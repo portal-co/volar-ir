@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/ir/volar-ir",
+    "crates/ir/volar-ir-common",
+    "crates/ir/volar-ir-config",
+    "crates/ir/volar-ir-passes",
+    "crates/ir/volar-ir-opt",
+    "crates/ir/volar-ir-virt",
+    "crates/ir/volar-ir-text",
+    "crates/ir/vaffle",
+    "crates/ir/volar-vaffle-target",
+    "crates/ir/volar-provenance",
+    "crates/ir/volar-side",
+    "crates/ir/volar-lir",
+    "crates/ir/volar-lir-text",
+    "crates/ir/volar-lir-saved",
+    "crates/ir/volar-lir-test-corpus",
+    "crates/fuzz/volar-fuzz",
+]
+resolver = "3"
+
+[workspace.package]
+license = "CC0-1.0 AND MIT AND Apache-2.0"
+description = "Volar IR and VAFFLE: a reusable compiler IR, lowering pipeline (VAFFLE-to-IR, movfuscation, virtualization, circuit lowering), and optimization passes (DCE, CSE, constant folding) for WASM-derived circuits"
+repository = "https://github.com/portal-co/volar-ir.git"
+
+[workspace.dependencies]
+volar-ir-config        = { path = "crates/ir/volar-ir-config", version = "0.1.0" }
+volar-ir               = { path = "crates/ir/volar-ir", version = "0.1.0" }
+volar-ir-passes        = { path = "crates/ir/volar-ir-passes", version = "0.1.0" }
+volar-ir-opt           = { path = "crates/ir/volar-ir-opt", version = "0.1.0" }
+volar-ir-virt          = { path = "crates/ir/volar-ir-virt", version = "0.1.0" }
+volar-ir-text          = { path = "crates/ir/volar-ir-text", version = "0.1.0" }
+vaffle                 = { path = "crates/ir/vaffle", version = "0.1.0" }
+volar-vaffle-target    = { path = "crates/ir/volar-vaffle-target", version = "0.1.0" }
+volar-ir-common        = { path = "crates/ir/volar-ir-common", version = "0.1.0" }
+volar-provenance       = { path = "crates/ir/volar-provenance", version = "0.1.0" }
+volar-side             = { path = "crates/ir/volar-side", version = "0.1.0" }
+volar-lir              = { path = "crates/ir/volar-lir", version = "0.1.0" }
+volar-lir-text         = { path = "crates/ir/volar-lir-text", version = "0.1.0" }
+volar-lir-saved        = { path = "crates/ir/volar-lir-saved", version = "0.1.0" }
+volar-lir-test-corpus  = { path = "crates/ir/volar-lir-test-corpus", version = "0.1.0" }
+volar-fuzz             = { path = "crates/fuzz/volar-fuzz", version = "0.1.0" }
+
+portal-pc-waffle-ir       = { version = "0.6.0-alpha.1", git = "https://github.com/portal-co/waffle-" }
+portal-pc-waffle-frontend = { version = "0.6.0-alpha.1", git = "https://github.com/portal-co/waffle-" }
+wax-meta                  = { version = "0.1.0", git = "https://github.com/portal-co/wax.git" }
+
+rkyv = { version = "0.8", default-features = false, features = ["alloc"] }
