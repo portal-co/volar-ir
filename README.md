@@ -6,9 +6,9 @@ optimization passes for WASM-derived circuits.
 This repo holds the IR/circuit-compilation layer that was split out of
 [`volar`](https://github.com/portal-co/volar), Portal's ZK-proof / garbled-circuit
 / MPC toolkit. `volar` still owns everything downstream of a boolean circuit —
-ZK proof weaving, garbled-circuit weaving, and the backends that consume
-`volar-lir` (C, LLVM, WASM) — and consumes the crates here as a regular
-dependency.
+ZK proof weaving, garbled-circuit weaving — and the spec-integration side of
+compiling `volar-spec` through to C/LLVM/WASM, and consumes the crates here as
+a regular dependency.
 
 ## What's here
 
@@ -22,8 +22,15 @@ dependency.
 - **Optimizations** (`volar-ir-opt`): DCE, CSE, constant folding, and
   store-forwarding, across Volar IR, Boolar IR, and VAFFLE.
 - **LIR** (`volar-lir`, `volar-lir-text`, `volar-lir-saved`,
-  `volar-lir-test-corpus`) — the mid-level IR that both this pipeline and
-  `volar`'s backend crates build on.
+  `volar-lir-test-corpus`) — the mid-level IR that this pipeline and the
+  backends below build on.
+- **Backends** (`crates/backends/volar-c-backend`, `volar-llvm-backend`,
+  `volar-wasm-backend`) — the `LirTarget` implementations that lower LIR to
+  C99, LLVM IR, and WASM, plus their pure-LIR-level tests. The
+  spec-integration tests (compiling real `volar-spec` source through
+  `volar-compiler` + `volar-lir-codegen` into these backends) stay in
+  `volar` as `volar-c-backend-spec-tests`, since they exercise crates that
+  are out of scope here.
 - **Fuzz/property tests** (`crates/fuzz/volar-fuzz`, `fuzz/`) for the passes
   above.
 
@@ -54,6 +61,11 @@ the same checkout, or a normal git dependency otherwise. Two things stay in
 - `volar-ir-lir-target` — the Volar-IR→LIR-for-backends lowering, since it
   depends on `volar-compiler`/`volar-lir-codegen`, which are backend/codegen
   infrastructure out of scope here.
+- `volar-lir-codegen` itself — the `IrModule`/`IrCfgModule` → `LirTarget`
+  lowering, since it depends on `volar-compiler`.
+- `volar-c-backend-spec-tests` — the spec-integration and
+  `volar-lir-codegen`-dependent tests for the C backend (parses real
+  `volar-spec` source, exercises `volar-weaver`).
 - `fuzz/fuzz_targets/fuzz_vole_circuit_completeness.rs` — it also exercises
   `volar-spec`, so it's an integration test of the crypto pipeline's
   consumption of this IR, not a test of the IR itself.

@@ -16,6 +16,9 @@ members = [
     "crates/ir/volar-lir-saved",
     "crates/ir/volar-lir-test-corpus",
     "crates/fuzz/volar-fuzz",
+    "crates/backends/volar-c-backend",
+    "crates/backends/volar-llvm-backend",
+    "crates/backends/volar-wasm-backend",
 ]
 resolver = "3"
 
@@ -41,9 +44,16 @@ volar-lir-text         = { path = "crates/ir/volar-lir-text", version = "0.1.0" 
 volar-lir-saved        = { path = "crates/ir/volar-lir-saved", version = "0.1.0" }
 volar-lir-test-corpus  = { path = "crates/ir/volar-lir-test-corpus", version = "0.1.0" }
 volar-fuzz             = { path = "crates/fuzz/volar-fuzz", version = "0.1.0" }
+volar-c-backend         = { path = "crates/backends/volar-c-backend", version = "0.1.0" }
+volar-llvm-backend      = { path = "crates/backends/volar-llvm-backend", version = "0.1.0" }
+volar-wasm-backend      = { path = "crates/backends/volar-wasm-backend", version = "0.1.0" }
 
 portal-pc-waffle-ir       = { version = "0.6.0-alpha.1", git = "https://github.com/portal-co/waffle-" }
 portal-pc-waffle-frontend = { version = "0.6.0-alpha.1", git = "https://github.com/portal-co/waffle-" }
 wax-meta                  = { version = "0.1.0", git = "https://github.com/portal-co/wax.git" }
 
 rkyv = { version = "0.8", default-features = false, features = ["alloc"] }
+
+inkwell = { version = "0.8.0", features = [
+    "llvm20-1",
+] } # TODO: remove hardcoded LLVM version (currently llvm@20)
