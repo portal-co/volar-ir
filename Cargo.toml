@@ -54,6 +54,9 @@ wax-meta                  = { version = "0.1.0", git = "https://github.com/porta
 
 rkyv = { version = "0.8", default-features = false, features = ["alloc"] }
 
-inkwell = { version = "0.8.0", features = [
-    "llvm20-1",
-] } # TODO: remove hardcoded LLVM version (currently llvm@20)
+inkwell = { version = "0.10.0", features = [
+    "llvm22-1",
+] } # matches cirrus's pin (crates/recompile/cirrus-llvm*), and the Homebrew
+    # `llvm`/`llvm@22` formula actually installed on dev machines — llvm-sys
+    # auto-detects it via `brew --prefix llvm@22`/`brew --prefix llvm`, no
+    # custom build.rs needed.

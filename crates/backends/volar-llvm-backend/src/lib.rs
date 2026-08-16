@@ -48,7 +48,7 @@ use inkwell::{
     values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PhiValue},
 };
 use volar_ir_common::Type as NativeType;
-use volar_lir::{IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef, StructId};
+use volar_lir::{BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef, StructId};
 
 pub use volar_lir::NameConfig;
 
@@ -228,6 +228,7 @@ impl<'ctx> LlvmBackend<'ctx> {
                     ty
                 )
             }
+            _ => panic!("LlvmBackend: unsupported LirType {:?}", ty),
         }
     }
 
@@ -574,7 +575,8 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
 
     // ---- Terminators --------------------------------------------------------
 
-    fn jump(&mut self, target: LlvmBlock<'ctx>, args: &[LlvmValue<'ctx>]) {
+    fn jump(&mut self, target: LlvmBlock<'ctx>, branch: BranchTarget<LlvmValue<'ctx>>) {
+        let args = &branch.args[..];
         let pred_block = self.current_block();
 
         // Wire incoming edges into the target block's PHI nodes.
@@ -612,10 +614,13 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         &mut self,
         cond: LlvmValue<'ctx>,
         then_block: LlvmBlock<'ctx>,
-        then_args: &[LlvmValue<'ctx>],
+        then_branch: BranchTarget<LlvmValue<'ctx>>,
         else_block: LlvmBlock<'ctx>,
-        else_args: &[LlvmValue<'ctx>],
+        else_branch: BranchTarget<LlvmValue<'ctx>>,
     ) {
+        let then_args = &then_branch.args[..];
+        let else_args = &else_branch.args[..];
+
         // When both targets are the same block, emitting a conditional branch
         // with identical predecessors would produce a PHI node with two entries
         // from the same predecessor, which LLVM forbids.  Convert to `select`
@@ -626,7 +631,7 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
                 .zip(else_args.iter())
                 .map(|(t, e)| self.select(cond.clone(), t.clone(), e.clone()))
                 .collect();
-            self.jump(then_block, &selected);
+            self.jump(then_block, BranchTarget::args(selected));
             return;
         }
 

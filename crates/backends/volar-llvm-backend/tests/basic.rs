@@ -7,7 +7,7 @@
 
 use inkwell::context::Context;
 use volar_llvm_backend::LlvmBackend;
-use volar_lir::{IcmpPred, LirTarget, LirType, StackAllocExt};
+use volar_lir::{BranchTarget, IcmpPred, LirTarget, LirType, StackAllocExt};
 
 fn display_ir(ir: &str) -> String {
     let log = volar_log::LlmtrimLogger::from_env();
@@ -294,7 +294,7 @@ fn test_block_param_phi() {
     let cond = b.icmp(IcmpPred::Eq, x, zero);
     let one = b.iconst(LirType::U64, 1);
     let two = b.iconst(LirType::U64, 2);
-    b.branch(cond, merge, &[one], merge, &[two]);
+    b.branch(cond, merge, BranchTarget::args(vec![one]), merge, BranchTarget::args(vec![two]));
 
     b.switch_to_block(merge);
     b.ret(&[p]);
@@ -327,14 +327,14 @@ fn test_loop_phi() {
     let i = b.add_block_param(loop_block, LirType::U64);
 
     b.switch_to_block(entry);
-    b.jump(loop_block, &[pvs[0][0].clone()]);
+    b.jump(loop_block, BranchTarget::args(vec![pvs[0][0].clone()]));
 
     b.switch_to_block(loop_block);
     let zero = b.iconst(LirType::U64, 0);
     let cond = b.icmp(IcmpPred::Eq, i.clone(), zero.clone());
     let one = b.iconst(LirType::U64, 1);
     let i_minus_1 = b.sub(i, one);
-    b.branch(cond, exit_block, &[], loop_block, &[i_minus_1]);
+    b.branch(cond, exit_block, BranchTarget::args(vec![]), loop_block, BranchTarget::args(vec![i_minus_1]));
 
     b.switch_to_block(exit_block);
     b.ret(&[zero]);
