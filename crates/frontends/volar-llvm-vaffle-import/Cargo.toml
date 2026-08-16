@@ -1,0 +1,15 @@
+[package]
+name = "volar-llvm-vaffle-import"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Selective, structural LLVM IR import into VAFFLE: call-preserving, 1:1 block/instruction translation (unlike volar-llvm-import-core's execution-mode/inlining walker)"
+repository.workspace = true
+
+[dependencies]
+vaffle = { workspace = true }
+volar-ir-common = { workspace = true }
+volar-lir = { workspace = true }
+inkwell = { workspace = true }
+volar-llvm-constchain = { path = "../../../../llvm-bridge/crates/volar-llvm-constchain" }
+

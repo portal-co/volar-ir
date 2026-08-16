@@ -1,7 +1,7 @@
 #![no_std]
 
 use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
-use volar_ir_common::{Constant, IrType, Node, OracleDecl, ActionDecl, PreInitSegment, Stmt, Type, TypeId, TypeTable};
+use volar_ir_common::{Node, OracleDecl, ActionDecl, PreInitSegment, Stmt, TypeId, TypeTable};
 
 extern crate alloc;
 
@@ -281,6 +281,21 @@ pub enum Value<V = ValueId> {
         idx: V,
         elem_bits: usize,
     },
+    /// The compile-time-assigned index of `block` within its own function,
+    /// for use as a [`Terminator::Table`] index — VAFFLE's analogue of
+    /// LLVM's `blockaddress` constant.
+    ///
+    /// Scoped to the enclosing function, matching LLVM's own restriction
+    /// that `blockaddress`/`indirectbr` only ever reference blocks in the
+    /// same function. A dynamic jump to this address is expressed as a
+    /// `Terminator::Table` whose `index` traces back (through arbitrary
+    /// dataflow — PHIs, `select`, memory) to one or more `BlockAddr` values
+    /// and whose `targets` list every block that had its address taken —
+    /// `indirectbr` in LLVM always carries its own destination list, so
+    /// this is never open-ended.
+    BlockAddr {
+        block: BlockId,
+    },
 }
 
 impl<V> Value<V> {
@@ -326,6 +341,7 @@ impl<V> Value<V> {
                 idx: go(ctx, idx)?,
                 elem_bits,
             },
+            Value::BlockAddr { block } => Value::BlockAddr { block },
         })
     }
 }
