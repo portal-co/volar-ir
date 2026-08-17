@@ -1,0 +1,14 @@
+[package]
+name = "volar-llvm-ir-import"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Execution-mode LLVM IR import into Volar IR: reuses volar-llvm-import-core's bounded concrete/symbolic interpreter unmodified, with a Volar-IR bit-circuit sink that inlines every direct call (unlike volar-llvm-vaffle-import's call-preserving structural translation)"
+repository.workspace = true
+
+[dependencies]
+volar-ir = { workspace = true }
+volar-ir-common = { workspace = true }
+volar-lir = { workspace = true }
+inkwell = { workspace = true }
+volar-llvm-import-core = { path = "../../../../llvm-bridge/crates/volar-llvm-import-core" }

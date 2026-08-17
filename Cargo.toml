@@ -20,6 +20,7 @@ members = [
     "crates/backends/volar-llvm-backend",
     "crates/backends/volar-wasm-backend",
     "crates/frontends/volar-llvm-vaffle-import",
+    "crates/frontends/volar-llvm-ir-import",
 ]
 resolver = "3"
 
