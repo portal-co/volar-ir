@@ -173,6 +173,11 @@ pub struct CBackend {
     array_typedef_set: BTreeSet<String>,
     /// Rendered `extern RetType name(ArgTypes...);` declarations.
     extern_decls: Vec<String>,
+    /// Rendered forward declarations (`RetType name(ArgTypes...);`, no
+    /// `extern`) for sibling functions called via [`LirTarget::call`] before
+    /// their own `begin_function`/`end_function` has produced a definition —
+    /// C requires declaration-before-use, unlike the other backends.
+    sibling_decls: Vec<String>,
     /// Next StructId to assign.
     next_struct_id: StructId,
     /// Name configuration: prefix and per-name remaps applied to all defined
@@ -197,6 +202,7 @@ impl CBackend {
             all_typedefs: Vec::new(),
             array_typedef_set: BTreeSet::new(),
             extern_decls: Vec::new(),
+            sibling_decls: Vec::new(),
             next_struct_id: 0,
             name_config: NameConfig::default(),
             rng_fn: "volar_rng".to_string(),
@@ -269,6 +275,14 @@ impl CBackend {
             out.push_str(decl);
         }
         if !self.extern_decls.is_empty() {
+            out.push('\n');
+        }
+
+        // Sibling forward declarations.
+        for decl in &self.sibling_decls {
+            out.push_str(decl);
+        }
+        if !self.sibling_decls.is_empty() {
             out.push('\n');
         }
 
@@ -798,6 +812,66 @@ impl LirTarget for CBackend {
         }
     }
 
+    // ---- Sibling (intra-module) calls ----------------------------------------
+
+    /// Call a function defined in this same translation unit.
+    ///
+    /// Since C requires declaration-before-use, this forward-declares a
+    /// plain (non-`extern`) prototype from the call-site's `arg_tys`/
+    /// `ret_ty` — exactly like [`call_extern`](Self::call_extern), except
+    /// rendered into `sibling_decls` instead of `extern_decls` so the
+    /// eventual real definition (emitted later via `begin_function`/
+    /// `end_function`) isn't mistaken for an external symbol.
+    fn call(
+        &mut self,
+        name: &str,
+        arg_tys: &[LirType],
+        args: &[CValue],
+        ret_ty: Option<LirType>,
+    ) -> Vec<CValue> {
+        let name = self.name_config.apply(name);
+        let name = name.as_str();
+        let expected: Vec<usize> = arg_tys.iter().map(|ty| self.lir_scalar_count(ty)).collect();
+        let expected_total: usize = expected.iter().sum();
+        if expected_total != args.len() {
+            panic!(
+                "call '{name}': arg_tys expect {expected_total} scalars ({expected:?} for {arg_tys:?}), flat args provided {}",
+                args.len()
+            );
+        }
+        let mut offset = 0usize;
+        let packed_args: Vec<CValue> = arg_tys
+            .iter()
+            .map(|ty| self.pack_scalars(ty, args, &mut offset))
+            .collect();
+
+        let arg_c_tys: Vec<String> = arg_tys.iter().map(|ty| self.type_to_c(ty)).collect();
+        let ret_c_ty = ret_ty.as_ref().map(|ty| self.type_to_c(ty)).unwrap_or_else(|| "void".to_string());
+        let params_str = arg_c_tys.join(", ");
+        let proto = format!("{ret_c_ty} {name}({params_str});\n");
+        if !self.sibling_decls.contains(&proto) {
+            self.sibling_decls.push(proto);
+        }
+
+        let packed_names: Vec<String> = packed_args.iter()
+            .map(|&v| self.state().name_of(v).to_owned())
+            .collect();
+        let args_str = packed_names.join(", ");
+
+        match ret_ty {
+            Some(ret) => {
+                let c_type = self.type_to_c(&ret);
+                let expr = format!("{name}({args_str})");
+                let agg_result = self.state().emit_instr(ret.clone(), c_type, &expr);
+                self.unpack_to_scalars(agg_result, &ret, false)
+            }
+            None => {
+                writeln!(self.state().body, "  {name}({args_str});").unwrap();
+                vec![]
+            }
+        }
+    }
+
     // ---- Terminators --------------------------------------------------------
 
     fn jump(&mut self, target: CBlock, branch: BranchTarget<CValue>) {
@@ -886,6 +960,34 @@ impl LirTarget for CBackend {
                 writeln!(self.state().body, "  return {name};").unwrap();
             }
         }
+    }
+
+    /// Native C `switch`, one `case` per entry plus a `default`. Each case's
+    /// (and the default's) block-param assignment reuses [`FunctionState::emit_jump`]
+    /// — globally-unique `_tN` temporaries mean no case-scoping braces are
+    /// load-bearing, but they're kept for readability.
+    fn switch(
+        &mut self,
+        index: CValue,
+        cases: &[(i64, CBlock, BranchTarget<CValue>)],
+        default_block: CBlock,
+        default_branch: BranchTarget<CValue>,
+    ) {
+        let index_name = self.state().name_of(index).to_owned();
+        writeln!(self.state().body, "  switch ({index_name}) {{").unwrap();
+        for (key, block, branch) in cases {
+            writeln!(self.state().body, "  case {key}: {{").unwrap();
+            self.state().emit_jump(*block, &branch.args);
+            writeln!(self.state().body, "  }}").unwrap();
+        }
+        writeln!(self.state().body, "  default: {{").unwrap();
+        self.state().emit_jump(default_block, &default_branch.args);
+        writeln!(self.state().body, "  }}").unwrap();
+        writeln!(self.state().body, "  }}").unwrap();
+    }
+
+    fn block_ordinal(&self, block: &CBlock) -> i64 {
+        block.0 as i64
     }
 
     // ---- External access primitives ----------------------------------------

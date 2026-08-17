@@ -126,6 +126,17 @@ enum Op {
         func_idx: u32,
         args: Vec<u32>,
     },
+    /// A sibling (intra-module) call, resolved by name to a final function
+    /// index only in [`WasmBackend::finish`] — unlike [`Op::Call`], the
+    /// callee's index isn't known at emission time since it depends on the
+    /// final import count and every defined function's position, including
+    /// ones not yet `begin_function`'d (forward references / mutual
+    /// recursion).
+    CallSibling {
+        dests: Vec<u32>,
+        name: String,
+        args: Vec<u32>,
+    },
     Jump {
         target: u32,
         args: Vec<u32>,
@@ -136,6 +147,18 @@ enum Op {
         then_args: Vec<u32>,
         else_block: u32,
         else_args: Vec<u32>,
+    },
+    /// A multi-way branch: `index` compared against each case key in turn,
+    /// falling back to `default_block` — the `LirTarget::switch` terminator.
+    /// Lowered as a chain of `if (index == key) {...} else {...}`, since
+    /// `br_table` requires a dense, statically-known `0..n` target list
+    /// (already used internally for the per-function block dispatcher) and
+    /// can't be reused directly for an arbitrary sparse `i64`-keyed switch.
+    Table {
+        index: u32,
+        cases: Vec<(i64, u32, Vec<u32>)>,
+        default_block: u32,
+        default_args: Vec<u32>,
     },
     Ret {
         vals: Vec<u32>,
@@ -198,7 +221,10 @@ impl FunctionState {
             !block.terminated,
             "WasmBackend: emitting after terminator in block {bid}"
         );
-        let is_term = matches!(op, Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. });
+        let is_term = matches!(
+            op,
+            Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. } | Op::Table { .. }
+        );
         block.ops.push(op);
         if is_term {
             block.terminated = true;
@@ -223,8 +249,14 @@ impl FunctionState {
 struct CompletedFunction {
     name: String,
     type_idx: u32,
-    /// Encoded function body (locals + instructions, including final `end`).
-    body: Function,
+    /// Raw per-function state, not yet lowered to a [`Function`] body.
+    ///
+    /// Lowering is deferred to [`WasmBackend::finish`] (rather than done
+    /// eagerly in `end_function`) because [`Op::CallSibling`] can reference
+    /// a function whose own `begin_function`/`end_function` hasn't run yet
+    /// (forward references / mutual recursion) — the name→index map for
+    /// sibling calls is only fully known once every function is complete.
+    state: FunctionState,
 }
 
 // ============================================================================
@@ -332,11 +364,21 @@ impl WasmBackend {
             module.section(&exports);
         }
 
-        // Code section.
+        // Code section. Lowered here (not in `end_function`) so that every
+        // sibling-call name resolves to a final function index, including
+        // forward references to functions completed after the call site.
         if !self.completed.is_empty() {
+            let import_count = self.imports.len() as u32;
+            let sibling_idx: BTreeMap<String, u32> = self
+                .completed
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.name.clone(), import_count + i as u32))
+                .collect();
             let mut codes = CodeSection::new();
             for f in &self.completed {
-                codes.function(&f.body);
+                let body = lower_function(&f.state, &sibling_idx);
+                codes.function(&body);
             }
             module.section(&codes);
         }
@@ -612,7 +654,7 @@ fn local_ty_lookup(state: &FunctionState, local: u32) -> LirType {
     panic!("WasmBackend: unknown local {local}");
 }
 
-fn emit_op(func: &mut Function, state: &FunctionState, op: &Op) {
+fn emit_op(func: &mut Function, state: &FunctionState, op: &Op, sibling_idx: &BTreeMap<String, u32>) {
     match op {
         Op::Iconst { dest, ty, val } => {
             emit_const(func, ty, *val);
@@ -756,7 +798,19 @@ fn emit_op(func: &mut Function, state: &FunctionState, op: &Op) {
                 emit(func, Instruction::LocalSet(d));
             }
         }
-        Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. } => {
+        Op::CallSibling { dests, name, args } => {
+            let func_idx = *sibling_idx
+                .get(name)
+                .unwrap_or_else(|| panic!("WasmBackend: sibling call to undefined function `{name}`"));
+            for &a in args {
+                emit(func, Instruction::LocalGet(a));
+            }
+            emit(func, Instruction::Call(func_idx));
+            for &d in dests.iter().rev() {
+                emit(func, Instruction::LocalSet(d));
+            }
+        }
+        Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. } | Op::Table { .. } => {
             panic!("emit_op: terminators must be lowered by emit_terminator");
         }
     }
@@ -822,11 +876,48 @@ fn emit_terminator(
             emit(func, Instruction::End);
             emit(func, Instruction::Br(dispatch_depth));
         }
+        Op::Table {
+            index,
+            cases,
+            default_block,
+            default_args,
+        } => {
+            let pc = state.pc_local.expect("pc local");
+            let idx_ty = local_ty_lookup(state, *index);
+            let is_i64 = WasmBackend::is_i64(&idx_ty);
+            // Nested `if (index == key) {...} else { <next case, or default> }`,
+            // each branch only assigning block params and setting `pc` —
+            // mirroring `Branch`'s trick of a single shared `Br` after every
+            // `if`/`else` has closed, rather than one `Br` per case (which
+            // would need a depth that grows with nesting).
+            for (key, target, args) in cases {
+                emit(func, Instruction::LocalGet(*index));
+                if is_i64 {
+                    emit(func, Instruction::I64Const(*key));
+                    emit(func, Instruction::I64Eq);
+                } else {
+                    emit(func, Instruction::I32Const(*key as i32));
+                    emit(func, Instruction::I32Eq);
+                }
+                emit(func, Instruction::If(wasm_encoder::BlockType::Empty));
+                emit_assign_block_params(func, state, *target, args);
+                emit(func, Instruction::I32Const(*target as i32));
+                emit(func, Instruction::LocalSet(pc));
+                emit(func, Instruction::Else);
+            }
+            emit_assign_block_params(func, state, *default_block, default_args);
+            emit(func, Instruction::I32Const(*default_block as i32));
+            emit(func, Instruction::LocalSet(pc));
+            for _ in cases {
+                emit(func, Instruction::End);
+            }
+            emit(func, Instruction::Br(dispatch_depth));
+        }
         _ => panic!("not a terminator"),
     }
 }
 
-fn lower_function(state: &FunctionState) -> Function {
+fn lower_function(state: &FunctionState, sibling_idx: &BTreeMap<String, u32>) -> Function {
     let decls = local_decls_in_alloc_order(state);
     let mut func = Function::new(decls);
     let nblocks = state.blocks.len() as u32;
@@ -835,7 +926,7 @@ fn lower_function(state: &FunctionState) -> Function {
     if !multi {
         let block = &state.blocks[0];
         for op in &block.ops {
-            if matches!(op, Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. }) {
+            if matches!(op, Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. } | Op::Table { .. }) {
                 match op {
                     Op::Ret { vals } => {
                         for &v in vals {
@@ -846,7 +937,7 @@ fn lower_function(state: &FunctionState) -> Function {
                     _ => panic!("WasmBackend: multi-block terminator in single-block function"),
                 }
             } else {
-                emit_op(&mut func, state, op);
+                emit_op(&mut func, state, op, sibling_idx);
             }
         }
         InstructionSink::<(), ()>::finish(&mut func).unwrap();
@@ -892,12 +983,12 @@ fn lower_function(state: &FunctionState) -> Function {
         emit(&mut func, Instruction::End);
         let block = &state.blocks[bid as usize];
         for op in &block.ops {
-            if matches!(op, Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. }) {
+            if matches!(op, Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. } | Op::Table { .. }) {
                 // Depth to $dispatch: remaining b_* wrappers + $default.
                 let dispatch_depth = nblocks - bid;
                 emit_terminator(&mut func, state, op, dispatch_depth);
             } else {
-                emit_op(&mut func, state, op);
+                emit_op(&mut func, state, op, sibling_idx);
             }
         }
         if !block.terminated {
@@ -1017,12 +1108,13 @@ impl LirTarget for WasmBackend {
         let type_idx = self.intern_type(&state.wasm_param_tys, &state.wasm_result_tys);
         // Defined functions follow imports in the function index space.
         // next_func_idx tracks imports only until we start completing functions;
-        // we don't need the defined func index until export time.
-        let body = lower_function(&state);
+        // we don't need the defined func index until export time. Lowering
+        // itself is deferred to `finish` — see `CompletedFunction::state`.
+        let name = state.name.clone();
         self.completed.push(CompletedFunction {
-            name: state.name,
+            name,
             type_idx,
-            body,
+            state,
         });
     }
 
@@ -1231,6 +1323,49 @@ impl LirTarget for WasmBackend {
         dests
     }
 
+    /// Call a function defined in this same module.
+    ///
+    /// Unlike [`call_extern`](Self::call_extern) (which resolves to a WASM
+    /// *import*), this defers resolution to [`finish`](Self::finish) via
+    /// [`Op::CallSibling`] — the callee's final function index depends on
+    /// the module's total import count and every defined function's
+    /// position, neither of which is settled until every `begin_function`/
+    /// `end_function` pair has run, so forward references and mutual
+    /// recursion are supported.
+    fn call(
+        &mut self,
+        name: &str,
+        arg_tys: &[LirType],
+        args: &[WasmValue],
+        ret_ty: Option<LirType>,
+    ) -> Vec<WasmValue> {
+        let flat_arg_tys: Vec<LirType> = arg_tys
+            .iter()
+            .flat_map(|ty| self.flatten_scalar_tys(ty))
+            .collect();
+        assert_eq!(flat_arg_tys.len(), args.len(), "call: flat arg count mismatch");
+        let flat_rets = ret_ty
+            .as_ref()
+            .map(|ty| self.flatten_scalar_tys(ty))
+            .unwrap_or_default();
+        let resolved_name = self.name_config.apply(name);
+
+        let mut dests = Vec::new();
+        let mut dest_locals = Vec::new();
+        for ty in &flat_rets {
+            let v = self.state().alloc_value(ty.clone());
+            dest_locals.push(self.state().local_of(v));
+            dests.push(v);
+        }
+        let arg_locals: Vec<u32> = args.iter().map(|a| self.state().local_of(*a)).collect();
+        self.state().push_op(Op::CallSibling {
+            dests: dest_locals,
+            name: resolved_name,
+            args: arg_locals,
+        });
+        dests
+    }
+
     fn jump(&mut self, target: WasmBlock, branch: BranchTarget<WasmValue>) {
         let args: Vec<u32> = branch
             .args
@@ -1274,6 +1409,44 @@ impl LirTarget for WasmBackend {
     fn ret(&mut self, vals: &[WasmValue]) {
         let locals: Vec<u32> = vals.iter().map(|v| self.state().local_of(*v)).collect();
         self.state().push_op(Op::Ret { vals: locals });
+    }
+
+    /// Lowered to a chain of `if (index == key) {...} else {...}` — see
+    /// [`Op::Table`]. Every case's (and the default's) target block already
+    /// participates in this function's `pc_local`/`br_table` dispatcher
+    /// (built once by [`lower_function`] for any function with more than one
+    /// block), so `switch` only needs to pick the right `pc` value and let
+    /// the existing dispatcher do the rest.
+    fn switch(
+        &mut self,
+        index: WasmValue,
+        cases: &[(i64, WasmBlock, BranchTarget<WasmValue>)],
+        default_block: WasmBlock,
+        default_branch: BranchTarget<WasmValue>,
+    ) {
+        let index_l = self.state().local_of(index);
+        let cases: Vec<(i64, u32, Vec<u32>)> = cases
+            .iter()
+            .map(|(key, block, branch)| {
+                let args: Vec<u32> = branch.args.iter().map(|a| self.state().local_of(*a)).collect();
+                (*key, block.0, args)
+            })
+            .collect();
+        let default_args: Vec<u32> = default_branch
+            .args
+            .iter()
+            .map(|a| self.state().local_of(*a))
+            .collect();
+        self.state().push_op(Op::Table {
+            index: index_l,
+            cases,
+            default_block: default_block.0,
+            default_args,
+        });
+    }
+
+    fn block_ordinal(&self, block: &WasmBlock) -> i64 {
+        block.0 as i64
     }
 
     fn oracle(

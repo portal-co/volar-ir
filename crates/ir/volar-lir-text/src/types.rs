@@ -174,3 +174,18 @@ pub(crate) fn write_lir_type_list(tys: &[LirType], w: &mut dyn fmt::Write) -> fm
     }
     w.write_char(']')
 }
+
+/// Write `LirCall::Switch`'s case list as `[(key, block, [args]), ...]`.
+pub(crate) fn write_switch_cases(
+    cases: &[(i64, u32, alloc::vec::Vec<u32>)],
+    w: &mut dyn fmt::Write,
+) -> fmt::Result {
+    w.write_char('[')?;
+    for (i, (key, block, args)) in cases.iter().enumerate() {
+        if i > 0 { w.write_str(", ")?; }
+        write!(w, "({}, {}, ", key, block)?;
+        write_u32_list(args, w)?;
+        w.write_char(')')?;
+    }
+    w.write_char(']')
+}

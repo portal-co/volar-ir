@@ -139,6 +139,14 @@ pub struct VaffleTarget {
     /// are passed via `StorageId::STACK` (caller writes bits, passes address;
     /// callee reads bits from address).  Default: `false`.
     optimized_abi: bool,
+    /// `FuncId`s reserved by [`LirTarget::call`] for siblings whose own
+    /// `begin_function`/`end_function` hasn't run yet (forward references /
+    /// mutual recursion). `end_function` consults this to patch the
+    /// reserved slot in place instead of pushing a second, orphaned
+    /// `FuncDecl` — the hazard `call_extern`'s older export-lookup-or-stub
+    /// pattern doesn't guard against (harmless there since externs are
+    /// never later "completed" by an `end_function`).
+    pending_funcs: BTreeMap<String, FuncId>,
 }
 
 impl VaffleTarget {
@@ -158,6 +166,7 @@ impl VaffleTarget {
             func: None,
             struct_widths: vec![],
             optimized_abi: false,
+            pending_funcs: BTreeMap::new(),
         }
     }
 
@@ -351,6 +360,86 @@ impl VaffleTarget {
         bits.truncate(PTR_BITS);
         bits
     }
+
+    /// Resolve `name` to a stable `FuncId` for a sibling (intra-module)
+    /// call: the real definition if `end_function` has already run for it,
+    /// a `FuncId` already reserved by an earlier `call` to this not-yet-
+    /// defined sibling, or else a freshly reserved placeholder — mirroring
+    /// `call_extern`'s empty-sig `FuncDecl::Import` stub convention, but
+    /// tracked in `pending_funcs` so `end_function` can patch it in place
+    /// rather than leaving it orphaned.
+    fn resolve_sibling(&mut self, name: &str) -> FuncId {
+        if let Some(&fid) = self.module.exports.get(name) {
+            return fid;
+        }
+        if let Some(&fid) = self.pending_funcs.get(name) {
+            return fid;
+        }
+        let fid = FuncId(self.module.funcs.len());
+        let sig_id = SigId(self.module.sigs.len());
+        self.module.sigs.push(SigDecl { params: vec![], results: vec![] });
+        self.module.funcs.push(FuncDecl::Import {
+            module: "self".to_string(),
+            name: name.to_string(),
+            sig: sig_id,
+        });
+        self.pending_funcs.insert(name.to_string(), fid);
+        fid
+    }
+
+    /// Shared call-emission logic for [`LirTarget::call_extern`] and
+    /// [`LirTarget::call`]: marshal args (routing oversized ones through
+    /// `StorageId::STACK` under the optimized ABI, exactly like
+    /// `call_extern` already did before this was factored out), emit
+    /// `Value::Call`, and project the flat return bits via `Value::Output`.
+    fn emit_call(&mut self, func_id: FuncId, args: &[VaffleValue], ret_ty: Option<LirType>) -> Vec<VaffleValue> {
+        let threshold = self.abi().aggregate_byval_limit;
+
+        let mut flat_args: Vec<ValueId> = Vec::new();
+        for arg in args {
+            if self.optimized_abi && arg.bits.len() > threshold {
+                let base_slot = self.fb().next_stack_slot;
+                self.fb().next_stack_slot += arg.bits.len() as u64;
+
+                let addr_const: Vec<ValueId> = (0..PTR_BITS)
+                    .map(|i| self.bc_const((base_slot >> i) & 1 != 0))
+                    .collect();
+
+                let bit_tid = self.bit_tid();
+                let storage = StorageId::STACK;
+                for (i, &bit) in arg.bits.iter().enumerate() {
+                    if i == 0 {
+                        self.emit_write(storage, bit, bit_tid, &addr_const);
+                    } else {
+                        let off = self.iconst(LirType::U32, i as i64);
+                        let off_bits = self.pad_to_ptr_bits(off);
+                        let addr = bc_add(self, &addr_const, &off_bits, false);
+                        self.emit_write(storage, bit, bit_tid, &addr);
+                    }
+                }
+                flat_args.extend(addr_const);
+            } else {
+                flat_args.extend(arg.bits.iter().copied());
+            }
+        }
+
+        let call_id = self.fb().emit_value(Value::Call { func: func_id, args: flat_args });
+        match ret_ty {
+            None => vec![],
+            Some(ty) => {
+                let n = bits_for_lir_type(&ty, &self.struct_widths);
+                let bits: Vec<ValueId> = (0..n)
+                    .map(|i| self.fb().emit_value(Value::Output { value: call_id, idx: i }))
+                    .collect();
+                vec![VaffleValue { bits, ty }]
+            }
+        }
+    }
+}
+
+/// Bits needed to represent every integer in `0..=v` (at least 1).
+fn bits_for_max_value(v: usize) -> usize {
+    if v == 0 { 1 } else { (usize::BITS - v.leading_zeros()) as usize }
 }
 
 impl Default for VaffleTarget {
@@ -560,8 +649,17 @@ impl LirTarget for VaffleTarget {
             terminator: bb.terminator.unwrap_or(Terminator::Return { values: vec![] }),
         }).collect();
         let body = FuncBody { sig: fb.sig_id, blocks, values: fb.all_values, entry: BlockId(0) };
-        let func_id = FuncId(self.module.funcs.len());
-        self.module.funcs.push(FuncDecl::Body(body));
+        // If a sibling `call` already reserved a `FuncId` for this function
+        // (a forward reference), patch that slot in place instead of
+        // pushing a second, disconnected entry.
+        let func_id = if let Some(fid) = self.pending_funcs.remove(&fb.name) {
+            self.module.funcs[fid.0] = FuncDecl::Body(body);
+            fid
+        } else {
+            let fid = FuncId(self.module.funcs.len());
+            self.module.funcs.push(FuncDecl::Body(body));
+            fid
+        };
         self.module.exports.insert(fb.name, func_id);
     }
 
@@ -743,53 +841,19 @@ impl LirTarget for VaffleTarget {
             });
             fid
         };
+        self.emit_call(func_id, args, ret_ty)
+    }
 
-        let threshold = self.abi().aggregate_byval_limit;
-
-        // Build the flat argument list, writing large args to stack storage.
-        let mut flat_args: Vec<ValueId> = Vec::new();
-        for arg in args {
-            if self.optimized_abi && arg.bits.len() > threshold {
-                // Allocate a stack slot for this arg.
-                let base_slot = self.fb().next_stack_slot;
-                self.fb().next_stack_slot += arg.bits.len() as u64;
-
-                // Emit address constant.
-                let addr_const: Vec<ValueId> = (0..PTR_BITS)
-                    .map(|i| self.bc_const((base_slot >> i) & 1 != 0))
-                    .collect();
-
-                // Write each bit to StorageId::STACK.
-                let bit_tid = self.bit_tid();
-                let storage = StorageId::STACK;
-                for (i, &bit) in arg.bits.iter().enumerate() {
-                    if i == 0 {
-                        self.emit_write(storage, bit, bit_tid, &addr_const);
-                    } else {
-                        let off = self.iconst(LirType::U32, i as i64);
-                        let off_bits = self.pad_to_ptr_bits(off);
-                        let addr = bc_add(self, &addr_const, &off_bits, false);
-                        self.emit_write(storage, bit, bit_tid, &addr);
-                    }
-                }
-                // Pass the address instead of the raw bits.
-                flat_args.extend(addr_const);
-            } else {
-                flat_args.extend(arg.bits.iter().copied());
-            }
-        }
-
-        let call_id = self.fb().emit_value(Value::Call { func: func_id, args: flat_args });
-        match ret_ty {
-            None => vec![],
-            Some(ty) => {
-                let n = bits_for_lir_type(&ty, &self.struct_widths);
-                let bits: Vec<ValueId> = (0..n)
-                    .map(|i| self.fb().emit_value(Value::Output { value: call_id, idx: i }))
-                    .collect();
-                vec![VaffleValue { bits, ty }]
-            }
-        }
+    // ---- Sibling (intra-module) calls ---------------------------------------
+    fn call(
+        &mut self,
+        name: &str,
+        _arg_tys: &[LirType],
+        args: &[VaffleValue],
+        ret_ty: Option<LirType>,
+    ) -> Vec<VaffleValue> {
+        let func_id = self.resolve_sibling(name);
+        self.emit_call(func_id, args, ret_ty)
     }
 
     // ---- External access primitives ----------------------------------------
@@ -872,6 +936,79 @@ impl LirTarget for VaffleTarget {
         let fb = self.fb();
         let cur = fb.current;
         fb.blocks[cur].terminator = Some(Terminator::Return { values: flat });
+    }
+
+    /// Lowers to `Terminator::Table`, VAFFLE's own dense positional
+    /// dispatch (`targets[idx]`, matching LLVM `switch`/WASM `br_table`
+    /// semantics — see `Value::BlockAddr`'s doc comment and the fuzz
+    /// interpreter's `Terminator::Table` evaluation).
+    ///
+    /// `switch`'s `cases` carry arbitrary (possibly sparse) `i64` keys, not
+    /// `Table`'s required dense `0..targets.len()` index — so this builds a
+    /// small GF(2) selector circuit: a right-to-left `bc_select` cascade
+    /// picks the position of the first matching case, or `cases.len()`
+    /// (guaranteed out of `targets`' bounds) when nothing matches, which
+    /// `Table`'s own default-target fallback then picks up for free.
+    fn switch(
+        &mut self,
+        index: VaffleValue,
+        cases: &[(i64, VaffleBlock, BranchTarget<VaffleValue>)],
+        default_block: VaffleBlock,
+        default_branch: BranchTarget<VaffleValue>,
+    ) {
+        let n = cases.len();
+        let sel_width = bits_for_max_value(n);
+        let index_width = index.bits.len();
+
+        let mut selector: Vec<ValueId> =
+            (0..sel_width).map(|b| self.bc_const((n >> b) & 1 != 0)).collect();
+        for (i, (key, _, _)) in cases.iter().enumerate().rev() {
+            let key_bits: Vec<ValueId> = (0..index_width)
+                .map(|b| self.bc_const((*key as u64 >> b) & 1 != 0))
+                .collect();
+            let matched = bc_eq(self, &index.bits, &key_bits);
+            let case_idx_bits: Vec<ValueId> =
+                (0..sel_width).map(|b| self.bc_const((i >> b) & 1 != 0)).collect();
+            selector = bc_select_vec(self, matched, &case_idx_bits, &selector);
+        }
+        let selector_val = self.compose_address(&selector);
+
+        let targets: Vec<Target> = cases
+            .iter()
+            .map(|(_, block, branch)| {
+                let flat: Vec<ValueId> = branch.args.iter()
+                    .filter(|v| !v.bits.is_empty())
+                    .map(|v| self.compose_address(&v.bits))
+                    .collect();
+                Target { block: BlockId(block.0), args: flat, reentry: branch.reentry.clone() }
+            })
+            .collect();
+        let default_flat: Vec<ValueId> = default_branch.args.iter()
+            .filter(|v| !v.bits.is_empty())
+            .map(|v| self.compose_address(&v.bits))
+            .collect();
+        let default_target =
+            Target { block: BlockId(default_block.0), args: default_flat, reentry: default_branch.reentry.clone() };
+
+        let fb = self.fb();
+        let cur = fb.current;
+        fb.blocks[cur].terminator = Some(Terminator::Table { index: selector_val, targets, default_target });
+    }
+
+    /// `VaffleBlock`'s own dense per-function index is already the exact
+    /// ordinal `Terminator::Table`'s positional dispatch needs — no
+    /// separate encoding required.
+    ///
+    /// `block_addr`/`dyn_jump` intentionally use the default trait
+    /// implementations (synthetic `iconst`/`switch`-based dispatch) rather
+    /// than wiring up VAFFLE's native `Value::BlockAddr` node here: nothing
+    /// downstream (the fuzz interpreter, `lower_to_ir`) evaluates
+    /// `BlockAddr` yet, mirroring `volar-llvm-vaffle-import`'s symmetric
+    /// deferral of `BlockAddr` *ingestion* in Phase 2. Revisit once a real
+    /// consumer needs the distinction between "a block-address constant"
+    /// and "just a `U32` constant that happens to equal one."
+    fn block_ordinal(&self, block: &VaffleBlock) -> i64 {
+        block.0 as i64
     }
 
     fn stack_alloc_ext(&mut self) -> Option<&mut dyn StackAllocExt<Value = Self::Value>> {
@@ -1569,5 +1706,168 @@ mod tests {
         };
         let has_wide_merge = body.values.iter().any(|v| matches!(&v.kind, Value::Op(Stmt::Merge { .. })));
         assert!(!has_wide_merge, "width<=1 and() should skip the wide-Poly path entirely, no Merge expected");
+    }
+
+    // ============================================================================
+    // Phase 4a: sibling calls + switch
+    // ============================================================================
+
+    /// `is_even` calls `is_odd` before `is_odd`'s own `begin_function` has
+    /// run (a forward reference). Both functions must end up as real
+    /// `FuncDecl::Body` entries under one stable `FuncId` each — not an
+    /// orphaned `FuncDecl::Import` stub left behind by the call site.
+    #[test]
+    fn sibling_call_forward_reference_resolves_to_one_func_id() {
+        let mut t = VaffleTarget::new();
+
+        let (entry, params) = t.begin_function("is_even", &[LirType::U32], Some(LirType::Bool));
+        t.switch_to_block(entry);
+        let n = params[0][0].clone();
+        let result = t.call("is_odd", &[LirType::U32], &[n], Some(LirType::Bool));
+        t.ret(&result);
+        t.end_function();
+
+        let (entry2, params2) = t.begin_function("is_odd", &[LirType::U32], Some(LirType::Bool));
+        t.switch_to_block(entry2);
+        let n2 = params2[0][0].clone();
+        let result2 = t.call("is_even", &[LirType::U32], &[n2], Some(LirType::Bool));
+        t.ret(&result2);
+        t.end_function();
+
+        assert_eq!(t.module.funcs.len(), 2, "no orphaned stub — exactly the two real functions");
+        assert!(
+            t.module.funcs.iter().all(|f| matches!(f, vaffle::FuncDecl::Body(_))),
+            "every func slot should be a real body, not a leftover Import placeholder"
+        );
+
+        let is_even_id = *t.module.exports.get("is_even").expect("is_even exported");
+        let is_odd_id = *t.module.exports.get("is_odd").expect("is_odd exported");
+        assert_ne!(is_even_id, is_odd_id);
+
+        let vaffle::FuncDecl::Body(is_even_body) = &t.module.funcs[is_even_id.0] else {
+            panic!("expected is_even to have a body");
+        };
+        assert!(
+            is_even_body.values.iter().any(|v| matches!(&v.kind, Value::Call { func, .. } if *func == is_odd_id)),
+            "is_even's Value::Call must reference is_odd's real (not orphaned) FuncId"
+        );
+
+        let vaffle::FuncDecl::Body(is_odd_body) = &t.module.funcs[is_odd_id.0] else {
+            panic!("expected is_odd to have a body");
+        };
+        assert!(
+            is_odd_body.values.iter().any(|v| matches!(&v.kind, Value::Call { func, .. } if *func == is_even_id)),
+            "is_odd's Value::Call must reference is_even's real FuncId"
+        );
+    }
+
+    /// `switch` lowers to `Terminator::Table` with one target per case plus
+    /// a default target, and each case's own args survive (heterogeneous
+    /// per-case args, unlike `dyn_jump`'s uniform-args contract).
+    #[test]
+    fn switch_lowers_to_table_terminator() {
+        let mut t = VaffleTarget::new();
+        let (entry, params) = t.begin_function("classify", &[LirType::U32], Some(LirType::U32));
+        let n = params[0][0].clone();
+
+        let one_block = t.create_block();
+        let one_param = t.add_block_param(one_block, LirType::U32);
+        let two_block = t.create_block();
+        let two_param = t.add_block_param(two_block, LirType::U32);
+        let default_block = t.create_block();
+        let default_param = t.add_block_param(default_block, LirType::U32);
+
+        t.switch_to_block(entry);
+        let hundred = t.iconst(LirType::U32, 100);
+        let twohundred = t.iconst(LirType::U32, 200);
+        let neg1 = t.iconst(LirType::U32, -1);
+        t.switch(
+            n,
+            &[
+                (1, one_block, BranchTarget::args(vec![hundred])),
+                (2, two_block, BranchTarget::args(vec![twohundred])),
+            ],
+            default_block,
+            BranchTarget::args(vec![neg1]),
+        );
+
+        t.switch_to_block(one_block);
+        t.ret(&[one_param]);
+        t.switch_to_block(two_block);
+        t.ret(&[two_param]);
+        t.switch_to_block(default_block);
+        t.ret(&[default_param]);
+        t.end_function();
+
+        let fid = t.module.exports["classify"];
+        let body = match &t.module.funcs[fid.0] {
+            vaffle::FuncDecl::Body(b) => b,
+            _ => panic!("expected body"),
+        };
+        let entry_block = &body.blocks[0];
+        match &entry_block.terminator {
+            Terminator::Table { targets, default_target, .. } => {
+                assert_eq!(targets.len(), 2, "one Target per switch case");
+                assert_eq!(targets[0].block, BlockId(one_block.0));
+                assert_eq!(targets[1].block, BlockId(two_block.0));
+                assert_eq!(default_target.block, BlockId(default_block.0));
+            }
+            other => panic!("expected Terminator::Table, got {other:?}"),
+        }
+    }
+
+    /// `dyn_jump`'s default (built on `switch`, keyed by `block_ordinal`)
+    /// also lowers to `Terminator::Table`, and `block_addr`'s default
+    /// (`iconst(block_ordinal)`) produces a real 32-bit bit-decomposed
+    /// value consistent with it.
+    #[test]
+    fn block_addr_dyn_jump_default_lowers_to_table() {
+        let mut t = VaffleTarget::new();
+        let (entry, params) =
+            t.begin_function("dispatch", &[LirType::Bool, LirType::U32], Some(LirType::U32));
+        let cond = params[0][0].clone();
+        let n = params[1][0].clone();
+
+        let block_a = t.create_block();
+        let a_param = t.add_block_param(block_a, LirType::U32);
+        let block_b = t.create_block();
+        let b_param = t.add_block_param(block_b, LirType::U32);
+
+        t.switch_to_block(entry);
+        let addr_a = t.block_addr(block_a);
+        assert_eq!(addr_a.bits.len(), 32, "block_addr's default should be a real 32-bit value");
+        let addr_b = t.block_addr(block_b);
+        let chosen = t.select(cond, addr_a, addr_b);
+        t.dyn_jump(chosen, &[block_a, block_b], BranchTarget::args(vec![n]));
+
+        t.switch_to_block(block_a);
+        let ten = t.iconst(LirType::U32, 10);
+        let a_result = t.add(a_param, ten);
+        t.ret(&[a_result]);
+
+        t.switch_to_block(block_b);
+        let twenty = t.iconst(LirType::U32, 20);
+        let b_result = t.add(b_param, twenty);
+        t.ret(&[b_result]);
+        t.end_function();
+
+        let fid = t.module.exports["dispatch"];
+        let body = match &t.module.funcs[fid.0] {
+            vaffle::FuncDecl::Body(b) => b,
+            _ => panic!("expected body"),
+        };
+        match &body.blocks[0].terminator {
+            Terminator::Table { targets, default_target, .. } => {
+                // dyn_jump's default builds `switch` cases from
+                // `destinations[1..]` and uses `destinations[0]` as the
+                // `switch` default — so block_a (destinations[0]) lands in
+                // `default_target`, and block_b (destinations[1]) is the
+                // one explicit case.
+                assert_eq!(targets.len(), 1, "dyn_jump's switch: one explicit case + one default");
+                assert_eq!(targets[0].block, BlockId(block_b.0));
+                assert_eq!(default_target.block, BlockId(block_a.0));
+            }
+            other => panic!("expected Terminator::Table, got {other:?}"),
+        }
     }
 }

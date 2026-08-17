@@ -285,6 +285,62 @@ impl<'ctx> LlvmBackend<'ctx> {
             .get_insert_block()
             .expect("LlvmBackend: builder has no current block")
     }
+
+    /// Add one incoming edge (from `pred_block`) to every PHI in `block`,
+    /// matching `args` positionally. Shared by `switch`/`dyn_jump`, which
+    /// each wire N successor blocks from a single predecessor — the same
+    /// per-block logic `jump`/`branch` already inline for their one/two
+    /// successors.
+    fn wire_phis(
+        &mut self,
+        block: LlvmBlock<'ctx>,
+        args: &[LlvmValue<'ctx>],
+        pred_block: inkwell::basic_block::BasicBlock<'ctx>,
+    ) {
+        let phi_count = self
+            .current
+            .as_ref()
+            .map(|s| s.blocks[block.id as usize].phi_values.len())
+            .unwrap_or(0);
+        assert_eq!(
+            args.len(),
+            phi_count,
+            "wire_phis: arg count ({}) != block param count ({}) for block{}",
+            args.len(),
+            phi_count,
+            block.id
+        );
+        for i in 0..phi_count {
+            let phi = self.current.as_ref().unwrap().blocks[block.id as usize].phi_values[i].0;
+            phi.add_incoming(&[(&args[i].inner, pred_block)]);
+        }
+    }
+
+    /// Resolve `name` to a `FunctionValue`, reusing an existing declaration
+    /// (from a prior sibling `call`, or the function's own earlier
+    /// `begin_function`) if one exists, otherwise forward-declaring one from
+    /// `param_tys`/`ret`. This is what makes forward references and mutual
+    /// recursion between module-local functions safe: whichever of
+    /// `call`/`begin_function` runs first creates the `FunctionValue`; the
+    /// other reuses it rather than risking LLVM auto-uniquifying a
+    /// name-colliding second function.
+    fn resolve_or_declare_sibling(
+        &mut self,
+        name: &str,
+        param_tys: &[LirType],
+        ret: &Option<LirType>,
+    ) -> FunctionValue<'ctx> {
+        if let Some(existing) = self.module.get_function(name) {
+            return existing;
+        }
+        let param_llvm_tys: Vec<BasicMetadataTypeEnum<'ctx>> =
+            param_tys.iter().map(|ty| self.lir_type_to_llvm(ty).into()).collect();
+        let fn_type = match ret.as_ref().map(|ty| self.lir_type_to_llvm(ty)) {
+            Some(r) => r.fn_type(&param_llvm_tys, false),
+            None => self.context.void_type().fn_type(&param_llvm_tys, false),
+        };
+        self.module.add_function(name, fn_type, None)
+    }
 }
 
 // ============================================================================
@@ -344,18 +400,11 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
             "begin_function called while already inside a function"
         );
 
-        // Build LLVM function type.
-        let param_llvm_tys: Vec<BasicMetadataTypeEnum<'ctx>> = params
-            .iter()
-            .map(|ty| self.lir_type_to_llvm(ty).into())
-            .collect();
-
-        let fn_type = match ret.as_ref().map(|ty| self.lir_type_to_llvm(ty)) {
-            Some(ret_ty) => ret_ty.fn_type(&param_llvm_tys, false),
-            None => self.context.void_type().fn_type(&param_llvm_tys, false),
-        };
-
-        let func = self.module.add_function(&self.name_config.apply(name), fn_type, None);
+        // Reuse an existing forward declaration (from a sibling `call` that
+        // ran before this function's own body) if one exists, rather than
+        // declaring a second, name-colliding function.
+        let resolved_name = self.name_config.apply(name);
+        let func = self.resolve_or_declare_sibling(&resolved_name, params, &ret);
 
         // Create the entry block.
         let entry_llvm = self.context.append_basic_block(func, "block0");
@@ -699,6 +748,72 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         }
     }
 
+    /// Native LLVM `switch`. Each case's (and the default's) target block
+    /// gets exactly one incoming PHI edge from the current block, matching
+    /// LLVM's own model — a `switch` has one predecessor block but many
+    /// successor edges, just like `branch`'s then/else pair generalized to
+    /// N+1 successors.
+    fn switch(
+        &mut self,
+        index: LlvmValue<'ctx>,
+        cases: &[(i64, LlvmBlock<'ctx>, BranchTarget<LlvmValue<'ctx>>)],
+        default_block: LlvmBlock<'ctx>,
+        default_branch: BranchTarget<LlvmValue<'ctx>>,
+    ) {
+        let pred_block = self.current_block();
+        let index_ty = index.ty.clone();
+        let idx_val = index.inner.into_int_value();
+
+        self.wire_phis(default_block, &default_branch.args, pred_block);
+
+        let llvm_int_ty = self.lir_type_to_llvm(&index_ty).into_int_type();
+        let mut llvm_cases = Vec::with_capacity(cases.len());
+        for (key, block, branch) in cases {
+            self.wire_phis(*block, &branch.args, pred_block);
+            llvm_cases.push((llvm_int_ty.const_int(*key as u64, true), block.inner));
+        }
+
+        self.builder
+            .build_switch(idx_val, default_block.inner, &llvm_cases)
+            .unwrap();
+    }
+
+    /// Native LLVM `blockaddress` constant.
+    ///
+    /// Represented as an opaque `LirType::Ptr(I8)` value — it's never
+    /// dereferenced, only compared/passed through to `dyn_jump`.
+    ///
+    /// # Panics
+    ///
+    /// LLVM cannot take the address of a function's *entry* block
+    /// (`BasicBlock::get_address` returns `None` there) — panics with a
+    /// clear message rather than silently producing a null pointer.
+    fn block_addr(&mut self, block: LlvmBlock<'ctx>) -> LlvmValue<'ctx> {
+        let addr = unsafe { block.inner.get_address() }.unwrap_or_else(|| {
+            panic!(
+                "LlvmBackend::block_addr: cannot take the address of a function's entry block \
+                 (block{} is block0)",
+                block.id
+            )
+        });
+        LlvmValue { inner: addr.into(), ty: LirType::Ptr(Box::new(LirType::I8)) }
+    }
+
+    /// Native LLVM `indirectbr`.
+    fn dyn_jump(
+        &mut self,
+        index: LlvmValue<'ctx>,
+        destinations: &[LlvmBlock<'ctx>],
+        branch: BranchTarget<LlvmValue<'ctx>>,
+    ) {
+        let pred_block = self.current_block();
+        for block in destinations {
+            self.wire_phis(*block, &branch.args, pred_block);
+        }
+        let dest_blocks: Vec<_> = destinations.iter().map(|b| b.inner).collect();
+        self.builder.build_indirect_branch(index.inner, &dest_blocks).unwrap();
+    }
+
     // ---- Extern calls -------------------------------------------------------
 
     fn call_extern(
@@ -736,6 +851,38 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
                 let ret_val = call
                     .try_as_basic_value()
                     .unwrap_basic();
+                vec![LlvmValue { inner: ret_val, ty }]
+            }
+        }
+    }
+
+    // ---- Sibling (intra-module) calls ----------------------------------------
+
+    /// Call another function defined in this same module.
+    ///
+    /// Reuses [`resolve_or_declare_sibling`](LlvmBackend::resolve_or_declare_sibling)
+    /// so the callee resolves correctly whether its own `begin_function` has
+    /// already run or not (forward references / mutual recursion). The
+    /// actual `call` instruction is identical to
+    /// [`call_extern`](Self::call_extern)'s.
+    fn call(
+        &mut self,
+        name: &str,
+        arg_tys: &[LirType],
+        args: &[LlvmValue<'ctx>],
+        ret_ty: Option<LirType>,
+    ) -> Vec<LlvmValue<'ctx>> {
+        let resolved_name = self.name_config.apply(name);
+        let func = self.resolve_or_declare_sibling(&resolved_name, arg_tys, &ret_ty);
+
+        let call_args: Vec<BasicMetadataValueEnum<'ctx>> =
+            args.iter().map(|v| v.inner.into()).collect();
+        let call = self.builder.build_call(func, &call_args, "").unwrap();
+
+        match ret_ty {
+            None => vec![],
+            Some(ty) => {
+                let ret_val = call.try_as_basic_value().unwrap_basic();
                 vec![LlvmValue { inner: ret_val, ty }]
             }
         }

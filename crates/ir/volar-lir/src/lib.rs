@@ -529,6 +529,27 @@ pub trait LirTarget<Prov: Clone = ()> {
         ret_ty: Option<LirType>,
     ) -> Vec<Self::Value>;
 
+    // ---- Sibling (intra-module) calls ----------------------------------------
+
+    /// Call another function *defined in this same module* — as opposed to
+    /// [`call_extern`](Self::call_extern), which is for named external/
+    /// oracle-style symbols the backend never itself emits a body for.
+    ///
+    /// `name` is the callee's logical name, exactly as passed to a
+    /// (possibly not-yet-emitted) [`begin_function`](Self::begin_function)
+    /// call. Implementations must support forward references and mutual
+    /// recursion: `name` may be called before its own `begin_function`/
+    /// `end_function` pair has run. Argument/return marshalling matches
+    /// `call_extern` exactly (flat scalar lists, ABI types from `arg_tys`/
+    /// `ret_ty`).
+    fn call(
+        &mut self,
+        name: &str,
+        arg_tys: &[LirType],
+        args: &[Self::Value],
+        ret_ty: Option<LirType>,
+    ) -> Vec<Self::Value>;
+
     // ---- Terminators --------------------------------------------------------
 
     fn jump(&mut self, target: Self::Block, branch: BranchTarget<Self::Value>);
@@ -545,6 +566,83 @@ pub trait LirTarget<Prov: Clone = ()> {
     /// Emit a return.  `vals` is the flat scalar list for the return value
     /// (empty slice for void functions).
     fn ret(&mut self, vals: &[Self::Value]);
+
+    /// A multi-way branch keyed on a compile-time-enumerable set of integer
+    /// case values, falling through to `default_block` when `index` matches
+    /// none of `cases`. The `LirTarget` analogue of VAFFLE's
+    /// `Terminator::Table`, LLVM's `switch`, and WASM's `br_table`. Unlike
+    /// [`dyn_jump`](Self::dyn_jump), each case carries its own
+    /// [`BranchTarget`] — args may differ per destination.
+    fn switch(
+        &mut self,
+        index: Self::Value,
+        cases: &[(i64, Self::Block, BranchTarget<Self::Value>)],
+        default_block: Self::Block,
+        default_branch: BranchTarget<Self::Value>,
+    );
+
+    /// A backend-defined integer ordinal for `block`, stable within one
+    /// function. Only used by the default [`block_addr`](Self::block_addr)
+    /// and [`dyn_jump`](Self::dyn_jump) implementations to build matching
+    /// [`switch`](Self::switch) case keys; backends that override both of
+    /// those (e.g. `LlvmBackend`, using native `blockaddress`/`indirectbr`)
+    /// need not implement this.
+    fn block_ordinal(&self, _block: &Self::Block) -> i64 {
+        unimplemented!(
+            "block_ordinal: not supported by this backend (only used by the default \
+             block_addr/dyn_jump implementations)"
+        )
+    }
+
+    /// Materialize a first-class reference to `block`, usable later as the
+    /// `index` of a [`dyn_jump`](Self::dyn_jump). Mirrors LLVM's
+    /// `blockaddress` constant.
+    ///
+    /// LLVM cannot take the address of a function's *entry* block
+    /// (`BasicBlock::get_address` returns `None` there) — implementations
+    /// should treat `block_addr(entry_block)` as a caller error. Producers
+    /// of `LirTarget` calls (e.g. VAFFLE's `Value::BlockAddr`) are expected
+    /// to never target the entry block for exactly this reason.
+    ///
+    /// The default implementation encodes `block_ordinal(block)` as a
+    /// `LirType::U32` constant; it is correct for any backend that also uses
+    /// the default [`dyn_jump`](Self::dyn_jump), since both agree on the
+    /// same per-block ordinal.
+    fn block_addr(&mut self, block: Self::Block) -> Self::Value {
+        let ordinal = self.block_ordinal(&block);
+        self.iconst(LirType::U32, ordinal)
+    }
+
+    /// Jump to a runtime block reference produced by
+    /// [`block_addr`](Self::block_addr), given the closed set of blocks it
+    /// could possibly resolve to (mirroring LLVM's `indirectbr`, which
+    /// always carries its own destination list — never truly open-ended).
+    ///
+    /// `branch`'s args apply *uniformly* to every possible destination: like
+    /// LLVM's `indirectbr`/PHI model (only one incoming value per
+    /// predecessor edge) and Volar IR's own `Dyn` continuation-jump
+    /// convention, a dynamic jump cannot pass different args down different
+    /// destinations — route per-destination data through storage instead if
+    /// that's needed.
+    ///
+    /// The default implementation lowers to [`switch`](Self::switch), keying
+    /// each destination on its own [`block_ordinal`](Self::block_ordinal) —
+    /// matching the default [`block_addr`](Self::block_addr) regardless of
+    /// `destinations`' order, so C and WASM backends need no bespoke code
+    /// here; only `LlvmBackend` overrides this (native `indirectbr`).
+    fn dyn_jump(
+        &mut self,
+        index: Self::Value,
+        destinations: &[Self::Block],
+        branch: BranchTarget<Self::Value>,
+    ) {
+        let mut cases = Vec::with_capacity(destinations.len().saturating_sub(1));
+        for block in destinations.iter().skip(1) {
+            let ordinal = self.block_ordinal(block);
+            cases.push((ordinal, block.clone(), branch.clone()));
+        }
+        self.switch(index, &cases, destinations[0].clone(), branch);
+    }
 
     // ---- External access primitives ----------------------------------------
 

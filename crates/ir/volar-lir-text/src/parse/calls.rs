@@ -211,6 +211,50 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             Ok(LirCall::CallExtern { name, arg_tys, args, ret_ty, outs })
         }
 
+        // ---- Sibling (intra-module) calls --------------------------------------
+        "call" => {
+            lex.expect_key("name")?;
+            let name = lex.read_string()?;
+            lex.expect_key("arg_tys")?;
+            let arg_tys = parse_lir_type_list(lex)?;
+            lex.expect_key("args")?;
+            let args = lex.read_u32_list()?;
+            lex.expect_key("ret")?;
+            let ret_ty = parse_opt_lir_type(lex)?;
+            lex.expect_key("outs")?;
+            let outs = lex.read_u32_list()?;
+            Ok(LirCall::Call { name, arg_tys, args, ret_ty, outs })
+        }
+
+        // ---- Switch / block references / dynamic jumps -------------------------
+        "switch" => {
+            lex.expect_key("index")?;
+            let index = lex.read_u32()?;
+            lex.expect_key("cases")?;
+            let cases = parse_switch_cases(lex)?;
+            lex.expect_key("default_block")?;
+            let default_block = lex.read_u32()?;
+            lex.expect_key("default_args")?;
+            let default_args = lex.read_u32_list()?;
+            Ok(LirCall::Switch { index, cases, default_block, default_args })
+        }
+        "block_addr" => {
+            lex.expect_key("block")?;
+            let block = lex.read_u32()?;
+            lex.expect_key("out")?;
+            let out = lex.read_u32()?;
+            Ok(LirCall::BlockAddr { block, out })
+        }
+        "dyn_jump" => {
+            lex.expect_key("index")?;
+            let index = lex.read_u32()?;
+            lex.expect_key("destinations")?;
+            let destinations = lex.read_u32_list()?;
+            lex.expect_key("args")?;
+            let args = lex.read_u32_list()?;
+            Ok(LirCall::DynJump { index, destinations, args })
+        }
+
         // ---- Crypto primitives ------------------------------------------------
         "oracle" => {
             lex.expect_key("name")?;
@@ -383,6 +427,29 @@ fn parse_icmp_pred(lex: &mut Lexer<'_>) -> Result<IcmpPred, ParseError> {
             got: alloc::format!("unknown icmp predicate: {:?}", other),
         }),
     }
+}
+
+/// Parse `LirCall::Switch`'s case list: `[(key, block, [args]), ...]`.
+fn parse_switch_cases(lex: &mut Lexer<'_>) -> Result<Vec<(i64, u32, Vec<u32>)>, ParseError> {
+    lex.expect_byte(b'[')?;
+    let mut out = Vec::new();
+    loop {
+        lex.skip();
+        if lex.try_byte(b']') { break; }
+        lex.expect_byte(b'(')?;
+        let key = lex.read_i64()?;
+        lex.expect_byte(b',')?;
+        let block = lex.read_u32()?;
+        lex.expect_byte(b',')?;
+        let args = lex.read_u32_list()?;
+        lex.expect_byte(b')')?;
+        out.push((key, block, args));
+        lex.skip();
+        if lex.try_byte(b',') { continue; }
+        lex.expect_byte(b']')?;
+        break;
+    }
+    Ok(out)
 }
 
 fn parse_field_def_list(lex: &mut Lexer<'_>) -> Result<Vec<FieldDef>, ParseError> {

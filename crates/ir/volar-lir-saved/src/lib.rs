@@ -128,6 +128,32 @@ pub enum LirCall {
         outs: Vec<u32>,
     },
 
+    // ---- Sibling (intra-module) calls ----------------------------------------
+    Call {
+        name: alloc::string::String,
+        arg_tys: Vec<LirType>,
+        args: Vec<u32>,
+        ret_ty: Option<LirType>,
+        outs: Vec<u32>,
+    },
+
+    // ---- Switch / block references / dynamic jumps ---------------------------
+    Switch {
+        index: u32,
+        cases: Vec<(i64, u32, Vec<u32>)>,
+        default_block: u32,
+        default_args: Vec<u32>,
+    },
+    BlockAddr {
+        block: u32,
+        out: u32,
+    },
+    DynJump {
+        index: u32,
+        destinations: Vec<u32>,
+        args: Vec<u32>,
+    },
+
     // ---- Crypto primitives --------------------------------------------------
     Oracle {
         name: alloc::string::String,
@@ -396,6 +422,37 @@ impl SavedLirModule {
                     for v in outs {
                         push_val!(v);
                     }
+                }
+
+                LirCall::Call { name, arg_tys, args, ret_ty, .. } => {
+                    let real_args: Vec<T::Value> = args.iter().map(|a| val!(a)).collect();
+                    let outs = target.call(name, arg_tys, &real_args, ret_ty.clone());
+                    for v in outs {
+                        push_val!(v);
+                    }
+                }
+
+                LirCall::Switch { index, cases, default_block, default_args } => {
+                    let real_cases: Vec<(i64, T::Block, BranchTarget<T::Value>)> = cases
+                        .iter()
+                        .map(|(key, block, args)| {
+                            let real_args: Vec<T::Value> = args.iter().map(|a| val!(a)).collect();
+                            (*key, block!(block), BranchTarget::args(real_args))
+                        })
+                        .collect();
+                    let real_default_args: Vec<T::Value> = default_args.iter().map(|a| val!(a)).collect();
+                    target.switch(val!(index), &real_cases, block!(default_block), BranchTarget::args(real_default_args));
+                }
+
+                LirCall::BlockAddr { block, .. } => {
+                    let v = target.block_addr(block!(block));
+                    push_val!(v);
+                }
+
+                LirCall::DynJump { index, destinations, args } => {
+                    let real_destinations: Vec<T::Block> = destinations.iter().map(|d| block!(d)).collect();
+                    let real_args: Vec<T::Value> = args.iter().map(|a| val!(a)).collect();
+                    target.dyn_jump(val!(index), &real_destinations, BranchTarget::args(real_args));
                 }
 
                 LirCall::Oracle { name, arg_tys, args, ret_tys, .. } => {
@@ -758,6 +815,34 @@ impl LirTarget for RecordingTarget {
         outs
     }
 
+    /// Recorded distinctly from [`call_extern`](Self::call_extern) — see
+    /// [`LirCall::Call`].
+    fn call(
+        &mut self,
+        name: &str,
+        arg_tys: &[LirType],
+        args: &[u32],
+        ret_ty: Option<LirType>,
+    ) -> Vec<u32> {
+        let outs: Vec<u32> = ret_ty
+            .as_ref()
+            .map(|ty| {
+                self.flatten_scalar_tys(ty)
+                    .into_iter()
+                    .map(|sty| self.alloc_val(sty))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.module.calls.push(LirCall::Call {
+            name: alloc::string::String::from(name),
+            arg_tys: arg_tys.to_vec(),
+            args: args.to_vec(),
+            ret_ty,
+            outs: outs.clone(),
+        });
+        outs
+    }
+
     fn jump(&mut self, target: u32, branch: BranchTarget<u32>) {
         // NOTE: the saved format records block args only; reentry hints are not
         // persisted (the recorder predates `BranchTarget::reentry`).
@@ -783,6 +868,48 @@ impl LirTarget for RecordingTarget {
 
     fn ret(&mut self, vals: &[u32]) {
         self.module.calls.push(LirCall::Ret { vals: vals.to_vec() });
+    }
+
+    /// Recorded verbatim (not via the default `switch`-based expansion) so
+    /// replay drives the real downstream target's own `switch` — important
+    /// when that target is `LlvmBackend`, whose `dyn_jump`/`block_addr`
+    /// overrides must run natively rather than being baked into the log as
+    /// a synthetic dispatch at record time.
+    fn switch(
+        &mut self,
+        index: u32,
+        cases: &[(i64, u32, BranchTarget<u32>)],
+        default_block: u32,
+        default_branch: BranchTarget<u32>,
+    ) {
+        let cases: Vec<(i64, u32, Vec<u32>)> = cases
+            .iter()
+            .map(|(key, block, branch)| (*key, *block, branch.args.clone()))
+            .collect();
+        self.module.calls.push(LirCall::Switch {
+            index,
+            cases,
+            default_block,
+            default_args: default_branch.args,
+        });
+    }
+
+    /// Overridden (rather than left as the default `switch`-based
+    /// expansion) for the same reason as [`switch`](Self::switch): replay
+    /// must call the real target's own `block_addr`.
+    fn block_addr(&mut self, block: u32) -> u32 {
+        let out = self.alloc_val(LirType::U32);
+        self.module.calls.push(LirCall::BlockAddr { block, out });
+        out
+    }
+
+    /// Overridden for the same reason as [`block_addr`](Self::block_addr).
+    fn dyn_jump(&mut self, index: u32, destinations: &[u32], branch: BranchTarget<u32>) {
+        self.module.calls.push(LirCall::DynJump {
+            index,
+            destinations: destinations.to_vec(),
+            args: branch.args,
+        });
     }
 
     fn oracle(

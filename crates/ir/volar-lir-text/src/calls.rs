@@ -4,8 +4,8 @@
 
 use crate::{
     types::{
-        write_lir_type_list, write_opt_lir_type, write_quoted_str, write_u32_list,
-        write_u32_list_list,
+        write_lir_type_list, write_opt_lir_type, write_quoted_str, write_switch_cases,
+        write_u32_list, write_u32_list_list,
     },
     WriteText,
 };
@@ -141,6 +141,37 @@ impl WriteText for LirCall {
                 write_opt_lir_type(ret_ty, w)?;
                 w.write_str(" outs=")?;
                 write_u32_list(outs, w)
+            }
+
+            // ---- Sibling (intra-module) calls --------------------------------
+            LirCall::Call { name, arg_tys, args, ret_ty, outs } => {
+                w.write_str("call name=")?;
+                write_quoted_str(name, w)?;
+                w.write_str(" arg_tys=")?;
+                write_lir_type_list(arg_tys, w)?;
+                w.write_str(" args=")?;
+                write_u32_list(args, w)?;
+                w.write_str(" ret=")?;
+                write_opt_lir_type(ret_ty, w)?;
+                w.write_str(" outs=")?;
+                write_u32_list(outs, w)
+            }
+
+            // ---- Switch / block references / dynamic jumps -------------------
+            LirCall::Switch { index, cases, default_block, default_args } => {
+                write!(w, "switch index={} cases=", index)?;
+                write_switch_cases(cases, w)?;
+                write!(w, " default_block={} default_args=", default_block)?;
+                write_u32_list(default_args, w)
+            }
+            LirCall::BlockAddr { block, out } => {
+                write!(w, "block_addr block={} out={}", block, out)
+            }
+            LirCall::DynJump { index, destinations, args } => {
+                write!(w, "dyn_jump index={} destinations=", index)?;
+                write_u32_list(destinations, w)?;
+                w.write_str(" args=")?;
+                write_u32_list(args, w)
             }
 
             // ---- Crypto primitives ------------------------------------------

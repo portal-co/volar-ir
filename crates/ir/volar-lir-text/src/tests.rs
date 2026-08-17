@@ -6,6 +6,8 @@
 extern crate std;
 
 use std::boxed::Box;
+use std::borrow::ToOwned;
+use std::string::String;
 use volar_lir::{FieldDef, IcmpPred, LirType, StructDef};
 use volar_lir_saved::{LirCall, SavedLirModule};
 use volar_ir_common::Type as NativeType;
@@ -282,6 +284,55 @@ fn call_string_escaping() {
         ret: None,
         entry_block: 0,
         param_vals: std::vec![],
+    });
+}
+
+// ============================================================================
+// Phase 4a: sibling calls / switch / block references round-trip
+// ============================================================================
+
+#[test]
+fn call_sibling_call() {
+    rt_call(LirCall::Call {
+        name: "is_odd".into(),
+        arg_tys: std::vec![LirType::U32],
+        args: std::vec![3],
+        ret_ty: Some(LirType::Bool),
+        outs: std::vec![7],
+    });
+}
+
+#[test]
+fn call_switch() {
+    rt_call(LirCall::Switch {
+        index: 1,
+        cases: std::vec![(1, 2, std::vec![10]), (2, 3, std::vec![20, 21])],
+        default_block: 4,
+        default_args: std::vec![99],
+    });
+}
+
+#[test]
+fn call_switch_empty_cases() {
+    rt_call(LirCall::Switch {
+        index: 0,
+        cases: std::vec![],
+        default_block: 1,
+        default_args: std::vec![],
+    });
+}
+
+#[test]
+fn call_block_addr() {
+    rt_call(LirCall::BlockAddr { block: 5, out: 8 });
+}
+
+#[test]
+fn call_dyn_jump() {
+    rt_call(LirCall::DynJump {
+        index: 2,
+        destinations: std::vec![3, 4, 5],
+        args: std::vec![10, 11],
     });
 }
 
