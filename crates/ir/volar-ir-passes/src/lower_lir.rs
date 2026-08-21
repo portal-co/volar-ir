@@ -8,7 +8,7 @@ use volar_provenance::ProvenanceHandler;
 
 use volar_ir::{
     boolar::{BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
-    ir::{IRBlockTargetId, IRBlocks, IRStmt, IRTerminator, IRType, IRTypes},
+    ir::{IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypes},
 };
 use volar_ir_common::Type;
 
@@ -266,6 +266,10 @@ pub fn lower_ir_with_handler<P, T, H>(
         block_handles.push(target.create_block());
     }
 
+    // Param arity per block, used to filter candidate destinations for
+    // `IRBlockTargetId::Dyn` jumps (see `lower_ir_terminator`).
+    let block_param_counts: Vec<usize> = blocks.blocks.iter().map(|b| b.params.len()).collect();
+
     // vals_per_block: for each block, vec of (var_id → value) in order
     let mut vals_per_block: Vec<Vec<T::Value>> = Vec::with_capacity(blocks.blocks.len());
     vals_per_block.push(entry_params);
@@ -355,7 +359,7 @@ pub fn lower_ir_with_handler<P, T, H>(
         }
 
         let block_vals = vals_per_block[bi].clone();
-        lower_ir_terminator(&block.terminator, &block_vals, &block_handles, target);
+        lower_ir_terminator(&block.terminator, &block_vals, &block_handles, &block_param_counts, target);
     }
 
     target.end_function();
@@ -525,6 +529,7 @@ fn lower_ir_terminator<Q: Clone, T: LirTarget<Q>>(
     term: &IRTerminator,
     vals: &[T::Value],
     block_handles: &[T::Block],
+    block_param_counts: &[usize],
     target: &mut T,
 ) {
     match term {
@@ -538,7 +543,9 @@ fn lower_ir_terminator<Q: Clone, T: LirTarget<Q>>(
                 IRBlockTargetId::Block(id) => {
                     target.jump(block_handles[id.0 as usize].clone(), BranchTarget::args(arg_vals));
                 }
-                IRBlockTargetId::Dyn(_) => unimplemented!("dynamic jump target"),
+                IRBlockTargetId::Dyn(v) => {
+                    lower_dyn_jump(vals[v.0 as usize].clone(), arg_vals, block_handles, block_param_counts, target);
+                }
                 _ => panic!("lower_ir_terminator: unhandled IRBlockTargetId variant — add lowering for this variant"),
             }
         }
@@ -557,9 +564,76 @@ fn lower_ir_terminator<Q: Clone, T: LirTarget<Q>>(
                 _ => unimplemented!("JumpCond with Return/Dyn target"),
             }
         }
-        IRTerminator::JumpTable { .. } => {
-            unimplemented!("JumpTable lowering not yet implemented")
+        IRTerminator::JumpTable { index, cases } => {
+            let idx_val = vals[index.0 as usize].clone();
+            let mut iter = cases.iter();
+            let (_, default_target) = iter
+                .next()
+                .unwrap_or_else(|| panic!("JumpTable with no cases: no valid destination"));
+            let (default_block, default_args) = resolve_ir_block_target::<Q, T>(default_target, vals, block_handles);
+            let mut switch_cases = Vec::with_capacity(cases.len().saturating_sub(1));
+            for (key, t) in iter {
+                let (blk, args) = resolve_ir_block_target::<Q, T>(t, vals, block_handles);
+                switch_cases.push((key.lo as i64, blk, BranchTarget::args(args)));
+            }
+            target.switch(idx_val, &switch_cases, default_block, BranchTarget::args(default_args));
         }
         _ => panic!("lower_ir_terminator: unhandled IRTerminator variant — add lowering for this variant"),
     }
+}
+
+fn resolve_ir_block_target<Q: Clone, T: LirTarget<Q>>(
+    t: &IRBranchTarget,
+    vals: &[T::Value],
+    block_handles: &[T::Block],
+) -> (T::Block, Vec<T::Value>) {
+    let args: Vec<T::Value> = t.args.iter().map(|id| vals[id.0 as usize].clone()).collect();
+    match &t.dest {
+        IRBlockTargetId::Block(id) => (block_handles[id.0 as usize].clone(), args),
+        _ => unimplemented!("JumpTable case with Return/Dyn target"),
+    }
+}
+
+/// Lower an `IRBlockTargetId::Dyn` jump to `LirTarget::switch`.
+///
+/// Volar IR has no `blockaddress`-equivalent value producer (unlike VAFFLE's
+/// `Value::BlockAddr`), so a `Dyn` jump's underlying value carries no static
+/// destination list — it is typically reconstructed via a `StorageRead` from
+/// the software call-stack (see `volar-vaffle-target`'s CPS lowering), which
+/// pure dataflow tracing cannot see through. Rather than a real points-to
+/// analysis (out of scope here — see Phase 5's DFA jump threading for that
+/// kind of precise recovery), this conservatively treats every non-entry
+/// block whose parameter arity matches the jump's argument count as a
+/// possible destination. This is sound (Volar IR block ids are
+/// function-scoped, so any valid Dyn jump target lives in this same
+/// function's block list) but not tight — a function with many
+/// same-arity blocks gets a proportionally large `switch`.
+fn lower_dyn_jump<Q: Clone, T: LirTarget<Q>>(
+    index: T::Value,
+    args: Vec<T::Value>,
+    block_handles: &[T::Block],
+    block_param_counts: &[usize],
+    target: &mut T,
+) {
+    let arg_count = args.len();
+    // Block 0 is the function's entry block, which LLVM (and this crate's
+    // own convention) never allows as a jump target.
+    let candidates: Vec<usize> = block_param_counts
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|&(_, &n)| n == arg_count)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !candidates.is_empty(),
+        "dynamic jump: no non-entry block in this function has {} params to match the jump's argument count",
+        arg_count,
+    );
+    let default_bi = candidates[0];
+    let mut switch_cases = Vec::with_capacity(candidates.len().saturating_sub(1));
+    for &bi in &candidates[1..] {
+        switch_cases.push((bi as i64, block_handles[bi].clone(), BranchTarget::args(args.clone())));
+    }
+    target.switch(index, &switch_cases, block_handles[default_bi].clone(), BranchTarget::args(args));
 }

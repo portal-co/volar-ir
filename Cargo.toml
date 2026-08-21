@@ -15,6 +15,7 @@ members = [
     "crates/ir/volar-lir-text",
     "crates/ir/volar-lir-saved",
     "crates/ir/volar-lir-test-corpus",
+    "crates/ir/volar-ssa-lir-replay",
     "crates/fuzz/volar-fuzz",
     "crates/backends/volar-c-backend",
     "crates/backends/volar-llvm-backend",
@@ -45,6 +46,7 @@ volar-lir              = { path = "crates/ir/volar-lir", version = "0.1.0" }
 volar-lir-text         = { path = "crates/ir/volar-lir-text", version = "0.1.0" }
 volar-lir-saved        = { path = "crates/ir/volar-lir-saved", version = "0.1.0" }
 volar-lir-test-corpus  = { path = "crates/ir/volar-lir-test-corpus", version = "0.1.0" }
+volar-ssa-lir-replay   = { path = "crates/ir/volar-ssa-lir-replay", version = "0.1.0" }
 volar-fuzz             = { path = "crates/fuzz/volar-fuzz", version = "0.1.0" }
 volar-c-backend         = { path = "crates/backends/volar-c-backend", version = "0.1.0" }
 volar-llvm-backend      = { path = "crates/backends/volar-llvm-backend", version = "0.1.0" }

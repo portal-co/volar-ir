@@ -1,0 +1,20 @@
+[package]
+name = "volar-ssa-lir-replay"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+
+[dependencies]
+vaffle.workspace = true
+volar-ir-common.workspace = true
+volar-lir.workspace = true
+volar-provenance.workspace = true
+
+[dev-dependencies]
+volar-c-backend.workspace = true
+volar-lir-test-corpus.workspace = true
+volar-llvm-backend.workspace = true
+inkwell.workspace = true
+tempfile = "3"

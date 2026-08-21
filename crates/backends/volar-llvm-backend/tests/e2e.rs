@@ -19,8 +19,13 @@ use inkwell::targets::{
 };
 use inkwell::OptimizationLevel;
 
+use std::collections::BTreeMap;
+
 use volar_ir::boolar::BIrBlocks;
-use volar_ir::ir::{IRBlocks, IRTypes};
+use volar_ir::ir::{
+    IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId, IRTypes, IRVarId,
+};
+use volar_ir_common::{Constant, IrType as CommonIrType, Node, Stmt as IRStmt, Type};
 use volar_llvm_backend::LlvmBackend;
 use volar_ir_passes::{
     lower_lir::{lower_biir, lower_ir},
@@ -395,4 +400,160 @@ fn ir_direct_not_0() {
 fn ir_direct_not_1() {
     let (blocks, types) = make_ir_not();
     run_ir(&blocks, &types, "ir_not_1", &[true], 0);
+}
+
+// ============================================================================
+// ir_direct: JumpTable / Dyn (Phase 4b) — exercises the new lower_ir support
+// for `IRTerminator::JumpTable` and `IRBlockTargetId::Dyn`, both of which
+// lower to `LirTarget::switch` (see `volar-ir-passes/src/lower_lir.rs`).
+// ============================================================================
+
+fn node<T>(kind: T) -> Node<T, ()> {
+    Node::new(kind, (), None)
+}
+
+fn u8_types() -> IRTypes {
+    IRTypes(vec![CommonIrType::Primitive(Type::_8)])
+}
+
+fn u8_tid() -> IRTypeId {
+    IRTypeId(0)
+}
+
+/// `IRTerminator::JumpTable` dispatching a single `u8` param to one of three
+/// blocks, each returning a distinct constant. The smallest case key (`0`)
+/// is used as the default per `lower_ir_terminator`'s policy, so an
+/// unmatched index falls through to block 1's value (10).
+fn make_ir_jump_table() -> (IRBlocks, IRTypes) {
+    let types = u8_types();
+    let mut cases = BTreeMap::new();
+    cases.insert(
+        Constant { hi: 0, lo: 0 },
+        IRBranchTarget::new(IRBlockTargetId::Block(volar_ir::ir::IRBlockId(1)), vec![]),
+    );
+    cases.insert(
+        Constant { hi: 0, lo: 1 },
+        IRBranchTarget::new(IRBlockTargetId::Block(volar_ir::ir::IRBlockId(2)), vec![]),
+    );
+    cases.insert(
+        Constant { hi: 0, lo: 2 },
+        IRBranchTarget::new(IRBlockTargetId::Block(volar_ir::ir::IRBlockId(3)), vec![]),
+    );
+    let blocks = IRBlocks::new(vec![
+        IRBlock {
+            params: vec![u8_tid()],
+            stmts: vec![],
+            terminator: IRTerminator::JumpTable { index: IRVarId(0), cases },
+        },
+        IRBlock {
+            params: vec![],
+            stmts: vec![node(IRStmt::Const(Constant { hi: 0, lo: 10 }, u8_tid()))],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+            },
+        },
+        IRBlock {
+            params: vec![],
+            stmts: vec![node(IRStmt::Const(Constant { hi: 0, lo: 20 }, u8_tid()))],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+            },
+        },
+        IRBlock {
+            params: vec![],
+            stmts: vec![node(IRStmt::Const(Constant { hi: 0, lo: 30 }, u8_tid()))],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+            },
+        },
+    ]);
+    (blocks, types)
+}
+
+fn run_ir_u8(blocks: &IRBlocks, types: &IRTypes, name: &str, input: u8, expected: u64) {
+    let ctx = Context::create();
+    let mut b = LlvmBackend::new(&ctx, name);
+    lower_ir(blocks, types, name, &mut b);
+
+    let decl = format!("uint64_t {name}(uint8_t a0);");
+    let body = format!(r#"  printf("%llu\n", (unsigned long long){name}({input}));"#);
+    let out = compile_and_run(b, &decl, &body);
+    let actual: u64 = out.trim().parse().unwrap_or_else(|_| panic!("parse error: {out:?}"));
+    assert_eq!(actual, expected, "{name}({input}): expected {expected}, got {actual}");
+}
+
+#[test]
+fn ir_direct_jump_table_case_0() {
+    let (blocks, types) = make_ir_jump_table();
+    run_ir_u8(&blocks, &types, "ir_jt_0", 0, 10);
+}
+
+#[test]
+fn ir_direct_jump_table_case_1() {
+    let (blocks, types) = make_ir_jump_table();
+    run_ir_u8(&blocks, &types, "ir_jt_1", 1, 20);
+}
+
+#[test]
+fn ir_direct_jump_table_case_2() {
+    let (blocks, types) = make_ir_jump_table();
+    run_ir_u8(&blocks, &types, "ir_jt_2", 2, 30);
+}
+
+#[test]
+fn ir_direct_jump_table_unmatched_falls_to_default() {
+    let (blocks, types) = make_ir_jump_table();
+    run_ir_u8(&blocks, &types, "ir_jt_99", 99, 10);
+}
+
+/// `IRBlockTargetId::Dyn` jump: the entry block's single `u8` param is used
+/// directly as a dynamic jump index (as `lower_to_ir.rs`'s continuation
+/// protocol would produce after unpacking a stack-read value). Candidate
+/// destinations are every non-entry, zero-param block — here blocks 1 and 2
+/// — with block 1 (the lowest-numbered candidate) as the conservative
+/// default per `lower_dyn_jump`'s policy.
+fn make_ir_dyn_jump() -> (IRBlocks, IRTypes) {
+    let types = u8_types();
+    let blocks = IRBlocks::new(vec![
+        IRBlock {
+            params: vec![u8_tid()],
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(0)), vec![]),
+            },
+        },
+        IRBlock {
+            params: vec![],
+            stmts: vec![node(IRStmt::Const(Constant { hi: 0, lo: 100 }, u8_tid()))],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+            },
+        },
+        IRBlock {
+            params: vec![],
+            stmts: vec![node(IRStmt::Const(Constant { hi: 0, lo: 200 }, u8_tid()))],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+            },
+        },
+    ]);
+    (blocks, types)
+}
+
+#[test]
+fn ir_direct_dyn_jump_to_block_2() {
+    let (blocks, types) = make_ir_dyn_jump();
+    run_ir_u8(&blocks, &types, "ir_dyn_2", 2, 200);
+}
+
+#[test]
+fn ir_direct_dyn_jump_default_fallback() {
+    let (blocks, types) = make_ir_dyn_jump();
+    run_ir_u8(&blocks, &types, "ir_dyn_1", 1, 100);
+}
+
+#[test]
+fn ir_direct_dyn_jump_unmatched_falls_to_default() {
+    let (blocks, types) = make_ir_dyn_jump();
+    run_ir_u8(&blocks, &types, "ir_dyn_99", 99, 100);
 }
