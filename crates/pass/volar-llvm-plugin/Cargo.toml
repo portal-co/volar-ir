@@ -1,0 +1,26 @@
+[package]
+name = "volar-llvm-plugin"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "LLVM New-PM pass plugin: DFA jump threading, structural VAFFLE import, and replay back to LLVM IR for a marked entry function"
+repository.workspace = true
+build = "build.rs"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+vaffle = { workspace = true }
+volar-llvm-vaffle-import = { path = "../../frontends/volar-llvm-vaffle-import" }
+volar-ssa-lir-replay = { path = "../../ir/volar-ssa-lir-replay" }
+volar-llvm-backend = { path = "../../backends/volar-llvm-backend" }
+volar-llvm-plugin-api = { path = "../volar-llvm-plugin-api" }
+volar-llvm-jumpthread = { path = "../../../../llvm-bridge/crates/volar-llvm-jumpthread" }
+volar-llvm-pass-support = { path = "../../../../llvm-bridge/crates/volar-llvm-pass-support" }
+volar-llvm-constchain = { path = "../../../../llvm-bridge/crates/volar-llvm-constchain" }
+inkwell = { workspace = true }
+
+[build-dependencies]
+volar-llvm-pass-build = { path = "../../../../llvm-bridge/crates/volar-llvm-pass-build" }

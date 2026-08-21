@@ -1,0 +1,7 @@
+[package]
+name = "volar-llvm-plugin-api"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Static entry marker for volar-llvm-plugin"
+repository.workspace = true
