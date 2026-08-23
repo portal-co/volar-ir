@@ -4,6 +4,7 @@
 
 use alloc::collections::BTreeMap;
 use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
+use volar_ir::circuit::BCircuit;
 use volar_ir::ir::{IRBlockTargetId, IRVarId};
 
 use crate::common::canon_alias;
@@ -28,6 +29,31 @@ pub fn fold_biir_blocks<P: Clone>(blocks: &mut BIrBlocks<P>) -> bool {
     any_changed
 }
 
+/// Simplify a fused Boolar circuit in place until no further changes occur.
+///
+/// Constants are propagated through Boolean statements and aliases are
+/// rewritten in both later statements and circuit outputs. Returns `true` if
+/// the circuit was modified.
+pub fn fold_biir_circuit<P: Clone>(circuit: &mut BCircuit<P>) -> bool {
+    let mut any_changed = false;
+    loop {
+        let state = fold_biir_stmts_once(circuit.params, &mut circuit.stmts);
+        let mut changed = state.changed;
+        for output in &mut circuit.outputs {
+            let canonical = canon_alias(&state.alias_map, *output);
+            if canonical != *output {
+                *output = canonical;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+        any_changed = true;
+    }
+    any_changed
+}
+
 // ============================================================================
 // Internal helpers
 // ============================================================================
@@ -36,23 +62,45 @@ pub fn fold_biir_blocks<P: Clone>(blocks: &mut BIrBlocks<P>) -> bool {
 ///
 /// Returns `true` if any stmt or terminator operand was changed.
 fn fold_biir_block_once<P: Clone>(block: &mut BIrBlock<P>) -> bool {
+    let state = fold_biir_stmts_once(block.params, &mut block.stmts);
+    let mut changed = state.changed;
+
+    // Rewrite terminator operands through alias_map.
+    changed |= apply_aliases_to_biir_terminator(&mut block.terminator, &state.alias_map);
+
+    // Dead branch removal: fold CondJmp when condition is a known boolean.
+    changed |= fold_biir_terminator_dead_branch(&mut block.terminator, &state.bool_map);
+
+    changed
+}
+
+struct FoldState {
+    bool_map: BTreeMap<IRVarId, bool>,
+    alias_map: BTreeMap<IRVarId, IRVarId>,
+    changed: bool,
+}
+
+fn fold_biir_stmts_once<P: Clone>(
+    params: u32,
+    stmts: &mut [volar_ir_common::Node<BIrStmt, P>],
+) -> FoldState {
     let mut bool_map: BTreeMap<IRVarId, bool> = BTreeMap::new();
     let mut alias_map: BTreeMap<IRVarId, IRVarId> = BTreeMap::new();
     let mut changed = false;
 
-    let base = block.params;
+    let base = params;
 
-    for i in 0..block.stmts.len() {
+    for i in 0..stmts.len() {
         let rv = IRVarId(base + i as u32);
 
         // Step 1: apply alias substitutions to this stmt's operands.
-        if apply_aliases_to_biir_stmt(&mut block.stmts[i].kind, &alias_map) {
+        if apply_aliases_to_biir_stmt(&mut stmts[i].kind, &alias_map) {
             changed = true;
         }
 
         // Step 2: read (now-updated) operands and compute the simplification action.
         let action = {
-            match &block.stmts[i].kind {
+            match &stmts[i].kind {
                 BIrStmt::Zero => {
                     bool_map.insert(rv, false);
                     None
@@ -115,8 +163,8 @@ fn fold_biir_block_once<P: Clone>(block: &mut BIrBlock<P>) -> bool {
         match action {
             Some(Action::ToConst(val)) => {
                 let new_stmt = if val { BIrStmt::One } else { BIrStmt::Zero };
-                if block.stmts[i].kind != new_stmt {
-                    block.stmts[i].kind = new_stmt;
+                if stmts[i].kind != new_stmt {
+                    stmts[i].kind = new_stmt;
                     changed = true;
                 }
                 bool_map.insert(rv, val);
@@ -138,13 +186,11 @@ fn fold_biir_block_once<P: Clone>(block: &mut BIrBlock<P>) -> bool {
         }
     }
 
-    // Rewrite terminator operands through alias_map.
-    changed |= apply_aliases_to_biir_terminator(&mut block.terminator, &alias_map);
-
-    // Dead branch removal: fold CondJmp when condition is a known boolean.
-    changed |= fold_biir_terminator_dead_branch(&mut block.terminator, &bool_map);
-
-    changed
+    FoldState {
+        bool_map,
+        alias_map,
+        changed,
+    }
 }
 
 // ============================================================================
@@ -281,4 +327,62 @@ fn fold_biir_terminator_dead_branch(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use volar_ir_common::Node;
+
+    fn node(stmt: BIrStmt) -> Node<BIrStmt> {
+        Node::new(stmt, (), None)
+    }
+
+    #[test]
+    fn folds_fused_circuit_constants_and_output_aliases() {
+        let mut circuit = BCircuit {
+            params: 1,
+            stmts: vec![
+                node(BIrStmt::Zero),
+                node(BIrStmt::One),
+                node(BIrStmt::And(IRVarId(0), IRVarId(1))),
+                node(BIrStmt::Or(IRVarId(0), IRVarId(2))),
+                node(BIrStmt::Xor(IRVarId(1), IRVarId(2))),
+                node(BIrStmt::Not(IRVarId(1))),
+                node(BIrStmt::And(IRVarId(3), IRVarId(4))),
+                node(BIrStmt::And(IRVarId(0), IRVarId(2))),
+                node(BIrStmt::Or(IRVarId(0), IRVarId(1))),
+            ],
+            outputs: vec![
+                IRVarId(3),
+                IRVarId(4),
+                IRVarId(5),
+                IRVarId(6),
+                IRVarId(7),
+                IRVarId(8),
+                IRVarId(9),
+            ],
+        };
+
+        assert!(fold_biir_circuit(&mut circuit));
+        assert!(!fold_biir_circuit(&mut circuit));
+        assert_eq!(circuit.stmts[2].kind, BIrStmt::Zero);
+        assert_eq!(circuit.stmts[3].kind, BIrStmt::One);
+        assert_eq!(circuit.stmts[4].kind, BIrStmt::One);
+        assert_eq!(circuit.stmts[5].kind, BIrStmt::One);
+        assert_eq!(circuit.stmts[6].kind, BIrStmt::Zero);
+        assert_eq!(
+            circuit.outputs,
+            vec![
+                IRVarId(3),
+                IRVarId(4),
+                IRVarId(5),
+                IRVarId(6),
+                IRVarId(7),
+                IRVarId(0),
+                IRVarId(0),
+            ]
+        );
+    }
 }
