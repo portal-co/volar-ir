@@ -354,6 +354,7 @@ mod tests {
                 node(BIrStmt::And(IRVarId(0), IRVarId(2))),
                 node(BIrStmt::Or(IRVarId(0), IRVarId(1))),
             ],
+            pre_init: vec![],
             outputs: vec![
                 IRVarId(3),
                 IRVarId(4),

@@ -1,7 +1,7 @@
 // @reliability: normal
 // @ai: assisted
 // !!! THIS FILE IS AUTO-GENERATED !!!
-// Run `python3 scripts/gen-lir-corpus.py` to regenerate.
+// Run `python3 scripts/gen-lir-corpus.py` from the volar-ir workspace to regenerate.
 // Do NOT edit by hand.
 
 use volar_lir::{BranchTarget, IcmpPred, LirTarget, LirType};
@@ -191,13 +191,7 @@ pub fn build_loop_sum_u32<B: LirTarget>(b: &mut B) {
     let new_acc = b.add(accum.clone(), counter.clone());
     let one = b.iconst(LirType::U32, 1);
     let new_ctr = b.sub(counter, one);
-    b.branch(
-        cond,
-        done_block.clone(),
-        BranchTarget::args(vec![accum]),
-        loop_block,
-        BranchTarget::args(vec![new_ctr, new_acc]),
-    );
+    b.branch(cond, done_block.clone(), BranchTarget::args(vec![accum]), loop_block, BranchTarget::args(vec![new_ctr, new_acc]));
     b.switch_to_block(done_block);
     b.ret(&[done_result]);
     b.end_function();
@@ -210,6 +204,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         ios: &[
         CorpusIo { inputs: &[], expected: 42 },
         ],
+        lir_param_types: &[],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &[],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -222,6 +218,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[0, 0], expected: 0 },
         CorpusIo { inputs: &[100, 200], expected: 300 },
         ],
+        lir_param_types: &[LirType::U32, LirType::U32],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &["uint32_t", "uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -233,6 +231,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[10, 3], expected: 7 },
         CorpusIo { inputs: &[0, 0], expected: 0 },
         ],
+        lir_param_types: &[LirType::U32, LirType::U32],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &["uint32_t", "uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -245,6 +245,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[0, 7], expected: 0 },
         CorpusIo { inputs: &[6, 7], expected: 42 },
         ],
+        lir_param_types: &[LirType::U32, LirType::U32],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &["uint32_t", "uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -256,6 +258,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[12, 4], expected: 3 },
         CorpusIo { inputs: &[7, 2], expected: 3 },
         ],
+        lir_param_types: &[LirType::U32, LirType::U32],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &["uint32_t", "uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -267,6 +271,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[255, 15], expected: 15 },
         CorpusIo { inputs: &[0, 18446744073709551615], expected: 0 },
         ],
+        lir_param_types: &[LirType::U64, LirType::U64],
+        lir_return_type: Some(LirType::U64),
         c_arg_types: &["uint64_t", "uint64_t"],
         c_ret_fmt: "%llu",
         c_ret_cast: "(unsigned long long)",
@@ -278,6 +284,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[240, 15], expected: 255 },
         CorpusIo { inputs: &[0, 0], expected: 0 },
         ],
+        lir_param_types: &[LirType::U64, LirType::U64],
+        lir_return_type: Some(LirType::U64),
         c_arg_types: &["uint64_t", "uint64_t"],
         c_ret_fmt: "%llu",
         c_ret_cast: "(unsigned long long)",
@@ -289,6 +297,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[255, 15], expected: 240 },
         CorpusIo { inputs: &[170, 170], expected: 0 },
         ],
+        lir_param_types: &[LirType::U64, LirType::U64],
+        lir_return_type: Some(LirType::U64),
         c_arg_types: &["uint64_t", "uint64_t"],
         c_ret_fmt: "%llu",
         c_ret_cast: "(unsigned long long)",
@@ -300,6 +310,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[0], expected: 1 },
         CorpusIo { inputs: &[1], expected: 0 },
         ],
+        lir_param_types: &[LirType::Bool],
+        lir_return_type: Some(LirType::Bool),
         c_arg_types: &["uint8_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -311,6 +323,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[1, 4], expected: 16 },
         CorpusIo { inputs: &[3, 2], expected: 12 },
         ],
+        lir_param_types: &[LirType::U32, LirType::U32],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &["uint32_t", "uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -322,6 +336,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[16, 4], expected: 1 },
         CorpusIo { inputs: &[12, 2], expected: 3 },
         ],
+        lir_param_types: &[LirType::U32, LirType::U32],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &["uint32_t", "uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -333,6 +349,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[5, 5], expected: 1 },
         CorpusIo { inputs: &[5, 6], expected: 0 },
         ],
+        lir_param_types: &[LirType::U32, LirType::U32],
+        lir_return_type: Some(LirType::Bool),
         c_arg_types: &["uint32_t", "uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -345,6 +363,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[5, 3], expected: 0 },
         CorpusIo { inputs: &[4, 4], expected: 0 },
         ],
+        lir_param_types: &[LirType::U32, LirType::U32],
+        lir_return_type: Some(LirType::Bool),
         c_arg_types: &["uint32_t", "uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -357,6 +377,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[0], expected: 0 },
         CorpusIo { inputs: &[42], expected: 42 },
         ],
+        lir_param_types: &[LirType::U8],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &["uint8_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -369,6 +391,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[257], expected: 1 },
         CorpusIo { inputs: &[42], expected: 42 },
         ],
+        lir_param_types: &[LirType::U32],
+        lir_return_type: Some(LirType::U8),
         c_arg_types: &["uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -380,6 +404,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[1, 10, 20], expected: 10 },
         CorpusIo { inputs: &[0, 10, 20], expected: 20 },
         ],
+        lir_param_types: &[LirType::Bool, LirType::U32, LirType::U32],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &["uint8_t", "uint32_t", "uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -391,6 +417,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[1, 10, 20], expected: 10 },
         CorpusIo { inputs: &[0, 10, 20], expected: 20 },
         ],
+        lir_param_types: &[LirType::Bool, LirType::U32, LirType::U32],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &["uint8_t", "uint32_t", "uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",
@@ -404,6 +432,8 @@ pub static ALL_CASES: &[CorpusCase] = &[
         CorpusIo { inputs: &[5], expected: 15 },
         CorpusIo { inputs: &[10], expected: 55 },
         ],
+        lir_param_types: &[LirType::U32],
+        lir_return_type: Some(LirType::U32),
         c_arg_types: &["uint32_t"],
         c_ret_fmt: "%u",
         c_ret_cast: "(unsigned)",

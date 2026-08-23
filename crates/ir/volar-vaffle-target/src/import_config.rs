@@ -30,11 +30,12 @@ pub enum WaffleImportKind {
 /// convention at every call site.
 pub struct WaffleImportConfig {
     pub imports: BTreeMap<String, WaffleImportKind>,
+    memory_address_bits: Option<usize>,
 }
 
 impl WaffleImportConfig {
     pub fn new() -> Self {
-        Self { imports: BTreeMap::new() }
+        Self { imports: BTreeMap::new(), memory_address_bits: None }
     }
 
     pub fn with_oracle(
@@ -92,6 +93,17 @@ impl WaffleImportConfig {
         );
         self
     }
+
+    /// Limit the low address bits presented to memory storage operations.
+    /// Effective-address arithmetic remains full-width; the default (`None`)
+    /// preserves WASM's 32-bit byte-address behavior.
+    pub fn with_memory_address_bits(mut self, bits: usize) -> Self {
+        assert!(bits <= 32, "WASM memory addresses are 32 bits, got {bits}");
+        self.memory_address_bits = Some(bits);
+        self
+    }
+
+    pub fn memory_address_bits(&self) -> Option<usize> { self.memory_address_bits }
 }
 
 impl Default for WaffleImportConfig {

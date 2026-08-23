@@ -225,7 +225,7 @@ fn lower_to_circuit_impl<P: Clone>(
         }),
     };
 
-    BIrBlocks { blocks: vec![out_block], pre_init: vec![] }
+    BIrBlocks { blocks: vec![out_block], pre_init: blocks.pre_init.clone() }
 }
 
 /// Boundary metadata for binding a lowered (skipped) segment to a resumed

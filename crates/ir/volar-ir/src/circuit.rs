@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use volar_ir_common::Node;
 
 use crate::{
-    boolar::{BIrBlocks, BIrBlock, BIrStmt},
+    boolar::{BIrBlocks, BIrBlock, BIrPreInitSegment, BIrStmt},
     ir::{IRBlockTargetId, IRBranchTarget, IRBlocks, IRTerminator, IRTypeId, IRVarId},
 };
 
@@ -27,10 +27,8 @@ pub enum CircuitFusionError {
     /// The single block's terminator was not `Jmp { dest: Return }`.
     NotReturnTerminator,
     /// The program carries module-level declaration state (oracles, actions,
-    /// RNG sources, or pre-initialised storage segments). Fused circuits are
-    /// self-contained; carrying such tables here would silently drop them on
-    /// round-trip, so fusion rejects them instead. Extend the fused types if
-    /// a consumer needs them.
+    /// RNG sources, or pre-initialised storage segments). [`VCircuit`] cannot
+    /// carry such tables without silently dropping them on round-trip.
     ModuleLevelStateUnsupported,
     /// An output variable does not name a var in the block's var space
     /// (params followed by statement results).
@@ -52,7 +50,7 @@ impl core::fmt::Display for CircuitFusionError {
             }
             CircuitFusionError::ModuleLevelStateUnsupported => write!(
                 f,
-                "circuit fusion rejects oracle/action/RNG declarations and pre-init segments"
+                "VCircuit fusion rejects oracle/action/RNG declarations and pre-init segments"
             ),
             CircuitFusionError::OutputVarOutOfRange { var, var_space } => {
                 write!(f, "output var {var} out of range (var space size {var_space})")
@@ -205,6 +203,8 @@ pub struct BCircuit<P: Clone = ()> {
     /// Number of input parameters (all bits).
     pub params: u32,
     pub stmts: Vec<Node<BIrStmt, P>>,
+    /// Bit-granular storage values to install before a fresh circuit run.
+    pub pre_init: Vec<BIrPreInitSegment>,
     /// The variables returned to the caller.
     pub outputs: Vec<IRVarId>,
 }
@@ -212,7 +212,7 @@ pub struct BCircuit<P: Clone = ()> {
 impl<P: Clone> BCircuit<P> {
     /// Construct an empty fused circuit with `params` input bits.
     pub fn new(params: u32) -> Self {
-        BCircuit { params, stmts: Vec::new(), outputs: Vec::new() }
+        BCircuit { params, stmts: Vec::new(), pre_init: Vec::new(), outputs: Vec::new() }
     }
 
     /// Append a statement with provenance and no side tag.
@@ -240,9 +240,6 @@ impl<P: Clone> BCircuit<P> {
     /// fused-circuit invariant for Boolar; passes call it, never re-check
     /// inline.
     pub fn try_from_ir(blocks: &BIrBlocks<P>) -> Result<Self, CircuitFusionError> {
-        if !blocks.pre_init.is_empty() {
-            return Err(CircuitFusionError::ModuleLevelStateUnsupported);
-        }
         let [block] = &blocks.blocks[..] else {
             return Err(CircuitFusionError::NotSingleBlock { found: blocks.blocks.len() });
         };
@@ -262,6 +259,7 @@ impl<P: Clone> BCircuit<P> {
         Ok(BCircuit {
             params: block.params,
             stmts: block.stmts.clone(),
+            pre_init: blocks.pre_init.clone(),
             outputs,
         })
     }
@@ -272,13 +270,14 @@ impl<P: Clone> BCircuit<P> {
         BCircuit {
             params: self.params,
             stmts: self.stmts.into_iter().map(|n| n.map_prov(|p| handler.map(&p))).collect(),
+            pre_init: self.pre_init,
             outputs: self.outputs,
         }
     }
 
     /// Un-fuse back into the general [`BIrBlocks`] form: one block whose sole
-    /// terminator is `Jmp(Return, args: outputs)`, with no module-level
-    /// declarations (see [`CircuitFusionError::ModuleLevelStateUnsupported`]).
+    /// terminator is `Jmp(Return, args: outputs)`. Unlike [`VCircuit`], this
+    /// form retains bit-granular pre-initialised storage segments.
     pub fn to_bir_blocks(self) -> BIrBlocks<P> {
         use crate::boolar::{BIrTarget, BIrTerminator};
         let terminator = BIrTerminator::Jmp(BIrTarget {
@@ -287,7 +286,7 @@ impl<P: Clone> BCircuit<P> {
         });
         BIrBlocks {
             blocks: alloc::vec![BIrBlock { params: self.params, stmts: self.stmts, terminator }],
-            pre_init: alloc::vec![],
+            pre_init: self.pre_init,
         }
     }
 }

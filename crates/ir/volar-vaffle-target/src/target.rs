@@ -685,11 +685,14 @@ impl LirTarget for VaffleTarget {
         let bit_tid = self.bit_tid();
         let param_tid = if n <= 1 { bit_tid } else { self.intern_type(IrType::Vec(n, bit_tid)) };
         let packed = self.fb().emit_block_param(block.0, param_tid);
+        let prior_block = self.fb().current;
+        self.fb().current = block.0;
         let bits: Vec<ValueId> = if n <= 1 {
             vec![packed]
         } else {
             (0..n as u8).map(|i| self.extract_bit(packed, i)).collect()
         };
+        self.fb().current = prior_block;
         VaffleValue { bits, ty }
     }
 

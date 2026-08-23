@@ -1,0 +1,18 @@
+[package]
+name = "volar-riscv-test-programs"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Bounded RISC-V fixtures for Volar IR and Cirrus tests"
+repository.workspace = true
+
+[dependencies]
+anyhow = { version = "^1.0", default-features = false }
+portal-pc-waffle-frontend.workspace = true
+portal-pc-waffle-ir.workspace = true
+rv-asm = { git = "https://github.com/portal-co/rv-utils.git" }
+
+[dev-dependencies]
+volar-vaffle-target.workspace = true
+wat = "1.212.0"
+wasmtime = "46.0.1"

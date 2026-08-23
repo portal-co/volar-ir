@@ -974,69 +974,69 @@ fn lower_op(
 
         // ---- Memory loads (byte-addressed storage) ---------------------
         Operator::I32Load { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 4, LirType::U32, false)
+            lower_mem_load(tgt, memory, &get(0)?, 4, LirType::U32, false, config)
         }
         Operator::I64Load { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 8, LirType::U64, false)
+            lower_mem_load(tgt, memory, &get(0)?, 8, LirType::U64, false, config)
         }
         Operator::I32Load8U { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 1, LirType::U32, false)
+            lower_mem_load(tgt, memory, &get(0)?, 1, LirType::U32, false, config)
         }
         Operator::I32Load8S { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 1, LirType::U32, true)
+            lower_mem_load(tgt, memory, &get(0)?, 1, LirType::U32, true, config)
         }
         Operator::I32Load16U { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 2, LirType::U32, false)
+            lower_mem_load(tgt, memory, &get(0)?, 2, LirType::U32, false, config)
         }
         Operator::I32Load16S { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 2, LirType::U32, true)
+            lower_mem_load(tgt, memory, &get(0)?, 2, LirType::U32, true, config)
         }
         Operator::I64Load8U { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 1, LirType::U64, false)
+            lower_mem_load(tgt, memory, &get(0)?, 1, LirType::U64, false, config)
         }
         Operator::I64Load8S { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 1, LirType::U64, true)
+            lower_mem_load(tgt, memory, &get(0)?, 1, LirType::U64, true, config)
         }
         Operator::I64Load16U { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 2, LirType::U64, false)
+            lower_mem_load(tgt, memory, &get(0)?, 2, LirType::U64, false, config)
         }
         Operator::I64Load16S { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 2, LirType::U64, true)
+            lower_mem_load(tgt, memory, &get(0)?, 2, LirType::U64, true, config)
         }
         Operator::I64Load32U { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 4, LirType::U64, false)
+            lower_mem_load(tgt, memory, &get(0)?, 4, LirType::U64, false, config)
         }
         Operator::I64Load32S { memory } => {
-            lower_mem_load(tgt, memory, &get(0)?, 4, LirType::U64, true)
+            lower_mem_load(tgt, memory, &get(0)?, 4, LirType::U64, true, config)
         }
 
         // ---- Memory stores ---------------------------------------------
         Operator::I32Store { memory } => {
-            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 4);
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 4, config);
             return Ok(None);
         }
         Operator::I64Store { memory } => {
-            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 8);
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 8, config);
             return Ok(None);
         }
         Operator::I32Store8 { memory } => {
-            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 1);
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 1, config);
             return Ok(None);
         }
         Operator::I32Store16 { memory } => {
-            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 2);
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 2, config);
             return Ok(None);
         }
         Operator::I64Store8 { memory } => {
-            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 1);
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 1, config);
             return Ok(None);
         }
         Operator::I64Store16 { memory } => {
-            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 2);
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 2, config);
             return Ok(None);
         }
         Operator::I64Store32 { memory } => {
-            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 4);
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 4, config);
             return Ok(None);
         }
 
@@ -1187,6 +1187,7 @@ fn mem_load_bytes(
     mem_idx: u32,
     byte_addr: &VaffleValue,
     n_bytes: usize,
+    config: &WaffleImportConfig,
 ) -> VaffleValue {
     let storage = StorageId::memory(mem_idx);
     let byte_tid = tgt.byte_tid();
@@ -1203,7 +1204,7 @@ fn mem_load_bytes(
         };
 
         // StorageRead: reads one byte (Vec(8, Bit)) from memory.
-        let byte_var = tgt.emit_read(storage, byte_tid, &addr_val.bits);
+        let byte_var = tgt.emit_read(storage, byte_tid, memory_address_bits(&addr_val.bits, config));
 
         // Decompose the byte into 8 individual bits via Shuffle.
         for bit_j in 0..8u8 {
@@ -1236,6 +1237,7 @@ fn mem_store_bytes(
     byte_addr: &VaffleValue,
     value: &VaffleValue,
     n_bytes: usize,
+    config: &WaffleImportConfig,
 ) {
     let storage = StorageId::memory(mem_idx);
     let byte_tid = tgt.byte_tid();
@@ -1266,7 +1268,7 @@ fn mem_store_bytes(
                                                    // Actually compose_address creates Vec(N, Bit) where N = bits.len().
                                                    // For 8 bits this gives us Vec(8, Bit) = byte_tid. Perfect.
 
-        tgt.emit_write(storage, byte_var, byte_tid, &addr_val.bits);
+        tgt.emit_write(storage, byte_var, byte_tid, memory_address_bits(&addr_val.bits, config));
     }
 }
 
@@ -1280,10 +1282,11 @@ fn lower_mem_load(
     load_bytes: usize,
     result_ty: LirType,
     sign_extend: bool,
+    config: &WaffleImportConfig,
 ) -> VaffleValue {
     let mem_idx = memory.memory.index() as u32;
     let addr = effective_addr(tgt, base, memory.offset);
-    let loaded = mem_load_bytes(tgt, mem_idx, &addr, load_bytes);
+    let loaded = mem_load_bytes(tgt, mem_idx, &addr, load_bytes, config);
 
     // Extend to the target width if needed.
     let target_bits = bits_for_lir_type(&result_ty, &[]);
@@ -1306,6 +1309,7 @@ fn lower_mem_store(
     base: &VaffleValue,
     value: &VaffleValue,
     store_bytes: usize,
+    config: &WaffleImportConfig,
 ) {
     let mem_idx = memory.memory.index() as u32;
     let addr = effective_addr(tgt, base, memory.offset);
@@ -1319,7 +1323,16 @@ fn lower_mem_store(
     } else {
         value.clone()
     };
-    mem_store_bytes(tgt, mem_idx, &addr, &truncated, store_bytes);
+    mem_store_bytes(tgt, mem_idx, &addr, &truncated, store_bytes, config);
+}
+
+/// Select the low address bits used by a bounded memory image after full
+/// 32-bit WASM effective-address arithmetic has completed.
+fn memory_address_bits<'a>(bits: &'a [ValueId], config: &WaffleImportConfig) -> &'a [ValueId] {
+    match config.memory_address_bits() {
+        Some(width) => &bits[..width],
+        None => bits,
+    }
 }
 
 // ============================================================================
@@ -1515,6 +1528,38 @@ mod tests {
             "VAFFLE should contain StorageWrite for i32.store"
         );
         assert!(has_read, "VAFFLE should contain StorageRead for i32.load");
+    }
+
+    #[test]
+    fn bounded_memory_uses_only_configured_address_bits() {
+        let wasm = build_store_load_module();
+        let mut bounded = VaffleTarget::new();
+        let errors = lower_waffle_module(&wasm, &mut bounded, &WaffleImportConfig::default().with_memory_address_bits(5));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let body = match &bounded.module.funcs[0] { vaffle::FuncDecl::Body(body) => body, _ => panic!() };
+        let address_width = |addr: ValueId| match &body.values[addr.0].kind {
+            vaffle::Value::Op(Stmt::Merge { parts, .. }) => parts.len(),
+            other => panic!("memory address should be a merged bit vector, got {other:?}"),
+        };
+        let widths: Vec<_> = body.values.iter().filter_map(|value| match &value.kind {
+            vaffle::Value::Op(Stmt::StorageRead { addr, .. }) | vaffle::Value::Op(Stmt::StorageWrite { addr, .. }) => Some(address_width(*addr)),
+            _ => None,
+        }).collect();
+        assert!(!widths.is_empty());
+        assert!(widths.iter().all(|&width| width == 5));
+
+        let mut full = VaffleTarget::new();
+        let errors = lower_waffle_module(&wasm, &mut full, &WaffleImportConfig::default());
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let body = match &full.module.funcs[0] { vaffle::FuncDecl::Body(body) => body, _ => panic!() };
+        let full_address_width = |addr: ValueId| match &body.values[addr.0].kind {
+            vaffle::Value::Op(Stmt::Merge { parts, .. }) => parts.len(),
+            other => panic!("memory address should be a merged bit vector, got {other:?}"),
+        };
+        assert!(body.values.iter().any(|value| match &value.kind {
+            vaffle::Value::Op(Stmt::StorageRead { addr, .. }) | vaffle::Value::Op(Stmt::StorageWrite { addr, .. }) => full_address_width(*addr) == MEM_ADDR_BITS,
+            _ => false,
+        }));
     }
 
     /// Build a module with i32.store8 + i32.load8_u to test sub-word memory access.

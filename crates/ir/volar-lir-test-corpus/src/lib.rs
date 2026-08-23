@@ -18,6 +18,7 @@ pub use generated::ALL_CASES;
 
 use std::{fs, process::Command};
 use tempfile::TempDir;
+use volar_lir::LirType;
 
 // ============================================================================
 // Corpus metadata types
@@ -36,6 +37,10 @@ pub struct CorpusCase {
     pub name: &'static str,
     /// I/O pairs for correctness verification.
     pub ios: &'static [CorpusIo],
+    /// LIR input types used for generic replay.
+    pub lir_param_types: &'static [LirType],
+    /// LIR return type (`None` is reserved for future void cases).
+    pub lir_return_type: Option<LirType>,
     /// C argument type strings (e.g. `"uint32_t"`), one per parameter.
     pub c_arg_types: &'static [&'static str],
     /// printf format for the return value (e.g. `"%u"` or `"%llu"`).
@@ -45,6 +50,33 @@ pub struct CorpusCase {
     /// Template for the C call expression using identifiers a0, a1, …
     /// (e.g. `"add_u32(a0, a1)"`).
     pub c_call_template: &'static str,
+}
+
+/// Replay one generated case into an arbitrary generic [`volar_lir::LirTarget`].
+/// Returns `false` for an unknown case name.
+pub fn build_case<B: volar_lir::LirTarget>(name: &str, target: &mut B) -> bool {
+    match name {
+        "const_u32" => generated::build_const_u32(target),
+        "add_u32" => generated::build_add_u32(target),
+        "sub_u32" => generated::build_sub_u32(target),
+        "mul_u32" => generated::build_mul_u32(target),
+        "udiv_u32" => generated::build_udiv_u32(target),
+        "and_u64" => generated::build_and_u64(target),
+        "or_u64" => generated::build_or_u64(target),
+        "xor_u64" => generated::build_xor_u64(target),
+        "not_bool" => generated::build_not_bool(target),
+        "shl_u32" => generated::build_shl_u32(target),
+        "lshr_u32" => generated::build_lshr_u32(target),
+        "icmp_eq_u32" => generated::build_icmp_eq_u32(target),
+        "icmp_ult_u32" => generated::build_icmp_ult_u32(target),
+        "zext_u8_to_u32" => generated::build_zext_u8_to_u32(target),
+        "trunc_u32_to_u8" => generated::build_trunc_u32_to_u8(target),
+        "select_u32" => generated::build_select_u32(target),
+        "branch_merge_u32" => generated::build_branch_merge_u32(target),
+        "loop_sum_u32" => generated::build_loop_sum_u32(target),
+        _ => return false,
+    }
+    true
 }
 
 impl CorpusCase {
@@ -89,11 +121,9 @@ pub fn compile_and_run(c_src: &str, main_body: &str) -> String {
         .arg(&c_path)
         .status()
         .expect("cc not found — install a C compiler");
-    let _portal_log = volar_log::LlmtrimLogger::from_env();
-    let display_src = if _portal_log.autominify { volar_log::minify_c(&full_src) } else { full_src.clone() };
     assert!(
         status.success(),
-        "C compilation failed.\nSource:\n{display_src}"
+        "C compilation failed.\nSource:\n{full_src}"
     );
 
     let output = Command::new(&exe_path)

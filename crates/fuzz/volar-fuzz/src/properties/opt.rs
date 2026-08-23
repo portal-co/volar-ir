@@ -10,7 +10,7 @@
 
 use proptest::prelude::*;
 use volar_ir_opt::biir::fold_biir_blocks;
-use volar_ir_opt::ir::fold_ir_blocks;
+use volar_ir_opt::ir::{cse_ir_blocks, dce_ir_blocks, fold_ir_blocks};
 use volar_ir_opt::inline_vaffle::{inline_vaffle_module, InlineBudget};
 use volar_ir_opt::vaffle::fold_vaffle_module;
 use volar_ir_opt::store_forward::{
@@ -25,6 +25,65 @@ use crate::generators::vaffle::{gen_vaffle_and_inputs, gen_vaffle_extended_and_i
 use crate::interpreter::biir::eval_biir;
 use crate::interpreter::ir::eval_ir;
 use crate::interpreter::vaffle::eval_vaffle;
+
+#[test]
+fn named_corpus_cases_survive_generic_optimization_passes() {
+    use volar_lir_test_corpus::{
+        ALL_CASES, build_case, make_biir_and, make_biir_half_adder, make_biir_not,
+        make_ir_and, make_ir_not, make_ir_xor,
+    };
+    use volar_vaffle_target::VaffleTarget;
+
+    fn case_inputs(case: &volar_lir_test_corpus::CorpusCase, raw: &[u64]) -> Vec<Vec<bool>> {
+        case.lir_param_types.iter().zip(raw).flat_map(|(ty, value)| {
+            (0..ty.bit_width()).map(move |bit| vec![value & (1u64 << bit) != 0])
+        }).collect()
+    }
+
+    fn eval_case(case: &volar_lir_test_corpus::CorpusCase, raw: &[u64], optimize: fn(&mut vaffle::Module) -> bool) -> Vec<Vec<bool>> {
+        let mut target = VaffleTarget::new();
+        assert!(build_case(case.name, &mut target));
+        optimize(&mut target.module);
+        crate::interpreter::vaffle::eval_vaffle(&target.module, vaffle::FuncId(0), &case_inputs(case, raw))
+            .expect("corpus program should halt")
+    }
+
+    for case in ALL_CASES {
+        for io in case.ios {
+            let baseline = eval_case(case, io.inputs, |_| false);
+            let expected: Vec<Vec<bool>> = (0..case.lir_return_type.as_ref().expect("corpus return type").bit_width())
+                .map(|bit| vec![io.expected & (1u64 << bit) != 0]).collect();
+            assert_eq!(baseline, expected, "{} baseline", case.name);
+            assert_eq!(eval_case(case, io.inputs, fold_vaffle_module), baseline, "{} fold", case.name);
+            assert_eq!(eval_case(case, io.inputs, store_forward_vaffle_module), baseline, "{} store-forward", case.name);
+        }
+    }
+
+    for (blocks, inputs) in [
+        (make_biir_not(), vec![true]),
+        (make_biir_and(), vec![true, false]),
+        (make_biir_half_adder(), vec![true, true]),
+    ] {
+        let before = eval_biir(&blocks, &inputs).expect("fixture should halt");
+        let mut optimized = blocks;
+        fold_biir_blocks(&mut optimized);
+        store_forward_biir_blocks(&mut optimized);
+        assert_eq!(eval_biir(&optimized, &inputs), Some(before));
+    }
+
+    for (blocks, types, inputs) in [
+        { let (b, t) = make_ir_xor(); (b, t, vec![vec![true], vec![false]]) },
+        { let (b, t) = make_ir_and(); (b, t, vec![vec![true], vec![true]]) },
+        { let (b, t) = make_ir_not(); (b, t, vec![vec![false]]) },
+    ] {
+        let before = eval_ir(&blocks, &types, &inputs).expect("fixture should halt");
+        let mut optimized = blocks;
+        fold_ir_blocks(&mut optimized, &types);
+        cse_ir_blocks(&mut optimized, &types);
+        dce_ir_blocks(&mut optimized, &types);
+        assert_eq!(eval_ir(&optimized, &types, &inputs), Some(before));
+    }
+}
 
 // ============================================================================
 // Property E — fold_ir_blocks preserves Volar IR semantics
