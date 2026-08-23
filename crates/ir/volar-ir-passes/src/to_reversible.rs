@@ -15,18 +15,24 @@
 //! # Wire layout
 //!
 //! ```text
-//! [ x register (params) | per-stmt result ancillas | y register (outputs) | scratch ]
+//! [ x register (params) | stmt-result ancillas | y register (outputs) | scratch ]
 //! ```
 //!
-//! [`VarWireMap`] — the total, injective map from Boolar var space to wire
-//! indices — is a byproduct of allocation and is what consumers use for
-//! value→wire watchlist translation.
+//! Stmt-result ancillas are compacted: a statement whose result is produced
+//! by a single-use XOR operand reuse (see gate cost below) allocates no
+//! ancilla of its own.
+//!
+//! [`VarWireMap`] — the total map from Boolar var space to wire indices — is
+//! a byproduct of allocation and is what consumers use for value→wire
+//! watchlist translation.
 //!
 //! # Gate cost
 //!
-//! Per statement: `Xor` → 2 CNOT, `And` → 1 Toffoli, `Not` → 1 CNOT + 1 X,
-//! `Or` → 2 CNOT + 2 X + 1 Toffoli + 1 X (De Morgan on copied-not operands).
-//! Output phase adds one CNOT per output bit.
+//! Per statement: `Xor` → 2 CNOT, or **1 CNOT with no new wire** when an
+//! operand is a single-use non-input var whose only reader is this XOR (the
+//! operand's wire is consumed in place); `And` → 1 Toffoli, `Not` → 1 CNOT +
+//! 1 X, `Or` → 2 CNOT + 2 X + 1 Toffoli + 1 X (De Morgan on copied-not
+//! operands). Output phase adds one CNOT per output bit.
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
@@ -74,18 +80,29 @@ impl core::fmt::Display for ToReversibleError {
     }
 }
 
-/// Total, injective map from a `BCircuit`'s var space (params followed by stmt
-/// results) to `RCircuit` wire indices.
+/// Total map from a `BCircuit`'s var space (params followed by stmt results)
+/// to `RCircuit` wire indices.
 ///
 /// Produced by the same [`to_reversible`] run that emits the [`RCircuit`] —
 /// never reconstructed after the fact, so it cannot drift from the allocator's
 /// layout.
+///
+/// The map is injective among **live** values. As a wire-reuse optimization,
+/// a Boolar var whose only use feeds an `Xor` may have its wire consumed in
+/// place: the XOR's result then lives at the consumed operand's old wire, and
+/// the consumed var's own entry aliases it. A consumed var has no remaining
+/// readers by construction, so well-formed consumers (which only observe
+/// vars via outputs or downstream uses) never query a stale entry.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct VarWireMap {
-    /// `map[var_id] = wire_index`; total over `0..var_space`.
+    /// `map[var_id] = wire_index`; total over `0..var_space`. Injective
+    /// among live values; entries of wire-consumed vars alias their
+    /// consumer's wire (see type doc).
     map: Vec<usize>,
     /// Total wires in the produced circuit (including scratch).
     num_wires: usize,
+    /// First wire of the y register (one wire per output, in output order).
+    y_base: usize,
 }
 
 impl VarWireMap {
@@ -102,6 +119,12 @@ impl VarWireMap {
     /// Number of mapped vars (params + stmt results).
     pub fn var_space(&self) -> u32 {
         self.map.len() as u32
+    }
+
+    /// First wire of the y register; output `k` lives at `y_base() + k` and
+    /// accumulates `f(x)` under XOR.
+    pub fn y_base(&self) -> usize {
+        self.y_base
     }
 }
 
@@ -162,13 +185,6 @@ pub fn translate_watchlist(
 // ============================================================================
 // The transform
 // ============================================================================
-/// Wire index of Boolar var `v`: by construction the layout is
-/// `[params | stmt-ancillas | y | scratch]`, so every mapped var's wire index
-/// equals its var id.
-fn wire_of(v: &IRVarId) -> usize {
-    v.0 as usize
-}
-
 
 /// Convert a circuit-fused Boolar program computing `y_out = f(x_in)` into a
 /// reversible circuit over `(x, y)` implementing `(x, y) ↦ (x, y ⊕ f(x))`,
@@ -178,33 +194,65 @@ fn wire_of(v: &IRVarId) -> usize {
 /// `circ.outputs.len()` wires below any scratch; use the returned map plus
 /// [`translate_watchlist`] to locate them symbolically.
 pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversibleError> {
-    // ---- Wire allocation ---------------------------------------------------
-    // x register: one wire per param bit (wire i carries param i).
-    // stmt ancillas: one zero-initialized wire per stmt result var.
+    // ---- Use-count analysis -------------------------------------------------
+    // Counts of each var in every *reader* position: stmt operands, storage
+    // addr/src lists, and outputs. A var with count == 1 that is not an input
+    // param is a wire-reuse candidate for the single statement that reads it.
     let params = circ.params;
     let n_stmts = circ.stmts.len();
-    let mut num_wires = params as usize + n_stmts;
+    let mut uses = alloc::vec![0u32; params as usize + n_stmts];
+    {
+        let mut bump = |v: IRVarId| uses[v.0 as usize] += 1;
+        for node in &circ.stmts {
+            match &node.kind {
+                BIrStmt::Xor(a, b) | BIrStmt::And(a, b) | BIrStmt::Or(a, b) => {
+                    bump(*a);
+                    bump(*b);
+                }
+                BIrStmt::Not(a) => bump(*a),
+                BIrStmt::StorageRead { addr, .. } => {
+                    for v in addr {
+                        bump(*v);
+                    }
+                }
+                BIrStmt::StorageWrite { src, addr, .. } => {
+                    bump(*src);
+                    for v in addr {
+                        bump(*v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for out in &circ.outputs {
+            bump(*out);
+        }
+    }
 
+    // ---- Wire allocation ---------------------------------------------------
+    // x register: one wire per param bit (wire i carries param i).
+    // stmt ancillas: allocated on demand below; a stmt whose result consumes
+    // a single-use operand's wire allocates none (see the Xor arm).
     let mut map_vec: Vec<usize> = Vec::with_capacity(params as usize + n_stmts);
     for w in 0..params as usize {
         map_vec.push(w);
     }
 
-    // y register comes after the stmt ancillas so scratch can grow past it.
-    let y_base = num_wires;
-    num_wires += circ.outputs.len();
+    // Provisional y-register base (an upper bound; compacted after synthesis).
+    let y_base_prov = params as usize + n_stmts;
 
     let mut gates: Vec<RGate> = Vec::new();
 
-    // Scratch allocator (appended after the y register).
-    let mut next_scratch = num_wires;
+    // Scratch allocator (appended after the provisional y register).
+    let mut next_scratch = y_base_prov + circ.outputs.len();
+
+    // On-demand stmt-result ancilla allocator.
+    let mut next_anc = params as usize;
 
 
     // SSA order check + synthesis per statement.
     for (i, node) in circ.stmts.iter().enumerate() {
         let r = IRVarId(params + i as u32); // this stmt's result var
-        // Stmt i's ancilla is its own dedicated zero-initialized wire.
-        let wr = params as usize + i;
         let check_operand = |v: IRVarId| -> Result<(), ToReversibleError> {
             if v.0 > r.0 {
                 Err(ToReversibleError::UseBeforeDef { user: r.0, operand: v.0 })
@@ -219,41 +267,96 @@ pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToRevers
             vs.iter().try_for_each(|&v| check_operand(v))
         };
         match &node.kind {
-            BIrStmt::Zero => {}
-            BIrStmt::One => gates.push(RGate::X(wr)),
+            BIrStmt::Zero => {
+                // No gates: a fresh ancilla is already 0.
+                let wr = next_anc;
+                next_anc += 1;
+                map_vec.push(wr);
+            }
+            BIrStmt::One => {
+                let wr = next_anc;
+                next_anc += 1;
+                gates.push(RGate::X(wr));
+                map_vec.push(wr);
+            }
             BIrStmt::Xor(a, b) => {
                 check_operand(*a)?;
                 check_operand(*b)?;
-                // w_r starts 0; XOR-copy both operands into it.
-                gates.push(RGate::Cnot { ctrl: wire_of(a), target: wr });
-                gates.push(RGate::Cnot { ctrl: wire_of(b), target: wr });
+                let wa = map_vec[a.0 as usize];
+                let wb = map_vec[b.0 as usize];
+                // Wire reuse: an operand whose only reader is this XOR and
+                // which is not an input param can be consumed in place —
+                // XOR the other operand into its wire instead of copying
+                // both into a fresh ancilla (saves one wire and one gate).
+                // Prefer `a` when both qualify. Guards: `a != b` avoids a
+                // self-CNOT; distinct live wires avoid clobbering the other
+                // operand through prior aliasing.
+                let is_candidate = |v: IRVarId| v.0 >= params && uses[v.0 as usize] == 1;
+                let sa = is_candidate(*a);
+                let sb = is_candidate(*b);
+                let cand = if sa && !sb {
+                    Some(*a)
+                } else if sb && !sa {
+                    Some(*b)
+                } else if sa && sb && a != b && wa != wb {
+                    Some(*a)
+                } else {
+                    None
+                };
+                if let Some(c) = cand {
+                    let wc = map_vec[c.0 as usize];
+                    let other_wire = if c == *a { wb } else { wa };
+                    gates.push(RGate::Cnot { ctrl: other_wire, target: wc });
+                    // The result now lives at the consumed operand's wire.
+                    map_vec.push(wc);
+                } else {
+                    // w_r starts 0; XOR-copy both operands into it.
+                    let wr = next_anc;
+                    next_anc += 1;
+                    gates.push(RGate::Cnot { ctrl: wa, target: wr });
+                    gates.push(RGate::Cnot { ctrl: wb, target: wr });
+                    map_vec.push(wr);
+                }
             }
             BIrStmt::And(a, b) => {
                 check_operand(*a)?;
                 check_operand(*b)?;
-                gates.push(RGate::Ccnot { c1: wire_of(a), c2: wire_of(b), target: wr });
+                let wr = next_anc;
+                next_anc += 1;
+                gates.push(RGate::Ccnot {
+                    c1: map_vec[a.0 as usize],
+                    c2: map_vec[b.0 as usize],
+                    target: wr,
+                });
+                map_vec.push(wr);
             }
             BIrStmt::Not(a) => {
                 check_operand(*a)?;
+                let wr = next_anc;
+                next_anc += 1;
                 // Copy-then-invert: never invert an input wire (would break
                 // the `(x, ·) ↦ (x, ·)` contract).
-                gates.push(RGate::Cnot { ctrl: wire_of(a), target: wr });
+                gates.push(RGate::Cnot { ctrl: map_vec[a.0 as usize], target: wr });
                 gates.push(RGate::X(wr));
+                map_vec.push(wr);
             }
             BIrStmt::Or(a, b) => {
                 check_operand(*a)?;
                 check_operand(*b)?;
+                let wr = next_anc;
+                next_anc += 1;
                 // De Morgan on copied-not operands: res := ¬(¬a ∧ ¬b).
                 let na = next_scratch;
                 next_scratch += 1;
                 let nb = next_scratch;
                 next_scratch += 1;
-                gates.push(RGate::Cnot { ctrl: wire_of(a), target: na });
+                gates.push(RGate::Cnot { ctrl: map_vec[a.0 as usize], target: na });
                 gates.push(RGate::X(na));
-                gates.push(RGate::Cnot { ctrl: wire_of(b), target: nb });
+                gates.push(RGate::Cnot { ctrl: map_vec[b.0 as usize], target: nb });
                 gates.push(RGate::X(nb));
                 gates.push(RGate::Ccnot { c1: na, c2: nb, target: wr });
                 gates.push(RGate::X(wr));
+                map_vec.push(wr);
             }
             BIrStmt::StorageRead { storage, lane, addr } => {
                 check_operand_list(addr)?;
@@ -263,7 +366,8 @@ pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToRevers
                 //   swap again (restore the cell, clear the scratch)
                 let s = next_scratch;
                 next_scratch += 1;
-                let addr_wires: Vec<usize> = addr.iter().map(|v| v.0 as usize).collect();
+                let addr_wires: Vec<usize> =
+                    addr.iter().map(|v| map_vec[v.0 as usize]).collect();
                 let swap = |target| RGate::StorageSwap {
                     storage: *storage,
                     lane: *lane,
@@ -271,24 +375,32 @@ pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToRevers
                     target,
                 };
                 gates.push(swap(s));
+                let wr = next_anc;
+                next_anc += 1;
                 gates.push(RGate::Cnot { ctrl: s, target: wr });
                 gates.push(swap(s));
+                map_vec.push(wr);
             }
             BIrStmt::StorageWrite { storage, lane, src, addr } => {
                 check_operand(*src)?;
                 check_operand_list(addr)?;
                 // Copy the source bit into a fresh scratch wire, then swap it
                 // into the cell. The old cell value is left in the scratch as
-                // expected Bennett garbage (documented, not uncomputed).
+                // expected Bennett garbage (documented, not uncomputed). The
+                // stmt's own result var is void — it gets a fresh ancilla
+                // that stays 0 and is never read.
                 let t = next_scratch;
                 next_scratch += 1;
-                gates.push(RGate::Cnot { ctrl: wire_of(src), target: t });
+                gates.push(RGate::Cnot { ctrl: map_vec[src.0 as usize], target: t });
                 gates.push(RGate::StorageSwap {
                     storage: *storage,
                     lane: *lane,
-                    addr: addr.iter().map(|v| v.0 as usize).collect(),
+                    addr: addr.iter().map(|v| map_vec[v.0 as usize]).collect(),
                     target: t,
                 });
+                let wr = next_anc;
+                next_anc += 1;
+                map_vec.push(wr);
             }
             // Catch-all over the `#[non_exhaustive]` statement enum: every
             // external primitive falls here with no reversible lowering.
@@ -296,27 +408,66 @@ pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToRevers
                 return Err(ToReversibleError::UnsupportedStmt { var: r.0 });
             }
         }
-        // Record this stmt's wire only after validation of the whole stmt.
+        // Each arm records this stmt's wire entry only after validation.
     }
 
-    // Fill the map for all stmt vars (params already recorded).
-    debug_assert_eq!(map_vec.len(), params as usize);
-    for i in 0..n_stmts {
-        map_vec.push(params as usize + i);
+    // ---- Compaction ---------------------------------------------------------
+    // Reuse left holes where consumed stmt results skipped their ancillas.
+    // Shift every wire at or above the provisional y base down to close them,
+    // across gates and map entries alike. All stmt wires (the only possible
+    // holes) are strictly below the provisional base, and all shifted wires
+    // are at or above it, so one linear pass suffices.
+    let y_base = next_anc;
+    let delta = y_base_prov - y_base;
+    if delta > 0 {
+        let mut shift = |w: &mut usize| {
+            if *w >= y_base_prov {
+                *w -= delta;
+            }
+        };
+        for g in &mut gates {
+            match g {
+                RGate::X(w) => shift(w),
+                RGate::Cnot { ctrl, target } => {
+                    shift(ctrl);
+                    shift(target);
+                }
+                RGate::Ccnot { c1, c2, target } => {
+                    shift(c1);
+                    shift(c2);
+                    shift(target);
+                }
+                RGate::StorageSwap { addr, target, .. } => {
+                    for w in addr.iter_mut() {
+                        shift(w);
+                    }
+                    shift(target);
+                }
+                // Fail closed on future gate variants rather than silently
+                // leaving stale wire indices behind.
+                _ => panic!("to_reversible compaction: unknown RGate variant"),
+            }
+        }
+        for w in map_vec.iter_mut() {
+            shift(w);
+        }
     }
 
     // ---- Output phase: y_i ^= out_i ----------------------------------------
     for (k, out) in circ.outputs.iter().enumerate() {
-        gates.push(RGate::Cnot { ctrl: wire_of(out), target: y_base + k });
+        gates.push(RGate::Cnot {
+            ctrl: map_vec[out.0 as usize],
+            target: y_base + k,
+        });
     }
 
-    let num_wires_total = next_scratch.max(num_wires);
+    let num_wires_total = next_scratch - delta;
     let circuit = RCircuit::new(num_wires_total, gates).expect(
         "to_reversible synthesis produces validated gates by construction",
     );
     Ok((
         circuit,
-        VarWireMap { map: map_vec, num_wires: num_wires_total },
+        VarWireMap { map: map_vec, num_wires: num_wires_total, y_base },
     ))
 }
 
@@ -371,8 +522,8 @@ mod tests {
                 circ.outputs.iter().map(|o| vals[o.0 as usize]).collect::<Vec<_>>()
             };
             // Wire layout mirrors the transform:
-            // [x ‖ stmt-ancillas ‖ y-register ‖ scratch].
-            let y_base = n_params + circ.stmts.len();
+            // Locate the y register through the map (reuse may compact it).
+            let y_base = map.y_base();
             for ymask in 0..(1u32 << n_out.min(6)) {
                 let py: Vec<bool> =
                     (0..n_out).map(|i| (ymask >> i) & 1 == 1).collect();
@@ -507,6 +658,113 @@ mod tests {
         );
     }
 
+    // ---- Wire reuse ---------------------------------------------------------
+
+    #[test]
+    fn xor_reuses_single_use_operand() {
+        // r = a ⊕ b where a = x0 ⊕ x1 is used only here: its wire is
+        // consumed in place — one CNOT, no fresh ancilla.
+        let mut circ = BCircuit::new(2);
+        let a = build(&mut circ, BIrStmt::Xor(IRVarId(0), IRVarId(1)));
+        let r = build(&mut circ, BIrStmt::Xor(a, IRVarId(0)));
+        circ.outputs = vec![r];
+
+        let (rc, map) = to_reversible(&circ).expect("converts");
+        // Gate budget: the first XOR synthesizes normally into its ancilla
+        // (2 CNOTs), then the second consumes `a`'s wire in place (1 CNOT),
+        // plus one output-phase CNOT.
+        let g = rc.gates();
+        assert_eq!(g.len(), 4);
+        assert_eq!(g[0], RGate::Cnot { ctrl: 0, target: 2 });
+        assert_eq!(g[1], RGate::Cnot { ctrl: 1, target: 2 });
+        assert_eq!(
+            g[2],
+            RGate::Cnot { ctrl: 0, target: 2 },
+            "x0 XORed into a's old wire instead of a fresh ancilla"
+        );
+        // The result lives at the consumed operand's wire; no ancilla was
+        // allocated for it.
+        assert_eq!(map.wire(a), Some(2));
+        assert_eq!(map.wire(r), Some(2));
+        check_semantics(&circ);
+    }
+
+    #[test]
+    fn xor_keeps_two_cnot_form_for_multi_use_operand() {
+        // Same as above but the intermediate also feeds an output: it has
+        // two uses, so the classic 2-CNOT form must be kept.
+        let mut circ = BCircuit::new(2);
+        let a = build(&mut circ, BIrStmt::Xor(IRVarId(0), IRVarId(1)));
+        let r = build(&mut circ, BIrStmt::Xor(a, IRVarId(0)));
+        circ.outputs = vec![a, r];
+
+        let (rc, _map) = to_reversible(&circ).expect("converts");
+        // 2 CNOT per XOR plus 2 output-phase CNOTs: no reuse happened.
+        assert_eq!(rc.gates().len(), 6);
+        check_semantics(&circ);
+    }
+
+    #[test]
+    fn params_are_never_consumed() {
+        // x1 is single-use here but is an input: the XOR must copy into a
+        // fresh ancilla and leave the x register untouched.
+        let mut circ = BCircuit::new(2);
+        let r = build(&mut circ, BIrStmt::Xor(IRVarId(0), IRVarId(1)));
+        circ.outputs = vec![r];
+
+        let (rc, map) = to_reversible(&circ).expect("converts");
+        assert_eq!(rc.gates().len(), 3, "2 CNOT + output phase");
+        assert_ne!(map.wire(r), Some(1), "must not live on the param wire");
+        check_semantics(&circ);
+    }
+
+    #[test]
+    fn xor_chain_collapses() {
+        // t1 = x ⊕ c1; t2 = t1 ⊕ c2; out = t2 ⊕ x: t1 and t2 are single-use
+        // non-inputs, so both are consumed — three XORs, three CNOTs total.
+        let mut circ = BCircuit::new(1);
+        let c1 = build(&mut circ, BIrStmt::One);
+        let t1 = build(&mut circ, BIrStmt::Xor(IRVarId(0), c1));
+        let c2 = build(&mut circ, BIrStmt::Zero);
+        let t2 = build(&mut circ, BIrStmt::Xor(t1, c2));
+        let out = build(&mut circ, BIrStmt::Xor(t2, IRVarId(0)));
+        circ.outputs = vec![out];
+
+        let (rc, map) = to_reversible(&circ).expect("converts");
+        // Synthesis gates: One's X, then one reused CNOT per XOR (the
+        // constants c1/c2 and intermediate t1 all get consumed), plus the
+        // output-phase CNOT.
+        let g = rc.gates();
+        assert_eq!(g.len(), 5);
+        assert_eq!(g[1], RGate::Cnot { ctrl: 0, target: 1 }, "x ⊕ c1 into c1's wire");
+        assert_eq!(g[2], RGate::Cnot { ctrl: 2, target: 1 }, "⊕ c2 into the chain wire");
+        assert_eq!(g[3], RGate::Cnot { ctrl: 0, target: 1 }, "⊕ x into the chain wire");
+        // All three results alias the same consumed chain wire.
+        assert_eq!(map.wire(t1), Some(1));
+        assert_eq!(map.wire(t2), Some(1));
+        assert_eq!(map.wire(out), Some(1));
+        // Layout compacted: [x | c1/chain wire | c2's zero wire | y] = 4 wires,
+        // not the 7 an uncompacted layout would need.
+        assert_eq!(rc.num_wires, 4);
+        assert_eq!(map.y_base(), 3);
+        check_semantics(&circ);
+    }
+
+    #[test]
+    fn both_operands_eligible_prefers_a() {
+        // Both operands of the outer XOR are single-use non-inputs: `a`
+        // must be the consumed one (deterministic tiebreak).
+        let mut circ = BCircuit::new(2);
+        let a = build(&mut circ, BIrStmt::Not(IRVarId(0)));
+        let b = build(&mut circ, BIrStmt::Not(IRVarId(1)));
+        let r = build(&mut circ, BIrStmt::Xor(a, b));
+        circ.outputs = vec![r];
+
+        let (_rc, map) = to_reversible(&circ).expect("converts");
+        assert_eq!(map.wire(r), Some(2), "consumed a's wire, not b's");
+        check_semantics(&circ);
+    }
+
     #[test]
     fn storage_read_write_synthesis() {
         // f(x0) = cell[x0] (one-bit storage read), then a second circuit that
@@ -534,7 +792,7 @@ mod tests {
                 wires[map.wire(IRVarId(0)).unwrap()] = addr_bit;
                 rc.apply(&mut wires, &mut storage);
                 // y register (last output wire region): y ^= f(x).
-                let y_base = 1 + read_circ.stmts.len();
+                let y_base = map.y_base();
                 assert_eq!(wires[y_base], stored, "read at addr={addr_bit}");
                 // Cell restored by the swap-back pair.
                 let got = storage.get(&((sid, lane), addr_bit as u64)).copied().unwrap_or(false);

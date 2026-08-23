@@ -9,6 +9,9 @@ Boolar 1-bit-storage refactor (see `docs/boolar-1bit-storage-plan.md`):
 non-destructive reads and swap-in writes instead of rejecting storage ops.
 **Deferred:** text-format (`volar-ir-text`) print/parse for the fused and
 reversible forms.
+**Optimization:** `to_reversible` reuses the wire of any single-use non-input
+XOR operand in place (1 CNOT, no fresh ancilla; chains collapse); see
+`docs/to-reversible-wire-reuse-plan.md`.
 **Scope:** `crates/ir/volar-ir` (new types), `crates/ir/volar-ir-passes`
 (new transforms), `crates/ir/volar-ir-opt` (opt support),
 `crates/ir/volar-ir-text` (text format), `crates/fuzz/volar-fuzz`

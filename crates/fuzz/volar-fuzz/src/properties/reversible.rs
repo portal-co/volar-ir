@@ -88,7 +88,8 @@ proptest! {
 
         let n_params = circ.params as usize;
         let n_out = circ.outputs.len();
-        let y_base = n_params + circ.stmts.len();
+        // Locate the y register through the map (wire reuse may compact it).
+        let y_base = map.y_base();
         let py: Vec<bool> = (0..n_out).map(|i| (ymask >> i) & 1 == 1).collect();
 
         let mut wires = vec![false; rc.num_wires];
