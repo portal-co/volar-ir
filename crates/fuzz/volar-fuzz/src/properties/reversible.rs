@@ -11,11 +11,13 @@
 //! are skipped — those have no naive reversible lowering by design.
 
 use proptest::prelude::*;
-use volar_ir::boolar::BIrStmt;
+use volar_ir::boolar::{BIrStmt, LaneId};
 use volar_ir::circuit::BCircuit;
 use volar_ir::ir::IRVarId;
+use volar_ir::rcircuit::StorageState;
 use volar_ir_passes::to_reversible::{to_reversible, translate_watchlist, ValueWatchlist};
 use volar_ir_passes::{lower_to_circuit_fused, movfuscate_biir_with_control_provenance, LoweringMode};
+use volar_ir_common::StorageId;
 
 use crate::generators::biir::gen_biir_and_inputs;
 use crate::interpreter::biir::eval_biir_with_limit;
@@ -97,8 +99,35 @@ proptest! {
             wires[y_base + k] = *b;
         }
 
-        rc.apply_pure(&mut wires)
-            .expect("lowered pure circuits contain no storage gates");
+        // Deterministically seeded initial storage so read/write traffic runs
+        // against non-trivial cell contents.
+        let mut storage = StorageState::new();
+        for cell in 0..16u64 {
+            storage.insert(((StorageId(0), LaneId(0)), cell), (ymask >> (cell % 31)) & 1 == 1);
+            storage.insert(((StorageId(3), LaneId(0)), cell), (ymask >> (cell % 17)) & 1 == 1);
+        }
+        let storage_before = storage.clone();
+
+        rc.apply(&mut wires, &mut storage);
+
+        // Reversibility over the joint (wires, storage) state: running the
+        // inverse must restore exactly what we started with.
+        let mut wires_after = wires.clone();
+        let mut storage_after = storage.clone();
+        rc.inverse().apply(&mut wires_after, &mut storage_after);
+        prop_assert_eq!(wires_after.len(), rc.num_wires);
+        // Recompute pristine inputs for comparison.
+        let mut pristine = vec![false; rc.num_wires];
+        for (i, b) in m_inputs.iter().take(n_params).enumerate() {
+            pristine[map.wire(IRVarId(i as u32)).unwrap()] = *b;
+        }
+        for (k, b) in py.iter().enumerate() {
+            pristine[y_base + k] = *b;
+        }
+        prop_assert_eq!(wires_after, pristine,
+            "inverse did not restore wires");
+        prop_assert_eq!(storage_after, storage_before,
+            "inverse did not restore storage");
 
         // x register untouched:
         for (i, b) in m_inputs.iter().take(n_params).enumerate() {

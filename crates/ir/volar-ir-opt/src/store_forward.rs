@@ -12,7 +12,7 @@
 //! clears **all** cached reads for that `(S, T)` pair, regardless of address.
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
-use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
+use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId};
 use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId};
 use volar_ir_common::{Constant, Node, StorageId, TypeId, TypeTable};
 use vaffle::{FuncBody, FuncDecl, Module, Value, ValueId};
@@ -971,7 +971,7 @@ fn merge_ir_caches_with_injection<P: Clone>(
 // Boolar IR
 // ============================================================================
 
-type BiirStoreCache = BTreeMap<(StorageId, usize, Vec<IRVarId>), IRVarId>;
+type BiirStoreCache = BTreeMap<(StorageId, LaneId, Vec<IRVarId>), IRVarId>;
 
 /// Apply store-to-load forwarding to `blocks`, propagating store caches across
 /// block boundaries with param injection when needed.
@@ -1114,25 +1114,25 @@ fn store_forward_biir_block_with_cache<P: Clone>(
         known_map.insert(rv, known);
 
         match &stmt {
-            BIrStmt::StorageWrite { storage, src, bit_width, addr } => {
+            BIrStmt::StorageWrite { storage, lane, src, addr } => {
                 let src = canon_alias(&alias_map, *src);
                 let addr: Vec<IRVarId> = addr.iter().map(|v| canon_alias(&alias_map, *v)).collect();
                 let slot_count = cache.keys()
-                    .filter(|(s, w, _)| s == storage && w == bit_width)
+                    .filter(|(s, l, _)| s == storage && l == lane)
                     .count();
                 if slot_count >= MAX_CONCURRENT_STORES {
-                    cache.retain(|(s, w, _), _| !(s == storage && w == bit_width));
+                    cache.retain(|(s, l, _), _| !(s == storage && l == lane));
                 } else {
-                    cache.retain(|(s, w, cached_addr), _| {
-                        if s != storage || w != bit_width { return true; }
+                    cache.retain(|(s, l, cached_addr), _| {
+                        if s != storage || l != lane { return true; }
                         biir_addrs_provably_different(&addr, cached_addr, &known_map)
                     });
                 }
-                cache.insert((*storage, *bit_width, addr), src);
+                cache.insert((*storage, *lane, addr), src);
             }
-            BIrStmt::StorageRead { storage, bit_width, addr } => {
+            BIrStmt::StorageRead { storage, lane, addr } => {
                 let addr: Vec<IRVarId> = addr.iter().map(|v| canon_alias(&alias_map, *v)).collect();
-                let key = (*storage, *bit_width, addr);
+                let key = (*storage, *lane, addr);
                 if let Some(&src) = cache.get(&key) {
                     alias_map.insert(rv, src);
                     changed = true;
@@ -1313,7 +1313,7 @@ fn merge_biir_caches_with_injection<P: Clone>(
     let n_preds = pred_indices.len();
 
     let mut trans_maps: Vec<BTreeMap<IRVarId, IRVarId>> = Vec::with_capacity(n_preds);
-    let mut translated: Vec<BTreeMap<(StorageId, usize, Vec<IRVarId>), IRVarId>> =
+    let mut translated: Vec<BTreeMap<(StorageId, LaneId, Vec<IRVarId>), IRVarId>> =
         Vec::with_capacity(n_preds);
 
     for &pi in pred_indices {
@@ -1344,7 +1344,7 @@ fn merge_biir_caches_with_injection<P: Clone>(
         translated.push(entries);
     }
 
-    let common_keys: Vec<(StorageId, usize, Vec<IRVarId>)> = if translated.is_empty() {
+    let common_keys: Vec<(StorageId, LaneId, Vec<IRVarId>)> = if translated.is_empty() {
         Vec::new()
     } else {
         translated[0]

@@ -37,28 +37,34 @@
 //! - `OracleOutput` / `ActionOutput`: resolved from the pre-projected bit
 //!   stash; emit no new Boolar stmts.
 //! - `Rng { name, ty }`: one `BIrStmt::Rng { name }` per output bit.
-//! - `StorageRead` / `StorageWrite`: passed through as opaque Boolar handles.
-//!   The address var is represented by its first bit; the result occupies one
-//!   Boolar var slot.  Downstream weavers must handle these variants
-//!   specially and must not expect bit-level decomposition of their results.
+//! - `StorageRead` / `StorageWrite`: expanded one Boolar op **per bit** of
+//!   the value. Every Boolar storage cell holds exactly one bit; the value's
+//!   bit index `i` is appended to the address as high-order bits
+//!   (`addr' = addr ++ bits_of(i)`, flat cell `base + (i << N)` where `N` is
+//!   the lane's fixed element-address width). Lanes are dense `LaneId`s
+//!   allocated by first use over the source type table; the total
+//!   `LaneId → IRTypeId` side table is available from
+//!   [`lower_ir_to_boolar_with_lane_table`].
 //!
 //! # Limitations
 //!
 //! - `IRTerminator::JumpTable` is not supported (panics).
 //! - `IRTerminator::Jmp` with `IRBlockTargetId::Dyn` is not supported (panics).
-//! - `StorageRead` result handles and addresses are opaque; they cannot be
-//!   used as operands to `Poly`, `Merge`, etc. without weaver-level support.
+//! - Within a `(StorageId, LaneId)` space every storage op must use the same
+//!   element-address width; mixed widths panic (the appended-index layout
+//!   would otherwise be ambiguous).
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use volar_ir::{
-    boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
+    boolar::{BIrBlock, BIrBlocks, BIrPreInitSegment, BIrStmt, BIrTarget, BIrTerminator, LaneId},
     ir::{
-        IRBlock, IRBlockTargetId, IRBlocks, IRStmt, IRTerminator, IRType, IRTypes, IRVarId,
-        PrimType,
+        IRBlock, IRBlockTargetId, IRBlocks, IRStmt, IRTerminator, IRType, IRTypeId, IRTypes,
+        IRVarId, PrimType,
     },
 };
 use volar_ir_common::Constant;
+use volar_ir_common::StorageId;
 
 // ============================================================================
 // Public API
@@ -70,22 +76,86 @@ use volar_ir_common::Constant;
 /// Each block is lowered independently; block arguments are expanded to their
 /// flat bit lists in the order they appear in the IR terminator.
 ///
+/// Storage lanes are allocated internally; use
+/// [`lower_ir_to_boolar_with_lane_table`] when the `LaneId → IRTypeId`
+/// mapping is needed.
+///
 /// # Panics
 ///
-/// Panics on `JumpTable` terminators and `Dyn` jump targets (not representable
-/// in `BIrTerminator`).
+/// Panics on `JumpTable` terminators, `Dyn` jump targets (not representable
+/// in `BIrTerminator`), and mismatched element-address widths within one
+/// `(StorageId, LaneId)` space.
 pub fn lower_ir_to_boolar<P: Clone>(blocks: &IRBlocks<P>, types: &IRTypes) -> BIrBlocks<P> {
-    BIrBlocks {
-        blocks: blocks.blocks.iter().map(|block| lower_block(block, types)).collect(),
-        pre_init: blocks.pre_init.clone(),
+    lower_ir_to_boolar_with_lane_table(blocks, types).0
+}
+
+/// Like [`lower_ir_to_boolar`], but also returns the watchlist-style side
+/// table mapping every allocated [`LaneId`] to its source [`IRTypeId`]. The
+/// table is a byproduct of the same lowering run that allocates the lanes, so
+/// it cannot drift from them.
+pub fn lower_ir_to_boolar_with_lane_table<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+) -> (BIrBlocks<P>, BTreeMap<LaneId, IRTypeId>) {
+    // ---- 1. Allocate lanes: dense first-use renumbering -------------------
+    let mut lane_of: BTreeMap<IRTypeId, LaneId> = BTreeMap::new();
+    let mut next_lane: u32 = 0;
+    {
+        let mut alloc_lane = |ty: IRTypeId| {
+            lane_of.entry(ty).or_insert_with(|| {
+                let l = LaneId(next_lane);
+                next_lane += 1;
+                l
+            });
+        };
+        for block in &blocks.blocks {
+            for stmt in &block.stmts {
+                match &stmt.kind {
+                    IRStmt::StorageRead { ty, .. } | IRStmt::StorageWrite { ty, .. } => {
+                        alloc_lane(*ty)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for seg in &blocks.pre_init {
+            alloc_lane(seg.ty);
+        }
     }
+    let lane_table: BTreeMap<LaneId, IRTypeId> =
+        lane_of.iter().map(|(&ty, &lane)| (lane, ty)).collect();
+
+    // ---- 2. Lower blocks, recording per-lane element-address widths -------
+    let mut addr_widths: BTreeMap<(StorageId, LaneId), usize> = BTreeMap::new();
+    let out_blocks: Vec<BIrBlock<P>> = blocks
+        .blocks
+        .iter()
+        .map(|block| lower_block(block, types, &lane_of, &mut addr_widths))
+        .collect();
+
+    // ---- 3. Expand typed pre-init to bit-granular segments ---------------
+    let pre_init = blocks
+        .pre_init
+        .iter()
+        .flat_map(|seg| expand_pre_init_segment(seg, types, &lane_of, &addr_widths))
+        .collect();
+
+    (
+        BIrBlocks { blocks: out_blocks, pre_init },
+        lane_table,
+    )
 }
 
 // ============================================================================
 // Block lowering
 // ============================================================================
 
-fn lower_block<P: Clone>(block: &IRBlock<P>, types: &IRTypes) -> BIrBlock<P> {
+fn lower_block<P: Clone>(
+    block: &IRBlock<P>,
+    types: &IRTypes,
+    lane_of: &BTreeMap<IRTypeId, LaneId>,
+    addr_widths: &mut BTreeMap<(StorageId, LaneId), usize>,
+) -> BIrBlock<P> {
     // ---- 1. Expand params --------------------------------------------------
     // Each IR param of type T becomes ir_type_bits(T) consecutive Boolar params.
     // var_bits[param_idx] = slice of Boolar param IRVarIds for that param.
@@ -110,7 +180,7 @@ fn lower_block<P: Clone>(block: &IRBlock<P>, types: &IRTypes) -> BIrBlock<P> {
     for (si, stmt) in block.stmts.iter().enumerate() {
         let prov = stmt.prov.clone();
         let ir_var_idx = block.params.len() as u32 + si as u32;
-        lower_stmt(&stmt.kind, prov, ir_var_idx, &mut var_bits, &mut call_output_bits, &mut emitter, types);
+        lower_stmt(&stmt.kind, prov, ir_var_idx, &mut var_bits, &mut call_output_bits, &mut emitter, types, lane_of, addr_widths);
     }
 
     // ---- 3. Convert terminator --------------------------------------------
@@ -136,6 +206,8 @@ fn lower_stmt<P: Clone>(
     call_output_bits: &mut BTreeMap<u32, Vec<Vec<IRVarId>>>,
     emitter: &mut Emitter<P>,
     types: &IRTypes,
+    lane_of: &BTreeMap<IRTypeId, LaneId>,
+    addr_widths: &mut BTreeMap<(StorageId, LaneId), usize>,
 ) {
     match stmt {
         // ---- Constant ------------------------------------------------------
@@ -216,29 +288,54 @@ fn lower_stmt<P: Clone>(
         }
 
         // ---- StorageRead ---------------------------------------------------
-        // Opaque handle: result is a single Boolar var.  Addr is approximated
-        // as the first Boolar bit of the address IR var.
+        // One Boolar read per bit of the value; bit i's address is the
+        // element address with bits_of(i) appended as high-order bits.
         IRStmt::StorageRead { storage, ty, addr } => {
-            let bit_width = ir_type_bits(&types.0[ty.0 as usize], types);
-            let addr_bits: Vec<IRVarId> = var_bits[&addr.0].iter().copied().collect();
-            let handle = emitter.emit(
-                BIrStmt::StorageRead { storage: *storage, bit_width, addr: addr_bits },
-                prov,
-            );
-            var_bits.insert(ir_var_idx, vec![handle]);
+            let k = ir_type_bits(&types.0[ty.0 as usize], types);
+            let lane = *lane_of.get(ty).expect("lane allocated for storage type");
+            let base_addr: Vec<IRVarId> = var_bits[&addr.0].clone();
+            check_addr_budget(base_addr.len(), k);
+            record_addr_width(*storage, lane, base_addr.len(), addr_widths);
+            let mut bits = Vec::with_capacity(k);
+            for i in 0..k {
+                let mut full_addr = base_addr.clone();
+                full_addr.extend(const_index_bits(emitter, i, k, &prov));
+                let h = emitter.emit(
+                    BIrStmt::StorageRead { storage: *storage, lane, addr: full_addr },
+                    prov.clone(),
+                );
+                bits.push(h);
+            }
+            var_bits.insert(ir_var_idx, bits);
         }
 
         // ---- StorageWrite --------------------------------------------------
-        // Opaque handle: emits one Boolar var (the write sentinel).
+        // One Boolar write per bit of the value; same address layout as
+        // reads. The result slot carries the per-bit dummy sentinels.
         IRStmt::StorageWrite { storage, src, ty, addr } => {
-            let bit_width = ir_type_bits(&types.0[ty.0 as usize], types);
-            let src_handle = var_bits[&src.0][0];
-            let addr_bits: Vec<IRVarId> = var_bits[&addr.0].iter().copied().collect();
-            let handle = emitter.emit(
-                BIrStmt::StorageWrite { storage: *storage, src: src_handle, bit_width, addr: addr_bits },
-                prov,
+            let k = ir_type_bits(&types.0[ty.0 as usize], types);
+            let lane = *lane_of.get(ty).expect("lane allocated for storage type");
+            let base_addr: Vec<IRVarId> = var_bits[&addr.0].clone();
+            let src_bits = &var_bits[&src.0];
+            assert_eq!(
+                src_bits.len(),
+                k,
+                "StorageWrite source width mismatch: {} bits vs type width {k}",
+                src_bits.len()
             );
-            var_bits.insert(ir_var_idx, vec![handle]);
+            check_addr_budget(base_addr.len(), k);
+            record_addr_width(*storage, lane, base_addr.len(), addr_widths);
+            let mut sentinels = Vec::with_capacity(k);
+            for (i, &b) in src_bits.iter().enumerate() {
+                let mut full_addr = base_addr.clone();
+                full_addr.extend(const_index_bits(emitter, i, k, &prov));
+                let h = emitter.emit(
+                    BIrStmt::StorageWrite { storage: *storage, lane, src: b, addr: full_addr },
+                    prov.clone(),
+                );
+                sentinels.push(h);
+            }
+            var_bits.insert(ir_var_idx, sentinels);
         }
 
         // ---- OracleCall ----------------------------------------------------
@@ -531,11 +628,14 @@ fn constant_bit(c: &Constant, bit: usize) -> bool {
 struct Emitter<P: Clone> {
     stmts: Vec<volar_ir_common::Node<BIrStmt, P>>,
     next_var: u32,
+    /// Cache of constant index-bit wires used as appended address suffixes:
+    /// `(bit_position, bit_value) → wire`.
+    const_wires: BTreeMap<(u32, bool), IRVarId>,
 }
 
 impl<P: Clone> Emitter<P> {
     fn new(params: u32) -> Self {
-        Emitter { stmts: vec![], next_var: params }
+        Emitter { stmts: vec![], next_var: params, const_wires: BTreeMap::new() }
     }
 
     fn emit(&mut self, stmt: BIrStmt, prov: P) -> IRVarId {
@@ -544,6 +644,101 @@ impl<P: Clone> Emitter<P> {
         self.next_var += 1;
         id
     }
+
+    /// Wire that is constantly `(i >> j) & 1`, emitting a `Zero`/`One`
+    /// statement once per (position, value) pair.
+    fn const_bit_wire(&mut self, i: usize, j: u32, prov: &P) -> IRVarId {
+        let bit_val = ((i >> j) & 1) == 1;
+        if let Some(&w) = self.const_wires.get(&(j, bit_val)) {
+            return w;
+        }
+        let w = self.emit(
+            if bit_val { BIrStmt::One } else { BIrStmt::Zero },
+            prov.clone(),
+        );
+        self.const_wires.insert((j, bit_val), w);
+        w
+    }
+}
+
+/// Record the element-address width of a storage space; all ops in one
+/// `(StorageId, LaneId)` must agree, since the appended-index cell layout is
+/// defined relative to it.
+/// Fail closed when an appended-index address cannot fit the `u64` flat cell
+/// space: element-address bits + ceil(log2(value bits)) must stay within 64.
+///
+/// The Boolar storage model keys cells by `u64`; silently truncating wider
+/// addresses would alias distinct cells and corrupt read/write semantics.
+fn check_addr_budget(addr_bits: usize, value_bits: usize) {
+    // Same minimal bit count `const_index_bits` emits for indices 0..k.
+    let index_bits = if value_bits <= 1 { 0 } else { (u32::BITS - (value_bits as u32 - 1).leading_zeros()) as usize };
+    let total = addr_bits + index_bits;
+    assert!(
+        total <= 64,
+        "lower_ir_to_boolar: storage address of {addr_bits} element bits + \
+         {index_bits} appended bit-index bits exceeds the 64-bit flat cell space \
+         (value width {value_bits})"
+    );
+}
+
+fn record_addr_width(
+    storage: StorageId,
+    lane: LaneId,
+    width: usize,
+    addr_widths: &mut BTreeMap<(StorageId, LaneId), usize>,
+) {
+    match addr_widths.entry((storage, lane)) {
+        alloc::collections::btree_map::Entry::Occupied(e) => {
+            assert_eq!(
+                *e.get(), width,
+                "mixed element-address widths within one (StorageId, LaneId) \
+                 storage space: {} vs {width}",
+                e.get()
+            );
+        }
+        alloc::collections::btree_map::Entry::Vacant(e) => {
+            e.insert(width);
+        }
+    }
+}
+
+/// Appended address suffix wires for bit `i` of a `k`-bit value:
+/// `ceil(log2(k))` constant wires, LSB-first (empty when `k <= 1`).
+fn const_index_bits<P: Clone>(
+    emitter: &mut Emitter<P>,
+    i: usize,
+    k: usize,
+    prov: &P,
+) -> Vec<IRVarId> {
+    let s = if k <= 1 { 0 } else { (usize::BITS - (k - 1).leading_zeros()) as usize };
+    (0..s as u32).map(|j| emitter.const_bit_wire(i, j, prov)).collect()
+}
+
+/// Expand one typed pre-init segment into bit-granular Boolar segments.
+///
+/// Under the appended-address layout, element `e`, bit `i` lives in flat cell
+/// `offset + e + (i << N)` where `N` is the lane's recorded element-address
+/// width (0 when the lane has no runtime storage ops). Bits of one element
+/// are therefore strided, so one [`BIrPreInitSegment`] is emitted per bit
+/// index, each covering the contiguous run of elements at that bit position.
+fn expand_pre_init_segment(
+    seg: &volar_ir_common::PreInitSegment,
+    types: &IRTypes,
+    lane_of: &BTreeMap<IRTypeId, LaneId>,
+    addr_widths: &BTreeMap<(StorageId, LaneId), usize>,
+) -> alloc::vec::Vec<BIrPreInitSegment> {
+    let k = ir_type_bits(&types.0[seg.ty.0 as usize], types);
+    let lane = *lane_of.get(&seg.ty).expect("lane allocated for pre-init type");
+    let n_addr = *addr_widths.get(&(seg.storage, lane)).unwrap_or(&0);
+    check_addr_budget(n_addr, k);
+    (0..k)
+        .map(|i| BIrPreInitSegment {
+            storage: seg.storage,
+            lane,
+            offset: seg.offset as u64 + ((i as u64) << n_addr),
+            data: (0..seg.data.len()).map(|e| constant_bit(&seg.data[e], i)).collect(),
+        })
+        .collect()
 }
 
 // ============================================================================

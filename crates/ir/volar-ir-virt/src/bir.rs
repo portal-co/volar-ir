@@ -8,17 +8,17 @@
 //! so public dispatch is emitted as a balanced binary tree of
 //! `CondJmp` over the bits of the handler index.
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
+use alloc::{collections::BTreeMap, vec::Vec};
 
 use volar_ir::{
-    boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
+    boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId},
     ir::{IRBlockId, IRBlockTargetId, IRVarId},
 };
 use volar_ir_common::StorageId;
 
 use crate::canon::{canonicalize_bir_block, BirHandlerKey, BlockImmediates};
 use crate::ctx::{DedupTable, VirtOutput};
-use crate::preinit::{build_bir_storage_init, merge_pre_init};
+use crate::preinit::{build_bir_storage_init, merge_bir_pre_init};
 use crate::{DedupPolicy, DispatchMode, VirtualizeConfig};
 
 // ============================================================================
@@ -102,7 +102,7 @@ pub fn virtualize_bir<P: Clone + Default>(
         handler_bits,
         pc_bits,
     );
-    let merged_pre_init = merge_pre_init(&blocks.pre_init, &storage_init.pre_init);
+    let merged_pre_init = merge_bir_pre_init(&blocks.pre_init, &storage_init.pre_init);
 
     // Oblivious dispatch: hand the Public-dispatch output to
     // `movfuscate_biir`, which collapses it to a single self-looping
@@ -436,7 +436,7 @@ fn emit_dispatcher_blocks<P: Clone>(
     for k in 0..handler_bits {
         let v = entry.push(BIrStmt::StorageRead {
             storage: StorageId(base_storage.0 + k as u32),
-            bit_width: 1,
+            lane: LaneId(0),
             addr: pc_addr.clone(),
         });
         h_bits.push(v);
@@ -531,7 +531,7 @@ fn emit_dispatcher_blocks<P: Clone>(
         for kk in 0..handler_bits {
             let v = node.push(BIrStmt::StorageRead {
                 storage: StorageId(base_storage.0 + kk as u32),
-                bit_width: 1,
+                lane: LaneId(0),
                 addr: pc_addr_in_node.clone(),
             });
             h_bits_in_node.push(v);
@@ -590,7 +590,7 @@ fn emit_handler_block<P: Clone>(
         for k in 0..pc_bits {
             let v = b.push(BIrStmt::StorageRead {
                 storage: StorageId(slot_base.0 + k as u32),
-                bit_width: 1,
+                lane: LaneId(0),
                 addr: pc_addr.clone(),
             });
             bits.push(v);
@@ -754,24 +754,15 @@ fn remap_bir_stmt(s: &BIrStmt, map: &BTreeMap<IRVarId, IRVarId>) -> BIrStmt {
             bit: *bit,
         },
         BIrStmt::Rng { name } => BIrStmt::Rng { name: name.clone() },
-        BIrStmt::StorageRead {
-            storage,
-            bit_width,
-            addr,
-        } => BIrStmt::StorageRead {
+        BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
             storage: *storage,
-            bit_width: *bit_width,
+            lane: *lane,
             addr: remap_vs(addr, map),
         },
-        BIrStmt::StorageWrite {
-            storage,
-            src,
-            bit_width,
-            addr,
-        } => BIrStmt::StorageWrite {
+        BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
             storage: *storage,
+            lane: *lane,
             src: remap_v(*src, map),
-            bit_width: *bit_width,
             addr: remap_vs(addr, map),
         },
         _ => panic!("remap_bir_stmt: unhandled BIrStmt variant — add remapping for this variant"),

@@ -3,9 +3,12 @@
 **Status:** Phases 1–3 landed (fused types, `RCircuit`, fusion + reversible
 transforms, watchlist translation, exhaustive unit tests, and fuzz Property E
 in `crates/fuzz/volar-fuzz/src/properties/reversible.rs`).
+Storage synthesis in `to_reversible` has since **landed** as part of the
+Boolar 1-bit-storage refactor (see `docs/boolar-1bit-storage-plan.md`):
+`RGate::StorageSwap` now carries a `LaneId`, and `to_reversible` synthesizes
+non-destructive reads and swap-in writes instead of rejecting storage ops.
 **Deferred:** text-format (`volar-ir-text`) print/parse for the fused and
-reversible forms; synthesizing reversible storage access from Boolar storage
-traffic.
+reversible forms.
 **Scope:** `crates/ir/volar-ir` (new types), `crates/ir/volar-ir-passes`
 (new transforms), `crates/ir/volar-ir-opt` (opt support),
 `crates/ir/volar-ir-text` (text format), `crates/fuzz/volar-fuzz`
@@ -150,7 +153,7 @@ pub enum RGate {
     Ccnot { c1: usize, c2: usize, target: usize },
 
     /// Reversible storage exchange: atomically SWAP the target wire with the
-    /// bit stored at `(storage, addr)`.
+    /// bit stored at `((storage, lane), addr)`.
     ///
     /// This is the reversible analogue of Boolar's `StorageRead`/
     /// `StorageWrite`: because it *exchanges* rather than copies, the joint
@@ -163,6 +166,7 @@ pub enum RGate {
     /// = least-significant; match `BIrStmt::StorageRead`'s convention).
     StorageSwap {
         storage: StorageId,
+        lane: LaneId,
         addr: Vec<usize>,
         target: usize,
     },

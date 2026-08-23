@@ -31,18 +31,22 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use volar_ir::boolar::BIrStmt;
+#[cfg(test)]
+use volar_ir::boolar::LaneId;
 use volar_ir::circuit::BCircuit;
 use volar_ir::ir::IRVarId;
 use volar_ir::rcircuit::{RCircuit, RGate};
+#[cfg(test)]
+use volar_ir::rcircuit::StorageState;
+#[cfg(test)]
+use volar_ir_common::StorageId;
 
 /// Why a Boolar circuit could not be converted to a reversible circuit.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ToReversibleError {
     /// External primitives have no reversible-gate realization in the naive
-    /// scheme. Note `StorageRead`/`StorageWrite` are rejected here even
-    /// though `RCircuit` can *represent* storage ops (`RGate::StorageSwap`) —
-    /// synthesizing reversible storage access from Boolar storage traffic is
-    /// future work.
+    /// scheme (oracles, actions, RNG). Storage access *is* synthesized — via
+    /// [`RGate::StorageSwap`] — but only for the fused single-block form.
     UnsupportedStmt {
         /// Var id of the offending statement result.
         var: u32,
@@ -211,6 +215,9 @@ pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToRevers
                 Ok(())
             }
         };
+        let check_operand_list = |vs: &[IRVarId]| -> Result<(), ToReversibleError> {
+            vs.iter().try_for_each(|&v| check_operand(v))
+        };
         match &node.kind {
             BIrStmt::Zero => {}
             BIrStmt::One => gates.push(RGate::X(wr)),
@@ -247,6 +254,41 @@ pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToRevers
                 gates.push(RGate::X(nb));
                 gates.push(RGate::Ccnot { c1: na, c2: nb, target: wr });
                 gates.push(RGate::X(wr));
+            }
+            BIrStmt::StorageRead { storage, lane, addr } => {
+                check_operand_list(addr)?;
+                // Bennett-style non-destructive read:
+                //   swap cell ↔ scratch (cell value now in scratch, cell = 0)
+                //   CNOT scratch → result wire (copy the bit out)
+                //   swap again (restore the cell, clear the scratch)
+                let s = next_scratch;
+                next_scratch += 1;
+                let addr_wires: Vec<usize> = addr.iter().map(|v| v.0 as usize).collect();
+                let swap = |target| RGate::StorageSwap {
+                    storage: *storage,
+                    lane: *lane,
+                    addr: addr_wires.clone(),
+                    target,
+                };
+                gates.push(swap(s));
+                gates.push(RGate::Cnot { ctrl: s, target: wr });
+                gates.push(swap(s));
+            }
+            BIrStmt::StorageWrite { storage, lane, src, addr } => {
+                check_operand(*src)?;
+                check_operand_list(addr)?;
+                // Copy the source bit into a fresh scratch wire, then swap it
+                // into the cell. The old cell value is left in the scratch as
+                // expected Bennett garbage (documented, not uncomputed).
+                let t = next_scratch;
+                next_scratch += 1;
+                gates.push(RGate::Cnot { ctrl: wire_of(src), target: t });
+                gates.push(RGate::StorageSwap {
+                    storage: *storage,
+                    lane: *lane,
+                    addr: addr.iter().map(|v| v.0 as usize).collect(),
+                    target: t,
+                });
             }
             // Catch-all over the `#[non_exhaustive]` statement enum: every
             // external primitive falls here with no reversible lowering.
@@ -463,5 +505,67 @@ mod tests {
             to_reversible(&circ).unwrap_err(),
             ToReversibleError::UseBeforeDef { user: 1, operand: 2 }
         );
+    }
+
+    #[test]
+    fn storage_read_write_synthesis() {
+        // f(x0) = cell[x0] (one-bit storage read), then a second circuit that
+        // writes x0 into cell[0]. Both must evaluate correctly through the
+        // storage model, and reads must leave storage restored.
+        let sid = StorageId::DEFAULT;
+        let lane = LaneId(0);
+
+        let mut read_circ = BCircuit::new(1);
+        let r = read_circ.push_stmt(
+            BIrStmt::StorageRead { storage: sid, lane, addr: vec![IRVarId(0)] },
+            (),
+        );
+        read_circ.outputs = vec![r];
+        let (rc, map) = to_reversible(&read_circ).expect("storage read converts");
+        assert!(rc.uses_storage());
+
+        for addr_bit in [false, true] {
+            for stored in [false, true] {
+                let mut storage = StorageState::new();
+                if stored {
+                    storage.insert(((sid, lane), addr_bit as u64), true);
+                }
+                let mut wires = vec![false; rc.num_wires];
+                wires[map.wire(IRVarId(0)).unwrap()] = addr_bit;
+                rc.apply(&mut wires, &mut storage);
+                // y register (last output wire region): y ^= f(x).
+                let y_base = 1 + read_circ.stmts.len();
+                assert_eq!(wires[y_base], stored, "read at addr={addr_bit}");
+                // Cell restored by the swap-back pair.
+                let got = storage.get(&((sid, lane), addr_bit as u64)).copied().unwrap_or(false);
+                assert_eq!(got, stored, "cell must hold its original value");
+            }
+        }
+
+        // Write: cell[0] <- x0 (address wire is a Zero constant).
+        let mut write_circ = BCircuit::new(1);
+        let zero = write_circ.push_stmt(BIrStmt::Zero, ());
+        let _w = write_circ.push_stmt(
+            BIrStmt::StorageWrite {
+                storage: sid,
+                lane,
+                src: IRVarId(0),
+                addr: vec![zero],
+            },
+            (),
+        );
+        write_circ.outputs = vec![];
+        let (rcw, _) = to_reversible(&write_circ).expect("storage write converts");
+        for x in [false, true] {
+            let mut storage = StorageState::new();
+            let mut wires = vec![false; rcw.num_wires];
+            wires[0] = x;
+            rcw.apply(&mut wires, &mut storage);
+            assert_eq!(
+                storage.get(&((sid, lane), 0)).copied().unwrap_or(false),
+                x,
+                "cell[0] must hold written bit"
+            );
+        }
     }
 }

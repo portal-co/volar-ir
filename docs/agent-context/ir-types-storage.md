@@ -57,17 +57,32 @@ A `StorageWrite` to `(S, T, addr)` invalidates all cached reads for the same `(S
 
 ### Evaluator conformance
 
-All evaluators must key their storage maps by `(StorageId, TypeId, addr)` (IR, VAFFLE) or the equivalent `(StorageId, bit_width, addr)` (BIR, where all values are single bits). Writing with one type and reading with a different type at the same `StorageId + address` returns the default zero value, not the previously written data.
+All evaluators must key their storage maps by `(StorageId, TypeId, addr)` (IR, VAFFLE) or the equivalent `((StorageId, LaneId), addr)` (BIR, where every value — and therefore every cell — is exactly one bit). Writing with one type and reading with a different type at the same `StorageId + address` returns the default zero value, not the previously written data.
+
+### BIR storage lanes (1-bit cells)
+
+Every Boolar storage cell holds exactly **one bit**; the value's type is
+disambiguated by the `LaneId`, not by a per-op width. `BIrStmt::StorageRead`
+/ `StorageWrite` carry `lane: LaneId`, and the producer
+(`lower_ir_to_boolar_with_lane_table`) returns a total `LaneId → IRTypeId`
+side table allocated densely by first use over the source type table.
+Multi-bit values are expanded one BIR op per bit, appending the bit index as
+high-order address bits: element bit `i` of a value at element address `A`
+lives in flat cell `base + A + (i << N)`, where `N` is the lane's fixed
+element-address bit width (mixed widths within one `(StorageId, LaneId)`
+space are rejected fail-closed, as are addresses where
+`N + ceil(log2(value_bits)) > 64`). `pre_init` uses one strided
+`BIrPreInitSegment { storage, lane, offset, data }` per bit index.
 
 ### BIR multi-bit addresses
 
-`BIrStmt::StorageRead` and `StorageWrite` use `addr: Vec<IRVarId>` — each element is a single-bit BIR variable, and the Vec represents an N-bit address giving 2^N distinct locations per `(StorageId, bit_width)` pair. Bit 0 (index 0) is the least-significant bit.
+`BIrStmt::StorageRead` and `StorageWrite` use `addr: Vec<IRVarId>` — each element is a single-bit BIR variable, and the Vec represents an N-bit *element* address giving 2^N distinct elements per `((StorageId, LaneId))` pair; appended bit-index bits select within the element (see above). Bit 0 (index 0) is the least-significant bit.
 
-**IR->BIR lowering** (`lower_ir_to_boolar.rs`): all bits of the IR address variable are passed through to the BIR address vec — `var_bits[&addr.0].iter().copied().collect()`. No truncation.
+**IR->BIR lowering** (`lower_ir_to_boolar.rs`): all bits of the IR address variable are passed through to the BIR base address vec — `var_bits[&addr.0].iter().copied().collect()`. No truncation. The value's bit index is appended as constant high-order bits.
 
-**BIR evaluator** (`interpreter/biir.rs`): collapses `Vec<IRVarId>` to `u64` via `bits_to_u64` (imported from `interpreter::ir`), then keys the `BIrStorageMap` by `(StorageId, u64)`. This keeps the evaluator simple and supports up to 64-bit addresses.
+**BIR evaluator** (`interpreter/biir.rs`): collapses `Vec<IRVarId>` to `u64` via `bits_to_u64` (imported from `interpreter::ir`), then keys the `BIrStorageMap` by `((StorageId, LaneId), u64)`. This keeps the evaluator simple and supports up to 64-bit flat addresses (element address + appended index bits must fit).
 
-**Store-forward optimizer** (`store_forward.rs`): `BiirStoreCache` is keyed by `(StorageId, usize, Vec<IRVarId>)`. `Vec<IRVarId>` implements `Ord` lexicographically, so it works as a `BTreeMap` key. Cross-block translation applies the pred->target arg map to **each element** of the addr Vec; if any bit fails to translate, the entire cache entry is dropped.
+**Store-forward optimizer** (`store_forward.rs`): `BiirStoreCache` is keyed by `(StorageId, LaneId, Vec<IRVarId>)`. `Vec<IRVarId>` implements `Ord` lexicographically, so it works as a `BTreeMap` key. Cross-block translation applies the pred->target arg map to **each element** of the addr Vec; if any bit fails to translate, the entire cache entry is dropped.
 
 **FHE weaver** (`fhe.rs`): `emit_read` and `emit_write` take `addr_wires: &[&str]` (one wire name per address bit). `mux_tree_read` uses `addr_wires[level]` at each recursion level (not the same wire at every level). `emit_write` uses a full binary demux tree for N-bit addresses, mirroring `mux_tree_read`.
 

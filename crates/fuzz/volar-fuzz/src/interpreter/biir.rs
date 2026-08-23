@@ -14,16 +14,17 @@ use crate::generators::oracle::hash_oracle;
 use crate::interpreter::ir::bits_to_u64;
 use std::collections::BTreeMap;
 
-use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
+use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrPreInitSegment, BIrStmt, BIrTarget, BIrTerminator, LaneId};
 use volar_ir::ir::{IRBlockTargetId, IRVarId, StorageId};
-use volar_ir_common::PreInitSegment;
 
-/// Storage map for BIR evaluation: keyed by `(StorageId, address_as_u64)`.
+/// Storage map for BIR evaluation: keyed by
+/// `((StorageId, LaneId), address_as_u64)`.
 ///
-/// Each BIR variable is a single bit; the `addr: Vec<IRVarId>` in
-/// `StorageRead`/`StorageWrite` is an N-bit address collapsed to a `u64`
-/// via `bits_to_u64`.
-pub type BIrStorageMap = BTreeMap<(StorageId, u64), bool>;
+/// Every BIR storage cell holds exactly one bit. The `addr: Vec<IRVarId>` in
+/// `StorageRead`/`StorageWrite` is an N-bit address (already including the
+/// appended bit-index bits produced by lowering) collapsed to a `u64` via
+/// `bits_to_u64`.
+pub type BIrStorageMap = BTreeMap<((StorageId, LaneId), u64), bool>;
 
 /// Maximum number of times block 0 may be re-entered (loop guard for
 /// movfuscated / iterating circuits).
@@ -74,12 +75,12 @@ pub fn eval_biir_with_limit(
     }
 }
 
-/// Seed BIR storage from module-level pre-init segments (virt uses `TypeId(0)` = Bit).
-pub fn apply_pre_init(storage: &mut BIrStorageMap, pre_init: &[PreInitSegment]) {
+/// Seed BIR storage from bit-granular pre-init segments.
+pub fn apply_pre_init(storage: &mut BIrStorageMap, pre_init: &[BIrPreInitSegment]) {
     for seg in pre_init {
-        for (i, c) in seg.data.iter().enumerate() {
-            let addr = (seg.offset + i) as u64;
-            storage.insert((seg.storage, addr), c.lo & 1 != 0);
+        for (i, &b) in seg.data.iter().enumerate() {
+            let addr = seg.offset + i as u64;
+            storage.insert(((seg.storage, seg.lane), addr), b);
         }
     }
 }
@@ -172,16 +173,16 @@ fn eval_stmt(
         BIrStmt::ActionCall { .. } => panic!("eval_biir: ActionCall not supported"),
         BIrStmt::ActionBit { .. } => panic!("eval_biir: ActionBit not supported"),
         BIrStmt::Rng { .. } => panic!("eval_biir: Rng not supported"),
-        BIrStmt::StorageRead { storage: store_id, bit_width: _, addr } => {
+        BIrStmt::StorageRead { storage: store_id, lane, addr } => {
             let addr_bits: Vec<bool> = addr.iter().map(|v| get(vars, v)).collect();
             let addr_u64 = bits_to_u64(&addr_bits);
-            storage.get(&(*store_id, addr_u64)).copied().unwrap_or(false)
+            storage.get(&((*store_id, *lane), addr_u64)).copied().unwrap_or(false)
         }
-        BIrStmt::StorageWrite { storage: store_id, src, bit_width: _, addr } => {
+        BIrStmt::StorageWrite { storage: store_id, lane, src, addr } => {
             let src_val = get(vars, src);
             let addr_bits: Vec<bool> = addr.iter().map(|v| get(vars, v)).collect();
             let addr_u64 = bits_to_u64(&addr_bits);
-            storage.insert((*store_id, addr_u64), src_val);
+            storage.insert(((*store_id, *lane), addr_u64), src_val);
             false // dummy zero bit
         }
         _ => panic!("eval_biir: unhandled BIrStmt variant — add evaluation for this variant"),

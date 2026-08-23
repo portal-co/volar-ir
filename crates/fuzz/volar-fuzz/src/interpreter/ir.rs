@@ -430,10 +430,13 @@ fn eval_ir_stmt(
         }
         Stmt::OracleCall { name, args, output_tys, .. } => {
             // Find oracle index by name for the hash seed.
-            let oracle_idx = oracles
-                .iter()
-                .position(|o| &o.name == name)
-                .unwrap_or(0) as u32;
+            // Seed the FNV hash oracle from the *name bytes* — the same
+            // derivation `eval_biir` uses on lowered Boolar output, where no
+            // oracle table is available. Keeps all three interpreters
+            // (IR / vaffle / Boolar) consistent on uninterpreted calls.
+            let oracle_idx: u32 = name
+                .bytes()
+                .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
             // Flatten all input args into a single bit vector.
             let flat_inputs: Vec<bool> = args
                 .iter()

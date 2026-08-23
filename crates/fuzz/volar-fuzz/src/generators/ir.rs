@@ -198,6 +198,13 @@ fn build_extended_ir_stmts(
 ) -> Vec<IRStmt> {
     let mut stmts: Vec<IRStmt> = Vec::new();
 
+    // Per `(storage, value-type)` element-address bit width. The appended-index
+    // cell layout used by `lower_ir_to_boolar` requires all ops in one
+    // `(storage, lane)` space to use same-width address vars, so generation
+    // pins the width on first use and filters later choices to match.
+    let mut lane_addr_width: std::collections::BTreeMap<(StorageId, TypeId), usize> =
+        std::collections::BTreeMap::new();
+
     for (kind, a, b, c_lo, c_hi) in raw_stmts.iter().copied() {
         let n_vars = var_info.len();
         let rv = IRVarId(stmt_base + stmts.len() as u32);
@@ -259,15 +266,34 @@ fn build_extended_ir_stmts(
             let store_id = StorageId(a % 4);
             let src_idx = (b as usize) % n_vars;
             let (src_tid, _, src_id) = var_info[src_idx];
-            let addr_idx = (c_lo as usize % n_vars) as usize;
-            let addr_id = var_info[addr_idx].2;
-            stmts.push(Stmt::StorageWrite {
-                storage: store_id,
-                src: src_id,
-                ty: src_tid,
-                addr: addr_id,
-            });
-            // void result — do NOT add to var_info
+            // Address candidates consistent with the pinned lane width (if any).
+            let want_w = lane_addr_width.get(&(store_id, src_tid)).copied();
+            let cands: Vec<usize> = var_info
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, w, _))| {
+                    // Keep appended-index addresses within the 64-bit flat
+                    // cell space (max value width 128 -> 7 index bits).
+                    *w <= 50 && want_w.map_or(true, |lw| *w == lw)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if let Some(&addr_idx) = cands.get(c_lo as usize % cands.len().max(1)).filter(|_| !cands.is_empty()) {
+                let (_, _, addr_id) = var_info[addr_idx];
+                lane_addr_width.insert((store_id, src_tid), var_info[addr_idx].1);
+                stmts.push(Stmt::StorageWrite {
+                    storage: store_id,
+                    src: src_id,
+                    ty: src_tid,
+                    addr: addr_id,
+                });
+            } else {
+                // No usable address var exists — emit a harmless constant
+                // instead so the program stays well-formed.
+                stmts.push(Stmt::Const(Constant { lo: c_lo, hi: c_hi }, src_tid));
+                var_info.push((src_tid, 1, rv));
+            }
+            // void result — do NOT add to var_info (unless fallback ran)
         } else if kind % 7 == 4 {
             // ── StorageRead ──────────────────────────────────────────────────
             let store_id = StorageId(a % 4);
@@ -275,8 +301,25 @@ fn build_extended_ir_stmts(
             let ty = PRIM_TYPES[type_idx];
             let tid = types.primitive(ty);
             let w = primitive_width(ty);
-            let addr_idx = (c_lo as usize % n_vars) as usize;
+            let want_w = lane_addr_width.get(&(store_id, tid)).copied();
+            let cands: Vec<usize> = var_info
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, aw, _))| {
+                    *aw <= 50 && want_w.map_or(true, |lw| *aw == lw)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if cands.is_empty() {
+                // Pinned width unavailable — degrade to a constant of the
+                // intended read type instead.
+                stmts.push(Stmt::Const(Constant { lo: c_lo, hi: c_hi }, tid));
+                var_info.push((tid, w, rv));
+                continue;
+            }
+            let addr_idx = cands[c_lo as usize % cands.len()];
             let addr_id = var_info[addr_idx].2;
+            lane_addr_width.insert((store_id, tid), var_info[addr_idx].1);
             stmts.push(Stmt::StorageRead {
                 storage: store_id,
                 ty: tid,
@@ -404,8 +447,12 @@ pub fn interpret_ir_extended(
     let stmts = build_extended_ir_stmts(&mut types, &mut var_info, raw_stmts, n_params as u32, &oracle_decls);
 
     // Terminator: JumpCond on first Bit-typed var if one exists, else Jmp(Return).
-    let total_vars = n_params + stmts.len();
-    let ret_args: Vec<IRVarId> = (0..total_vars as u32).map(IRVarId).collect();
+    //
+    // Branch args cover exactly the *non-void* vars: void stmts (StorageWrite)
+    // consume a var-id slot but hold no value, so referencing them here would
+    // make IR-level outputs disagree with lowered Boolar outputs (where every
+    // slot is one real wire).
+    let ret_args: Vec<IRVarId> = var_info.iter().map(|(_, _, id)| *id).collect();
 
     let bit_tid = types.primitive(Type::Bit);
     let cond_var = var_info.iter().find(|(tid, _, _)| *tid == bit_tid).map(|(_, _, id)| *id);
@@ -896,3 +943,4 @@ mod strategies {
         )
     }
 }
+

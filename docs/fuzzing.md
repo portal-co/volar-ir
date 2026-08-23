@@ -27,7 +27,8 @@ crates/fuzz/volar-fuzz/src/
 │   └── ir.rs           — Arbitrary<IRBlocks>
 └── properties/         — proptest property tests
     ├── biir_passes.rs  — Properties A, B, C (movfuscate + lower_to_circuit)
-    └── ir_passes.rs    — Property D (lower_ir_to_boolar)
+    ├── ir_passes.rs    — Properties D, D2 (lower_ir_to_boolar incl. storage traffic)
+    └── reversible.rs   — Property E (to_reversible XOR embedding + joint reversibility)
 
 fuzz/
 ├── Cargo.toml
@@ -104,8 +105,10 @@ Returns `None` if block 0 is re-entered more than `MAX_ITERS` (512) times
 without terminating.  This handles movfuscated circuits (which are single
 self-looping blocks).
 
-Oracle, action, RNG, and storage stmts panic — the generator never produces
-them, so this should not occur during property tests.
+Oracle and action stmts panic — the plain generator never produces them.
+RNG stmts panic too. Storage read/write are evaluated against a keyed
+`BIrStorageMap` (`((StorageId, LaneId), cell)` → bit), including pre-init
+seeding from `BIrPreInitSegment`s.
 
 ### `eval_ir` (`interpreter/ir.rs`)
 
@@ -217,8 +220,14 @@ pub fn lower_ir_to_boolar(blocks: &IRBlocks, types: &IRTypes) -> BIrBlocks<()>;
 Pure bit-permutation ops (`Transmute`, `Rol`, `Ror`, `Merge`, `Splat`, `Shuffle`)
 update the variable-to-bits map without emitting any new Boolar stmts.
 
-External primitives (`OracleCall`, `ActionCall`, `Rng`, `StorageRead`,
-`StorageWrite`) are passed through as opaque Boolar handles.
+External primitives are lowered as follows: `OracleCall` / `ActionCall`
+pass through as opaque Boolar call-handles (one `OracleBit` / `ActionBit`
+per output bit), `Rng` becomes one `BIrStmt::Rng` per output bit, and
+`StorageRead` / `StorageWrite` expand one Boolar op **per value bit** with
+the bit index appended as high-order address bits (see
+`docs/agent-context/ir-types-storage.md`). Programs whose element-address
+plus appended index bits exceed the 64-bit flat cell space are rejected
+fail-closed.
 
 `JumpTable` and `Dyn` terminators are not supported (panic).
 

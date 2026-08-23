@@ -14,7 +14,7 @@ use volar_ir_common::{
 use volar_ir::ir::{IRBranchTarget, 
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRTerminator, IRVarId,
 };
-use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
+use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId};
 
 use crate::{ParseText, WriteText, SavedIrBlocks, SavedBIrBlocks};
 
@@ -354,8 +354,8 @@ fn bir_storage() {
     let block = BIrBlock {
         params:     4,   // v0..v3 (addr bits)
         stmts:      vec![
-            node(BIrStmt::StorageRead  { storage: storage(0), bit_width: 8, addr: vec![v(0), v(1)] }), // v4
-            node(BIrStmt::StorageWrite { storage: storage(1), src: v(4), bit_width: 8, addr: vec![v(2), v(3)] }), // v5
+            node(BIrStmt::StorageRead  { storage: storage(0), lane: LaneId(0), addr: vec![v(0), v(1)] }), // v4
+            node(BIrStmt::StorageWrite { storage: storage(1), lane: LaneId(0), src: v(4), addr: vec![v(2), v(3)] }), // v5
         ],
         terminator: BIrTerminator::Jmp(BIrTarget {
             block: IRBlockTargetId::Return, args: vec![v(4)],

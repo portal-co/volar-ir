@@ -282,10 +282,13 @@ fn eval_vaffle_stmt(
             result
         }
         Stmt::OracleCall { name, args, output_tys, .. } => {
-            let oracle_idx = oracles
-                .iter()
-                .position(|o| &o.name == name)
-                .unwrap_or(0) as u32;
+            // Seed the FNV hash oracle from the *name bytes* — the same
+            // derivation `eval_biir` uses on lowered Boolar output, where no
+            // oracle table is available. Keeps all three interpreters
+            // (IR / vaffle / Boolar) consistent on uninterpreted calls.
+            let oracle_idx: u32 = name
+                .bytes()
+                .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
             let flat_inputs: Vec<bool> = args.iter().flat_map(|v| get(v)).collect();
             let output_widths: Vec<usize> =
                 output_tys.iter().map(|&ty| bit_width(ty, types)).collect();

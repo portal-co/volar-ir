@@ -58,11 +58,11 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
-    use volar_ir::boolar::{BIrBlock, BIrStmt, BIrTarget, BIrTerminator};
+    use volar_ir::boolar::{BIrBlock, BIrPreInitSegment, BIrStmt, BIrTarget, BIrTerminator};
     use volar_ir::ir::{IRBlock, IRBlockId, IRBlockTargetId, IRBranchTarget, IRTerminator, IRTypeId, IRVarId};
     use volar_ir_common::{Constant, Node, PreInitSegment, Stmt};
 
-    fn empty_pre_init() -> Vec<PreInitSegment> {
+    fn empty_pre_init() -> Vec<BIrPreInitSegment> {
         Vec::new()
     }
 

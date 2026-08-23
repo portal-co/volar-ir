@@ -27,7 +27,7 @@
 //! - Only non-oracle/non-action/non-storage/non-rng stmts are generated
 //!   (`Zero`, `One`, `And`, `Or`, `Xor`, `Not`).
 
-use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
+use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId};
 use volar_ir::ir::{IRBlockId, IRBlockTargetId, IRVarId, StorageId};
 use volar_ir_common::Node;
 
@@ -265,20 +265,20 @@ fn make_stmt_extended(
             4 => (BIrStmt::Xor(IRVarId(av), IRVarId(bv)), false),
             5 => (BIrStmt::Not(IRVarId(av)), false),
             6 => {
-                // StorageWrite: store src=av at addr=bv, bit_width=1
+                // StorageWrite: store src=av at addr=bv, single-bit lane
                 let store_id = StorageId(a % 4);
                 (BIrStmt::StorageWrite {
                     storage: store_id,
+                    lane: LaneId(0),
                     src: IRVarId(av),
-                    bit_width: 1,
                     addr: vec![IRVarId(bv)] }, true) // void
             }
             7 => {
-                // StorageRead: read from addr=av, bit_width=1
+                // StorageRead: read one bit from addr=av, single-bit lane
                 let store_id = StorageId(a % 4);
                 (BIrStmt::StorageRead {
                     storage: store_id,
-                    bit_width: 1,
+                    lane: LaneId(0),
                     addr: vec![IRVarId(av)] }, false)
             }
             8 => {

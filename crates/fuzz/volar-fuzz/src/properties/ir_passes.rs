@@ -7,7 +7,7 @@ use volar_ir_opt::inline_vaffle::InlineBudget;
 use volar_ir_passes::lower_ir_to_boolar;
 use volar_vaffle_target::{lower_vaffle_to_ir_with_control_provenance, lower_vaffle_to_ir_with_inlining};
 
-use crate::generators::ir::gen_ir_and_inputs;
+use crate::generators::ir::{gen_ir_and_inputs, gen_ir_extended_and_inputs};
 use crate::generators::vaffle::{gen_vaffle_and_inputs, gen_vaffle_two_func_and_inputs};
 use crate::interpreter::biir::eval_biir;
 use crate::interpreter::ir::{bit_flatten, bit_unflatten, bit_width, eval_ir};
@@ -56,6 +56,72 @@ proptest! {
         (ir, types, _inputs) in gen_ir_and_inputs()
     ) {
         let _ = lower_ir_to_boolar(&ir, &types);
+    }
+
+    /// Property D2 — storage round-trip: programs with storage traffic lower
+    /// to Boolar whose per-bit appended-address cells agree with the IR-level
+    /// `(storage, type, addr)` cell semantics.
+    #[test]
+    fn prop_d2_lower_ir_storage_roundtrip_preserves_semantics(
+        (ir, types, inputs) in gen_ir_extended_and_inputs()
+    ) {
+        use volar_ir_passes::lower_ir_to_boolar_with_lane_table;
+
+        let ir_outputs = match eval_ir(&ir, &types, &inputs) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        if ir.blocks.len() != 1 {
+            // Extended generator emits a single block; guard anyway.
+            return Ok(());
+        }
+
+        let output_widths: Vec<usize> = ir_outputs.iter().map(|v| v.len()).collect();
+        let total_output_bits: usize = output_widths.iter().sum();
+
+        // Persisted regression cases from other properties may contain
+        // programs whose element-address + appended-index bits exceed the
+        // 64-bit flat cell space; lowering fails closed on those. Skip them,
+        // but fail loudly on any *other* unexpected panic.
+        let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lower_ir_to_boolar_with_lane_table(&ir, &types)
+        }));
+        let (boolar, lane_table) = match lowered {
+            Ok(pair) => pair,
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                if msg.contains("flat cell space") {
+                    return Ok(()); // not representable in Boolar storage model
+                }
+                panic!("lower_ir_to_boolar_with_lane_table panicked unexpectedly: {msg}");
+            }
+        };
+        // Lane table is dense: lanes form a contiguous `0..n` range.
+        let mut lanes: Vec<u32> = lane_table.keys().map(|l| l.0).collect();
+        lanes.sort_unstable();
+        for (i, l) in lanes.iter().enumerate() {
+            prop_assert_eq!(*l, i as u32, "dense contiguous lane ids");
+        }
+        let flat_inputs = bit_flatten(&inputs);
+        let flat_outputs = match eval_biir(&boolar, &flat_inputs) {
+            Some(v) => v,
+            None => {
+                prop_assert!(false, "eval_biir on lowered extended circuit did not terminate");
+                return Ok(());
+            }
+        };
+        prop_assert_eq!(flat_outputs.len(), total_output_bits,
+            "lowered extended circuit output bit count mismatch");
+        let boolar_outputs = bit_unflatten(&flat_outputs, &output_widths);
+        if boolar_outputs != ir_outputs {
+            panic!(
+                "lower_ir_to_boolar changed the semantics of a program with storage ops\nIR: {ir:?}\ntypes: {types:?}\ninputs: {inputs:?}\ngot: {boolar_outputs:?}\nwanted: {ir_outputs:?}"
+            );
+        }
     }
 }
 

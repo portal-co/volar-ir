@@ -11,6 +11,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use crate::boolar::LaneId;
 use volar_ir_common::StorageId;
 
 /// A single reversible gate. Every variant is a bijection on the joint
@@ -35,7 +36,7 @@ pub enum RGate {
         target: usize,
     },
     /// Reversible storage exchange: atomically SWAP the target wire with the
-    /// bit stored at `(storage, addr)`.
+    /// bit stored at `((storage, lane), addr)`.
     ///
     /// This is the reversible analogue of Boolar's `StorageRead`/`StorageWrite`:
     /// because it *exchanges* rather than copies, the joint map over (wires,
@@ -44,9 +45,11 @@ pub enum RGate {
     ///
     /// `addr` is a list of wire indices forming the address bit-vector, LSB
     /// first (bit 0 = index 0 = least-significant), matching
-    /// `BIrStmt::StorageRead`'s convention.
+    /// `BIrStmt::StorageRead`'s convention (including any appended bit-index
+    /// bits produced by lowering).
     StorageSwap {
         storage: StorageId,
+        lane: LaneId,
         addr: Vec<usize>,
         target: usize,
     },
@@ -107,8 +110,9 @@ impl core::fmt::Display for RCircuitError {
 }
 
 /// Simple storage model for evaluating [`RCircuit`]s containing
-/// [`RGate::StorageSwap`]: maps `(storage space, cell index)` to one bit.
-pub type StorageState = BTreeMap<(StorageId, u64), bool>;
+/// [`RGate::StorageSwap`]: maps `((storage space, lane), cell index)` to one
+/// bit, matching the fuzz interpreter's keyed Boolar storage model.
+pub type StorageState = BTreeMap<((StorageId, LaneId), u64), bool>;
 
 /// Compute the flat cell index for a storage address given its address-bit
 /// wires. LSB-first per the Boolar convention.
@@ -199,7 +203,7 @@ impl RCircuit {
                 }
                 Ok(())
             }
-            RGate::StorageSwap { storage: _, addr, target } => {
+            RGate::StorageSwap { addr, target, .. } => {
                 check(*target)?;
                 for w in addr.iter() {
                     check(*w)?;
@@ -238,8 +242,8 @@ impl RCircuit {
                 RGate::X(w) => wires[*w] = !wires[*w],
                 RGate::Cnot { ctrl, target } => wires[*target] ^= wires[*ctrl],
                 RGate::Ccnot { c1, c2, target } => wires[*target] ^= wires[*c1] & wires[*c2],
-                RGate::StorageSwap { storage: sid, addr, target } => {
-                    let cell = (*sid, addr_cell_index(addr, wires));
+                RGate::StorageSwap { storage: sid, lane, addr, target } => {
+                    let cell = ((*sid, *lane), addr_cell_index(addr, wires));
                     let stored = storage.remove(&cell).unwrap_or(false);
                     storage.insert(cell, wires[*target]);
                     wires[*target] = stored;
@@ -302,6 +306,7 @@ mod tests {
                 2,
                 vec![RGate::StorageSwap {
                     storage: StorageId::DEFAULT,
+                    lane: LaneId(0),
                     addr: vec![0],
                     target: 0
                 }]
@@ -338,21 +343,21 @@ mod tests {
         let sid = StorageId::DEFAULT;
         let c = RCircuit::new(
             3,
-            vec![RGate::StorageSwap { storage: sid, addr: vec![0, 1], target: 2 }],
+            vec![RGate::StorageSwap { storage: sid, lane: LaneId(0), addr: vec![0, 1], target: 2 }],
         )
         .unwrap();
         // LSB-first address over wires [0, 1]: wires[1]=1 selects cell 2.
         let mut wires = vec![false, true, false]; // target wire starts 0
         let mut storage = StorageState::new();
-        storage.insert((sid, 2), true); // cell 2 holds 1
+        storage.insert(((sid, LaneId(0)), 2), true); // cell 2 holds 1
         c.apply(&mut wires, &mut storage);
         // Wire picked up the stored bit; the cell now holds the old wire bit.
         assert_eq!(wires[2], true);
-        assert_eq!(storage.get(&(sid, 2)), Some(&false));
+        assert_eq!(storage.get(&((sid, LaneId(0)), 2)), Some(&false));
         // Applying again restores both (involution).
         c.apply(&mut wires, &mut storage);
         assert_eq!(wires[2], false);
-        assert_eq!(storage.get(&(sid, 2)), Some(&true));
+        assert_eq!(storage.get(&((sid, LaneId(0)), 2)), Some(&true));
         // apply_pure rejects storage-using circuits.
         assert_eq!(c.apply_pure(&mut vec![false; 3]).unwrap_err(), RCircuitError::StorageOpsUnsupported);
     }

@@ -8,6 +8,7 @@ use alloc::{
     vec::Vec,
 };
 
+use volar_ir::boolar::{BIrPreInitSegment, LaneId};
 use volar_ir::ir::{IRBlocks, IRTypeId};
 use volar_ir_common::{Constant, PreInitSegment, StorageId, TypeId};
 
@@ -35,18 +36,8 @@ pub(crate) struct VirtStorageInit {
 
 type LaneKey = (StorageId, TypeId);
 
-/// BIR virt preinit segments always tag element type `TypeId(0)` (single bit in `lo`).
-const BIR_PREINIT_BIT_TY: TypeId = TypeId(0);
-
 fn zero_constant() -> Constant {
     Constant { hi: 0, lo: 0 }
-}
-
-fn const_bit(b: bool) -> Constant {
-    Constant {
-        hi: 0,
-        lo: if b { 1 } else { 0 },
-    }
 }
 
 fn lane_mut<'a>(
@@ -296,25 +287,24 @@ fn fill_ir_outer_rows<P: Clone>(
 }
 
 /// Build BIR bit-stuffed storage lanes and matching [`VirtBytecode`].
+///
+/// Each dispatch bit lives in its own `StorageId` (already 1-bit-uniform), so
+/// every segment uses [`LaneId`] 0.
 pub(crate) fn build_bir_storage_init(
     dedup: &DedupTable<BirHandlerKey>,
     per_handler_slots: &[Vec<StorageId>],
     bytecode_storage: StorageId,
     handler_bits: usize,
     pc_bits: usize,
-) -> VirtStorageInit {
+) -> BirVirtStorageInit {
     let total_rows = dedup.per_block.len();
-    let mut lanes: BTreeMap<LaneKey, Vec<Constant>> = BTreeMap::new();
+    let mut lanes: BTreeMap<StorageId, Vec<bool>> = BTreeMap::new();
 
     for (pc, (h_idx, imm)) in dedup.per_block.iter().enumerate() {
         for k in 0..handler_bits {
             let bit = (*h_idx as usize >> k) & 1;
-            lane_mut(
-                &mut lanes,
-                StorageId(bytecode_storage.0 + k as u32),
-                BIR_PREINIT_BIT_TY,
-                total_rows,
-            )[pc] = const_bit(bit == 1);
+            lane_mut_bool(&mut lanes, StorageId(bytecode_storage.0 + k as u32), total_rows)[pc] =
+                bit == 1;
         }
 
         let slots = &per_handler_slots[*h_idx as usize];
@@ -322,18 +312,70 @@ pub(crate) fn build_bir_storage_init(
             let slot_base = slots[slot_idx];
             for k in 0..pc_bits {
                 let bit = (tgt.0 as usize >> k) & 1;
-                lane_mut(
-                    &mut lanes,
-                    StorageId(slot_base.0 + k as u32),
-                    BIR_PREINIT_BIT_TY,
-                    total_rows,
-                )[pc] = const_bit(bit == 1);
+                lane_mut_bool(&mut lanes, StorageId(slot_base.0 + k as u32), total_rows)[pc] =
+                    bit == 1;
             }
         }
     }
 
-    VirtStorageInit {
-        pre_init: lanes_to_pre_init(lanes),
+    BirVirtStorageInit {
+        pre_init: lanes_to_bir_pre_init(lanes),
         bytecode: virt_bytecode_from_dedup(dedup),
     }
+}
+
+/// Result of the canonical virt storage builder for BIR output.
+pub(crate) struct BirVirtStorageInit {
+    pub pre_init: Vec<BIrPreInitSegment>,
+    pub bytecode: VirtBytecode,
+}
+
+fn lane_mut_bool<'a>(
+    lanes: &'a mut BTreeMap<StorageId, Vec<bool>>,
+    storage: StorageId,
+    total_rows: usize,
+) -> &'a mut Vec<bool> {
+    lanes.entry(storage).or_insert_with(|| vec![false; total_rows])
+}
+
+fn lanes_to_bir_pre_init(lanes: BTreeMap<StorageId, Vec<bool>>) -> Vec<BIrPreInitSegment> {
+    lanes
+        .into_iter()
+        .map(|(storage, data)| BIrPreInitSegment {
+            storage,
+            lane: LaneId(0),
+            offset: 0,
+            data,
+        })
+        .collect()
+}
+
+fn bir_segments_overlap(a: &BIrPreInitSegment, b: &BIrPreInitSegment) -> bool {
+    if a.storage != b.storage || a.lane != b.lane {
+        return false;
+    }
+    let a_end = a.offset + a.data.len() as u64;
+    let b_end = b.offset + b.data.len() as u64;
+    a.offset < b_end && b.offset < a_end
+}
+
+/// Append virt segments after input `pre_init`, asserting no cell overlap
+/// (BIR variant over [`BIrPreInitSegment`]).
+pub(crate) fn merge_bir_pre_init(
+    input: &[BIrPreInitSegment],
+    virt: &[BIrPreInitSegment],
+) -> Vec<BIrPreInitSegment> {
+    for v in virt {
+        for i in input {
+            debug_assert!(
+                !bir_segments_overlap(i, v),
+                "virt pre_init overlaps input pre_init at storage={:?} lane={:?}",
+                v.storage,
+                v.lane
+            );
+        }
+    }
+    let mut out = input.to_vec();
+    out.extend_from_slice(virt);
+    out
 }

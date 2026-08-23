@@ -869,15 +869,15 @@ fn subst_biir(stmt: &BIrStmt, var_map: &[u32]) -> BIrStmt {
         },
         BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit { call: s(call), bit: *bit },
         BIrStmt::Rng { name } => BIrStmt::Rng { name: name.clone() },
-        BIrStmt::StorageRead { storage, bit_width, addr } => BIrStmt::StorageRead {
+        BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
             storage: storage.clone(),
-            bit_width: *bit_width,
+            lane: *lane,
             addr: addr.iter().map(|v| s(v)).collect(),
         },
-        BIrStmt::StorageWrite { storage, src, bit_width, addr } => BIrStmt::StorageWrite {
+        BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
             storage: storage.clone(),
+            lane: *lane,
             src: s(src),
-            bit_width: *bit_width,
             addr: addr.iter().map(|v| s(v)).collect(),
         },
         _ => panic!("subst_biir: unhandled BIrStmt variant — add substitution for this variant"),

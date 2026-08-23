@@ -97,14 +97,14 @@ fn write_bir_stmt(result: IRVarId, stmt: &BIrStmt, w: &mut dyn fmt::Write) -> fm
             w.write_str("rng ")?;
             write_quoted_str(name, w)?;
         }
-        BIrStmt::StorageRead { storage, bit_width, addr } => {
-            write!(w, "storage_read storage={} bit_width={} addr=", storage.0, bit_width)?;
+        BIrStmt::StorageRead { storage, lane, addr } => {
+            write!(w, "storage_read storage={} lane={} addr=", storage.0, lane.0)?;
             write_var_list(addr, w)?;
         }
-        BIrStmt::StorageWrite { storage, src, bit_width, addr } => {
-            write!(w, "storage_write storage={} src=", storage.0)?;
+        BIrStmt::StorageWrite { storage, lane, src, addr } => {
+            write!(w, "storage_write storage={} lane={} src=", storage.0, lane.0)?;
             write_var(*src, w)?;
-            write!(w, " bit_width={} addr=", bit_width)?;
+            w.write_str(" addr=")?;
             write_var_list(addr, w)?;
         }
         _ => { w.write_str("<unknown-stmt>")?; }

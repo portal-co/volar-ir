@@ -12,7 +12,7 @@ use volar_ir_common::{
 use volar_ir::ir::{IRBranchTarget, 
     IRBlock, IRBlockTargetId, IRBlocks, IRTerminator, IRVarId,
 };
-use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
+use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId};
 
 use super::{error::ParseError, lexer::Lexer};
 use crate::{ir::{FORMAT_HEADER as IR_HEADER, SavedIrBlocks}, boolar::{FORMAT_HEADER as BIR_HEADER, SavedBIrBlocks}};
@@ -529,22 +529,22 @@ fn parse_bir_stmt(kw: &str, lex: &mut Lexer) -> Result<BIrStmt, ParseError> {
         "storage_read" => {
             lex.expect_key("storage")?;
             let storage = mk_storage(lex.read_u32()?);
-            lex.expect_key("bit_width")?;
-            let bit_width = lex.read_usize()?;
+            lex.expect_key("lane")?;
+            let lane = LaneId(lex.read_u32()?);
             lex.expect_key("addr")?;
             let addr = read_var_id_list(lex)?;
-            Ok(BIrStmt::StorageRead { storage, bit_width, addr })
+            Ok(BIrStmt::StorageRead { storage, lane, addr })
         }
         "storage_write" => {
             lex.expect_key("storage")?;
             let storage = mk_storage(lex.read_u32()?);
+            lex.expect_key("lane")?;
+            let lane = LaneId(lex.read_u32()?);
             lex.expect_key("src")?;
             let src = mk_var(lex.read_var()?);
-            lex.expect_key("bit_width")?;
-            let bit_width = lex.read_usize()?;
             lex.expect_key("addr")?;
             let addr = read_var_id_list(lex)?;
-            Ok(BIrStmt::StorageWrite { storage, src, bit_width, addr })
+            Ok(BIrStmt::StorageWrite { storage, lane, src, addr })
         }
         other => {
             let p = lex.pos();

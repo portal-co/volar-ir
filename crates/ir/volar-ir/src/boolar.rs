@@ -3,8 +3,37 @@
 // Boolar IR: boolean circuit IR (AND/XOR/NOT basis).
 // Pure data structure definitions; no cryptographic claims.
 use super::{ir::*, *};
-use volar_ir_common::{Node, PreInitSegment, StorageId};
+use volar_ir_common::{Node, StorageId};
 use volar_side::SideId;
+
+/// Opaque lane discriminator for Boolar storage spaces.
+///
+/// Different Volar value types may legally share one [`StorageId`]; the lane
+/// keeps those values' cells from colliding. It carries **no width
+/// semantics** — every Boolar storage cell is exactly one bit. Lowering
+/// allocates lanes by dense first-use renumbering of the source type table
+/// and emits a total `LaneId → TypeId` side table from the same pass run.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+pub struct LaneId(pub u32);
+
+/// A bit-granular pre-initialised storage segment.
+///
+/// `data[i]` initialises the flat cell at `offset + i` within the
+/// `(storage, lane)` space, using the appended-address layout produced by
+/// lowering (`base + (bit_index << addr_width)`).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+pub struct BIrPreInitSegment {
+    /// Which storage space to initialise.
+    pub storage: StorageId,
+    /// Which typed-value lane within that space.
+    pub lane: LaneId,
+    /// Flat bit-cell offset of `data[0]` within the `(storage, lane)` space.
+    pub offset: u64,
+    /// One entry per initialised cell; each is a single bit.
+    pub data: alloc::vec::Vec<bool>,
+}
 
 /// A complete Boolar circuit — a set of boolean-gate blocks.
 ///
@@ -15,8 +44,9 @@ use volar_side::SideId;
 pub struct BIrBlocks<P: Clone = ()> {
     /// The blocks of the circuit, in order. Block 0 is the entry.
     pub blocks: Vec<BIrBlock<P>>,
-    /// Pre-initialised storage segments propagated from WASM data sections.
-    pub pre_init: alloc::vec::Vec<PreInitSegment>,
+    /// Pre-initialised storage segments propagated from WASM data sections,
+    /// expanded to bit granularity by lowering.
+    pub pre_init: alloc::vec::Vec<BIrPreInitSegment>,
 }
 
 impl<P: Clone> BIrBlocks<P> {
@@ -142,32 +172,29 @@ pub enum BIrStmt<Var = IRVarId, Stor = StorageId> {
         name: alloc::string::String,
     },
 
-    /// Read `bit_width` bits from a storage space, addressed by a bit-vector.
+    /// Read one bit from a storage space, addressed by a bit-vector.
     ///
     /// `addr` is an N-bit address represented as a `Vec` of single-bit BIR
     /// variables (bit 0 = index 0 = least-significant), giving 2^N distinct
-    /// locations per `(StorageId, bit_width)` pair.
+    /// locations per `(StorageId, LaneId)` pair.
     ///
-    /// The result var represents the entire `bit_width`-wide value as a single
-    /// Boolar handle; individual bits are not separately addressable at this
-    /// level.  The lowering pass or weaver expands this as needed.
+    /// Every storage cell holds exactly one bit; multi-bit Volar values are
+    /// lowered to one read per bit, with the value's bit index appended to
+    /// the address as high-order bits (flat cell `base + (i << N)`).
     StorageRead {
         storage: Stor,
-        bit_width: usize,
+        lane: LaneId,
         addr: Vec<Var>,
     },
 
-    /// Write a `bit_width`-wide value `src` to storage, addressed by `addr`.
-    ///
-    /// `addr` is an N-bit address represented as a `Vec` of single-bit BIR
-    /// variables (bit 0 = index 0 = least-significant), giving 2^N distinct
-    /// locations per `(StorageId, bit_width)` pair.
+    /// Write the single-bit value `src` to a storage space, addressed by
+    /// `addr` (same layout as [`BIrStmt::StorageRead`]).
     ///
     /// Produces a dummy zero bit (no useful value).
     StorageWrite {
         storage: Stor,
+        lane: LaneId,
         src: Var,
-        bit_width: usize,
         addr: Vec<Var>,
     },
 }
@@ -202,15 +229,15 @@ impl<Var, Stor> BIrStmt<Var, Stor> {
             },
             BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit { call: var_fn(ctx, call)?, bit },
             BIrStmt::Rng { name } => BIrStmt::Rng { name },
-            BIrStmt::StorageRead { storage, bit_width, addr } => BIrStmt::StorageRead {
+            BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
                 storage: stor_fn(ctx, storage)?,
-                bit_width,
+                lane,
                 addr: addr.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<_, E>>()?,
             },
-            BIrStmt::StorageWrite { storage, src, bit_width, addr } => BIrStmt::StorageWrite {
+            BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
                 storage: stor_fn(ctx, storage)?,
+                lane,
                 src: var_fn(ctx, src)?,
-                bit_width,
                 addr: addr.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<_, E>>()?,
             },
         })
@@ -243,15 +270,15 @@ impl<Var, Stor> BIrStmt<Var, Stor> {
             },
             BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit { call, bit: *bit },
             BIrStmt::Rng { name } => BIrStmt::Rng { name: name.clone() },
-            BIrStmt::StorageRead { storage, bit_width, addr } => BIrStmt::StorageRead {
+            BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
                 storage,
-                bit_width: *bit_width,
+                lane: *lane,
                 addr: addr.iter().collect(),
             },
-            BIrStmt::StorageWrite { storage, src, bit_width, addr } => BIrStmt::StorageWrite {
+            BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
                 storage,
+                lane: *lane,
                 src,
-                bit_width: *bit_width,
                 addr: addr.iter().collect(),
             },
         }
@@ -283,15 +310,15 @@ impl<Var, Stor> BIrStmt<Var, Stor> {
             },
             BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit { call, bit: *bit },
             BIrStmt::Rng { name } => BIrStmt::Rng { name: name.clone() },
-            BIrStmt::StorageRead { storage, bit_width, addr } => BIrStmt::StorageRead {
+            BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
                 storage,
-                bit_width: *bit_width,
+                lane: *lane,
                 addr: addr.iter_mut().collect(),
             },
-            BIrStmt::StorageWrite { storage, src, bit_width, addr } => BIrStmt::StorageWrite {
+            BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
                 storage,
+                lane: *lane,
                 src,
-                bit_width: *bit_width,
                 addr: addr.iter_mut().collect(),
             },
         }
