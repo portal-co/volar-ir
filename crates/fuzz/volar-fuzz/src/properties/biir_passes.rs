@@ -21,7 +21,7 @@ use crate::interpreter::biir::{eval_biir, eval_biir_with_limit};
 /// Unroll limit used for `lower_to_circuit` in property B.
 /// A DAG with ≤ 3 blocks, movfuscated, traverses at most ~3 loop iterations,
 /// so 16 gives ample headroom.
-const LOWER_LIMIT: u32 = 16;
+pub(crate) const LOWER_LIMIT: u32 = 16;
 
 /// Build the input vector for the movfuscated form of a CFG.
 ///
@@ -33,7 +33,7 @@ const LOWER_LIMIT: u32 = 16;
 ///
 /// Initial call → PC = 0 (all false), state = original entry inputs padded
 /// with false on the right.
-fn movfuscated_inputs(cfg: &volar_ir::boolar::BIrBlocks<()>, entry_inputs: &[bool]) -> Vec<bool> {
+pub(crate) fn movfuscated_inputs(cfg: &volar_ir::boolar::BIrBlocks<()>, entry_inputs: &[bool]) -> Vec<bool> {
     let n_blocks = cfg.blocks.len();
     let pc_width = pc_bits_needed(n_blocks);
     let state_width = cfg.blocks.iter().map(|b| b.params as usize).max().unwrap_or(0);

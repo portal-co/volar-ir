@@ -31,7 +31,12 @@
      │
      │  circuit lowering  (lower_to_circuit.rs)
      ▼
- Boolean circuit
+ Boolean circuit ── fuse_to_circuit.rs ──▶ circuit-fused BCircuit/VCircuit
+                                              │
+                                              │ to_reversible.rs (naive
+                                              │ Bennett: (x,y) ↦ (x, y ⊕ f(x)))
+                                              ▼
+                                       Reversible circuit (RCircuit)
 ```
 
 Consumers outside this repo (in `volar`) take the boolean circuit (or the
@@ -45,7 +50,7 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | `vaffle` | VAFFLE module representation, mirrors `portal-pc-waffle-ir::Module` |
 | `volar-vaffle-target` | Lowers VAFFLE (and WAFFLE, via `portal-pc-waffle-frontend`) into Volar IR |
 | `volar-ir` | Volar IR and Boolar IR types |
-| `volar-ir-passes` | `movfuscate.rs` (movfuscation), `lower_to_circuit.rs` (circuit lowering) |
+| `volar-ir-passes` | `movfuscate.rs` (movfuscation), `lower_to_circuit.rs` (circuit lowering), `fuse_to_circuit.rs` (circuit-fused forms), `to_reversible.rs` (reversible lowering) |
 | `volar-ir-opt` | DCE, CSE, constant folding, store-forwarding — across Volar IR, Boolar IR, and VAFFLE |
 | `volar-ir-virt` | Virtualization (dispatch-mode block interpretation) |
 | `volar-lir` / `volar-lir-text` / `volar-lir-saved` | Mid-level IR shared with backend consumers in `volar` |

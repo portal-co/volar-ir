@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e19c0ff0901d38ac06cc0682937e8f430653494a702091f717802dd6265afd65 # shrinks to (cfg, inputs) = (BIrBlocks { blocks: [BIrBlock { params: 1, stmts: [], terminator: CondJmp { val: IRVarId(0), then_target: BIrTarget { block: Return, args: [] }, else_target: BIrTarget { block: Return, args: [] } } }], pre_init: [] }, [false]), ymask = 0
