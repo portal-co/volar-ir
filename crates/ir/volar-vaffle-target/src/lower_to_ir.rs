@@ -130,6 +130,20 @@ pub fn lower_vaffle_to_ir_with_control_provenance<P: Clone>(
     ctx.finish()
 }
 
+/// Like [`lower_vaffle_to_ir`], but first runs `volar_ir_opt::inline_vaffle`
+/// on the module, splicing eligible calls directly into their call sites so
+/// fewer calls reach this file's on-stack call convention (see the module
+/// doc's "Call protocol" section). Takes `module` by value (rather than
+/// `&Module<P>` like its siblings) because inlining mutates in place and
+/// [`Module`] does not implement `Clone`.
+pub fn lower_vaffle_to_ir_with_inlining<P: Clone>(
+    mut module: Module<P>,
+    budget: volar_ir_opt::inline_vaffle::InlineBudget,
+) -> (IRBlocks<P>, IRTypes) {
+    volar_ir_opt::inline_vaffle::inline_vaffle_module(&mut module, budget);
+    lower_vaffle_to_ir(&module)
+}
+
 /// Temporary diagnostic variant of [`lower_vaffle_to_ir`] that also returns
 /// every cross-block spill/reload's own `(vaffle_block, vid, address)` log
 /// line -- lets a caller cross-reference write vs. read sites for a given

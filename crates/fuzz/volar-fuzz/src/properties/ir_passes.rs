@@ -1,12 +1,14 @@
 //! Property D — `lower_ir_to_boolar` preserves semantics.
 //! Property J — `lower_vaffle_to_ir` preserves semantics.
+//! Property K — `lower_vaffle_to_ir_with_inlining` preserves semantics.
 
 use proptest::prelude::*;
+use volar_ir_opt::inline_vaffle::InlineBudget;
 use volar_ir_passes::lower_ir_to_boolar;
-use volar_vaffle_target::lower_vaffle_to_ir_with_control_provenance;
+use volar_vaffle_target::{lower_vaffle_to_ir_with_control_provenance, lower_vaffle_to_ir_with_inlining};
 
 use crate::generators::ir::gen_ir_and_inputs;
-use crate::generators::vaffle::gen_vaffle_and_inputs;
+use crate::generators::vaffle::{gen_vaffle_and_inputs, gen_vaffle_two_func_and_inputs};
 use crate::interpreter::biir::eval_biir;
 use crate::interpreter::ir::{bit_flatten, bit_unflatten, bit_width, eval_ir};
 use crate::interpreter::vaffle::eval_vaffle;
@@ -99,6 +101,75 @@ proptest! {
         (module, _func_id, _inputs) in gen_vaffle_and_inputs()
     ) {
         let _ = lower_vaffle_to_ir_with_control_provenance(&module, &());
+    }
+}
+
+// ============================================================================
+// Property K — lower_vaffle_to_ir_with_inlining preserves semantics
+// ============================================================================
+
+fn generous_inline_budget() -> InlineBudget {
+    InlineBudget { max_callee_values: 1000, total_budget: 10_000 }
+}
+
+/// `interpret_vaffle_two_func` (unlike the plain, non-extended
+/// `interpret_vaffle` property J uses) can emit `StorageRead`/`StorageWrite`
+/// values in either function's body. `lower_vaffle_to_ir` has a pre-existing
+/// param-count mismatch for a non-entry function whose `Return` includes a
+/// `StorageWrite`'s own (not semantically meaningful) "result" -- reproduced
+/// independent of inlining (same panic on the plain, non-inlining
+/// `lower_vaffle_to_ir_with_control_provenance` path), so it's a
+/// `lower_vaffle_to_ir` limitation, not something introduced by
+/// `inline_vaffle_module`. Filtered out here the same way property J already
+/// narrows its own generator's shape to what `lower_vaffle_to_ir` supports.
+fn module_has_storage_ops(module: &vaffle::Module) -> bool {
+    module.funcs.iter().any(|f| {
+        let vaffle::FuncDecl::Body(body) = f else { return false };
+        body.values.iter().any(|n| {
+            matches!(
+                &n.kind,
+                vaffle::Value::Op(volar_ir_common::Stmt::StorageRead { .. } | volar_ir_common::Stmt::StorageWrite { .. })
+            )
+        })
+    })
+}
+
+proptest! {
+    #[test]
+    fn prop_k_lower_vaffle_to_ir_with_inlining_preserves_semantics(
+        (module, func_id, inputs) in gen_vaffle_two_func_and_inputs()
+            .prop_filter("no storage ops (pre-existing lower_vaffle_to_ir limitation)", |(m, _, _)| !module_has_storage_ops(m))
+    ) {
+        // Same zero-param-entry restriction as property J (the CPS entry
+        // block takes no params -- see its comment above).
+        if !inputs.is_empty() {
+            return Ok(());
+        }
+
+        let vaffle_out = match eval_vaffle(&module, func_id, &inputs) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        let (ir, ir_types) = lower_vaffle_to_ir_with_inlining(module, generous_inline_budget());
+
+        let ir_out = match eval_ir(&ir, &ir_types, &[]) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        let flat_vaffle: Vec<bool> = vaffle_out.into_iter().flatten().collect();
+        let flat_ir: Vec<bool> = ir_out.into_iter().flatten().collect();
+
+        prop_assert_eq!(flat_ir, flat_vaffle, "lower_vaffle_to_ir_with_inlining changed the semantics");
+    }
+
+    #[test]
+    fn prop_k_lower_vaffle_to_ir_with_inlining_does_not_panic(
+        (module, _func_id, _inputs) in gen_vaffle_two_func_and_inputs()
+            .prop_filter("no storage ops (pre-existing lower_vaffle_to_ir limitation)", |(m, _, _)| !module_has_storage_ops(m))
+    ) {
+        let _ = lower_vaffle_to_ir_with_inlining(module, generous_inline_budget());
     }
 }
 

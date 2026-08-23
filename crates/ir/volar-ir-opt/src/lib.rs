@@ -6,6 +6,7 @@ extern crate alloc;
 
 pub mod biir;
 pub mod common;
+pub mod inline_vaffle;
 pub mod ir;
 pub mod store_forward;
 pub mod substitute_ir;

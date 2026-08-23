@@ -893,21 +893,17 @@ pub fn interpret_vaffle_two_func(
     // Emit Value::Call { func: FuncId(1), args }.
     // For each of func_1's param types, pick a var from f0_var_info with matching type,
     // or fall back to a Const zero of the right type.
-    let call_vid = ValueId(f0_values.len());
     let call_args: Vec<ValueId> = f1_param_type_ids
         .iter()
-        .enumerate()
-        .map(|(i, &needed_tid)| {
+        .map(|&needed_tid| {
             // Find first var in f0 with matching type.
             if let Some(&(_, _, vid)) = f0_var_info.iter().find(|(tid, _, _)| *tid == needed_tid) {
                 vid
             } else {
-                // Emit a Const zero of the right type and use it.
-                let const_vid = ValueId(f0_values.len() + i);
-                // We'll push Const values after the loop; for now just record the vid.
-                // Actually we need to do this inside the loop — push now.
-                let _ = const_vid; // avoid unused warning
-                // Recompute: we may have pushed consts already above this iteration.
+                // Emit a Const zero of the right type and use it. `cur_vid` must be
+                // computed here, not before this loop -- each fallback const shifts
+                // f0_values.len() for every subsequent iteration (and for the
+                // `call_vid` computed after this loop, below).
                 let cur_vid = ValueId(f0_values.len());
                 let w = f0_var_info
                     .iter()
@@ -924,6 +920,10 @@ pub fn interpret_vaffle_two_func(
             }
         })
         .collect();
+
+    // Computed *after* the args loop above, since that loop may itself have
+    // pushed fallback Const values into f0_values.
+    let call_vid = ValueId(f0_values.len());
 
     // Now emit the Call value itself.
     f0_values.push(Value::Call { func: FuncId(1), args: call_args });
@@ -1257,5 +1257,62 @@ mod strategies {
                 )
             },
         )
+    }
+
+    /// Two-function VAFFLE module (`func_0` calls `func_1` once) with
+    /// matching inputs for `func_0`. Exercises `Value::Call`/`Value::Output`
+    /// call sites, the only shape `inline_vaffle_module` acts on --
+    /// [`gen_vaffle_and_inputs`] and friends above only ever generate a
+    /// single, call-free function.
+    ///
+    /// `func_1` (the non-entry function) always gets at least one param, so
+    /// its body always has at least one `Value` -- `lower_vaffle_to_ir`'s
+    /// `vaffle_ssa` pass requires every non-entry function to have at least
+    /// one value (to seed provenance for the SP params it threads through),
+    /// and a param-less, stmt-less `func_1` would violate that regardless of
+    /// whether it ends up inlined.
+    pub fn gen_vaffle_two_func_and_inputs(
+    ) -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)> {
+        (
+            proptest::collection::vec(any::<u8>(), 0usize..=3usize),
+            proptest::collection::vec(any::<u8>(), 1usize..=3usize),
+        )
+            .prop_flat_map(|(raw_param_types_f0, raw_param_types_f1)| {
+                let widths_f0: Vec<usize> = raw_param_types_f0
+                    .iter()
+                    .map(|&idx| primitive_width(PRIM_TYPES[idx as usize % PRIM_TYPES.len()]))
+                    .collect();
+                let total_bits_f0: usize = widths_f0.iter().sum();
+
+                let raw_tuple = (any::<u8>(), any::<u32>(), any::<u32>(), any::<u128>(), any::<u128>());
+                let raw_stmts_f0 = proptest::collection::vec(raw_tuple.clone(), 0usize..=6usize);
+                let raw_stmts_f1 = proptest::collection::vec(raw_tuple, 0usize..=6usize);
+                let input_bits = proptest::collection::vec(any::<bool>(), total_bits_f0);
+
+                (raw_stmts_f0, raw_stmts_f1, input_bits).prop_map(
+                    move |(raw_stmts_f0, raw_stmts_f1, input_bits)| {
+                        let (module, func_id, _param_widths) = interpret_vaffle_two_func(
+                            &raw_param_types_f0,
+                            &raw_stmts_f0,
+                            &raw_param_types_f1,
+                            &raw_stmts_f1,
+                        );
+
+                        let inputs: Vec<IrValue> = {
+                            let mut off = 0;
+                            widths_f0
+                                .iter()
+                                .map(|&w| {
+                                    let v = input_bits[off..off + w].to_vec();
+                                    off += w;
+                                    v
+                                })
+                                .collect()
+                        };
+
+                        (module, func_id, inputs)
+                    },
+                )
+            })
     }
 }
