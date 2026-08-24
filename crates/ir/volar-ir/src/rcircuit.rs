@@ -2,7 +2,8 @@
 //! @ai: assisted
 // Reversible circuit-fused Boolar IR (`RCircuit`): a gate-level representation
 // of *reversible* circuits — bijective boolean maps over a fixed wire vector —
-// using the X / CNOT / Toffoli basis plus a reversible storage-exchange gate.
+// using the X / CNOT / Toffoli basis, a two-input target-XOR lookup gate,
+// plus a reversible storage-exchange gate.
 //
 // Unlike `BCircuit` (SSA values), gates here mutate wires in place; every v1
 // gate is an involution, so circuit inversion is just reversing the gate list.
@@ -53,6 +54,21 @@ pub enum RGate {
         addr: Vec<usize>,
         target: usize,
     },
+    /// Two-input lookup gate: `target ^= lut(control0, control1)`.
+    ///
+    /// `table` is a four-bit truth table in conventional display order:
+    /// bit 3 is input `00`, bit 2 is `01`, bit 1 is `10`, and bit 0 is
+    /// `11`. The upper four bits must be zero. Requiring two distinct
+    /// controls and a distinct target gives consumers a canonical atomic
+    /// representation for arbitrary two-control reversible gates.
+    ///
+    /// This variant is appended after the original variants to preserve their
+    /// derived archive discriminants.
+    XorLut2 {
+        controls: [usize; 2],
+        target: usize,
+        table: u8,
+    },
 }
 
 /// Why an [`RCircuit`] could not be constructed (gate validation failed).
@@ -69,6 +85,18 @@ pub enum RCircuitError {
         /// Zero-based position of the offending gate in the gate list.
         gate: usize,
         wire: usize,
+    },
+    /// The two controls of an [`RGate::XorLut2`] gate were the same wire.
+    ControlAliased {
+        /// Zero-based position of the offending gate in the gate list.
+        gate: usize,
+        wire: usize,
+    },
+    /// An [`RGate::XorLut2`] table used bits outside its four-bit encoding.
+    InvalidTruthTable {
+        /// Zero-based position of the offending gate in the gate list.
+        gate: usize,
+        table: u8,
     },
     /// A `StorageSwap` address exceeded 64 address bits (the storage-state
     /// model indexes cells by a `u64` cell index).
@@ -95,6 +123,12 @@ impl core::fmt::Display for RCircuitError {
             }
             RCircuitError::TargetAliased { gate, wire } => {
                 write!(f, "gate {gate} aliases control/address wire {wire} with its target")
+            }
+            RCircuitError::ControlAliased { gate, wire } => {
+                write!(f, "gate {gate} uses wire {wire} for both lookup controls")
+            }
+            RCircuitError::InvalidTruthTable { gate, table } => {
+                write!(f, "gate {gate} has invalid two-input truth table {table:#04x}")
             }
             RCircuitError::AddressTooWide { gate, width } => {
                 write!(f, "gate {gate} has a {width}-bit storage address (max 64)")
@@ -133,8 +167,9 @@ fn addr_cell_index(addr_wires: &[usize], wires: &[bool]) -> u64 {
 /// Invariants, validated on construction:
 /// - every wire index `< num_wires`;
 /// - control/target disjointness (`Cnot`: `target ≠ ctrl`; `Ccnot`: target
-///   distinct from both controls; `StorageSwap`: `target` not among the
-///   address wires);
+///   distinct from both controls; `XorLut2`: three distinct wires;
+///   `StorageSwap`: `target` not among the address wires);
+/// - `XorLut2` truth tables fit in four bits;
 /// - `StorageSwap` addresses are at most 64 bits wide.
 ///
 /// There are no SSA values here and no provenance annotation (see the plan
@@ -203,6 +238,21 @@ impl RCircuit {
                 }
                 Ok(())
             }
+            RGate::XorLut2 { controls, target, table } => {
+                check(controls[0])?;
+                check(controls[1])?;
+                check(*target)?;
+                if *target == controls[0] || *target == controls[1] {
+                    return Err(RCircuitError::TargetAliased { gate: i, wire: *target });
+                }
+                if controls[0] == controls[1] {
+                    return Err(RCircuitError::ControlAliased { gate: i, wire: controls[0] });
+                }
+                if table & !0x0f != 0 {
+                    return Err(RCircuitError::InvalidTruthTable { gate: i, table: *table });
+                }
+                Ok(())
+            }
             RGate::StorageSwap { addr, target, .. } => {
                 check(*target)?;
                 for w in addr.iter() {
@@ -242,6 +292,10 @@ impl RCircuit {
                 RGate::X(w) => wires[*w] = !wires[*w],
                 RGate::Cnot { ctrl, target } => wires[*target] ^= wires[*ctrl],
                 RGate::Ccnot { c1, c2, target } => wires[*target] ^= wires[*c1] & wires[*c2],
+                RGate::XorLut2 { controls, target, table } => {
+                    let input = ((wires[controls[0]] as u8) << 1) | wires[controls[1]] as u8;
+                    wires[*target] ^= (table >> (3 - input)) & 1 == 1;
+                }
                 RGate::StorageSwap { storage: sid, lane, addr, target } => {
                     let cell = ((*sid, *lane), addr_cell_index(addr, wires));
                     let stored = storage.remove(&cell).unwrap_or(false);
@@ -315,6 +369,30 @@ mod tests {
             RCircuitError::TargetAliased { gate: 0, wire: 0 }
         );
         assert!(RCircuit::new(3, vec![RGate::Ccnot { c1: 0, c2: 1, target: 2 }]).is_ok());
+        assert_eq!(
+            RCircuit::new(
+                3,
+                vec![RGate::XorLut2 { controls: [0, 1], target: 1, table: 0x1 }],
+            )
+            .unwrap_err(),
+            RCircuitError::TargetAliased { gate: 0, wire: 1 }
+        );
+        assert_eq!(
+            RCircuit::new(
+                3,
+                vec![RGate::XorLut2 { controls: [0, 0], target: 2, table: 0x1 }],
+            )
+            .unwrap_err(),
+            RCircuitError::ControlAliased { gate: 0, wire: 0 }
+        );
+        assert_eq!(
+            RCircuit::new(
+                3,
+                vec![RGate::XorLut2 { controls: [0, 1], target: 2, table: 0x10 }],
+            )
+            .unwrap_err(),
+            RCircuitError::InvalidTruthTable { gate: 0, table: 0x10 }
+        );
     }
 
     #[test]
@@ -336,6 +414,30 @@ mod tests {
         let inv = c.inverse();
         inv.apply_pure(&mut wires).unwrap();
         assert_eq!(wires, vec![true, true, false]);
+    }
+
+    #[test]
+    fn xor_lut2_exhaustive_semantics_and_inverse() {
+        for table in 0u8..16 {
+            let c = RCircuit::new(
+                3,
+                vec![RGate::XorLut2 { controls: [0, 1], target: 2, table }],
+            )
+            .unwrap();
+            for input in 0u8..8 {
+                let a = input & 0b100 != 0;
+                let b = input & 0b010 != 0;
+                let target = input & 0b001 != 0;
+                let lut_input = ((a as u8) << 1) | b as u8;
+                let expected = target ^ ((table >> (3 - lut_input)) & 1 == 1);
+                let mut wires = vec![a, b, target];
+
+                c.apply_pure(&mut wires).unwrap();
+                assert_eq!(wires, vec![a, b, expected], "table={table:#x}, input={input:#x}");
+                c.inverse().apply_pure(&mut wires).unwrap();
+                assert_eq!(wires, vec![a, b, target]);
+            }
+        }
     }
 
     #[test]

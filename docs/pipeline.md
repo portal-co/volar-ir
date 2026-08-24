@@ -36,7 +36,8 @@
                                               │ to_reversible.rs (naive
                                               │ Bennett: (x,y) ↦ (x, y ⊕ f(x)))
                                               ▼
-                                       Reversible circuit (RCircuit)
+                                       Reversible circuit (RCircuit:
+                                       X/CNOT/Toffoli/XorLut2/StorageSwap)
 ```
 
 Consumers outside this repo (in `volar`) take the boolean circuit (or the

@@ -32,7 +32,8 @@ This plan introduces three things:
    circuit invariant unrepresentable to violate.
 2. **A reversible circuit-fused Boolar IR** — a gate-level representation of
    *reversible* circuits (bijective boolean maps), using a reversible gate
-   basis (X / CNOT / Toffoli, plus a reversible storage-exchange gate).
+   basis (X / CNOT / Toffoli), an atomic two-input target-XOR lookup gate,
+   plus a reversible storage-exchange gate.
 3. **Two transforms:**
    - `to_circuit_fused`: ordinary (movfuscated/circuit-shaped) Volar IR and
      Boolar IR → their circuit-fused variants.
@@ -154,7 +155,6 @@ pub enum RGate {
     Cnot { ctrl: usize, target: usize },
     /// Toffoli (CCNOT): target ^= c1 & c2.
     Ccnot { c1: usize, c2: usize, target: usize },
-
     /// Reversible storage exchange: atomically SWAP the target wire with the
     /// bit stored at `((storage, lane), addr)`.
     ///
@@ -173,6 +173,9 @@ pub enum RGate {
         addr: Vec<usize>,
         target: usize,
     },
+    /// Arbitrary two-input reversible lookup: target ^= lut(c0, c1).
+    /// Appended so the original variants retain their archive discriminants.
+    XorLut2 { controls: [usize; 2], target: usize, table: u8 },
 }
 
 pub struct RCircuit {

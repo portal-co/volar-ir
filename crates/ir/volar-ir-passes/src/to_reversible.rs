@@ -420,7 +420,7 @@ pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToRevers
     let y_base = next_anc;
     let delta = y_base_prov - y_base;
     if delta > 0 {
-        let mut shift = |w: &mut usize| {
+        let shift = |w: &mut usize| {
             if *w >= y_base_prov {
                 *w -= delta;
             }
@@ -435,6 +435,13 @@ pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToRevers
                 RGate::Ccnot { c1, c2, target } => {
                     shift(c1);
                     shift(c2);
+                    shift(target);
+                }
+                RGate::XorLut2 {
+                    controls, target, ..
+                } => {
+                    shift(&mut controls[0]);
+                    shift(&mut controls[1]);
                     shift(target);
                 }
                 RGate::StorageSwap { addr, target, .. } => {
