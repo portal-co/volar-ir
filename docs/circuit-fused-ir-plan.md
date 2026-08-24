@@ -7,6 +7,12 @@ Storage synthesis in `to_reversible` has since **landed** as part of the
 Boolar 1-bit-storage refactor (see `docs/boolar-1bit-storage-plan.md`):
 `RGate::StorageSwap` now carries a `LaneId`, and `to_reversible` synthesizes
 non-destructive reads and swap-in writes instead of rejecting storage ops.
+An opt-in `ReversibleMode::Hardened` has also **landed**. It reuses the naive
+synthesis as a compute phase, uncomputes every intermediate, and applies the
+intended output XOR only when the full synthesized workspace starts at zero;
+all nonzero workspace inputs map to identity even for arbitrary borrowed-wire
+values. This is the hardened-Toffoli invariant from Appendix A of IACR ePrint
+2024/006.
 **Deferred:** text-format (`volar-ir-text`) print/parse for the fused and
 reversible forms.
 **Optimization:** `to_reversible` reuses the wire of any single-use non-input
@@ -307,6 +313,30 @@ Naive scheme (no uncomputation — garbage ancillas are expected and documented)
    correspondence between the two spaces. Watchlists are per-consumption,
    not baked into the artifact.
 
+#### Hardened mode
+
+`to_reversible_with_mode(circ, ReversibleMode::Hardened)` strengthens the
+initialized-ancilla contract to a total function over `(x, y, z, u)`:
+
+```text
+(x, y, z, u) ↦ (x, y ⊕ f(x), z, u)  if z = 0
+(x, y, z, u) ↦ (x, y,        z, u)  otherwise
+```
+
+The construction follows Appendix A of Canetti et al., *Towards
+general-purpose program obfuscation via local mixing* (IACR ePrint 2024/006),
+while reusing this pass's existing synthesis. If `U` is the naive compute phase,
+the controlled clean copy is `S = U; controlled-output-copy; U^-1`; only the
+output copy needs the dirty selector as an added control. A linear-size
+multiple-control ladder implements `T`, which toggles the selector exactly when
+all workspace wires are zero while restoring every borrowed wire. The final
+gate sequence is `S; T; S; T`.
+
+The `VarWireMap` reports both workspace and borrowed-wire sets so callers do
+not reconstruct layout assumptions. Pure Boolean statements are supported;
+storage statements fail closed in hardened mode and retain their existing
+semantics in naive mode.
+
 Cost notes (see `docs/agent-context/complexity-hints.md` conventions):
 gate count ≈ (#XOR)·1 + (#AND + #OR·5-ish)·Toffoli-equivalents + #outputs;
 wire count ≈ #vars + #outputs. Record actuals in the complexity-hints doc
@@ -349,8 +379,9 @@ shape):
 
 ## Non-goals
 
-- **No Bennett uncomputation / garbage cleanup.** The transform is explicitly
-  naive; ancilla hygiene is future work.
+- **No default behavior change.** `to_reversible` remains the low-cost naive
+  transform; Bennett uncomputation and total-workspace hardening are explicit
+  opt-in behavior through `ReversibleMode::Hardened`.
 - **No reversible Volar-IR variant.** Field-level arithmetic has no natural
   reversible gate basis at this layer; reversibility starts at the bit level.
 - **No change to movfuscation or loop-unrolling policies.** Fusion validates;

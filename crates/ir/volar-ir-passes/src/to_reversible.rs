@@ -1,7 +1,9 @@
 // @reliability: normal
 //! @ai: assisted
 //! Transform: circuit-fused Boolar (`BCircuit`) → reversible circuit
-//! ([`RCircuit`]), implementing the naive Bennett-style embedding
+//! ([`RCircuit`]), with a choice of two embeddings.
+//!
+//! [`ReversibleMode::Naive`] implements the original Bennett-style embedding
 //!
 //! ```text
 //! (x, y) ↦ (x, y ⊕ f(x))
@@ -12,11 +14,27 @@
 //! uncomputation. The `x` register is provably untouched and the `y` register
 //! accumulates `f(x)` via CNOTs.
 //!
+//! [`ReversibleMode::Hardened`] adds compute/copy/uncompute and a borrowed-wire
+//! zero test. For workspace `z` and borrowed wires `u`, it implements
+//!
+//! ```text
+//! (x, y, z, u) ↦ (x, y ⊕ f(x), z, u)  when z = 0
+//! (x, y, z, u) ↦ (x, y,        z, u)  otherwise
+//! ```
+//!
+//! for every initial value of `u`. This is the hardened-Toffoli invariant from
+//! Appendix A of Canetti et al., *Towards general-purpose program obfuscation
+//! via local mixing* (IACR ePrint 2024/006). The implementation reuses the
+//! existing Boolar synthesis as the compute phase; it controls only the output
+//! copy, then reverses the compute phase, rather than duplicating the lowering.
+//!
 //! # Wire layout
 //!
 //! ```text
-//! [ x register (params) | stmt-result ancillas | y register (outputs) | scratch ]
+//! [ x register | stmt-result workspace | y register | scratch workspace | borrowed ]
 //! ```
+//!
+//! The final borrowed region is present only in hardened mode.
 //!
 //! Stmt-result ancillas are compacted: a statement whose result is produced
 //! by a single-use XOR operand reuse (see gate cost below) allocates no
@@ -65,6 +83,12 @@ pub enum ToReversibleError {
         /// Var id of the operand defined too late.
         operand: u32,
     },
+    /// Hardened lowering is defined for pure Boolar circuits. Stateful
+    /// storage operations cannot satisfy its wire-only function contract.
+    StatefulStmtInHardenedMode {
+        /// Var id of the offending statement result.
+        var: u32,
+    },
 }
 
 impl core::fmt::Display for ToReversibleError {
@@ -76,8 +100,23 @@ impl core::fmt::Display for ToReversibleError {
             ToReversibleError::UseBeforeDef { user, operand } => {
                 write!(f, "stmt var {user} uses var {operand} before it is defined")
             }
+            ToReversibleError::StatefulStmtInHardenedMode { var } => {
+                write!(f, "stmt var {var} is stateful and cannot use hardened lowering")
+            }
         }
     }
+}
+
+/// Reversible embedding policy for [`to_reversible_with_mode`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ReversibleMode {
+    /// Preserve the existing low-gate-count lowering. Workspace wires must
+    /// start at zero and retain computed intermediates after evaluation.
+    #[default]
+    Naive,
+    /// Clean all workspace and make nonzero workspace inputs map to the
+    /// identity, independently of the borrowed-wire values.
+    Hardened,
 }
 
 /// Total map from a `BCircuit`'s var space (params followed by stmt results)
@@ -103,10 +142,23 @@ pub struct VarWireMap {
     num_wires: usize,
     /// First wire of the y register (one wire per output, in output order).
     y_base: usize,
+    /// Non-input, non-output wires allocated by Boolar synthesis. Hardened
+    /// mode tests this entire set for zero and restores it before returning.
+    workspace: Vec<usize>,
+    /// Dirty borrowed wires appended by hardened mode. They may start with
+    /// arbitrary values and are restored before returning.
+    borrowed: Vec<usize>,
+    /// Lowering mode that produced this layout.
+    mode: ReversibleMode,
 }
 
 impl VarWireMap {
-    /// Wire index carrying the value of Boolar var `v`.
+    /// Wire index carrying the value of Boolar var `v` during synthesis.
+    ///
+    /// In naive mode the computed value remains there after evaluation. In
+    /// hardened mode internal values are uncomputed before the circuit
+    /// returns, so non-parameter entries identify the compute phases rather
+    /// than a value that remains live in the final state.
     pub fn wire(&self, v: IRVarId) -> Option<usize> {
         self.map.get(v.0 as usize).copied()
     }
@@ -125,6 +177,27 @@ impl VarWireMap {
     /// accumulates `f(x)` under XOR.
     pub fn y_base(&self) -> usize {
         self.y_base
+    }
+
+    /// Workspace wires allocated by Boolar synthesis, in wire-index order.
+    ///
+    /// Naive mode requires these wires to start at zero. Hardened mode also
+    /// requires zero for the intended computation, but maps every nonzero
+    /// assignment to the identity and restores the workspace in either case.
+    pub fn workspace_wires(&self) -> &[usize] {
+        &self.workspace
+    }
+
+    /// Borrowed wires used only by hardened mode's zero test.
+    ///
+    /// Their initial values are unrestricted and the circuit restores them.
+    pub fn borrowed_wires(&self) -> &[usize] {
+        &self.borrowed
+    }
+
+    /// Mode that produced this circuit layout.
+    pub fn mode(&self) -> ReversibleMode {
+        self.mode
     }
 }
 
@@ -194,6 +267,39 @@ pub fn translate_watchlist(
 /// `circ.outputs.len()` wires below any scratch; use the returned map plus
 /// [`translate_watchlist`] to locate them symbolically.
 pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversibleError> {
+    to_reversible_with_mode(circ, ReversibleMode::Naive)
+}
+
+/// Convert a circuit-fused Boolar program with an explicit embedding policy.
+///
+/// [`ReversibleMode::Naive`] is exactly [`to_reversible`].
+/// [`ReversibleMode::Hardened`] accepts pure Boolean statements and guarantees
+/// that all workspace and borrowed wires are restored: zero workspace selects
+/// the `(x, y ⊕ f(x))` embedding, while nonzero workspace selects identity.
+pub fn to_reversible_with_mode(
+    circ: &BCircuit,
+    mode: ReversibleMode,
+) -> Result<(RCircuit, VarWireMap), ToReversibleError> {
+    if mode == ReversibleMode::Hardened {
+        for (i, node) in circ.stmts.iter().enumerate() {
+            if matches!(node.kind, BIrStmt::StorageRead { .. } | BIrStmt::StorageWrite { .. }) {
+                return Err(ToReversibleError::StatefulStmtInHardenedMode {
+                    var: circ.params + i as u32,
+                });
+            }
+        }
+    }
+
+    let (circuit, map) = synthesize_naive(circ)?;
+    match mode {
+        ReversibleMode::Naive => Ok((circuit, map)),
+        ReversibleMode::Hardened => Ok(harden(circ, circuit, map)),
+    }
+}
+
+/// Shared Boolar synthesis used directly by naive mode and as the compute
+/// phase of hardened mode.
+fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversibleError> {
     // ---- Use-count analysis -------------------------------------------------
     // Counts of each var in every *reader* position: stmt operands, storage
     // addr/src lists, and outputs. A var with count == 1 that is not an input
@@ -472,10 +578,160 @@ pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToRevers
     let circuit = RCircuit::new(num_wires_total, gates).expect(
         "to_reversible synthesis produces validated gates by construction",
     );
+    let y_end = y_base + circ.outputs.len();
+    let workspace = (params as usize..y_base)
+        .chain(y_end..num_wires_total)
+        .collect();
     Ok((
         circuit,
-        VarWireMap { map: map_vec, num_wires: num_wires_total, y_base },
+        VarWireMap {
+            map: map_vec,
+            num_wires: num_wires_total,
+            y_base,
+            workspace,
+            borrowed: Vec::new(),
+            mode: ReversibleMode::Naive,
+        },
     ))
+}
+
+/// Upgrade the shared naive synthesis to the hardened embedding.
+///
+/// Let `U` be the naive compute phase before its final output CNOTs. A
+/// controlled clean copy is `S = U; controlled-copy; U^-1`; because `U` runs
+/// unconditionally, no new control needs to be synthesized for its nonlinear
+/// gates. Let `T` toggle one dirty borrowed bit exactly when all workspace
+/// wires are zero. `S; T; S; T` then runs exactly one clean copy for zero
+/// workspace and either zero or two copies otherwise.
+fn harden(
+    circ: &BCircuit,
+    circuit: RCircuit,
+    mut map: VarWireMap,
+) -> (RCircuit, VarWireMap) {
+    let output_count = circ.outputs.len();
+    let compute_len = circuit.gates.len() - output_count;
+    let compute = &circuit.gates[..compute_len];
+
+    if map.workspace.is_empty() {
+        // There is nothing illegitimate to guard. The only possible Boolar
+        // values are input parameters, so the naive output-copy circuit is
+        // already clean and total over its complete wire space.
+        map.mode = ReversibleMode::Hardened;
+        return (circuit, map);
+    }
+
+    let borrowed_base = circuit.num_wires;
+    let borrowed: Vec<usize> =
+        (borrowed_base..borrowed_base + map.workspace.len()).collect();
+    let selector = *borrowed.last().expect("nonempty workspace has a selector");
+
+    let mut controlled_clean_copy = Vec::with_capacity(compute.len() * 2 + output_count);
+    controlled_clean_copy.extend_from_slice(compute);
+    for (k, out) in circ.outputs.iter().enumerate() {
+        controlled_clean_copy.push(RGate::Ccnot {
+            c1: map.map[out.0 as usize],
+            c2: selector,
+            target: map.y_base + k,
+        });
+    }
+    controlled_clean_copy.extend(compute.iter().rev().cloned());
+
+    let mut zero_test = Vec::new();
+    append_zero_test(
+        &mut zero_test,
+        &map.workspace,
+        selector,
+        &borrowed[..borrowed.len() - 1],
+    );
+
+    let mut gates = Vec::with_capacity(2 * (controlled_clean_copy.len() + zero_test.len()));
+    gates.extend_from_slice(&controlled_clean_copy);
+    gates.extend_from_slice(&zero_test);
+    gates.extend_from_slice(&controlled_clean_copy);
+    gates.extend_from_slice(&zero_test);
+
+    map.num_wires = borrowed_base + borrowed.len();
+    map.borrowed = borrowed;
+    map.mode = ReversibleMode::Hardened;
+    let hardened = RCircuit::new(map.num_wires, gates)
+        .expect("hardened reversible synthesis produces validated gates by construction");
+    (hardened, map)
+}
+
+/// Append `target ^= 1` iff every control wire is zero, restoring all dirty
+/// borrowed wires for every initial assignment.
+fn append_zero_test(
+    gates: &mut Vec<RGate>,
+    controls: &[usize],
+    target: usize,
+    dirty: &[usize],
+) {
+    debug_assert!(!controls.is_empty());
+    debug_assert!(dirty.len() >= controls.len().saturating_sub(2));
+
+    // Turn negative controls into positive controls by conjugating the
+    // multiple-controlled NOT with X on each workspace wire.
+    gates.extend(controls.iter().copied().map(RGate::X));
+    append_mcx_with_dirty(gates, controls, target, dirty);
+    gates.extend(controls.iter().copied().map(RGate::X));
+}
+
+/// Append a positive multiple-controlled NOT using arbitrary-state borrowed
+/// wires. The `n >= 3` ladder first produces the desired conjunction plus all
+/// dirty-wire pollution; repeating the ladder without its first step cancels
+/// exactly that pollution. This is the standard linear-size dirty-ancilla
+/// construction (4n - 8 Toffoli gates).
+fn append_mcx_with_dirty(
+    gates: &mut Vec<RGate>,
+    controls: &[usize],
+    target: usize,
+    dirty: &[usize],
+) {
+    match controls {
+        [control] => gates.push(RGate::Cnot { ctrl: *control, target }),
+        [c1, c2] => gates.push(RGate::Ccnot { c1: *c1, c2: *c2, target }),
+        _ => {
+            let ladder_len = controls.len() - 2;
+            let ladder = &dirty[..ladder_len];
+
+            append_dirty_ladder(gates, controls, target, ladder, true);
+            append_dirty_ladder(gates, controls, target, ladder, false);
+        }
+    }
+}
+
+/// One compute/use/uncompute ladder. Including the first rung adds the full
+/// control product; omitting it reproduces only the terms caused by the
+/// borrowed wires' initial values.
+fn append_dirty_ladder(
+    gates: &mut Vec<RGate>,
+    controls: &[usize],
+    target: usize,
+    dirty: &[usize],
+    include_first: bool,
+) {
+    let first = usize::from(!include_first);
+    for i in first..dirty.len() {
+        let (c1, c2) = if i == 0 {
+            (controls[0], controls[1])
+        } else {
+            (dirty[i - 1], controls[i + 1])
+        };
+        gates.push(RGate::Ccnot { c1, c2, target: dirty[i] });
+    }
+    gates.push(RGate::Ccnot {
+        c1: *dirty.last().expect("three controls require a borrowed wire"),
+        c2: *controls.last().expect("nonempty controls"),
+        target,
+    });
+    for i in (first..dirty.len()).rev() {
+        let (c1, c2) = if i == 0 {
+            (controls[0], controls[1])
+        } else {
+            (dirty[i - 1], controls[i + 1])
+        };
+        gates.push(RGate::Ccnot { c1, c2, target: dirty[i] });
+    }
 }
 
 // ============================================================================
@@ -557,6 +813,120 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Exhaust the complete hardened state space for a small pure circuit.
+    /// The assertion covers the paper's stronger contract, not only the
+    /// initialized-ancilla path: x/z/u are restored for every assignment and
+    /// y changes exactly when z was all zero.
+    fn check_hardened_semantics(circ: &BCircuit) {
+        let (rc, map) =
+            to_reversible_with_mode(circ, ReversibleMode::Hardened).expect("converts");
+        assert_eq!(map.mode(), ReversibleMode::Hardened);
+        assert_eq!(map.num_wires(), rc.num_wires);
+        assert_eq!(map.borrowed_wires().len(), map.workspace_wires().len());
+
+        let n_params = circ.params as usize;
+        let n_out = circ.outputs.len();
+        let state_bits = n_params
+            + n_out
+            + map.workspace_wires().len()
+            + map.borrowed_wires().len();
+        assert_eq!(state_bits, rc.num_wires);
+        assert!(state_bits <= 12, "test circuit state space must stay small");
+
+        for mask in 0usize..(1usize << state_bits) {
+            let mut wires = vec![false; rc.num_wires];
+            let mut next_bit = 0usize;
+            for wire in 0..n_params {
+                wires[wire] = (mask >> next_bit) & 1 == 1;
+                next_bit += 1;
+            }
+            for wire in map.y_base()..map.y_base() + n_out {
+                wires[wire] = (mask >> next_bit) & 1 == 1;
+                next_bit += 1;
+            }
+            for &wire in map.workspace_wires() {
+                wires[wire] = (mask >> next_bit) & 1 == 1;
+                next_bit += 1;
+            }
+            for &wire in map.borrowed_wires() {
+                wires[wire] = (mask >> next_bit) & 1 == 1;
+                next_bit += 1;
+            }
+
+            let before = wires.clone();
+            let workspace_is_zero = map.workspace_wires().iter().all(|&w| !before[w]);
+            let input: Vec<bool> = before[..n_params].to_vec();
+            let values = eval_bir(circ, &input);
+
+            rc.apply_pure(&mut wires).expect("pure hardened circuit");
+            for wire in 0..rc.num_wires {
+                let output_index = wire.checked_sub(map.y_base()).filter(|&k| k < n_out);
+                let expected = if let Some(k) = output_index {
+                    before[wire]
+                        ^ (workspace_is_zero
+                            && values[circ.outputs[k].0 as usize])
+                } else {
+                    before[wire]
+                };
+                assert_eq!(
+                    wires[wire], expected,
+                    "mask={mask:#x}, wire={wire}, z0={workspace_is_zero}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dirty_zero_test_is_exact_and_restores_borrowed_wires() {
+        for width in 1usize..=6 {
+            let controls: Vec<usize> = (0..width).collect();
+            let target = width;
+            let dirty: Vec<usize> = (width + 1..width + 1 + width.saturating_sub(2)).collect();
+            let mut gates = Vec::new();
+            append_zero_test(&mut gates, &controls, target, &dirty);
+            let rc = RCircuit::new(width + 1 + dirty.len(), gates).expect("valid zero test");
+
+            for mask in 0usize..(1usize << rc.num_wires) {
+                let mut wires: Vec<bool> =
+                    (0..rc.num_wires).map(|i| (mask >> i) & 1 == 1).collect();
+                let before = wires.clone();
+                rc.apply_pure(&mut wires).expect("pure zero test");
+
+                for &wire in controls.iter().chain(dirty.iter()) {
+                    assert_eq!(wires[wire], before[wire], "width={width}, mask={mask:#x}");
+                }
+                let all_zero = controls.iter().all(|&wire| !before[wire]);
+                assert_eq!(
+                    wires[target],
+                    before[target] ^ all_zero,
+                    "width={width}, mask={mask:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hardened_mode_is_total_over_workspace_and_borrowed_wires() {
+        // OR allocates one result and two scratch wires, exercising the
+        // n >= 3 dirty-ancilla zero-test path.
+        let mut circ = BCircuit::new(2);
+        let out = build(&mut circ, BIrStmt::Or(IRVarId(0), IRVarId(1)));
+        circ.outputs = vec![out];
+        check_hardened_semantics(&circ);
+    }
+
+    #[test]
+    fn hardened_mode_without_workspace_keeps_the_direct_embedding() {
+        let mut circ = BCircuit::new(2);
+        circ.outputs = vec![IRVarId(0), IRVarId(1)];
+        let (rc, map) =
+            to_reversible_with_mode(&circ, ReversibleMode::Hardened).expect("converts");
+        assert!(map.workspace_wires().is_empty());
+        assert!(map.borrowed_wires().is_empty());
+        assert_eq!(rc.gates().len(), 2);
+        check_hardened_semantics(&circ);
     }
 
     #[test]
@@ -832,5 +1202,25 @@ mod tests {
                 "cell[0] must hold written bit"
             );
         }
+    }
+
+    #[test]
+    fn hardened_mode_rejects_stateful_storage_statements() {
+        let mut circ = BCircuit::new(1);
+        let read = circ.push_stmt(
+            BIrStmt::StorageRead {
+                storage: StorageId::DEFAULT,
+                lane: LaneId(0),
+                addr: vec![IRVarId(0)],
+            },
+            (),
+        );
+        circ.outputs = vec![read];
+
+        assert_eq!(
+            to_reversible_with_mode(&circ, ReversibleMode::Hardened).unwrap_err(),
+            ToReversibleError::StatefulStmtInHardenedMode { var: 1 }
+        );
+        assert!(to_reversible(&circ).is_ok(), "naive storage lowering remains available");
     }
 }

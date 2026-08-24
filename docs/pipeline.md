@@ -33,12 +33,24 @@
      ▼
  Boolean circuit ── fuse_to_circuit.rs ──▶ circuit-fused BCircuit/VCircuit
                                               │
-                                              │ to_reversible.rs (naive
-                                              │ Bennett: (x,y) ↦ (x, y ⊕ f(x)))
+                                              │ to_reversible.rs
+                                              │  naive: (x,y) ↦ (x,y ⊕ f(x))
+                                              │  hardened: zero workspace runs
+                                              │  f; nonzero workspace is identity
                                               ▼
                                        Reversible circuit (RCircuit:
                                        X/CNOT/Toffoli/XorLut2/StorageSwap)
 ```
+
+`to_reversible` preserves the original naive behavior. Library consumers opt
+into the clean, total-workspace transform with
+`to_reversible_with_mode(..., ReversibleMode::Hardened)`. Hardened mode follows
+the reversible embedding invariant in Appendix A of Canetti, Chamon, Mucciolo,
+and Ruckenstein, *Towards general-purpose program obfuscation via local mixing*
+(IACR ePrint 2024/006): it restores both synthesized workspace and arbitrary
+dirty borrowed wires, and becomes identity for every nonzero workspace input.
+Stateful storage statements remain available in naive mode and are rejected by
+hardened mode because they do not have the required pure wire-function contract.
 
 Consumers outside this repo (in `volar`) take the boolean circuit (or the
 movfuscated Volar IR directly) into ZK proof weaving or garbled-circuit

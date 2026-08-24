@@ -28,6 +28,7 @@ pub use fuse_to_circuit::{
     lower_to_circuit_fused, to_circuit_fused_boolar, to_circuit_fused_volar,
 };
 pub use to_reversible::{
-    to_reversible, translate_watchlist, ToReversibleError, UnknownVar, ValueWatchlist,
-    VarWireMap, WireWatchEntry, WireWatchlist,
+    to_reversible, to_reversible_with_mode, translate_watchlist, ReversibleMode,
+    ToReversibleError, UnknownVar, ValueWatchlist, VarWireMap, WireWatchEntry,
+    WireWatchlist,
 };
