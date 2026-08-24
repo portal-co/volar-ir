@@ -1,0 +1,13 @@
+[package]
+name = "retro-cpus"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+publish = false
+
+[dependencies]
+volar-ir = { path = "../volar-ir" }
+volar-ir-common = { path = "../volar-ir-common" }
+
+[dev-dependencies]
+volar-fuzz = { path = "../../fuzz/volar-fuzz" }

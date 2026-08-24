@@ -15,6 +15,7 @@ members = [
     "crates/ir/volar-lir-text",
     "crates/ir/volar-lir-saved",
     "crates/ir/volar-lir-test-corpus",
+    "crates/ir/retro-cpus",
     "crates/ir/volar-riscv-test-programs",
     "crates/ir/volar-ssa-lir-replay",
     "crates/fuzz/volar-fuzz",
