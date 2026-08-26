@@ -1,0 +1,18 @@
+[package]
+name = "volar-wasm-circuit-import"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Direct bounded WASM/WAFFLE import into circuit-fused Volar IR"
+repository.workspace = true
+
+[dependencies]
+volar-ir.workspace = true
+volar-ir-common.workspace = true
+volar-lir.workspace = true
+portal-pc-waffle-ir.workspace = true
+portal-pc-waffle-frontend.workspace = true
+volar-circuit-exec-core = { path = "../../../../llvm-bridge/crates/volar-circuit-exec-core" }
+
+[dev-dependencies]
+wat = "1.212.0"

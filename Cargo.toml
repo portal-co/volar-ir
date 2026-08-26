@@ -23,6 +23,7 @@ members = [
     "crates/backends/volar-wasm-backend",
     "crates/frontends/volar-llvm-vaffle-import",
     "crates/frontends/volar-llvm-ir-import",
+    "crates/frontends/volar-wasm-circuit-import",
     "crates/pass/volar-llvm-plugin-api",
     "crates/pass/volar-llvm-plugin",
 ]
