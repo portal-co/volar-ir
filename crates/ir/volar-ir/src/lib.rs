@@ -5,6 +5,8 @@ extern crate alloc;
 pub mod boolar;
 pub mod circuit;
 pub mod ir;
+#[cfg(feature = "lazy")]
+pub mod lazy;
 pub mod public;
 pub mod rcircuit;
 
