@@ -12,8 +12,8 @@ use alloc::vec::Vec;
 use volar_ir_common::Node;
 
 use crate::{
-    boolar::{BIrBlocks, BIrBlock, BIrPreInitSegment, BIrStmt},
-    ir::{IRBlockTargetId, IRBranchTarget, IRBlocks, IRTerminator, IRTypeId, IRVarId},
+    boolar::{BIrBlock, BIrBlocks, BIrPreInitSegment, BIrStmt},
+    ir::{IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId, IRVarId},
 };
 
 /// Why an [`IRBlocks`] / [`BIrBlocks`] could not be fused into a circuit.
@@ -43,17 +43,26 @@ impl core::fmt::Display for CircuitFusionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             CircuitFusionError::NotSingleBlock { found } => {
-                write!(f, "circuit fusion requires exactly one block, found {found}")
+                write!(
+                    f,
+                    "circuit fusion requires exactly one block, found {found}"
+                )
             }
             CircuitFusionError::NotReturnTerminator => {
-                write!(f, "circuit fusion requires a `Jmp {{ dest: Return }}` terminator")
+                write!(
+                    f,
+                    "circuit fusion requires a `Jmp {{ dest: Return }}` terminator"
+                )
             }
             CircuitFusionError::ModuleLevelStateUnsupported => write!(
                 f,
                 "VCircuit fusion rejects oracle/action/RNG declarations and pre-init segments"
             ),
             CircuitFusionError::OutputVarOutOfRange { var, var_space } => {
-                write!(f, "output var {var} out of range (var space size {var_space})")
+                write!(
+                    f,
+                    "output var {var} out of range (var space size {var_space})"
+                )
             }
         }
     }
@@ -74,7 +83,10 @@ impl core::fmt::Display for CircuitFusionError {
 /// The type parameter `P` is a per-statement provenance annotation carried on
 /// each [`Node`], exactly as in the unfused IRs.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct VCircuit<P: Clone = ()> {
     /// Input parameters, typed as in [`crate::ir::IRBlock::params`].
     pub params: Vec<IRTypeId>,
@@ -86,7 +98,11 @@ pub struct VCircuit<P: Clone = ()> {
 impl<P: Clone> VCircuit<P> {
     /// Construct an empty fused circuit with the given input types.
     pub fn new(params: Vec<IRTypeId>) -> Self {
-        VCircuit { params, stmts: Vec::new(), outputs: Vec::new() }
+        VCircuit {
+            params,
+            stmts: Vec::new(),
+            outputs: Vec::new(),
+        }
     }
 
     /// Append a statement with provenance and no side tag.
@@ -122,7 +138,9 @@ impl<P: Clone> VCircuit<P> {
             blocks.pre_init.is_empty(),
         )?;
         let [block] = &blocks.blocks[..] else {
-            return Err(CircuitFusionError::NotSingleBlock { found: blocks.blocks.len() });
+            return Err(CircuitFusionError::NotSingleBlock {
+                found: blocks.blocks.len(),
+            });
         };
         let outputs = match &block.terminator {
             IRTerminator::Jmp { target } => match target.dest {
@@ -134,7 +152,10 @@ impl<P: Clone> VCircuit<P> {
         let var_space = block.params.len() as u32 + block.stmts.len() as u32;
         for v in &outputs {
             if v.0 >= var_space {
-                return Err(CircuitFusionError::OutputVarOutOfRange { var: v.0, var_space });
+                return Err(CircuitFusionError::OutputVarOutOfRange {
+                    var: v.0,
+                    var_space,
+                });
             }
         }
         Ok(VCircuit {
@@ -146,10 +167,17 @@ impl<P: Clone> VCircuit<P> {
 
     /// Map provenance annotations using a [`ProvenanceHandler`]. `side` is
     /// untouched — provenance and side are independent axes.
-    pub fn map_prov_with_handler<H: crate::ProvenanceHandler<P>>(self, handler: &H) -> VCircuit<H::Output> {
+    pub fn map_prov_with_handler<H: crate::ProvenanceHandler<P>>(
+        self,
+        handler: &H,
+    ) -> VCircuit<H::Output> {
         VCircuit {
             params: self.params,
-            stmts: self.stmts.into_iter().map(|n| n.map_prov(|p| handler.map(&p))).collect(),
+            stmts: self
+                .stmts
+                .into_iter()
+                .map(|n| n.map_prov(|p| handler.map(&p)))
+                .collect(),
             outputs: self.outputs,
         }
     }
@@ -198,7 +226,10 @@ impl<P: Clone> From<VCircuit<P>> for IRBlocks<P> {
 /// `Jmp(BIrTarget { block: Return, args })` terminator becomes
 /// [`outputs`](Self::outputs), and there is no terminator field.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct BCircuit<P: Clone = ()> {
     /// Number of input parameters (all bits).
     pub params: u32,
@@ -212,7 +243,12 @@ pub struct BCircuit<P: Clone = ()> {
 impl<P: Clone> BCircuit<P> {
     /// Construct an empty fused circuit with `params` input bits.
     pub fn new(params: u32) -> Self {
-        BCircuit { params, stmts: Vec::new(), pre_init: Vec::new(), outputs: Vec::new() }
+        BCircuit {
+            params,
+            stmts: Vec::new(),
+            pre_init: Vec::new(),
+            outputs: Vec::new(),
+        }
     }
 
     /// Append a statement with provenance and no side tag.
@@ -223,7 +259,12 @@ impl<P: Clone> BCircuit<P> {
 
     /// Append a statement with provenance and an optional side tag.
     /// Returns the [`IRVarId`] for this statement (= index in the var space).
-    pub fn push_stmt_with_side(&mut self, stmt: BIrStmt, prov: P, side: Option<volar_side::SideId>) -> IRVarId {
+    pub fn push_stmt_with_side(
+        &mut self,
+        stmt: BIrStmt,
+        prov: P,
+        side: Option<volar_side::SideId>,
+    ) -> IRVarId {
         let id = IRVarId(self.params + self.stmts.len() as u32);
         self.stmts.push(Node::new(stmt, prov, side));
         id
@@ -241,7 +282,9 @@ impl<P: Clone> BCircuit<P> {
     /// inline.
     pub fn try_from_ir(blocks: &BIrBlocks<P>) -> Result<Self, CircuitFusionError> {
         let [block] = &blocks.blocks[..] else {
-            return Err(CircuitFusionError::NotSingleBlock { found: blocks.blocks.len() });
+            return Err(CircuitFusionError::NotSingleBlock {
+                found: blocks.blocks.len(),
+            });
         };
         let outputs = match &block.terminator {
             crate::boolar::BIrTerminator::Jmp(target) => match target.block {
@@ -253,7 +296,10 @@ impl<P: Clone> BCircuit<P> {
         let var_space = block.params + block.stmts.len() as u32;
         for v in &outputs {
             if v.0 >= var_space {
-                return Err(CircuitFusionError::OutputVarOutOfRange { var: v.0, var_space });
+                return Err(CircuitFusionError::OutputVarOutOfRange {
+                    var: v.0,
+                    var_space,
+                });
             }
         }
         Ok(BCircuit {
@@ -266,10 +312,17 @@ impl<P: Clone> BCircuit<P> {
 
     /// Map provenance annotations using a [`ProvenanceHandler`]. `side` is
     /// untouched — provenance and side are independent axes.
-    pub fn map_prov_with_handler<H: crate::ProvenanceHandler<P>>(self, handler: &H) -> BCircuit<H::Output> {
+    pub fn map_prov_with_handler<H: crate::ProvenanceHandler<P>>(
+        self,
+        handler: &H,
+    ) -> BCircuit<H::Output> {
         BCircuit {
             params: self.params,
-            stmts: self.stmts.into_iter().map(|n| n.map_prov(|p| handler.map(&p))).collect(),
+            stmts: self
+                .stmts
+                .into_iter()
+                .map(|n| n.map_prov(|p| handler.map(&p)))
+                .collect(),
             pre_init: self.pre_init,
             outputs: self.outputs,
         }
@@ -285,7 +338,11 @@ impl<P: Clone> BCircuit<P> {
             args: self.outputs,
         });
         BIrBlocks {
-            blocks: alloc::vec![BIrBlock { params: self.params, stmts: self.stmts, terminator }],
+            blocks: alloc::vec![BIrBlock {
+                params: self.params,
+                stmts: self.stmts,
+                terminator
+            }],
             pre_init: self.pre_init,
         }
     }
@@ -304,7 +361,6 @@ impl<P: Clone> From<BCircuit<P>> for BIrBlocks<P> {
         circuit.to_bir_blocks()
     }
 }
-
 
 // ============================================================================
 // Shared validation helpers

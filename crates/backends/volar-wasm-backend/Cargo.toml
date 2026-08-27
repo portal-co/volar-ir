@@ -16,3 +16,6 @@ wasm-encoder = { version = "0.240.0", default-features = false, features = ["was
 wasmtime = "46.0.1"
 volar-lir-saved = { workspace = true }
 volar-lir-test-corpus = { workspace = true }
+volar-ir.workspace = true
+volar-ir-passes.workspace = true
+volar-ir-common.workspace = true

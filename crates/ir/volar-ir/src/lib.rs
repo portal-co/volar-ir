@@ -11,4 +11,4 @@ pub mod public;
 pub mod rcircuit;
 
 /// Re-export provenance handler types for convenience.
-pub use volar_provenance::{self, ProvenanceHandler, NoProvenance, KeepProvenance, MapProvenance};
+pub use volar_provenance::{self, KeepProvenance, MapProvenance, NoProvenance, ProvenanceHandler};

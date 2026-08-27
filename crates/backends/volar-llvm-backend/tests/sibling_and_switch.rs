@@ -9,9 +9,11 @@
 use std::{fs, process::Command};
 use tempfile::TempDir;
 
-use inkwell::context::Context;
-use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::OptimizationLevel;
+use inkwell::context::Context;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
 
 use volar_lir::{BranchTarget, IcmpPred, LirTarget, LirType};
 use volar_llvm_backend::LlvmBackend;
@@ -71,8 +73,13 @@ fn compile_and_run(backend: LlvmBackend<'_>, decl: &str, main_body: &str) -> (St
         .expect("cc not found — install a C compiler");
     assert!(status.success(), "linking failed.\nC stub:\n{c_src}");
 
-    let output = Command::new(&exe_path).output().expect("failed to run compiled program");
-    (String::from_utf8(output.stdout).expect("non-UTF8 output"), ir_text)
+    let output = Command::new(&exe_path)
+        .output()
+        .expect("failed to run compiled program");
+    (
+        String::from_utf8(output.stdout).expect("non-UTF8 output"),
+        ir_text,
+    )
 }
 
 // ============================================================================
@@ -93,7 +100,13 @@ fn sibling_call_mutual_recursion() {
     let is_zero = b.icmp(IcmpPred::Eq, n.clone(), zero);
     let then_block = b.create_block();
     let else_block = b.create_block();
-    b.branch(is_zero, then_block, BranchTarget::args(vec![]), else_block, BranchTarget::args(vec![]));
+    b.branch(
+        is_zero,
+        then_block,
+        BranchTarget::args(vec![]),
+        else_block,
+        BranchTarget::args(vec![]),
+    );
     b.switch_to_block(then_block);
     let t = b.iconst(LirType::Bool, 1);
     b.ret(&[t]);
@@ -111,14 +124,25 @@ fn sibling_call_mutual_recursion() {
     let is_zero2 = b.icmp(IcmpPred::Eq, n2.clone(), zero2);
     let then_block2 = b.create_block();
     let else_block2 = b.create_block();
-    b.branch(is_zero2, then_block2, BranchTarget::args(vec![]), else_block2, BranchTarget::args(vec![]));
+    b.branch(
+        is_zero2,
+        then_block2,
+        BranchTarget::args(vec![]),
+        else_block2,
+        BranchTarget::args(vec![]),
+    );
     b.switch_to_block(then_block2);
     let f = b.iconst(LirType::Bool, 0);
     b.ret(&[f]);
     b.switch_to_block(else_block2);
     let one2 = b.iconst(LirType::U32, 1);
     let n2_minus_1 = b.sub(n2, one2);
-    let result2 = b.call("is_even", &[LirType::U32], &[n2_minus_1], Some(LirType::Bool));
+    let result2 = b.call(
+        "is_even",
+        &[LirType::U32],
+        &[n2_minus_1],
+        Some(LirType::Bool),
+    );
     b.ret(&result2);
     b.end_function();
 
@@ -178,7 +202,10 @@ fn switch_heterogeneous_args() {
         r#"  printf("%u %u %u\n", classify(1), classify(2), classify(9));"#,
     );
     assert_eq!(out.trim(), "100 200 4294967295");
-    assert!(ir.contains("switch i32"), "expected a native LLVM `switch`, got:\n{ir}");
+    assert!(
+        ir.contains("switch i32"),
+        "expected a native LLVM `switch`, got:\n{ir}"
+    );
 }
 
 // ============================================================================
@@ -190,7 +217,11 @@ fn block_addr_dyn_jump() {
     let ctx = Context::create();
     let mut b = LlvmBackend::new(&ctx, "dyn_jump_test");
 
-    let (entry, params) = b.begin_function("dispatch", &[LirType::Bool, LirType::U32], Some(LirType::U32));
+    let (entry, params) = b.begin_function(
+        "dispatch",
+        &[LirType::Bool, LirType::U32],
+        Some(LirType::U32),
+    );
     let cond = params[0][0].clone();
     let n = params[1][0].clone();
 
@@ -223,8 +254,14 @@ fn block_addr_dyn_jump() {
         r#"  printf("%u %u\n", dispatch(true, 5), dispatch(false, 5));"#,
     );
     assert_eq!(out.trim(), "15 25");
-    assert!(ir.contains("blockaddress("), "expected a native `blockaddress` constant, got:\n{ir}");
-    assert!(ir.contains("indirectbr "), "expected a native `indirectbr`, got:\n{ir}");
+    assert!(
+        ir.contains("blockaddress("),
+        "expected a native `blockaddress` constant, got:\n{ir}"
+    );
+    assert!(
+        ir.contains("indirectbr "),
+        "expected a native `indirectbr`, got:\n{ir}"
+    );
 }
 
 // ============================================================================

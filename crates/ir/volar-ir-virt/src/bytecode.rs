@@ -31,9 +31,7 @@ pub struct HandlerImmSchema {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum AppendedRegionKind {
     /// Stepping sub-interpreter (cross-block dedup).
-    SharedCore {
-        members: Vec<(usize, u32, u32)>,
-    },
+    SharedCore { members: Vec<(usize, u32, u32)> },
     /// Counted repeat — typically one descriptor row.
     RerollLoop {
         owner_block: usize,

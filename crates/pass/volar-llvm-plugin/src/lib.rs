@@ -46,7 +46,9 @@ use std::ffi::c_char;
 use std::mem::ManuallyDrop;
 
 use inkwell::context::Context;
-use inkwell::llvm_sys::core::{LLVMGetArgOperand, LLVMGetInitializer, LLVMGetNumOperands, LLVMGetOperand};
+use inkwell::llvm_sys::core::{
+    LLVMGetArgOperand, LLVMGetInitializer, LLVMGetNumOperands, LLVMGetOperand,
+};
 use inkwell::llvm_sys::linker::LLVMLinkModules2;
 use inkwell::llvm_sys::prelude::LLVMModuleRef;
 use inkwell::module::Module;
@@ -86,7 +88,10 @@ unsafe extern "C" {
 /// markers were found, `1` means at least one function was reimported, and
 /// `-1` returns an allocated diagnostic.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn volar_llvm_plugin_run(raw_module: LLVMModuleRef, error: *mut *mut c_char) -> i32 {
+pub unsafe extern "C" fn volar_llvm_plugin_run(
+    raw_module: LLVMModuleRef,
+    error: *mut *mut c_char,
+) -> i32 {
     // SAFETY: this empty C++ function deliberately anchors the pass-plugin
     // archive member containing llvmGetPassPluginInfo in the final cdylib.
     unsafe { volar_llvm_plugin_link_anchor() };
@@ -117,9 +122,12 @@ fn run_on_module<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Result<
             .call
             .get_called_fn_value()
             .expect("find_calls_to only returns calls with a resolved callee");
-        volar_llvm_pass_support::validate_marker_declaration(callee, MARKER, 1).map_err(PassError::new)?;
+        volar_llvm_pass_support::validate_marker_declaration(callee, MARKER, 1)
+            .map_err(PassError::new)?;
         if found.call.count_arguments() != 1 {
-            return Err(PassError::new("__volar_entry must take exactly (ptr target)"));
+            return Err(PassError::new(
+                "__volar_entry must take exactly (ptr target)",
+            ));
         }
         // SAFETY: count_arguments above proves this argument slot exists.
         let raw_target = unsafe { LLVMGetArgOperand(found.call.as_value_ref(), 0) };
@@ -140,7 +148,8 @@ fn run_on_module<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Result<
         .filter(|found| volar_llvm_pass_support::is_marker_wrapper(found.caller, MARKER))
         .map(|found| (found.caller.as_value_ref() as usize, found.caller))
         .collect();
-    let retention_globals = volar_llvm_pass_support::retained_wrapper_globals(module, &wrapper_owners);
+    let retention_globals =
+        volar_llvm_pass_support::retained_wrapper_globals(module, &wrapper_owners);
 
     let mut discarded: std::collections::BTreeSet<usize> = wrapper_owners.keys().copied().collect();
     discarded.extend(retention_globals.keys().copied());
@@ -194,8 +203,9 @@ fn discard_llvm_used_entries<'ctx>(
     let mut retained = Vec::<PointerValue<'_>>::new();
     for index in 0..unsafe { LLVMGetNumOperands(initializer) } as u32 {
         let entry = unsafe { LLVMGetOperand(initializer, index) };
-        let is_discarded =
-            strip_pointer(entry, "llvm.used entry").ok().is_some_and(|value| discarded.contains(&(value as usize)));
+        let is_discarded = strip_pointer(entry, "llvm.used entry")
+            .ok()
+            .is_some_and(|value| discarded.contains(&(value as usize)));
         if !is_discarded {
             // SAFETY: llvm.used is an array of pointer constants by LLVM's
             // special-global contract.
@@ -209,7 +219,8 @@ fn discard_llvm_used_entries<'ctx>(
         return Ok(());
     }
     let pointer = context.ptr_type(inkwell::AddressSpace::default());
-    let replacement = module.add_global(pointer.array_type(retained.len() as u32), None, "llvm.used");
+    let replacement =
+        module.add_global(pointer.array_type(retained.len() as u32), None, "llvm.used");
     replacement.set_linkage(inkwell::module::Linkage::Appending);
     replacement.set_section(Some("llvm.metadata"));
     replacement.set_initializer(&pointer.const_array(&retained));
@@ -219,7 +230,11 @@ fn discard_llvm_used_entries<'ctx>(
 /// DFA-jump-thread, structurally import, and replay `target` back out to
 /// LLVM IR in place, splicing the reimplementation in under `target`'s
 /// original name.
-fn reimport_function<'ctx>(context: &'ctx Context, module: &Module<'ctx>, target: FunctionValue<'ctx>) -> Result<(), PassError> {
+fn reimport_function<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    target: FunctionValue<'ctx>,
+) -> Result<(), PassError> {
     if target.count_basic_blocks() == 0 {
         return Err(PassError::new(format!(
             "__volar_entry target `{}` is a declaration, not a definition",
@@ -248,7 +263,8 @@ fn reimport_function<'ctx>(context: &'ctx Context, module: &Module<'ctx>, target
     // it can be linked into the original), with every emitted function
     // prefixed to avoid name collisions with `module` while both
     // temporarily coexist.
-    let mut backend = volar_llvm_backend::LlvmBackend::new(context, "volar_reimport_tmp").with_prefix(REIMPORT_PREFIX);
+    let mut backend = volar_llvm_backend::LlvmBackend::new(context, "volar_reimport_tmp")
+        .with_prefix(REIMPORT_PREFIX);
     volar_ssa_lir_replay::lower_vaffle_module(&vaffle_module, &mut backend);
     let temp_module = backend.finish();
 
@@ -261,13 +277,17 @@ fn reimport_function<'ctx>(context: &'ctx Context, module: &Module<'ctx>, target
     // fresh above and is never touched again after this call succeeds.
     let failed = unsafe { LLVMLinkModules2(module.as_mut_ptr(), temp_module.as_mut_ptr()) };
     if failed != 0 {
-        return Err(PassError::new(format!("linking the reimported `{target_name}` into the module failed")));
+        return Err(PassError::new(format!(
+            "linking the reimported `{target_name}` into the module failed"
+        )));
     }
 
     let reimported_name = format!("{REIMPORT_PREFIX}{target_name}");
-    let reimported = module
-        .get_function(&reimported_name)
-        .ok_or_else(|| PassError::new(format!("reimported function `{reimported_name}` missing after link")))?;
+    let reimported = module.get_function(&reimported_name).ok_or_else(|| {
+        PassError::new(format!(
+            "reimported function `{reimported_name}` missing after link"
+        ))
+    })?;
 
     if target.get_type() != reimported.get_type() {
         return Err(PassError::new(format!(
@@ -289,7 +309,9 @@ fn reimport_function<'ctx>(context: &'ctx Context, module: &Module<'ctx>, target
     // never deleted, since this pass cannot prove no other translation unit
     // still references its symbol before final link.
     target.replace_all_uses_with(reimported);
-    target.as_global_value().set_name(&format!("{target_name}{RENAMED_SUFFIX}"));
+    target
+        .as_global_value()
+        .set_name(&format!("{target_name}{RENAMED_SUFFIX}"));
     reimported.as_global_value().set_name(&target_name);
 
     Ok(())

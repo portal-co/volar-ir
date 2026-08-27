@@ -13,7 +13,7 @@
 
 use proptest::prelude::*;
 use volar_ir_passes::lower_to_circuit::lower_to_circuit_with_control_provenance;
-use volar_ir_passes::{movfuscate_biir_with_control_provenance, pc_bits_needed, LoweringMode};
+use volar_ir_passes::{LoweringMode, movfuscate_biir_with_control_provenance, pc_bits_needed};
 
 use crate::generators::biir::gen_biir_and_inputs;
 use crate::interpreter::biir::{eval_biir, eval_biir_with_limit};
@@ -33,10 +33,18 @@ pub(crate) const LOWER_LIMIT: u32 = 16;
 ///
 /// Initial call → PC = 0 (all false), state = original entry inputs padded
 /// with false on the right.
-pub(crate) fn movfuscated_inputs(cfg: &volar_ir::boolar::BIrBlocks<()>, entry_inputs: &[bool]) -> Vec<bool> {
+pub(crate) fn movfuscated_inputs(
+    cfg: &volar_ir::boolar::BIrBlocks<()>,
+    entry_inputs: &[bool],
+) -> Vec<bool> {
     let n_blocks = cfg.blocks.len();
     let pc_width = pc_bits_needed(n_blocks);
-    let state_width = cfg.blocks.iter().map(|b| b.params as usize).max().unwrap_or(0);
+    let state_width = cfg
+        .blocks
+        .iter()
+        .map(|b| b.params as usize)
+        .max()
+        .unwrap_or(0);
     let n_entry = cfg.blocks[0].params as usize;
 
     let mut v = vec![false; pc_width];

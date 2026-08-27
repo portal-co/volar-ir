@@ -37,6 +37,8 @@
 //! [`lower_to_circuit_with_boundary`] returns alongside the lowered circuit.
 //! Static lowering ([`lower_to_circuit`]) is unchanged.
 
+use alloc::collections::BTreeMap;
+use alloc::{vec, vec::Vec};
 use volar_ir::{
     boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
     ir::{
@@ -45,8 +47,6 @@ use volar_ir::{
     },
 };
 use volar_ir_common::Constant;
-use alloc::{vec, vec::Vec};
-use alloc::collections::BTreeMap;
 
 use crate::dispatch_accumulator::{
     DispatchBitPrimitives, DispatchSlotPrimitives, emit_select_bit, emit_select_slot,
@@ -83,7 +83,11 @@ pub enum LoweringMode {
 /// - If `blocks` has more than one block (multi-block DAG not yet implemented).
 /// - If a back-edge targets any block other than block 0.
 /// - If `IRBlockTargetId::Dyn` is encountered.
-pub fn lower_to_circuit<P: Clone>(blocks: &BIrBlocks<P>, limit: u32, mode: LoweringMode) -> BIrBlocks<P> {
+pub fn lower_to_circuit<P: Clone>(
+    blocks: &BIrBlocks<P>,
+    limit: u32,
+    mode: LoweringMode,
+) -> BIrBlocks<P> {
     lower_to_circuit_impl(blocks, limit, mode, None)
 }
 
@@ -122,7 +126,10 @@ fn lower_to_circuit_impl<P: Clone>(
     // Provenance for infrastructure gates (MUX cascade, loop control constants).
     // Prefer an actual statement and otherwise require the caller's explicit
     // frontend/control provenance.
-    let ctrl_prov: &P = block0.stmts.first().map(|n| &n.prov)
+    let ctrl_prov: &P = block0
+        .stmts
+        .first()
+        .map(|n| &n.prov)
         .or(control_prov)
         .expect("lower_to_circuit: block has no statements; supply explicit control provenance");
 
@@ -153,8 +160,13 @@ fn lower_to_circuit_impl<P: Clone>(
         }
 
         // Process terminator to extract (done, result, next_args).
-        let (done_v, result_v, next_v) =
-            process_terminator(&block0.terminator, &var_map, &mut emitter, &current_state, ctrl_prov);
+        let (done_v, result_v, next_v) = process_terminator(
+            &block0.terminator,
+            &var_map,
+            &mut emitter,
+            &current_state,
+            ctrl_prov,
+        );
 
         done_vars.push(done_v);
         result_wires.push(result_v);
@@ -164,7 +176,9 @@ fn lower_to_circuit_impl<P: Clone>(
     // Determine output width (number of return bits).
     // When limit == 0 or the loop never returns (all Jmp(Block(0))),
     // use the current_state width as output width.
-    let output_width = result_wires.first().map_or(current_state.len(), |r| r.len());
+    let output_width = result_wires
+        .first()
+        .map_or(current_state.len(), |r| r.len());
 
     // ---- MUX cascade (right-to-left over iterations) ----
     //
@@ -225,7 +239,10 @@ fn lower_to_circuit_impl<P: Clone>(
         }),
     };
 
-    BIrBlocks { blocks: vec![out_block], pre_init: blocks.pre_init.clone() }
+    BIrBlocks {
+        blocks: vec![out_block],
+        pre_init: blocks.pre_init.clone(),
+    }
 }
 
 /// Boundary metadata for binding a lowered (skipped) segment to a resumed
@@ -262,7 +279,13 @@ pub fn lower_to_circuit_with_boundary<P: Clone>(
         _ => 0,
     };
     let state_width = ret_len.saturating_sub(has_done_flag as usize);
-    (circuit, SkipBoundary { state_width, has_done_flag })
+    (
+        circuit,
+        SkipBoundary {
+            state_width,
+            has_done_flag,
+        },
+    )
 }
 
 // ============================================================================
@@ -313,10 +336,16 @@ fn process_terminator<P: Clone>(
             IRBlockTargetId::Dyn(_) => {
                 panic!("lower_to_circuit: dynamic dispatch (Dyn) is not supported");
             }
-            _ => panic!("lower_to_circuit: unhandled IRBlockTargetId variant — add handling for this variant"),
+            _ => panic!(
+                "lower_to_circuit: unhandled IRBlockTargetId variant — add handling for this variant"
+            ),
         },
 
-        BIrTerminator::CondJmp { val, then_target, else_target } => {
+        BIrTerminator::CondJmp {
+            val,
+            then_target,
+            else_target,
+        } => {
             let val_cv = lookup(val);
 
             match (&then_target.block, &else_target.block) {
@@ -369,7 +398,9 @@ fn process_terminator<P: Clone>(
                 ),
             }
         }
-        _ => panic!("lower_to_circuit: unhandled BIrTerminator variant — add handling for this variant"),
+        _ => panic!(
+            "lower_to_circuit: unhandled BIrTerminator variant — add handling for this variant"
+        ),
     }
 }
 
@@ -405,13 +436,12 @@ fn emit_or<P: Clone>(emitter: &mut Emitter<P>, a: u32, b: u32, prov: &P) -> u32 
 /// Apply `var_map` to all operands of a `BIrStmt`, returning a new stmt
 /// with circuit var IDs substituted for original SSA IDs.
 fn subst_stmt(stmt: &BIrStmt, var_map: &BTreeMap<u32, u32>) -> BIrStmt {
-    let s = |id: &IRVarId| -> IRVarId {
-        IRVarId(
-            *var_map
-                .get(&id.0)
-                .unwrap_or_else(|| panic!("lower_to_circuit: var {} not in map during subst", id.0)),
-        )
-    };
+    let s =
+        |id: &IRVarId| -> IRVarId {
+            IRVarId(*var_map.get(&id.0).unwrap_or_else(|| {
+                panic!("lower_to_circuit: var {} not in map during subst", id.0)
+            }))
+        };
     match stmt {
         BIrStmt::Zero => BIrStmt::Zero,
         BIrStmt::One => BIrStmt::One,
@@ -420,27 +450,93 @@ fn subst_stmt(stmt: &BIrStmt, var_map: &BTreeMap<u32, u32>) -> BIrStmt {
         BIrStmt::Xor(a, b) => BIrStmt::Xor(s(a), s(b)),
         BIrStmt::Not(a) => BIrStmt::Not(s(a)),
         // External primitives: substitute operand var-IDs, carry everything else through.
-        BIrStmt::OracleCall { name, args, num_bits } => BIrStmt::OracleCall {
+        BIrStmt::OracleCall {
+            name,
+            args,
+            num_bits,
+        } => BIrStmt::OracleCall {
             name: name.clone(),
             args: args.iter().map(s).collect(),
             num_bits: *num_bits,
         },
-        BIrStmt::OracleBit { call, bit } => BIrStmt::OracleBit { call: s(call), bit: *bit },
-        BIrStmt::ActionCall { name, guard, args, fallback, num_bits } => BIrStmt::ActionCall {
+        BIrStmt::OracleBit {
+            name,
+            args,
+            bit,
+            occurrence,
+        } => BIrStmt::OracleBit {
+            name: name.clone(),
+            args: args.iter().map(s).collect(),
+            bit: *bit,
+            occurrence: *occurrence,
+        },
+        BIrStmt::OracleProjectedBit { call, bit } => BIrStmt::OracleProjectedBit {
+            call: s(call),
+            bit: *bit,
+        },
+        BIrStmt::ActionCall {
+            name,
+            guard,
+            args,
+            fallback,
+            num_bits,
+        } => BIrStmt::ActionCall {
             name: name.clone(),
             guard: s(guard),
             args: args.iter().map(s).collect(),
             fallback: fallback.iter().map(s).collect(),
             num_bits: *num_bits,
         },
-        BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit { call: s(call), bit: *bit },
+        BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit {
+            call: s(call),
+            bit: *bit,
+        },
+        BIrStmt::ActionStoreBit {
+            name,
+            guard,
+            args,
+            fallback,
+            storage,
+            lane,
+            addr,
+            bit,
+            occurrence,
+        } => BIrStmt::ActionStoreBit {
+            name: name.clone(),
+            guard: s(guard),
+            args: args.iter().map(s).collect(),
+            fallback: s(fallback),
+            storage: *storage,
+            lane: *lane,
+            addr: addr.iter().map(s).collect(),
+            bit: *bit,
+            occurrence: *occurrence,
+        },
         BIrStmt::Rng { name } => BIrStmt::Rng { name: name.clone() },
-        BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
+        BIrStmt::RngBit {
+            name,
+            bit,
+            occurrence,
+        } => BIrStmt::RngBit {
+            name: name.clone(),
+            bit: *bit,
+            occurrence: *occurrence,
+        },
+        BIrStmt::StorageRead {
+            storage,
+            lane,
+            addr,
+        } => BIrStmt::StorageRead {
             storage: *storage,
             lane: *lane,
             addr: addr.iter().map(|v| s(v)).collect(),
         },
-        BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
+        BIrStmt::StorageWrite {
+            storage,
+            lane,
+            src,
+            addr,
+        } => BIrStmt::StorageWrite {
             storage: *storage,
             lane: *lane,
             src: s(src),
@@ -461,7 +557,10 @@ struct Emitter<P: Clone = ()> {
 
 impl<P: Clone> Emitter<P> {
     fn new(first_id: u32) -> Self {
-        Self { stmts: Vec::new(), next_id: first_id }
+        Self {
+            stmts: Vec::new(),
+            next_id: first_id,
+        }
     }
 
     /// Push `stmt` with a provenance annotation, assign it the next sequential
@@ -469,7 +568,8 @@ impl<P: Clone> Emitter<P> {
     fn emit(&mut self, stmt: BIrStmt, prov: P) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
-        self.stmts.push(volar_ir_common::Node::new(stmt, prov, None));
+        self.stmts
+            .push(volar_ir_common::Node::new(stmt, prov, None));
         id
     }
 }
@@ -506,7 +606,12 @@ struct IrEmitter<P: Clone> {
 
 impl<P: Clone> IrEmitter<P> {
     fn new(first_id: u32, bit_type_id: IRTypeId, ctrl_prov: P) -> Self {
-        Self { stmts: Vec::new(), next_id: first_id, bit_type_id, prov: ctrl_prov }
+        Self {
+            stmts: Vec::new(),
+            next_id: first_id,
+            bit_type_id,
+            prov: ctrl_prov,
+        }
     }
 
     fn set_prov(&mut self, prov: P) {
@@ -516,12 +621,25 @@ impl<P: Clone> IrEmitter<P> {
     fn push(&mut self, stmt: IRStmt) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
-        self.stmts.push(volar_ir_common::Node::new(stmt, self.prov.clone(), None));
+        self.stmts
+            .push(volar_ir_common::Node::new(stmt, self.prov.clone(), None));
         id
     }
 
-    fn emit_poly(&mut self, coeffs: BTreeMap<Vec<IRVarId>, u8>, constant_lo: u128, ty: IRTypeId) -> u32 {
-        self.push(IRStmt::Poly { ty, coeffs, constant: Constant { hi: 0, lo: constant_lo } })
+    fn emit_poly(
+        &mut self,
+        coeffs: BTreeMap<Vec<IRVarId>, u8>,
+        constant_lo: u128,
+        ty: IRTypeId,
+    ) -> u32 {
+        self.push(IRStmt::Poly {
+            ty,
+            coeffs,
+            constant: Constant {
+                hi: 0,
+                lo: constant_lo,
+            },
+        })
     }
 }
 
@@ -599,7 +717,7 @@ impl<P: Clone> DispatchSlotPrimitives for IrEmitter<P> {
 fn ir_stmt_result_type(stmt: &IRStmt, bit_type_id: &IRTypeId) -> IRTypeId {
     match stmt {
         IRStmt::StorageRead { ty, .. } => ty.clone(),
-        IRStmt::StorageWrite { .. } => bit_type_id.clone(),
+        IRStmt::StorageWrite { .. } | IRStmt::ActionStore { .. } => bit_type_id.clone(),
         IRStmt::Const(_, ty) => ty.clone(),
         IRStmt::Transmute { dst_ty, .. } => dst_ty.clone(),
         IRStmt::Poly { ty, .. } => ty.clone(),
@@ -619,18 +737,45 @@ fn ir_stmt_result_type(stmt: &IRStmt, bit_type_id: &IRTypeId) -> IRTypeId {
 
 /// If `terminator` has a `Return` target (`Jmp` or either arm of a
 /// `JumpCond`), resolve each of its args' types via `orig_var_types`.
-fn return_target_types(terminator: &IRTerminator, orig_var_types: &[IRTypeId]) -> Option<Vec<IRTypeId>> {
+fn return_target_types(
+    terminator: &IRTerminator,
+    orig_var_types: &[IRTypeId],
+) -> Option<Vec<IRTypeId>> {
     let ret_args: &[IRVarId] = match terminator {
-        IRTerminator::Jmp { target: IRBranchTarget { dest: IRBlockTargetId::Return, args, .. } } => args,
-        IRTerminator::JumpCond {
-            then_target: IRBranchTarget { dest: IRBlockTargetId::Return, args, .. }, ..
+        IRTerminator::Jmp {
+            target:
+                IRBranchTarget {
+                    dest: IRBlockTargetId::Return,
+                    args,
+                    ..
+                },
         } => args,
         IRTerminator::JumpCond {
-            else_target: IRBranchTarget { dest: IRBlockTargetId::Return, args, .. }, ..
+            then_target:
+                IRBranchTarget {
+                    dest: IRBlockTargetId::Return,
+                    args,
+                    ..
+                },
+            ..
+        } => args,
+        IRTerminator::JumpCond {
+            else_target:
+                IRBranchTarget {
+                    dest: IRBlockTargetId::Return,
+                    args,
+                    ..
+                },
+            ..
         } => args,
         _ => return None,
     };
-    Some(ret_args.iter().map(|id| orig_var_types[id.0 as usize].clone()).collect())
+    Some(
+        ret_args
+            .iter()
+            .map(|id| orig_var_types[id.0 as usize].clone())
+            .collect(),
+    )
 }
 
 /// Analyse an `IRTerminator` and return `(done_wire, result_wires, next_args)`.
@@ -673,10 +818,16 @@ fn process_terminator_ir<P: Clone>(
             IRBlockTargetId::Dyn(_) => {
                 panic!("lower_to_circuit_ir: dynamic dispatch (Dyn) is not supported");
             }
-            _ => panic!("lower_to_circuit_ir: unhandled IRBlockTargetId variant — add handling for this variant"),
+            _ => panic!(
+                "lower_to_circuit_ir: unhandled IRBlockTargetId variant — add handling for this variant"
+            ),
         },
 
-        IRTerminator::JumpCond { condition, then_target, else_target } => {
+        IRTerminator::JumpCond {
+            condition,
+            then_target,
+            else_target,
+        } => {
             let val_cv = lookup(condition);
 
             match (&then_target.dest, &else_target.dest) {
@@ -744,7 +895,9 @@ fn process_terminator_ir<P: Clone>(
         IRTerminator::JumpTable { .. } => {
             panic!("lower_to_circuit_ir: JumpTable is not supported")
         }
-        _ => panic!("lower_to_circuit_ir: unhandled IRTerminator variant — add handling for this variant"),
+        _ => panic!(
+            "lower_to_circuit_ir: unhandled IRTerminator variant — add handling for this variant"
+        ),
     }
 }
 
@@ -808,7 +961,10 @@ fn lower_to_circuit_ir_impl<P: Clone>(
     let block0 = &blocks.blocks[0];
     let p = block0.params.len();
 
-    let ctrl_prov: P = block0.stmts.first().map(|n| n.prov.clone())
+    let ctrl_prov: P = block0
+        .stmts
+        .first()
+        .map(|n| n.prov.clone())
         .or_else(|| control_prov.cloned())
         .expect("lower_to_circuit_ir: block has no statements; supply explicit control provenance");
 
@@ -837,8 +993,13 @@ fn lower_to_circuit_ir_impl<P: Clone>(
         }
 
         emitter.set_prov(ctrl_prov.clone());
-        let (done_v, result_v, next_v) =
-            process_terminator_ir(&block0.terminator, &var_map, &mut emitter, &current_state, &orig_var_types);
+        let (done_v, result_v, next_v) = process_terminator_ir(
+            &block0.terminator,
+            &var_map,
+            &mut emitter,
+            &current_state,
+            &orig_var_types,
+        );
 
         done_vars.push(done_v);
         result_wires.push(result_v);
@@ -854,8 +1015,8 @@ fn lower_to_circuit_ir_impl<P: Clone>(
     // value needs the right-to-left "first done wins" cascade, since later
     // unrolled iterations may keep "executing" (garbage past the real
     // halt) and must not overwrite an earlier iteration's real result.
-    let ret_types: Vec<IRTypeId> = return_target_types(&block0.terminator, &orig_var_types)
-        .unwrap_or_default();
+    let ret_types: Vec<IRTypeId> =
+        return_target_types(&block0.terminator, &orig_var_types).unwrap_or_default();
     let ret_width = ret_types.len();
 
     let mut ret_gated: Vec<u32> = vec![0u32; ret_width];
@@ -865,7 +1026,13 @@ fn lower_to_circuit_ir_impl<P: Clone>(
             let a = *result_wires[k].get(b).unwrap_or(&ret_gated[b]);
             let b_wire = ret_gated[b];
             emitter.set_prov(ctrl_prov.clone());
-            new_ret_gated.push(emit_select_slot(&mut emitter, done_vars[k], a, b_wire, &ret_types[b]));
+            new_ret_gated.push(emit_select_slot(
+                &mut emitter,
+                done_vars[k],
+                a,
+                b_wire,
+                &ret_types[b],
+            ));
         }
         ret_gated = new_ret_gated;
     }
@@ -931,34 +1098,43 @@ mod tests {
     /// Semantics: "if input bit is 1, return it; else loop with 1".
     /// After at most 1 iteration, output is always 1.
     fn build_simple_loop() -> BIrBlocks {
-        BIrBlocks { blocks: std::vec![BIrBlock {
-            params: 1,
-            stmts: std::vec![BIrStmt::One].into_iter().map(|s| Node::new(s, (), None)).collect(), // IRVarId(1) = constant 1
-            terminator: BIrTerminator::CondJmp {
-                val: IRVarId(0), // condition = input bit
-                then_target: BIrTarget {
-                    block: IRBlockTargetId::Return,
-                    args: std::vec![IRVarId(0)], // return input bit
+        BIrBlocks {
+            blocks: std::vec![BIrBlock {
+                params: 1,
+                stmts: std::vec![BIrStmt::One]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(), // IRVarId(1) = constant 1
+                terminator: BIrTerminator::CondJmp {
+                    val: IRVarId(0), // condition = input bit
+                    then_target: BIrTarget {
+                        block: IRBlockTargetId::Return,
+                        args: std::vec![IRVarId(0)], // return input bit
+                    },
+                    else_target: BIrTarget {
+                        block: IRBlockTargetId::Block(IRBlockId(0)),
+                        args: std::vec![IRVarId(1)], // loop with One
+                    },
                 },
-                else_target: BIrTarget {
-                    block: IRBlockTargetId::Block(IRBlockId(0)),
-                    args: std::vec![IRVarId(1)], // loop with One
-                },
-            },
-        }], pre_init: std::vec![] }
+            }],
+            pre_init: std::vec![],
+        }
     }
 
     #[test]
     fn test_already_circuit_passthrough() {
         // A circuit should be returned unchanged.
-        let circuit: BIrBlocks<()> = BIrBlocks { blocks: std::vec![BIrBlock {
-            params: 1,
-            stmts: std::vec![],
-            terminator: BIrTerminator::Jmp(BIrTarget {
-                block: IRBlockTargetId::Return,
-                args: std::vec![IRVarId(0)],
-            }),
-        }], pre_init: std::vec![] };
+        let circuit: BIrBlocks<()> = BIrBlocks {
+            blocks: std::vec![BIrBlock {
+                params: 1,
+                stmts: std::vec![],
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: std::vec![IRVarId(0)],
+                }),
+            }],
+            pre_init: std::vec![],
+        };
         let result = lower_to_circuit(&circuit, 3, LoweringMode::Unconditional);
         assert_eq!(result, circuit);
     }
@@ -971,7 +1147,8 @@ mod tests {
         assert_eq!(b_u.state_width, 1, "one carried state wire");
         assert!(!b_u.has_done_flag);
         // WithTerminationFlag prepends a done flag; carried state width is unchanged.
-        let (_circ_f, b_f) = lower_to_circuit_with_boundary(&blocks, 3, LoweringMode::WithTerminationFlag);
+        let (_circ_f, b_f) =
+            lower_to_circuit_with_boundary(&blocks, 3, LoweringMode::WithTerminationFlag);
         assert_eq!(b_f.state_width, 1, "done flag excluded from state width");
         assert!(b_f.has_done_flag);
     }
@@ -981,7 +1158,10 @@ mod tests {
         let blocks = build_simple_loop();
         assert!(!blocks.is_circuit(), "precondition: not yet a circuit");
         let lowered = lower_to_circuit(&blocks, 3, LoweringMode::Unconditional);
-        assert!(lowered.is_circuit(), "lowered result must satisfy is_circuit()");
+        assert!(
+            lowered.is_circuit(),
+            "lowered result must satisfy is_circuit()"
+        );
         assert_eq!(lowered.blocks[0].params, 1, "param count must be preserved");
     }
 
@@ -1045,14 +1225,20 @@ mod tests {
     #[test]
     fn test_lower_unconditional_jmp_block0() {
         // Pure loop: always Jmp(Block(0)). Output = state after limit steps.
-        let blocks = BIrBlocks { blocks: std::vec![BIrBlock {
-            params: 1,
-            stmts: std::vec![BIrStmt::Not(IRVarId(0))].into_iter().map(|s| Node::new(s, (), None)).collect(), // flip the bit each step
-            terminator: BIrTerminator::Jmp(BIrTarget {
-                block: IRBlockTargetId::Block(IRBlockId(0)),
-                args: std::vec![IRVarId(1)], // loop with NOT(input)
-            }),
-        }], pre_init: std::vec![] };
+        let blocks = BIrBlocks {
+            blocks: std::vec![BIrBlock {
+                params: 1,
+                stmts: std::vec![BIrStmt::Not(IRVarId(0))]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(), // flip the bit each step
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Block(IRBlockId(0)),
+                    args: std::vec![IRVarId(1)], // loop with NOT(input)
+                }),
+            }],
+            pre_init: std::vec![],
+        };
         let lowered = lower_to_circuit(&blocks, 4, LoweringMode::Unconditional);
         assert!(lowered.is_circuit());
         assert_eq!(lowered.blocks[0].params, 1);
@@ -1061,21 +1247,27 @@ mod tests {
     #[test]
     fn test_lower_both_return_condjmp() {
         // CondJmp where both targets return: always done, result = mux(val, then, else).
-        let blocks: BIrBlocks<()> = BIrBlocks { blocks: std::vec![BIrBlock {
-            params: 2, // two input bits: selector and value
-            stmts: std::vec![BIrStmt::Zero].into_iter().map(|s| Node::new(s, (), None)).collect(),
-            terminator: BIrTerminator::CondJmp {
-                val: IRVarId(0), // select on bit 0
-                then_target: BIrTarget {
-                    block: IRBlockTargetId::Return,
-                    args: std::vec![IRVarId(1)], // return bit 1 if val=1
+        let blocks: BIrBlocks<()> = BIrBlocks {
+            blocks: std::vec![BIrBlock {
+                params: 2, // two input bits: selector and value
+                stmts: std::vec![BIrStmt::Zero]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
+                terminator: BIrTerminator::CondJmp {
+                    val: IRVarId(0), // select on bit 0
+                    then_target: BIrTarget {
+                        block: IRBlockTargetId::Return,
+                        args: std::vec![IRVarId(1)], // return bit 1 if val=1
+                    },
+                    else_target: BIrTarget {
+                        block: IRBlockTargetId::Return,
+                        args: std::vec![IRVarId(0)], // return bit 0 if val=0
+                    },
                 },
-                else_target: BIrTarget {
-                    block: IRBlockTargetId::Return,
-                    args: std::vec![IRVarId(0)], // return bit 0 if val=0
-                },
-            },
-        }], pre_init: std::vec![] };
+            }],
+            pre_init: std::vec![],
+        };
         // Not a circuit (has CondJmp).
         assert!(!blocks.is_circuit());
         let lowered = lower_to_circuit(&blocks, 1, LoweringMode::Unconditional);
@@ -1115,8 +1307,14 @@ mod tests {
                         .collect(),
                     terminator: IRTerminator::JumpCond {
                         condition: IRVarId(0),
-                        then_target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)]),
-                        else_target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(0)), std::vec![IRVarId(1)]),
+                        then_target: IRBranchTarget::new(
+                            IRBlockTargetId::Return,
+                            std::vec![IRVarId(0)]
+                        ),
+                        else_target: IRBranchTarget::new(
+                            IRBlockTargetId::Block(IRBlockId(0)),
+                            std::vec![IRVarId(1)]
+                        ),
                     },
                 }],
                 pre_init: std::vec![],
@@ -1129,8 +1327,15 @@ mod tests {
             let (blocks, bit_ty) = build_simple_ir_loop();
             assert!(!blocks.is_circuit(), "precondition: not yet a circuit");
             let lowered = lower_to_circuit_ir(&blocks, &bit_ty, 3, LoweringMode::Unconditional);
-            assert!(lowered.is_circuit(), "lowered result must satisfy is_circuit()");
-            assert_eq!(lowered.blocks[0].params, std::vec![bit_ty], "param types must be preserved");
+            assert!(
+                lowered.is_circuit(),
+                "lowered result must satisfy is_circuit()"
+            );
+            assert_eq!(
+                lowered.blocks[0].params,
+                std::vec![bit_ty],
+                "param types must be preserved"
+            );
         }
 
         #[test]
@@ -1141,7 +1346,11 @@ mod tests {
             let lowered = lower_to_circuit_ir(&blocks, &bit_ty, 3, LoweringMode::Unconditional);
             match &lowered.blocks[0].terminator {
                 IRTerminator::Jmp { target } => {
-                    assert_eq!(target.args.len(), 2, "Unconditional mode: 1 (state) + 1 (return)");
+                    assert_eq!(
+                        target.args.len(),
+                        2,
+                        "Unconditional mode: 1 (state) + 1 (return)"
+                    );
                     assert_eq!(target.dest, IRBlockTargetId::Return);
                 }
                 _ => panic!("expected Jmp(Return) terminator"),
@@ -1151,11 +1360,16 @@ mod tests {
         #[test]
         fn test_lower_ir_with_termination_flag_return_width() {
             let (blocks, bit_ty) = build_simple_ir_loop();
-            let lowered = lower_to_circuit_ir(&blocks, &bit_ty, 3, LoweringMode::WithTerminationFlag);
+            let lowered =
+                lower_to_circuit_ir(&blocks, &bit_ty, 3, LoweringMode::WithTerminationFlag);
             assert!(lowered.is_circuit());
             match &lowered.blocks[0].terminator {
                 IRTerminator::Jmp { target } => {
-                    assert_eq!(target.args.len(), 3, "WithTerminationFlag mode: 1 (done) + 1 (state) + 1 (return)");
+                    assert_eq!(
+                        target.args.len(),
+                        3,
+                        "WithTerminationFlag mode: 1 (done) + 1 (state) + 1 (return)"
+                    );
                 }
                 _ => panic!("expected Jmp(Return) terminator"),
             }
@@ -1166,7 +1380,10 @@ mod tests {
             let (blocks, bit_ty) = build_simple_ir_loop();
             let l3 = lower_to_circuit_ir(&blocks, &bit_ty, 3, LoweringMode::Unconditional);
             let l6 = lower_to_circuit_ir(&blocks, &bit_ty, 6, LoweringMode::Unconditional);
-            assert!(l6.blocks[0].stmts.len() > l3.blocks[0].stmts.len(), "more iterations → more gates");
+            assert!(
+                l6.blocks[0].stmts.len() > l3.blocks[0].stmts.len(),
+                "more iterations → more gates"
+            );
         }
 
         #[test]
@@ -1194,7 +1411,10 @@ mod tests {
                     .map(|s| Node::new(s, (), None))
                     .collect(),
                     terminator: IRTerminator::Jmp {
-                        target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(0)), std::vec![IRVarId(1)]),
+                        target: IRBranchTarget::new(
+                            IRBlockTargetId::Block(IRBlockId(0)),
+                            std::vec![IRVarId(1)]
+                        ),
                     },
                 }],
                 pre_init: std::vec![],
@@ -1224,8 +1444,14 @@ mod tests {
                         .collect(),
                     terminator: IRTerminator::JumpCond {
                         condition: IRVarId(0),
-                        then_target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(1)]),
-                        else_target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)]),
+                        then_target: IRBranchTarget::new(
+                            IRBlockTargetId::Return,
+                            std::vec![IRVarId(1)]
+                        ),
+                        else_target: IRBranchTarget::new(
+                            IRBlockTargetId::Return,
+                            std::vec![IRVarId(0)]
+                        ),
                     },
                 }],
                 pre_init: std::vec![],

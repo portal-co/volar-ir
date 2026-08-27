@@ -158,11 +158,17 @@ pub struct KeepLeft;
 impl<P1: Clone, P2: Clone> DualProvenanceHandler<P1, P2> for KeepLeft {
     type Output = P1;
     #[inline]
-    fn map_left(&self, p1: &P1) -> P1 { p1.clone() }
+    fn map_left(&self, p1: &P1) -> P1 {
+        p1.clone()
+    }
     #[inline]
-    fn map_right(&self, _p2: &P2) -> P1 { panic!("KeepLeft: cannot produce P1 from a right-only statement with no left provenance") }
+    fn map_right(&self, _p2: &P2) -> P1 {
+        panic!("KeepLeft: cannot produce P1 from a right-only statement with no left provenance")
+    }
     #[inline]
-    fn merge(&self, p1: &P1, _p2: &P2) -> P1 { p1.clone() }
+    fn merge(&self, p1: &P1, _p2: &P2) -> P1 {
+        p1.clone()
+    }
 }
 
 /// Dual handler that keeps only the right (replacement) provenance.
@@ -173,11 +179,17 @@ pub struct KeepRight;
 impl<P1: Clone, P2: Clone> DualProvenanceHandler<P1, P2> for KeepRight {
     type Output = P2;
     #[inline]
-    fn map_left(&self, _p1: &P1) -> P2 { panic!("KeepRight: cannot produce P2 from a left-only statement with no right provenance") }
+    fn map_left(&self, _p1: &P1) -> P2 {
+        panic!("KeepRight: cannot produce P2 from a left-only statement with no right provenance")
+    }
     #[inline]
-    fn map_right(&self, p2: &P2) -> P2 { p2.clone() }
+    fn map_right(&self, p2: &P2) -> P2 {
+        p2.clone()
+    }
     #[inline]
-    fn merge(&self, _p1: &P1, p2: &P2) -> P2 { p2.clone() }
+    fn merge(&self, _p1: &P1, p2: &P2) -> P2 {
+        p2.clone()
+    }
 }
 
 /// Dual handler that applies separate closures for left, right, and merge.
@@ -199,11 +211,17 @@ where
 {
     type Output = Q;
     #[inline]
-    fn map_left(&self, p1: &P1) -> Q { (self.0)(p1) }
+    fn map_left(&self, p1: &P1) -> Q {
+        (self.0)(p1)
+    }
     #[inline]
-    fn map_right(&self, p2: &P2) -> Q { (self.1)(p2) }
+    fn map_right(&self, p2: &P2) -> Q {
+        (self.1)(p2)
+    }
     #[inline]
-    fn merge(&self, p1: &P1, p2: &P2) -> Q { (self.2)(p1, p2) }
+    fn merge(&self, p1: &P1, p2: &P2) -> Q {
+        (self.2)(p1, p2)
+    }
 }
 
 // ============================================================================
@@ -272,15 +290,27 @@ mod tests {
     #[test]
     fn keep_left_maps_left() {
         let h = KeepLeft;
-        assert_eq!(<KeepLeft as DualProvenanceHandler<u32, u32>>::map_left(&h, &5u32), 5u32);
-        assert_eq!(<KeepLeft as DualProvenanceHandler<u32, u32>>::merge(&h, &5u32, &99u32), 5u32);
+        assert_eq!(
+            <KeepLeft as DualProvenanceHandler<u32, u32>>::map_left(&h, &5u32),
+            5u32
+        );
+        assert_eq!(
+            <KeepLeft as DualProvenanceHandler<u32, u32>>::merge(&h, &5u32, &99u32),
+            5u32
+        );
     }
 
     #[test]
     fn keep_right_maps_right() {
         let h = KeepRight;
-        assert_eq!(<KeepRight as DualProvenanceHandler<u32, u32>>::map_right(&h, &7u32), 7u32);
-        assert_eq!(<KeepRight as DualProvenanceHandler<u32, u32>>::merge(&h, &1u32, &7u32), 7u32);
+        assert_eq!(
+            <KeepRight as DualProvenanceHandler<u32, u32>>::map_right(&h, &7u32),
+            7u32
+        );
+        assert_eq!(
+            <KeepRight as DualProvenanceHandler<u32, u32>>::merge(&h, &1u32, &7u32),
+            7u32
+        );
     }
 
     #[test]

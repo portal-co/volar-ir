@@ -55,15 +55,15 @@
 //! - **Typed select** (`select(bit, a: T, b: T) = bit·(a+b) + b`): three
 //!   `Poly` stmts.
 
-use alloc::{vec, vec::Vec};
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::{vec, vec::Vec};
 use volar_ir_common::{Constant, PreInitSegment, StorageId, Type};
 
 use volar_ir::{
     boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
     ir::{
-        IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypeId,
-        IRTypes, IRVarId,
+        IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator,
+        IRType, IRTypeId, IRTypes, IRVarId,
     },
 };
 
@@ -87,14 +87,14 @@ pub fn pc_bits_needed(n: usize) -> usize {
 fn bit_width_for_eq(ir_types: &[IRType], ty: IRTypeId) -> usize {
     match &ir_types[ty.0 as usize] {
         IRType::Primitive(p) => match p {
-            Type::Bit     => 1,
-            Type::_8      => 8,
-            Type::_16     => 16,
-            Type::_32     => 32,
-            Type::_64     => 64,
-            Type::_128    => 128,
-            Type::_256    => 256,
-            Type::AES8    => 8,
+            Type::Bit => 1,
+            Type::_8 => 8,
+            Type::_16 => 16,
+            Type::_32 => 32,
+            Type::_64 => 64,
+            Type::_128 => 128,
+            Type::_256 => 256,
+            Type::AES8 => 8,
             Type::Galois64 => 64,
             _ => panic!("bit_width_for_eq: unsupported primitive type {:?}", p),
         },
@@ -256,13 +256,7 @@ pub trait MovfuscCtx {
     ///
     /// This is `cond · (a ⊕ b) ⊕ b` expressed via field ops, which works for
     /// any field type including `Bit`.
-    fn emit_select_slot(
-        &mut self,
-        cond: u32,
-        a: u32,
-        b: u32,
-        ty: &Self::SlotTy,
-    ) -> u32 {
+    fn emit_select_slot(&mut self, cond: u32, a: u32, b: u32, ty: &Self::SlotTy) -> u32 {
         // Inlined directly (rather than via the shim) because
         // DispatchSlotPrimitives::SlotTy is a concrete associated type
         // and the generic helper needs it, which would require yet
@@ -440,11 +434,16 @@ pub struct MovfuscAccumInfo {
 /// boundary metadata still needs it; that's a real bug in whichever pass
 /// produced `remap` (or in how it's being applied), not something to
 /// paper over silently.
-pub fn remap_movfusc_boundary(boundary: &MovfuscBlockBoundary, remap: &BTreeMap<u32, u32>) -> MovfuscBlockBoundary {
-    let r = |v: u32| *remap.get(&v).unwrap_or_else(|| panic!(
+pub fn remap_movfusc_boundary(
+    boundary: &MovfuscBlockBoundary,
+    remap: &BTreeMap<u32, u32>,
+) -> MovfuscBlockBoundary {
+    let r = |v: u32| {
+        *remap.get(&v).unwrap_or_else(|| panic!(
         "remap_movfusc_boundary: var {v} referenced by boundary metadata has no remap entry -- \
          a downstream pass removed a variable this boundary still needs"
-    ));
+    ))
+    };
     MovfuscBlockBoundary {
         start: r(boundary.start),
         end: r(boundary.end),
@@ -460,17 +459,28 @@ pub fn remap_movfusc_boundary(boundary: &MovfuscBlockBoundary, remap: &BTreeMap<
 
 /// As [`remap_movfusc_boundary`], applied to every boundary in a slice —
 /// the common case (one boundary per original block).
-pub fn remap_movfusc_boundaries(boundaries: &[MovfuscBlockBoundary], remap: &BTreeMap<u32, u32>) -> Vec<MovfuscBlockBoundary> {
-    boundaries.iter().map(|b| remap_movfusc_boundary(b, remap)).collect()
+pub fn remap_movfusc_boundaries(
+    boundaries: &[MovfuscBlockBoundary],
+    remap: &BTreeMap<u32, u32>,
+) -> Vec<MovfuscBlockBoundary> {
+    boundaries
+        .iter()
+        .map(|b| remap_movfusc_boundary(b, remap))
+        .collect()
 }
 
 /// As [`remap_movfusc_boundary`], for the cross-block accumulation phase's
 /// own boundary metadata.
-pub fn remap_movfusc_accum_info(info: &MovfuscAccumInfo, remap: &BTreeMap<u32, u32>) -> MovfuscAccumInfo {
-    let r = |v: u32| *remap.get(&v).unwrap_or_else(|| panic!(
+pub fn remap_movfusc_accum_info(
+    info: &MovfuscAccumInfo,
+    remap: &BTreeMap<u32, u32>,
+) -> MovfuscAccumInfo {
+    let r = |v: u32| {
+        *remap.get(&v).unwrap_or_else(|| panic!(
         "remap_movfusc_accum_info: var {v} referenced by accum-info metadata has no remap entry -- \
          a downstream pass removed a variable this metadata still needs"
-    ));
+    ))
+    };
     let remap_init = |init: &MovfuscAccumInit| MovfuscAccumInit {
         start: r(init.start),
         end: r(init.end),
@@ -547,7 +557,11 @@ pub fn thread_synthetic_slots(
     region_sets_final: &BTreeMap<u32, BTreeSet<u32>>,
 ) {
     let n = boundary.len();
-    assert_eq!(accum_info.steps.len(), n, "thread_synthetic_slots: accum_info.steps must have one entry per boundary");
+    assert_eq!(
+        accum_info.steps.len(),
+        n,
+        "thread_synthetic_slots: accum_info.steps must have one entry per boundary"
+    );
 
     let mut synth_out: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
     let mut synth_in: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
@@ -622,12 +636,34 @@ pub fn movfuscate<C: MovfuscCtx>(
     state_slot_types: Vec<C::SlotTy>,
     return_slot_types: Vec<C::SlotTy>,
     watch: &[(usize, u32)],
-) -> (C::Blocks, Vec<MovfuscBlockBoundary>, MovfuscAccumInfo, Vec<(usize, u32, u32)>) {
+) -> (
+    C::Blocks,
+    Vec<MovfuscBlockBoundary>,
+    MovfuscAccumInfo,
+    Vec<(usize, u32, u32)>,
+) {
     let n = C::num_blocks(blocks);
     assert!(n >= 1, "movfuscate: empty block list");
     if n == 1 {
-        let empty_init = MovfuscAccumInit { start: 0, end: 0, done_acc: 0, next_pc: Vec::new(), next_state: Vec::new(), ret_vals: Vec::new(), synthetic_out: Vec::new(), synthetic_in: Vec::new() };
-        return (blocks.clone(), Vec::new(), MovfuscAccumInfo { init: empty_init, steps: Vec::new() }, Vec::new());
+        let empty_init = MovfuscAccumInit {
+            start: 0,
+            end: 0,
+            done_acc: 0,
+            next_pc: Vec::new(),
+            next_state: Vec::new(),
+            ret_vals: Vec::new(),
+            synthetic_out: Vec::new(),
+            synthetic_in: Vec::new(),
+        };
+        return (
+            blocks.clone(),
+            Vec::new(),
+            MovfuscAccumInfo {
+                init: empty_init,
+                steps: Vec::new(),
+            },
+            Vec::new(),
+        );
     }
 
     let pc_width = pc_bits_needed(n);
@@ -806,7 +842,8 @@ pub fn movfuscate<C: MovfuscCtx>(
             // scheme (reproduces identically under both the (position,
             // type) and the dataflow-edge-aware schemes).
             if br.next_state[k] != state_vars[k] {
-                let diff = ctx.emit_field_add(br.next_state[k], state_vars[k], &state_slot_types[k]);
+                let diff =
+                    ctx.emit_field_add(br.next_state[k], state_vars[k], &state_slot_types[k]);
                 let g = ctx.emit_gate(br.is_active, diff, &state_slot_types[k]);
                 next_state[k] = ctx.emit_field_add(next_state[k], g, &state_slot_types[k]);
             }
@@ -826,7 +863,10 @@ pub fn movfuscate<C: MovfuscCtx>(
             synthetic_in: Vec::new(),
         });
     }
-    let accum_info = MovfuscAccumInfo { init: accum_init, steps: accum_steps };
+    let accum_info = MovfuscAccumInfo {
+        init: accum_init,
+        steps: accum_steps,
+    };
 
     // loop_vars = [next_pc_bits…, next_state…]
     let mut loop_vars = Vec::with_capacity(combined_params);
@@ -854,27 +894,93 @@ fn subst_biir(stmt: &BIrStmt, var_map: &[u32]) -> BIrStmt {
         BIrStmt::Or(a, b) => BIrStmt::Or(s(a), s(b)),
         BIrStmt::Xor(a, b) => BIrStmt::Xor(s(a), s(b)),
         BIrStmt::Not(a) => BIrStmt::Not(s(a)),
-        BIrStmt::OracleCall { name, args, num_bits } => BIrStmt::OracleCall {
+        BIrStmt::OracleCall {
+            name,
+            args,
+            num_bits,
+        } => BIrStmt::OracleCall {
             name: name.clone(),
             args: args.iter().map(s).collect(),
             num_bits: *num_bits,
         },
-        BIrStmt::OracleBit { call, bit } => BIrStmt::OracleBit { call: s(call), bit: *bit },
-        BIrStmt::ActionCall { name, guard, args, fallback, num_bits } => BIrStmt::ActionCall {
+        BIrStmt::OracleBit {
+            name,
+            args,
+            bit,
+            occurrence,
+        } => BIrStmt::OracleBit {
+            name: name.clone(),
+            args: args.iter().map(s).collect(),
+            bit: *bit,
+            occurrence: *occurrence,
+        },
+        BIrStmt::OracleProjectedBit { call, bit } => BIrStmt::OracleProjectedBit {
+            call: s(call),
+            bit: *bit,
+        },
+        BIrStmt::ActionCall {
+            name,
+            guard,
+            args,
+            fallback,
+            num_bits,
+        } => BIrStmt::ActionCall {
             name: name.clone(),
             guard: s(guard),
             args: args.iter().map(s).collect(),
             fallback: fallback.iter().map(s).collect(),
             num_bits: *num_bits,
         },
-        BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit { call: s(call), bit: *bit },
+        BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit {
+            call: s(call),
+            bit: *bit,
+        },
+        BIrStmt::ActionStoreBit {
+            name,
+            guard,
+            args,
+            fallback,
+            storage,
+            lane,
+            addr,
+            bit,
+            occurrence,
+        } => BIrStmt::ActionStoreBit {
+            name: name.clone(),
+            guard: s(guard),
+            args: args.iter().map(s).collect(),
+            fallback: s(fallback),
+            storage: storage.clone(),
+            lane: *lane,
+            addr: addr.iter().map(s).collect(),
+            bit: *bit,
+            occurrence: *occurrence,
+        },
         BIrStmt::Rng { name } => BIrStmt::Rng { name: name.clone() },
-        BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
+        BIrStmt::RngBit {
+            name,
+            bit,
+            occurrence,
+        } => BIrStmt::RngBit {
+            name: name.clone(),
+            bit: *bit,
+            occurrence: *occurrence,
+        },
+        BIrStmt::StorageRead {
+            storage,
+            lane,
+            addr,
+        } => BIrStmt::StorageRead {
             storage: storage.clone(),
             lane: *lane,
             addr: addr.iter().map(|v| s(v)).collect(),
         },
-        BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
+        BIrStmt::StorageWrite {
+            storage,
+            lane,
+            src,
+            addr,
+        } => BIrStmt::StorageWrite {
             storage: storage.clone(),
             lane: *lane,
             src: s(src),
@@ -892,13 +998,18 @@ struct BIrCtx<P: Clone = ()> {
 
 impl<P: Clone> BIrCtx<P> {
     fn new(first_id: u32, ctrl_prov: P) -> Self {
-        Self { stmts: Vec::new(), next_id: first_id, ctrl_prov }
+        Self {
+            stmts: Vec::new(),
+            next_id: first_id,
+            ctrl_prov,
+        }
     }
 
     fn push(&mut self, stmt: BIrStmt, prov: P) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
-        self.stmts.push(volar_ir_common::Node::new(stmt, prov, None));
+        self.stmts
+            .push(volar_ir_common::Node::new(stmt, prov, None));
         id
     }
 
@@ -935,11 +1046,12 @@ impl<P: Clone> BIrCtx<P> {
             IRBlockTargetId::Dyn(_) => {
                 panic!("movfuscate_biir: Dyn jump targets are not supported")
             }
-            _ => panic!("movfuscate_biir: unhandled IRBlockTargetId variant — add handling for this variant"),
+            _ => panic!(
+                "movfuscate_biir: unhandled IRBlockTargetId variant — add handling for this variant"
+            ),
         }
     }
 }
-
 
 impl<P: Clone> MovfuscCtx for BIrCtx<P> {
     type Blocks = BIrBlocks<P>;
@@ -962,17 +1074,17 @@ impl<P: Clone> MovfuscCtx for BIrCtx<P> {
         for block in &blocks.blocks {
             match &block.terminator {
                 BIrTerminator::Jmp(t) if matches!(t.block, IRBlockTargetId::Return) => {
-                    return t.args.len()
+                    return t.args.len();
                 }
                 BIrTerminator::CondJmp { then_target, .. }
                     if matches!(then_target.block, IRBlockTargetId::Return) =>
                 {
-                    return then_target.args.len()
+                    return then_target.args.len();
                 }
                 BIrTerminator::CondJmp { else_target, .. }
                     if matches!(else_target.block, IRBlockTargetId::Return) =>
                 {
-                    return else_target.args.len()
+                    return else_target.args.len();
                 }
                 _ => {}
             }
@@ -1071,16 +1183,20 @@ impl<P: Clone> MovfuscCtx for BIrCtx<P> {
         let block = &blocks.blocks[block_idx];
         match &block.terminator {
             BIrTerminator::Jmp(target) => {
-                let (done, next_pc_bits, next_state, ret_vals) = self.process_biir_target(
-                    target,
-                    block_vals,
-                    pc_width,
-                    state_width,
-                    ret_width,
-                );
-                TermResult { done, next_pc_bits, next_state, ret_vals }
+                let (done, next_pc_bits, next_state, ret_vals) =
+                    self.process_biir_target(target, block_vals, pc_width, state_width, ret_width);
+                TermResult {
+                    done,
+                    next_pc_bits,
+                    next_state,
+                    ret_vals,
+                }
             }
-            BIrTerminator::CondJmp { val, then_target, else_target } => {
+            BIrTerminator::CondJmp {
+                val,
+                then_target,
+                else_target,
+            } => {
                 let cond = block_vals[val.0 as usize];
                 let (t_done, t_npc, t_ns, t_ret) = self.process_biir_target(
                     then_target,
@@ -1107,9 +1223,16 @@ impl<P: Clone> MovfuscCtx for BIrCtx<P> {
                 let ret_vals = (0..ret_width)
                     .map(|m| self.emit_select_bit(cond, t_ret[m], e_ret[m]))
                     .collect();
-                TermResult { done, next_pc_bits, next_state, ret_vals }
+                TermResult {
+                    done,
+                    next_pc_bits,
+                    next_state,
+                    ret_vals,
+                }
             }
-            _ => panic!("emit_block_terminator: unhandled BIrTerminator variant — add handling for this variant"),
+            _ => panic!(
+                "emit_block_terminator: unhandled BIrTerminator variant — add handling for this variant"
+            ),
         }
     }
 
@@ -1120,21 +1243,24 @@ impl<P: Clone> MovfuscCtx for BIrCtx<P> {
         loop_vars: Vec<u32>,
         ret_vars: Vec<u32>,
     ) -> BIrBlocks<P> {
-        BIrBlocks { blocks: vec![BIrBlock {
-            params: combined_params as u32,
-            stmts: self.stmts,
-            terminator: BIrTerminator::CondJmp {
-                val: IRVarId(done_var),
-                then_target: BIrTarget {
-                    block: IRBlockTargetId::Return,
-                    args: ret_vars.into_iter().map(IRVarId).collect(),
+        BIrBlocks {
+            blocks: vec![BIrBlock {
+                params: combined_params as u32,
+                stmts: self.stmts,
+                terminator: BIrTerminator::CondJmp {
+                    val: IRVarId(done_var),
+                    then_target: BIrTarget {
+                        block: IRBlockTargetId::Return,
+                        args: ret_vars.into_iter().map(IRVarId).collect(),
+                    },
+                    else_target: BIrTarget {
+                        block: IRBlockTargetId::Block(IRBlockId(0)),
+                        args: loop_vars.into_iter().map(IRVarId).collect(),
+                    },
                 },
-                else_target: BIrTarget {
-                    block: IRBlockTargetId::Block(IRBlockId(0)),
-                    args: loop_vars.into_iter().map(IRVarId).collect(),
-                },
-            },
-        }], pre_init: vec![] }
+            }],
+            pre_init: vec![],
+        }
     }
 }
 
@@ -1147,15 +1273,37 @@ impl<P: Clone> MovfuscCtx for BIrCtx<P> {
 pub(crate) fn subst_ir(stmt: &IRStmt, var_map: &[u32]) -> IRStmt {
     let s = |id: &IRVarId| IRVarId(var_map[id.0 as usize]);
     match stmt {
-        IRStmt::StorageRead { storage, ty, addr } => IRStmt::StorageRead { storage: *storage, ty: ty.clone(), addr: s(addr) },
-        IRStmt::StorageWrite { storage, src, ty, addr } => {
-            IRStmt::StorageWrite { storage: *storage, src: s(src), ty: ty.clone(), addr: s(addr) }
-        }
+        IRStmt::StorageRead { storage, ty, addr } => IRStmt::StorageRead {
+            storage: *storage,
+            ty: ty.clone(),
+            addr: s(addr),
+        },
+        IRStmt::StorageWrite {
+            storage,
+            src,
+            ty,
+            addr,
+        } => IRStmt::StorageWrite {
+            storage: *storage,
+            src: s(src),
+            ty: ty.clone(),
+            addr: s(addr),
+        },
         IRStmt::Const(c, ty) => IRStmt::Const(*c, ty.clone()),
-        IRStmt::Transmute { src, src_ty, dst_ty } => {
-            IRStmt::Transmute { src: s(src), src_ty: src_ty.clone(), dst_ty: dst_ty.clone() }
-        }
-        IRStmt::Poly { ty, coeffs, constant } => IRStmt::Poly {
+        IRStmt::Transmute {
+            src,
+            src_ty,
+            dst_ty,
+        } => IRStmt::Transmute {
+            src: s(src),
+            src_ty: src_ty.clone(),
+            dst_ty: dst_ty.clone(),
+        },
+        IRStmt::Poly {
+            ty,
+            coeffs,
+            constant,
+        } => IRStmt::Poly {
             ty: *ty,
             coeffs: coeffs
                 .iter()
@@ -1167,36 +1315,89 @@ pub(crate) fn subst_ir(stmt: &IRStmt, var_map: &[u32]) -> IRStmt {
                 .collect(),
             constant: *constant,
         },
-        IRStmt::Rol { src, ty, n } => IRStmt::Rol { src: s(src), ty: ty.clone(), n: *n },
-        IRStmt::Ror { src, ty, n } => IRStmt::Ror { src: s(src), ty: ty.clone(), n: *n },
-        IRStmt::Merge { parts, ty } => {
-            IRStmt::Merge { parts: parts.iter().map(s).collect(), ty: ty.clone() }
-        }
-        IRStmt::Splat { src, ty } => IRStmt::Splat { src: s(src), ty: ty.clone() },
+        IRStmt::Rol { src, ty, n } => IRStmt::Rol {
+            src: s(src),
+            ty: ty.clone(),
+            n: *n,
+        },
+        IRStmt::Ror { src, ty, n } => IRStmt::Ror {
+            src: s(src),
+            ty: ty.clone(),
+            n: *n,
+        },
+        IRStmt::Merge { parts, ty } => IRStmt::Merge {
+            parts: parts.iter().map(s).collect(),
+            ty: ty.clone(),
+        },
+        IRStmt::Splat { src, ty } => IRStmt::Splat {
+            src: s(src),
+            ty: ty.clone(),
+        },
         IRStmt::Shuffle { result_bits, ty } => IRStmt::Shuffle {
             result_bits: result_bits.iter().map(|(b, v)| (*b, s(v))).collect(),
             ty: ty.clone(),
         },
-        IRStmt::OracleCall { name, args, output_tys, result_ty } => IRStmt::OracleCall {
+        IRStmt::OracleCall {
+            name,
+            args,
+            output_tys,
+            result_ty,
+        } => IRStmt::OracleCall {
             name: name.clone(),
             args: args.iter().map(s).collect(),
             output_tys: output_tys.clone(),
             result_ty: result_ty.clone(),
         },
-        IRStmt::OracleOutput { call, idx, ty } =>
-            IRStmt::OracleOutput { call: s(call), idx: *idx, ty: ty.clone() },
-        IRStmt::ActionCall { name, guard, args, fallbacks, output_tys, result_ty } =>
-            IRStmt::ActionCall {
-                name: name.clone(),
-                guard: s(guard),
-                args: args.iter().map(s).collect(),
-                fallbacks: fallbacks.iter().map(s).collect(),
-                output_tys: output_tys.clone(),
-                result_ty: result_ty.clone(),
-            },
-        IRStmt::ActionOutput { call, idx, ty } =>
-            IRStmt::ActionOutput { call: s(call), idx: *idx, ty: ty.clone() },
-        IRStmt::Rng { name, ty } => IRStmt::Rng { name: name.clone(), ty: ty.clone() },
+        IRStmt::OracleOutput { call, idx, ty } => IRStmt::OracleOutput {
+            call: s(call),
+            idx: *idx,
+            ty: ty.clone(),
+        },
+        IRStmt::ActionCall {
+            name,
+            guard,
+            args,
+            fallbacks,
+            output_tys,
+            result_ty,
+        } => IRStmt::ActionCall {
+            name: name.clone(),
+            guard: s(guard),
+            args: args.iter().map(s).collect(),
+            fallbacks: fallbacks.iter().map(s).collect(),
+            output_tys: output_tys.clone(),
+            result_ty: result_ty.clone(),
+        },
+        IRStmt::ActionStore {
+            name,
+            guard,
+            args,
+            fallbacks,
+            output_tys,
+            targets,
+        } => IRStmt::ActionStore {
+            name: name.clone(),
+            guard: s(guard),
+            args: args.iter().map(s).collect(),
+            fallbacks: fallbacks.iter().map(s).collect(),
+            output_tys: output_tys.clone(),
+            targets: targets
+                .iter()
+                .map(|target| volar_ir::ir::ActionTarget {
+                    storage: target.storage,
+                    addr: s(&target.addr),
+                })
+                .collect(),
+        },
+        IRStmt::ActionOutput { call, idx, ty } => IRStmt::ActionOutput {
+            call: s(call),
+            idx: *idx,
+            ty: ty.clone(),
+        },
+        IRStmt::Rng { name, ty } => IRStmt::Rng {
+            name: name.clone(),
+            ty: ty.clone(),
+        },
         _ => panic!("subst_ir: unhandled IRStmt variant — add substitution for this variant"),
     }
 }
@@ -1219,8 +1420,7 @@ fn promote_type(a: &IRTypeId, b: &IRTypeId, ir_types: &[IRType]) -> IRTypeId {
     } else {
         panic!(
             "movfuscate_ir: incompatible types in polynomial: {:?} and {:?}",
-            ir_types[a.0 as usize],
-            ir_types[b.0 as usize]
+            ir_types[a.0 as usize], ir_types[b.0 as usize]
         )
     }
 }
@@ -1261,17 +1461,20 @@ fn infer_stmt_result_type(
         | IRStmt::Merge { ty, .. }
         | IRStmt::Splat { ty, .. } => ty.clone(),
         // StorageWrite has no meaningful result; use Bit as a placeholder.
-        IRStmt::StorageWrite { .. } => bit_type_id.clone(),
+        IRStmt::StorageWrite { .. } | IRStmt::ActionStore { .. } => bit_type_id.clone(),
         // Shuffle carries its result type explicitly.
         IRStmt::Shuffle { ty, .. } => ty.clone(),
         // Oracle/action call results are pre-interned tuple types.
-        IRStmt::OracleCall { result_ty, .. } | IRStmt::ActionCall { result_ty, .. } =>
-            result_ty.clone(),
+        IRStmt::OracleCall { result_ty, .. } | IRStmt::ActionCall { result_ty, .. } => {
+            result_ty.clone()
+        }
         // Output projections carry their concrete scalar type.
         IRStmt::OracleOutput { ty, .. } | IRStmt::ActionOutput { ty, .. } => ty.clone(),
         // RNG produces a fresh value of the declared type.
         IRStmt::Rng { ty, .. } => ty.clone(),
-        _ => panic!("infer_stmt_result_type: unhandled IRStmt variant — add type inference for this variant"),
+        _ => panic!(
+            "infer_stmt_result_type: unhandled IRStmt variant — add type inference for this variant"
+        ),
     }
 }
 
@@ -1379,7 +1582,10 @@ impl<P: Clone> IrCtx<P> {
     /// `PerBlock`); pass `None` only for a `Dyn` target's own signature,
     /// where no concrete target block is known ahead of time.
     fn slot_map_for(&self, block_idx: Option<usize>, params: &[IRTypeId]) -> Vec<(usize, usize)> {
-        let SlotAllocation::PerBlock { slot_of, sig_fallback } = &self.slot_alloc;
+        let SlotAllocation::PerBlock {
+            slot_of,
+            sig_fallback,
+        } = &self.slot_alloc;
         match block_idx {
             Some(b) => slot_of[b].clone(),
             // A zero-width signature needs no lookup -- there's nothing to
@@ -1388,13 +1594,16 @@ impl<P: Clone> IrCtx<P> {
             None if params.is_empty() => Vec::new(),
             None => {
                 let key: Vec<u32> = params.iter().map(|t| t.0).collect();
-                sig_fallback.get(&key).unwrap_or_else(|| {
-                    panic!(
-                        "movfuscate_ir: Dyn target signature {key:?} has no matching block \
+                sig_fallback
+                    .get(&key)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "movfuscate_ir: Dyn target signature {key:?} has no matching block \
                          anywhere in the function -- sig_fallback must be built from the same \
                          block set this signature comes from"
-                    )
-                }).clone()
+                        )
+                    })
+                    .clone()
             }
         }
     }
@@ -1476,7 +1685,11 @@ impl<P: Clone> IrCtx<P> {
     fn push_typed(&mut self, stmt: IRStmt, result_type: IRTypeId) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
-        self.stmts.push(volar_ir_common::Node::new(stmt, self.pending_prov.clone(), None));
+        self.stmts.push(volar_ir_common::Node::new(
+            stmt,
+            self.pending_prov.clone(),
+            None,
+        ));
         self.var_types.push(result_type);
         id
     }
@@ -1484,14 +1697,17 @@ impl<P: Clone> IrCtx<P> {
     /// Emit a `Poly` with the given coefficients and constant, inferring the
     /// result type from the operand types tracked in `self.var_types`.
     fn emit_poly(&mut self, coeffs: BTreeMap<Vec<IRVarId>, u8>, constant_lo: u128) -> u32 {
-        let result_type = infer_poly_result_type(
-            &coeffs,
-            &self.var_types,
-            &self.ir_types,
-            &self.bit_type_id,
-        );
+        let result_type =
+            infer_poly_result_type(&coeffs, &self.var_types, &self.ir_types, &self.bit_type_id);
         self.push_typed(
-            IRStmt::Poly { ty: result_type, coeffs, constant: Constant { hi: 0, lo: constant_lo } },
+            IRStmt::Poly {
+                ty: result_type,
+                coeffs,
+                constant: Constant {
+                    hi: 0,
+                    lo: constant_lo,
+                },
+            },
             result_type,
         )
     }
@@ -1500,7 +1716,10 @@ impl<P: Clone> IrCtx<P> {
     fn emit_shuffle_bit(&mut self, src: u32, bit_j: u8) -> u32 {
         let bt = self.bit_type_id;
         self.push_typed(
-            IRStmt::Shuffle { result_bits: vec![(bit_j, IRVarId(src))], ty: bt },
+            IRStmt::Shuffle {
+                result_bits: vec![(bit_j, IRVarId(src))],
+                ty: bt,
+            },
             bt,
         )
     }
@@ -1509,7 +1728,14 @@ impl<P: Clone> IrCtx<P> {
     fn emit_poly_xor_const(&mut self, val: u32, const_k: Constant, ty: IRTypeId) -> u32 {
         let mut coeffs = BTreeMap::new();
         coeffs.insert(vec![IRVarId(val)], 1u8);
-        self.push_typed(IRStmt::Poly { ty, coeffs, constant: const_k }, ty)
+        self.push_typed(
+            IRStmt::Poly {
+                ty,
+                coeffs,
+                constant: const_k,
+            },
+            ty,
+        )
     }
 
     /// Emit a Bit var that is `1` iff `val == const_k`.
@@ -1518,8 +1744,15 @@ impl<P: Clone> IrCtx<P> {
     /// For wider types: compute `diff = val XOR const_k` via `Poly`, then AND
     /// the NOT of each bit of `diff` (checking all bits are zero).
     fn emit_eq_const_ir(&mut self, val: u32, const_k: Constant, idx_ty: IRTypeId) -> u32 {
-        if matches!(self.ir_types[idx_ty.0 as usize], IRType::Primitive(Type::Bit)) {
-            return if const_k.lo == 0 { self.emit_not(val) } else { val };
+        if matches!(
+            self.ir_types[idx_ty.0 as usize],
+            IRType::Primitive(Type::Bit)
+        ) {
+            return if const_k.lo == 0 {
+                self.emit_not(val)
+            } else {
+                val
+            };
         }
         let diff = self.emit_poly_xor_const(val, const_k, idx_ty);
         let check_width = bit_width_for_eq(&self.ir_types, idx_ty);
@@ -1527,7 +1760,7 @@ impl<P: Clone> IrCtx<P> {
         for j in 0..check_width as u8 {
             let bit_j = self.emit_shuffle_bit(diff, j);
             let not_j = self.emit_not(bit_j);
-            is_zero   = self.emit_and_bit(is_zero, not_j);
+            is_zero = self.emit_and_bit(is_zero, not_j);
         }
         is_zero
     }
@@ -1580,14 +1813,17 @@ impl<P: Clone> IrCtx<P> {
                     "DIAG: movfuscate_ir return-slot overflow -- this block's own \
                      Return args expand to {} slots, wider than the global \
                      ret_width={} (taken from a different Return-bearing block)",
-                    ret.len(), ret_width,
+                    ret.len(),
+                    ret_width,
                 );
                 assert_eq!(
-                    ret.len(), ret_width,
+                    ret.len(),
+                    ret_width,
                     "DIAG: movfuscate_ir return-slot underflow -- this block's own \
                      Return args expand to {} slots, narrower than the global \
                      ret_width={} (the zero-pad loop would have silently fired here)",
-                    ret.len(), ret_width,
+                    ret.len(),
+                    ret_width,
                 );
                 for m in ret.len()..ret_width {
                     let ty = return_slot_types[m].clone();
@@ -1603,7 +1839,10 @@ impl<P: Clone> IrCtx<P> {
                 let target_slot_map =
                     self.slot_map_for(Some(*j as usize), &blocks.blocks[*j as usize].params);
                 let next_state = self.scatter_args_to_state(
-                    args, block_vals, &target_slot_map, state_slot_types,
+                    args,
+                    block_vals,
+                    &target_slot_map,
+                    state_slot_types,
                 );
                 let ret = return_slot_types
                     .iter()
@@ -1633,7 +1872,10 @@ impl<P: Clone> IrCtx<P> {
                 // interface of the target, used to scatter call arguments.
                 let target_slot_map = self.slot_map_from_sig(&sig);
                 let next_state = self.scatter_args_to_state(
-                    args, block_vals, &target_slot_map, state_slot_types,
+                    args,
+                    block_vals,
+                    &target_slot_map,
+                    state_slot_types,
                 );
                 let ret = return_slot_types
                     .iter()
@@ -1644,7 +1886,9 @@ impl<P: Clone> IrCtx<P> {
                     .collect();
                 (done, next_pc_bits, next_state, ret)
             }
-            _ => panic!("process_ir_target: unhandled IRBlockTargetId variant — add handling for this variant"),
+            _ => panic!(
+                "process_ir_target: unhandled IRBlockTargetId variant — add handling for this variant"
+            ),
         }
     }
 }
@@ -1668,15 +1912,30 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
     fn return_val_width(blocks: &IRBlocks<P>) -> usize {
         for block in &blocks.blocks {
             match &block.terminator {
-                IRTerminator::Jmp { target: IRBranchTarget { dest: IRBlockTargetId::Return, args, .. } } => {
-                    return args.len()
-                }
+                IRTerminator::Jmp {
+                    target:
+                        IRBranchTarget {
+                            dest: IRBlockTargetId::Return,
+                            args,
+                            ..
+                        },
+                } => return args.len(),
                 IRTerminator::JumpCond {
-                    then_target: IRBranchTarget { dest: IRBlockTargetId::Return, args, .. },
+                    then_target:
+                        IRBranchTarget {
+                            dest: IRBlockTargetId::Return,
+                            args,
+                            ..
+                        },
                     ..
                 } => return args.len(),
                 IRTerminator::JumpCond {
-                    else_target: IRBranchTarget { dest: IRBlockTargetId::Return, args, .. },
+                    else_target:
+                        IRBranchTarget {
+                            dest: IRBlockTargetId::Return,
+                            args,
+                            ..
+                        },
                     ..
                 } => return args.len(),
                 _ => {}
@@ -1751,7 +2010,11 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         coeffs.insert(key, 1u8);
         let t = ty.clone();
         self.push_typed(
-            IRStmt::Poly { ty: t, coeffs, constant: Constant { hi: 0, lo: 0 } },
+            IRStmt::Poly {
+                ty: t,
+                coeffs,
+                constant: Constant { hi: 0, lo: 0 },
+            },
             t,
         )
     }
@@ -1768,7 +2031,11 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         coeffs.insert(vec![IRVarId(b)], 1);
         let t = ty.clone();
         self.push_typed(
-            IRStmt::Poly { ty: t, coeffs, constant: Constant { hi: 0, lo: 0 } },
+            IRStmt::Poly {
+                ty: t,
+                coeffs,
+                constant: Constant { hi: 0, lo: 0 },
+            },
             t,
         )
     }
@@ -1794,11 +2061,12 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         // all other params are 1-to-1.
         let slot_map = self.slot_map_for(Some(block_idx), &block.params);
         for (k, (slot_start, slot_count)) in slot_map.iter().enumerate() {
-            let is_block =
-                matches!(self.ir_types[block.params[k].0 as usize], IRType::Block { .. });
+            let is_block = matches!(
+                self.ir_types[block.params[k].0 as usize],
+                IRType::Block { .. }
+            );
             if is_block {
-                let bits: Vec<u32> =
-                    state_vars[*slot_start..*slot_start + *slot_count].to_vec();
+                let bits: Vec<u32> = state_vars[*slot_start..*slot_start + *slot_count].to_vec();
                 let sig = match &self.ir_types[block.params[k].0 as usize] {
                     IRType::Block { params } => params.clone(),
                     _ => unreachable!(),
@@ -1840,7 +2108,11 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                         IRType::Block { params } => params.clone(),
                         _ => unreachable!(),
                     };
-                    let rep = if !bits.is_empty() { bits[0] } else { self.emit_zero_bit() };
+                    let rep = if !bits.is_empty() {
+                        bits[0]
+                    } else {
+                        self.emit_zero_bit()
+                    };
                     self.block_var_to_bits.insert(orig_var_id, (bits, sig));
                     var_map.push(rep);
                     continue;
@@ -1851,7 +2123,13 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
             // The source var lives in `block_var_to_bits`; merge its PC bits
             // into a Vec(pc_width, Bit) and write to storage ID 2n (even).
             // Non-Block StorageWrite remaps to storage ID 2n+1 (odd).
-            if let IRStmt::StorageWrite { storage, src, ty, addr } = &mapped {
+            if let IRStmt::StorageWrite {
+                storage,
+                src,
+                ty,
+                addr,
+            } = &mapped
+            {
                 // `src` is the post-substitution combined-block var ID.
                 // `block_var_to_bits` is keyed by *original* IR var IDs, so
                 // we must look up via the pre-substitution src from `stmt`.
@@ -1864,7 +2142,10 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                     let parts: Vec<IRVarId> = bits.iter().map(|&b| IRVarId(b)).collect();
                     let vec_pc_ty = self.vec_pc_type_id;
                     let merged = self.push_typed(
-                        IRStmt::Merge { parts, ty: vec_pc_ty },
+                        IRStmt::Merge {
+                            parts,
+                            ty: vec_pc_ty,
+                        },
                         vec_pc_ty,
                     );
                     let new_storage = StorageId(storage.0 * 2);
@@ -1879,12 +2160,21 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                     // inactive block's own stale recomputation silently
                     // overwrites storage on every step it isn't active.
                     let current = self.push_typed(
-                        IRStmt::StorageRead { storage: new_storage, ty: vec_pc_ty, addr: write_addr },
+                        IRStmt::StorageRead {
+                            storage: new_storage,
+                            ty: vec_pc_ty,
+                            addr: write_addr,
+                        },
                         vec_pc_ty,
                     );
                     let gated_src = self.emit_select_slot(is_active, merged, current, &vec_pc_ty);
                     let id = self.push_typed(
-                        IRStmt::StorageWrite { storage: new_storage, src: IRVarId(gated_src), ty: vec_pc_ty, addr: write_addr },
+                        IRStmt::StorageWrite {
+                            storage: new_storage,
+                            src: IRVarId(gated_src),
+                            ty: vec_pc_ty,
+                            addr: write_addr,
+                        },
                         self.bit_type_id,
                     );
                     var_map.push(id);
@@ -1892,18 +2182,33 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                 } else {
                     // Non-block write: remap to odd storage lane.
                     let new_storage = StorageId(storage.0 * 2 + 1);
-                    let res_ty = infer_stmt_result_type(&mapped, &self.var_types, &self.ir_types, &self.bit_type_id);
+                    let res_ty = infer_stmt_result_type(
+                        &mapped,
+                        &self.var_types,
+                        &self.ir_types,
+                        &self.bit_type_id,
+                    );
                     let write_ty = *ty;
                     let write_addr = *addr;
                     let write_src = *src;
                     // Same is_active gating as the Block-typed arm above.
                     let current = self.push_typed(
-                        IRStmt::StorageRead { storage: new_storage, ty: write_ty, addr: write_addr },
+                        IRStmt::StorageRead {
+                            storage: new_storage,
+                            ty: write_ty,
+                            addr: write_addr,
+                        },
                         write_ty,
                     );
-                    let gated_src = self.emit_select_slot(is_active, write_src.0, current, &write_ty);
+                    let gated_src =
+                        self.emit_select_slot(is_active, write_src.0, current, &write_ty);
                     let id = self.push_typed(
-                        IRStmt::StorageWrite { storage: new_storage, src: IRVarId(gated_src), ty: write_ty, addr: write_addr },
+                        IRStmt::StorageWrite {
+                            storage: new_storage,
+                            src: IRVarId(gated_src),
+                            ty: write_ty,
+                            addr: write_addr,
+                        },
                         res_ty,
                     );
                     var_map.push(id);
@@ -1919,7 +2224,11 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                     // Read Vec(pc_width, Bit) from even lane.
                     let new_storage = StorageId(storage.0 * 2);
                     let merged = self.push_typed(
-                        IRStmt::StorageRead { storage: new_storage, ty: self.vec_pc_type_id, addr: *addr },
+                        IRStmt::StorageRead {
+                            storage: new_storage,
+                            ty: self.vec_pc_type_id,
+                            addr: *addr,
+                        },
                         self.vec_pc_type_id,
                     );
                     // Decompose Vec back into individual Bit vars via Shuffle.
@@ -1939,16 +2248,29 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                         IRType::Block { params } => params.clone(),
                         _ => unreachable!(),
                     };
-                    let rep = if !bits.is_empty() { bits[0] } else { self.emit_zero_bit() };
+                    let rep = if !bits.is_empty() {
+                        bits[0]
+                    } else {
+                        self.emit_zero_bit()
+                    };
                     self.block_var_to_bits.insert(orig_var_id, (bits, sig));
                     var_map.push(rep);
                     continue;
                 } else {
                     // Non-block read: remap to odd storage lane.
                     let new_storage = StorageId(storage.0 * 2 + 1);
-                    let res_ty = infer_stmt_result_type(&mapped, &self.var_types, &self.ir_types, &self.bit_type_id);
+                    let res_ty = infer_stmt_result_type(
+                        &mapped,
+                        &self.var_types,
+                        &self.ir_types,
+                        &self.bit_type_id,
+                    );
                     let id = self.push_typed(
-                        IRStmt::StorageRead { storage: new_storage, ty: *ty, addr: *addr },
+                        IRStmt::StorageRead {
+                            storage: new_storage,
+                            ty: *ty,
+                            addr: *addr,
+                        },
                         res_ty,
                     );
                     var_map.push(id);
@@ -1957,12 +2279,8 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
             }
 
             // Ordinary stmt — infer type and emit.
-            let ty = infer_stmt_result_type(
-                &mapped,
-                &self.var_types,
-                &self.ir_types,
-                &self.bit_type_id,
-            );
+            let ty =
+                infer_stmt_result_type(&mapped, &self.var_types, &self.ir_types, &self.bit_type_id);
             let id = self.push_typed(mapped, ty);
             var_map.push(id);
         }
@@ -1993,7 +2311,12 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                     return_slot_types,
                     blocks,
                 );
-                TermResult { done, next_pc_bits, next_state, ret_vals }
+                TermResult {
+                    done,
+                    next_pc_bits,
+                    next_state,
+                    ret_vals,
+                }
             }
             IRTerminator::JumpCond {
                 condition,
@@ -2026,26 +2349,26 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                     .collect();
                 // Typed (field) select for state and return.
                 let next_state = (0..state_width)
-                    .map(|k| {
-                        self.emit_select_slot(cond, t_ns[k], e_ns[k], &state_slot_types[k])
-                    })
+                    .map(|k| self.emit_select_slot(cond, t_ns[k], e_ns[k], &state_slot_types[k]))
                     .collect();
                 let ret_vals = (0..ret_width)
-                    .map(|m| {
-                        self.emit_select_slot(cond, t_ret[m], e_ret[m], &return_slot_types[m])
-                    })
+                    .map(|m| self.emit_select_slot(cond, t_ret[m], e_ret[m], &return_slot_types[m]))
                     .collect();
-                TermResult { done, next_pc_bits, next_state, ret_vals }
+                TermResult {
+                    done,
+                    next_pc_bits,
+                    next_state,
+                    ret_vals,
+                }
             }
             IRTerminator::JumpTable { index, cases } => {
                 let idx_val = block_vals[index.0 as usize];
-                let idx_ty  = self.var_types[idx_val as usize];
+                let idx_ty = self.var_types[idx_val as usize];
                 let state_width = state_slot_types.len();
-                let ret_width   = return_slot_types.len();
+                let ret_width = return_slot_types.len();
 
                 let mut done_acc = self.emit_zero_bit();
-                let mut npc_acc: Vec<u32> =
-                    (0..pc_width).map(|_| self.emit_zero_bit()).collect();
+                let mut npc_acc: Vec<u32> = (0..pc_width).map(|_| self.emit_zero_bit()).collect();
                 let mut ns_acc: Vec<u32> = state_slot_types
                     .iter()
                     .map(|ty| self.emit_zero_slot(ty))
@@ -2089,7 +2412,9 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                     ret_vals: ret_acc,
                 }
             }
-            _ => panic!("movfuscate: unhandled IRTerminator variant — add handling for this variant"),
+            _ => {
+                panic!("movfuscate: unhandled IRTerminator variant — add handling for this variant")
+            }
         }
     }
 
@@ -2202,8 +2527,17 @@ fn compute_static_slot_classes<P: Clone>(
     ir_types: &[IRType],
     bit_type_id: &IRTypeId,
     pc_width: usize,
-) -> (Vec<IRTypeId>, Vec<Vec<(usize, usize)>>, BTreeMap<Vec<u32>, Vec<(usize, usize)>>) {
-    let max_param_count = blocks.blocks.iter().map(|b| b.params.len()).max().unwrap_or(0);
+) -> (
+    Vec<IRTypeId>,
+    Vec<Vec<(usize, usize)>>,
+    BTreeMap<Vec<u32>, Vec<(usize, usize)>>,
+) {
+    let max_param_count = blocks
+        .blocks
+        .iter()
+        .map(|b| b.params.len())
+        .max()
+        .unwrap_or(0);
 
     // Per position, the distinct `(SlotSig, offset, count)` groups observed
     // across all blocks that have a param there — usually exactly one
@@ -2213,7 +2547,8 @@ fn compute_static_slot_classes<P: Clone>(
     // differently-typed param). First-seen order (blocks is itself an
     // ordered `Vec`) keeps the common single-group case's own offset
     // assignment deterministic and stable.
-    let mut position_groups: Vec<Vec<(SlotSig, usize, usize)>> = Vec::with_capacity(max_param_count);
+    let mut position_groups: Vec<Vec<(SlotSig, usize, usize)>> =
+        Vec::with_capacity(max_param_count);
     let mut state_slot_types: Vec<IRTypeId> = Vec::new();
     let mut next_offset = 0usize;
 
@@ -2278,7 +2613,9 @@ fn compute_static_slot_classes<P: Clone>(
     let mut sig_fallback: BTreeMap<Vec<u32>, Vec<(usize, usize)>> = BTreeMap::new();
     for (i, block) in blocks.blocks.iter().enumerate() {
         let key: Vec<u32> = block.params.iter().map(|t| t.0).collect();
-        sig_fallback.entry(key).or_insert_with(|| slot_of[i].clone());
+        sig_fallback
+            .entry(key)
+            .or_insert_with(|| slot_of[i].clone());
     }
 
     (state_slot_types, slot_of, sig_fallback)
@@ -2297,12 +2634,31 @@ fn compute_return_slot_types<P: Clone>(
     for block in &blocks.blocks {
         let var_types = infer_block_var_types(block, ir_types, bit_type_id);
         let ret_args: Option<&Vec<IRVarId>> = match &block.terminator {
-            IRTerminator::Jmp { target: IRBranchTarget { dest: IRBlockTargetId::Return, args, .. } } => Some(args),
-            IRTerminator::JumpCond {
-                then_target: IRBranchTarget { dest: IRBlockTargetId::Return, args, .. }, ..
+            IRTerminator::Jmp {
+                target:
+                    IRBranchTarget {
+                        dest: IRBlockTargetId::Return,
+                        args,
+                        ..
+                    },
             } => Some(args),
             IRTerminator::JumpCond {
-                else_target: IRBranchTarget { dest: IRBlockTargetId::Return, args, .. }, ..
+                then_target:
+                    IRBranchTarget {
+                        dest: IRBlockTargetId::Return,
+                        args,
+                        ..
+                    },
+                ..
+            } => Some(args),
+            IRTerminator::JumpCond {
+                else_target:
+                    IRBranchTarget {
+                        dest: IRBlockTargetId::Return,
+                        args,
+                        ..
+                    },
+                ..
             } => Some(args),
             _ => None,
         };
@@ -2354,11 +2710,23 @@ pub fn movfuscate_biir_with_control_provenance<P: Clone>(
 
 fn movfuscate_biir_impl<P: Clone>(blocks: &BIrBlocks<P>, control_prov: Option<&P>) -> BIrBlocks<P> {
     let n = blocks.blocks.len();
-    if n == 1 { return blocks.clone(); }
+    if n == 1 {
+        return blocks.clone();
+    }
     let pc_width = pc_bits_needed(n);
-    let state_width = blocks.blocks.iter().map(|b| b.params as usize).max().unwrap_or(0);
+    let state_width = blocks
+        .blocks
+        .iter()
+        .map(|b| b.params as usize)
+        .max()
+        .unwrap_or(0);
     let combined_params = pc_width + state_width;
-    let ctrl_prov = blocks.blocks.iter().flat_map(|b| b.stmts.iter()).map(|n| &n.prov).next()
+    let ctrl_prov = blocks
+        .blocks
+        .iter()
+        .flat_map(|b| b.stmts.iter())
+        .map(|n| &n.prov)
+        .next()
         .cloned()
         .or_else(|| control_prov.cloned())
         .expect("movfuscate_biir: circuit has no statements; supply explicit control provenance");
@@ -2366,7 +2734,8 @@ fn movfuscate_biir_impl<P: Clone>(blocks: &BIrBlocks<P>, control_prov: Option<&P
     let state_slot_types = vec![(); state_width];
     let ret_width = BIrCtx::<P>::return_val_width(blocks);
     let return_slot_types = vec![(); ret_width];
-    let (mut result, _block_ranges, _accum_info, _watch) = movfuscate(ctx, blocks, state_slot_types, return_slot_types, &[]);
+    let (mut result, _block_ranges, _accum_info, _watch) =
+        movfuscate(ctx, blocks, state_slot_types, return_slot_types, &[]);
     result.pre_init = blocks.pre_init.clone();
     result
 }
@@ -2422,7 +2791,12 @@ pub fn movfuscate_ir_with_boundary_and_watch<P: Clone>(
     blocks: &IRBlocks<P>,
     types: &mut IRTypes,
     watch: &[(usize, u32)],
-) -> (IRBlocks<P>, Vec<MovfuscBlockBoundary>, MovfuscAccumInfo, Vec<(usize, u32, u32)>) {
+) -> (
+    IRBlocks<P>,
+    Vec<MovfuscBlockBoundary>,
+    MovfuscAccumInfo,
+    Vec<(usize, u32, u32)>,
+) {
     movfuscate_ir_impl(blocks, types, watch, None)
 }
 
@@ -2433,31 +2807,58 @@ pub fn movfuscate_ir_with_boundary_and_watch<P: Clone>(
 /// running a full (slow) circuit evaluation.
 /// Dump a single statement's shape by `(block, var)` -- `var` may be a
 /// param (no stmt) or index into `stmts` (`var.0 - params.len()`).
-pub fn debug_dump_stmt<P: Clone>(blocks: &IRBlocks<P>, block_idx: usize, var: IRVarId) -> alloc::string::String {
+pub fn debug_dump_stmt<P: Clone>(
+    blocks: &IRBlocks<P>,
+    block_idx: usize,
+    var: IRVarId,
+) -> alloc::string::String {
     let b = &blocks.blocks[block_idx];
     if (var.0 as usize) < b.params.len() {
-        alloc::format!("var {} = param #{} (ty={:?})", var.0, var.0, b.params[var.0 as usize])
+        alloc::format!(
+            "var {} = param #{} (ty={:?})",
+            var.0,
+            var.0,
+            b.params[var.0 as usize]
+        )
     } else {
         let si = var.0 as usize - b.params.len();
         alloc::format!("var {} = stmts[{si}] = {:?}", var.0, b.stmts[si].kind)
     }
 }
 
-pub fn debug_dump_slot_of<P: Clone>(blocks: &IRBlocks<P>, types: &IRTypes) -> alloc::string::String {
+pub fn debug_dump_slot_of<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+) -> alloc::string::String {
     use alloc::string::String;
     use core::fmt::Write;
     let bit_type_id = {
-        let existing = types.0.iter().position(|t| matches!(t, IRType::Primitive(Type::Bit)));
+        let existing = types
+            .0
+            .iter()
+            .position(|t| matches!(t, IRType::Primitive(Type::Bit)));
         IRTypeId(existing.expect("Bit type must already be interned") as u32)
     };
     let pc_width = pc_bits_needed(blocks.blocks.len());
     let (state_slot_types, slot_of, _sig_fallback) =
         compute_static_slot_classes(blocks, &types.0, &bit_type_id, pc_width);
     let mut out = String::new();
-    let _ = writeln!(out, "n_blocks={} pc_width={} state_width={}", blocks.blocks.len(), pc_width, state_slot_types.len());
+    let _ = writeln!(
+        out,
+        "n_blocks={} pc_width={} state_width={}",
+        blocks.blocks.len(),
+        pc_width,
+        state_slot_types.len()
+    );
     for (i, slots) in slot_of.iter().enumerate() {
         let b = &blocks.blocks[i];
-        let _ = writeln!(out, "block {i}: params={:?} n_stmts={} slots={slots:?} term={:?}", b.params, b.stmts.len(), b.terminator);
+        let _ = writeln!(
+            out,
+            "block {i}: params={:?} n_stmts={} slots={slots:?} term={:?}",
+            b.params,
+            b.stmts.len(),
+            b.terminator
+        );
     }
     out
 }
@@ -2467,14 +2868,36 @@ fn movfuscate_ir_impl<P: Clone>(
     types: &mut IRTypes,
     watch: &[(usize, u32)],
     control_prov: Option<&P>,
-) -> (IRBlocks<P>, Vec<MovfuscBlockBoundary>, MovfuscAccumInfo, Vec<(usize, u32, u32)>) {
+) -> (
+    IRBlocks<P>,
+    Vec<MovfuscBlockBoundary>,
+    MovfuscAccumInfo,
+    Vec<(usize, u32, u32)>,
+) {
     // Ensure IRType::Bit is present in the types table.
     let bit_type_id = types.intern(IRType::Primitive(Type::Bit));
 
     let n = blocks.blocks.len();
     if n == 1 {
-        let empty_init = MovfuscAccumInit { start: 0, end: 0, done_acc: 0, next_pc: Vec::new(), next_state: Vec::new(), ret_vals: Vec::new(), synthetic_out: Vec::new(), synthetic_in: Vec::new() };
-        return (blocks.clone(), Vec::new(), MovfuscAccumInfo { init: empty_init, steps: Vec::new() }, Vec::new());
+        let empty_init = MovfuscAccumInit {
+            start: 0,
+            end: 0,
+            done_acc: 0,
+            next_pc: Vec::new(),
+            next_state: Vec::new(),
+            ret_vals: Vec::new(),
+            synthetic_out: Vec::new(),
+            synthetic_in: Vec::new(),
+        };
+        return (
+            blocks.clone(),
+            Vec::new(),
+            MovfuscAccumInfo {
+                init: empty_init,
+                steps: Vec::new(),
+            },
+            Vec::new(),
+        );
     }
 
     // Intern Vec(pc_width, Bit) for block-reference storage.
@@ -2494,10 +2917,13 @@ fn movfuscate_ir_impl<P: Clone>(
     // purely from its own param signature; `sig_fallback` below resolves
     // a `Dyn` target by signature alone at actual emission time (see
     // `compute_static_slot_classes`'s own doc comment).
-    let (state_slot_types, slot_of, sig_fallback) = compute_static_slot_classes(blocks, &ir_types, &bit_type_id, pc_width);
-    let slot_alloc = SlotAllocation::PerBlock { slot_of, sig_fallback };
-    let return_slot_types =
-        compute_return_slot_types(blocks, &ir_types, &bit_type_id, pc_width);
+    let (state_slot_types, slot_of, sig_fallback) =
+        compute_static_slot_classes(blocks, &ir_types, &bit_type_id, pc_width);
+    let slot_alloc = SlotAllocation::PerBlock {
+        slot_of,
+        sig_fallback,
+    };
+    let return_slot_types = compute_return_slot_types(blocks, &ir_types, &bit_type_id, pc_width);
 
     // Combined block param types: [Bit×pc_width] ++ expanded state_slot_types
     let combined_param_types: Vec<IRTypeId> = (0..pc_width)
@@ -2506,7 +2932,12 @@ fn movfuscate_ir_impl<P: Clone>(
         .collect();
 
     let combined_params = pc_width + state_slot_types.len();
-    let ctrl_prov = blocks.blocks.iter().flat_map(|b| b.stmts.iter()).map(|n| &n.prov).next()
+    let ctrl_prov = blocks
+        .blocks
+        .iter()
+        .flat_map(|b| b.stmts.iter())
+        .map(|n| &n.prov)
+        .next()
         .cloned()
         .or_else(|| control_prov.cloned())
         .expect("movfuscate_ir: circuit has no statements; supply explicit control provenance");
@@ -2520,7 +2951,8 @@ fn movfuscate_ir_impl<P: Clone>(
         ctrl_prov,
         slot_alloc,
     );
-    let (mut result, block_ranges, accum_info, watch_results) = movfuscate(ctx, blocks, state_slot_types, return_slot_types, watch);
+    let (mut result, block_ranges, accum_info, watch_results) =
+        movfuscate(ctx, blocks, state_slot_types, return_slot_types, watch);
     // `pre_init` segments name storage lanes in the *pre-movfuscation*
     // numbering, but every StorageRead/StorageWrite statement just emitted
     // above was remapped to `id*2` (Block-typed value) or `id*2+1`
@@ -2539,7 +2971,10 @@ fn movfuscate_ir_impl<P: Clone>(
             } else {
                 StorageId(seg.storage.0 * 2 + 1)
             };
-            PreInitSegment { storage: new_storage, ..seg.clone() }
+            PreInitSegment {
+                storage: new_storage,
+                ..seg.clone()
+            }
         })
         .collect();
     // Oracle/action/RNG *declarations* need no remapping (unlike `pre_init`,
@@ -2561,7 +2996,6 @@ fn movfuscate_ir_impl<P: Clone>(
     (result, block_ranges, accum_info, watch_results)
 }
 
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -2572,8 +3006,9 @@ mod tests {
     use super::*;
     use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
     use volar_ir::ir::{
-        IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypeId,
-        IRTypes, IRVarId};
+        IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator,
+        IRType, IRTypeId, IRTypes, IRVarId,
+    };
     use volar_ir_common::{Constant, Node};
 
     // =========================================================================
@@ -2598,43 +3033,55 @@ mod tests {
     // =========================================================================
 
     fn two_block_dag() -> BIrBlocks {
-        BIrBlocks { blocks: std::vec![
-            BIrBlock {
-                params: 1,
-                stmts: std::vec![BIrStmt::Not(IRVarId(0))].into_iter().map(|s| Node::new(s, (), None)).collect(),
-                terminator: BIrTerminator::CondJmp {
-                    val: IRVarId(1),
-                    then_target: BIrTarget {
-                        block: IRBlockTargetId::Block(IRBlockId(1)),
-                        args: std::vec![IRVarId(1)],
-                    },
-                    else_target: BIrTarget {
-                        block: IRBlockTargetId::Block(IRBlockId(1)),
-                        args: std::vec![IRVarId(0)],
+        BIrBlocks {
+            blocks: std::vec![
+                BIrBlock {
+                    params: 1,
+                    stmts: std::vec![BIrStmt::Not(IRVarId(0))]
+                        .into_iter()
+                        .map(|s| Node::new(s, (), None))
+                        .collect(),
+                    terminator: BIrTerminator::CondJmp {
+                        val: IRVarId(1),
+                        then_target: BIrTarget {
+                            block: IRBlockTargetId::Block(IRBlockId(1)),
+                            args: std::vec![IRVarId(1)],
+                        },
+                        else_target: BIrTarget {
+                            block: IRBlockTargetId::Block(IRBlockId(1)),
+                            args: std::vec![IRVarId(0)],
+                        },
                     },
                 },
-            },
-            BIrBlock {
-                params: 1,
-                stmts: std::vec![],
-                terminator: BIrTerminator::Jmp(BIrTarget {
-                    block: IRBlockTargetId::Return,
-                    args: std::vec![IRVarId(0)],
-                }),
-            },
-        ], pre_init: std::vec![] }
+                BIrBlock {
+                    params: 1,
+                    stmts: std::vec![],
+                    terminator: BIrTerminator::Jmp(BIrTarget {
+                        block: IRBlockTargetId::Return,
+                        args: std::vec![IRVarId(0)],
+                    }),
+                },
+            ],
+            pre_init: std::vec![],
+        }
     }
 
     #[test]
     fn test_biir_single_block_passthrough() {
-        let single = BIrBlocks { blocks: std::vec![BIrBlock {
-            params: 2,
-            stmts: std::vec![BIrStmt::And(IRVarId(0), IRVarId(1))].into_iter().map(|s| Node::new(s, (), None)).collect(),
-            terminator: BIrTerminator::Jmp(BIrTarget {
-                block: IRBlockTargetId::Return,
-                args: std::vec![IRVarId(2)],
-            }),
-        }], pre_init: std::vec![] };
+        let single = BIrBlocks {
+            blocks: std::vec![BIrBlock {
+                params: 2,
+                stmts: std::vec![BIrStmt::And(IRVarId(0), IRVarId(1))]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: std::vec![IRVarId(2)],
+                }),
+            }],
+            pre_init: std::vec![],
+        };
         let result = movfuscate_biir(&single);
         assert_eq!(result, single);
     }
@@ -2654,7 +3101,11 @@ mod tests {
     fn test_biir_two_block_dag_terminator_shape() {
         let result = movfuscate_biir(&two_block_dag());
         match &result.blocks[0].terminator {
-            BIrTerminator::CondJmp { then_target, else_target, .. } => {
+            BIrTerminator::CondJmp {
+                then_target,
+                else_target,
+                ..
+            } => {
                 assert_eq!(then_target.block, IRBlockTargetId::Return);
                 assert_eq!(else_target.block, IRBlockTargetId::Block(IRBlockId(0)));
                 assert_eq!(else_target.args.len(), 2);
@@ -2675,37 +3126,47 @@ mod tests {
 
     #[test]
     fn test_biir_three_block_chain() {
-        let blocks = BIrBlocks { blocks: std::vec![
-            BIrBlock {
-                params: 1,
-                stmts: std::vec![],
-                terminator: BIrTerminator::Jmp(BIrTarget {
-                    block: IRBlockTargetId::Block(IRBlockId(1)),
-                    args: std::vec![IRVarId(0)],
-                }),
-            },
-            BIrBlock {
-                params: 1,
-                stmts: std::vec![BIrStmt::Not(IRVarId(0))].into_iter().map(|s| Node::new(s, (), None)).collect(),
-                terminator: BIrTerminator::Jmp(BIrTarget {
-                    block: IRBlockTargetId::Block(IRBlockId(2)),
-                    args: std::vec![IRVarId(1)],
-                }),
-            },
-            BIrBlock {
-                params: 1,
-                stmts: std::vec![],
-                terminator: BIrTerminator::Jmp(BIrTarget {
-                    block: IRBlockTargetId::Return,
-                    args: std::vec![IRVarId(0)],
-                }),
-            },
-        ], pre_init: std::vec![] };
+        let blocks = BIrBlocks {
+            blocks: std::vec![
+                BIrBlock {
+                    params: 1,
+                    stmts: std::vec![],
+                    terminator: BIrTerminator::Jmp(BIrTarget {
+                        block: IRBlockTargetId::Block(IRBlockId(1)),
+                        args: std::vec![IRVarId(0)],
+                    }),
+                },
+                BIrBlock {
+                    params: 1,
+                    stmts: std::vec![BIrStmt::Not(IRVarId(0))]
+                        .into_iter()
+                        .map(|s| Node::new(s, (), None))
+                        .collect(),
+                    terminator: BIrTerminator::Jmp(BIrTarget {
+                        block: IRBlockTargetId::Block(IRBlockId(2)),
+                        args: std::vec![IRVarId(1)],
+                    }),
+                },
+                BIrBlock {
+                    params: 1,
+                    stmts: std::vec![],
+                    terminator: BIrTerminator::Jmp(BIrTarget {
+                        block: IRBlockTargetId::Return,
+                        args: std::vec![IRVarId(0)],
+                    }),
+                },
+            ],
+            pre_init: std::vec![],
+        };
         let result = movfuscate_biir(&blocks);
         assert!(result.is_movfuscated());
         assert_eq!(result.blocks[0].params, 3); // pc(2) + state(1)
         match &result.blocks[0].terminator {
-            BIrTerminator::CondJmp { then_target, else_target, .. } => {
+            BIrTerminator::CondJmp {
+                then_target,
+                else_target,
+                ..
+            } => {
                 assert_eq!(then_target.block, IRBlockTargetId::Return);
                 assert_eq!(else_target.args.len(), 3);
             }
@@ -2715,14 +3176,20 @@ mod tests {
 
     #[test]
     fn test_biir_self_loop_passthrough() {
-        let blocks = BIrBlocks { blocks: std::vec![BIrBlock {
-            params: 1,
-            stmts: std::vec![BIrStmt::Not(IRVarId(0))].into_iter().map(|s| Node::new(s, (), None)).collect(),
-            terminator: BIrTerminator::Jmp(BIrTarget {
-                block: IRBlockTargetId::Block(IRBlockId(0)),
-                args: std::vec![IRVarId(1)],
-            }),
-        }], pre_init: std::vec![] };
+        let blocks = BIrBlocks {
+            blocks: std::vec![BIrBlock {
+                params: 1,
+                stmts: std::vec![BIrStmt::Not(IRVarId(0))]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Block(IRBlockId(0)),
+                    args: std::vec![IRVarId(1)],
+                }),
+            }],
+            pre_init: std::vec![],
+        };
         let result = movfuscate_biir(&blocks);
         assert_eq!(result, blocks);
     }
@@ -2731,25 +3198,31 @@ mod tests {
     fn test_biir_four_block_pc_width() {
         let make_pass = |dst: u32| BIrBlock::<()> {
             params: 1,
-            stmts: std::vec![BIrStmt::Zero].into_iter().map(|s| Node::new(s, (), None)).collect(),
+            stmts: std::vec![BIrStmt::Zero]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
             terminator: BIrTerminator::Jmp(BIrTarget {
                 block: IRBlockTargetId::Block(IRBlockId(dst)),
                 args: std::vec![IRVarId(0)],
             }),
         };
-        let blocks = BIrBlocks { blocks: std::vec![
-            make_pass(1),
-            make_pass(2),
-            make_pass(3),
-            BIrBlock {
-                params: 1,
-                stmts: std::vec![],
-                terminator: BIrTerminator::Jmp(BIrTarget {
-                    block: IRBlockTargetId::Return,
-                    args: std::vec![IRVarId(0)],
-                }),
-            },
-        ], pre_init: std::vec![] };
+        let blocks = BIrBlocks {
+            blocks: std::vec![
+                make_pass(1),
+                make_pass(2),
+                make_pass(3),
+                BIrBlock {
+                    params: 1,
+                    stmts: std::vec![],
+                    terminator: BIrTerminator::Jmp(BIrTarget {
+                        block: IRBlockTargetId::Return,
+                        args: std::vec![IRVarId(0)],
+                    }),
+                },
+            ],
+            pre_init: std::vec![],
+        };
         let result = movfuscate_biir(&blocks);
         assert!(result.is_movfuscated());
         assert_eq!(result.blocks[0].params, 3); // pc(2) + state(1)
@@ -2768,13 +3241,23 @@ mod tests {
         let blocks = IRBlocks::new(std::vec![
             IRBlock {
                 params: std::vec![IRTypeId(0)],
-                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, IRTypeId(0))].into_iter().map(|s| Node::new(s, (), None)).collect(),
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![IRVarId(0)],) },
+                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, IRTypeId(0))]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(0)],
+                    )
+                },
             },
             IRBlock {
                 params: std::vec![IRTypeId(0)],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],)
+                },
             },
         ]);
         (blocks, types)
@@ -2786,7 +3269,9 @@ mod tests {
         let blocks: IRBlocks<()> = IRBlocks::new(std::vec![IRBlock {
             params: std::vec![IRTypeId(0)],
             stmts: std::vec![],
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],)
+            },
         }]);
         assert_eq!(movfuscate_ir(&blocks, &mut types), blocks);
     }
@@ -2803,7 +3288,10 @@ mod tests {
         let result = movfuscate_ir(&blocks, &mut types);
         assert_eq!(result.blocks[0].params.len(), 2); // pc(1) + state(1)
         for tid in &result.blocks[0].params {
-            assert!(matches!(types.0[tid.0 as usize], IRType::Primitive(Type::Bit)));
+            assert!(matches!(
+                types.0[tid.0 as usize],
+                IRType::Primitive(Type::Bit)
+            ));
         }
     }
 
@@ -2813,7 +3301,9 @@ mod tests {
         let result = movfuscate_ir(&blocks, &mut types);
         match &result.blocks[0].terminator {
             IRTerminator::JumpCond {
-                then_target, else_target, ..
+                then_target,
+                else_target,
+                ..
             } => {
                 assert_eq!(then_target.dest, IRBlockTargetId::Return);
                 assert_eq!(then_target.args.len(), 1);
@@ -2835,8 +3325,15 @@ mod tests {
         // shared `bit_zero` stmt emitted before the per-block loop), block
         // 1 starts right where block 0 ends, and block 1 ends at the last
         // stmt.
-        assert_eq!(block_ranges[0].start, combined_params + 1, "first range starts right after params + bit_zero");
-        assert_eq!(block_ranges[0].end, block_ranges[1].start, "ranges are back-to-back, no gap");
+        assert_eq!(
+            block_ranges[0].start,
+            combined_params + 1,
+            "first range starts right after params + bit_zero"
+        );
+        assert_eq!(
+            block_ranges[0].end, block_ranges[1].start,
+            "ranges are back-to-back, no gap"
+        );
         // The last range ends before the final cross-block accumulation
         // phase (done/next_pc/next_state/ret_vals, combining *all* blocks'
         // results together) -- that phase necessarily comes after every
@@ -2855,7 +3352,12 @@ mod tests {
         // gate needed for "bit == 1"), so it may reference a param
         // (var id < combined_params) rather than a freshly emitted stmt.
         for b in &block_ranges {
-            assert!(b.start < b.end, "range ({}, {}) must be non-empty", b.start, b.end);
+            assert!(
+                b.start < b.end,
+                "range ({}, {}) must be non-empty",
+                b.start,
+                b.end
+            );
             assert!(b.is_active < b.end);
             assert!(b.done < b.end);
         }
@@ -2869,7 +3371,8 @@ mod tests {
         let (blocks, mut types_a) = two_block_ir_bit();
         let mut types_b = types_a.clone();
         let plain = movfuscate_ir(&blocks, &mut types_a);
-        let (with_boundary, _ranges, _accum_info) = movfuscate_ir_with_boundary(&blocks, &mut types_b);
+        let (with_boundary, _ranges, _accum_info) =
+            movfuscate_ir_with_boundary(&blocks, &mut types_b);
         assert_eq!(plain, with_boundary);
     }
 
@@ -2882,19 +3385,32 @@ mod tests {
     ///   Block 1 (1 param `x: G8`): Jmp(Return, [x])
     fn two_block_ir_g8() -> (IRBlocks, IRTypes) {
         // types[0] = Bit, types[1] = Galois8AES
-        let types = IRTypes(std::vec![IRType::Primitive(Type::Bit), IRType::Primitive(Type::AES8)]);
+        let types = IRTypes(std::vec![
+            IRType::Primitive(Type::Bit),
+            IRType::Primitive(Type::AES8)
+        ]);
         let g8 = IRTypeId(1);
         let bit = IRTypeId(0);
         let blocks = IRBlocks::new(std::vec![
             IRBlock {
                 params: std::vec![g8.clone()],
-                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, bit)].into_iter().map(|s| Node::new(s, (), None)).collect(),
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![IRVarId(0)],) },
+                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, bit)]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(0)],
+                    )
+                },
             },
             IRBlock {
                 params: std::vec![g8.clone()],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],)
+                },
             },
         ]);
         (blocks, types)
@@ -2915,12 +3431,18 @@ mod tests {
         assert_eq!(result.blocks[0].params.len(), 2);
         // First param (PC) must be Bit
         assert!(
-            matches!(types.0[result.blocks[0].params[0].0 as usize], IRType::Primitive(Type::Bit)),
+            matches!(
+                types.0[result.blocks[0].params[0].0 as usize],
+                IRType::Primitive(Type::Bit)
+            ),
             "PC param must be Bit"
         );
         // Second param (state slot 0) must be Galois8AES
         assert!(
-            matches!(types.0[result.blocks[0].params[1].0 as usize], IRType::Primitive(Type::AES8)),
+            matches!(
+                types.0[result.blocks[0].params[1].0 as usize],
+                IRType::Primitive(Type::AES8)
+            ),
             "state slot 0 must be Galois8AES"
         );
     }
@@ -2930,7 +3452,11 @@ mod tests {
         let (blocks, mut types) = two_block_ir_g8();
         let result = movfuscate_ir(&blocks, &mut types);
         match &result.blocks[0].terminator {
-            IRTerminator::JumpCond { then_target, else_target, .. } => {
+            IRTerminator::JumpCond {
+                then_target,
+                else_target,
+                ..
+            } => {
                 assert_eq!(then_target.args.len(), 1, "ret_width = 1 (one G8 value)");
                 assert_eq!(else_target.args.len(), 2, "loop-back = pc(1) + state(1)");
             }
@@ -2948,7 +3474,10 @@ mod tests {
             .stmts
             .iter()
             .any(|node| matches!(&node.kind, IRStmt::Poly { .. }));
-        assert!(has_poly, "combined block must contain Poly stmts for field dispatch");
+        assert!(
+            has_poly,
+            "combined block must contain Poly stmts for field dispatch"
+        );
     }
 
     /// Verify that gate Poly stmts for G8 slots are degree-2 (two-var monomial).
@@ -2964,7 +3493,10 @@ mod tests {
                 false
             }
         });
-        assert!(degree2, "expected at least one degree-2 Poly for the gate operation");
+        assert!(
+            degree2,
+            "expected at least one degree-2 Poly for the gate operation"
+        );
     }
 
     // =========================================================================
@@ -2976,24 +3508,38 @@ mod tests {
     ///   Block 1: params (x: G8);         Jmp(Return, [x])
     #[test]
     fn test_ir_mixed_types_two_block() {
-        let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit), IRType::Primitive(Type::AES8)]);
+        let mut types = IRTypes(std::vec![
+            IRType::Primitive(Type::Bit),
+            IRType::Primitive(Type::AES8)
+        ]);
         let bit = IRTypeId(0);
         let g8 = IRTypeId(1);
 
         let blocks: IRBlocks<()> = IRBlocks::new(std::vec![
             IRBlock {
                 params: std::vec![g8.clone(), bit.clone()],
-                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone())].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone())]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
                 terminator: IRTerminator::JumpCond {
                     condition: IRVarId(1), // b
-                    then_target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![IRVarId(0)]), // a
-                    else_target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)]), // a
+                    then_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(0)]
+                    ), // a
+                    else_target: IRBranchTarget::new(
+                        IRBlockTargetId::Return,
+                        std::vec![IRVarId(0)]
+                    ), // a
                 },
             },
             IRBlock {
                 params: std::vec![g8.clone()],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],)
+                },
             },
         ]);
 
@@ -3004,12 +3550,25 @@ mod tests {
 
         // Param types: [Bit (PC), G8 (slot 0), Bit (slot 1)]
         let p = &result.blocks[0].params;
-        assert!(matches!(types.0[p[0].0 as usize], IRType::Primitive(Type::Bit)), "PC slot");
-        assert!(matches!(types.0[p[1].0 as usize], IRType::Primitive(Type::AES8)), "state slot 0");
-        assert!(matches!(types.0[p[2].0 as usize], IRType::Primitive(Type::Bit)), "state slot 1");
+        assert!(
+            matches!(types.0[p[0].0 as usize], IRType::Primitive(Type::Bit)),
+            "PC slot"
+        );
+        assert!(
+            matches!(types.0[p[1].0 as usize], IRType::Primitive(Type::AES8)),
+            "state slot 0"
+        );
+        assert!(
+            matches!(types.0[p[2].0 as usize], IRType::Primitive(Type::Bit)),
+            "state slot 1"
+        );
 
         match &result.blocks[0].terminator {
-            IRTerminator::JumpCond { then_target, else_target, .. } => {
+            IRTerminator::JumpCond {
+                then_target,
+                else_target,
+                ..
+            } => {
                 assert_eq!(then_target.args.len(), 1, "ret_width = 1 (G8)");
                 assert_eq!(else_target.args.len(), 3, "loop-back = pc(1) + state(2)");
             }
@@ -3045,10 +3604,16 @@ mod tests {
                     ty: bit.clone(),
                     coeffs: std::collections::BTreeMap::from([(std::vec![IRVarId(0)], 1u8)]),
                     constant: Constant { hi: 0, lo: 1 },
-                }].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                }]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
                 terminator: IRTerminator::Jmp {
                     // slot0 <- Not(slot0) (touched); slot1 <- slot1 (untouched pass-through)
-                    target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![IRVarId(2), IRVarId(1)]),
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(2), IRVarId(1)]
+                    ),
                 },
             },
             IRBlock {
@@ -3057,10 +3622,16 @@ mod tests {
                     ty: bit.clone(),
                     coeffs: std::collections::BTreeMap::from([(std::vec![IRVarId(1)], 1u8)]),
                     constant: Constant { hi: 0, lo: 1 },
-                }].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                }]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
                 terminator: IRTerminator::Jmp {
                     // slot0 <- slot0 (untouched pass-through); slot1 <- Not(slot1) (touched)
-                    target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(0)), std::vec![IRVarId(0), IRVarId(2)]),
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(0)),
+                        std::vec![IRVarId(0), IRVarId(2)]
+                    ),
                 },
             },
             // Block 2: unreachable from 0/1 in this synthetic example, but
@@ -3085,21 +3656,36 @@ mod tests {
         // Block 0 (steps[0]) touches slot 0 (new var, different from the
         // seed) but not slot 1 (must stay exactly accum_init's own var --
         // no gate/add pair was emitted for it).
-        assert_ne!(accum_info.steps[0].next_state[0], accum_info.init.next_state[0], "block 0 touches slot 0 -- must allocate a new accumulation var");
-        assert_eq!(accum_info.steps[0].next_state[1], accum_info.init.next_state[1], "block 0 does not touch slot 1 -- must skip accumulation entirely, not just skip the change");
+        assert_ne!(
+            accum_info.steps[0].next_state[0], accum_info.init.next_state[0],
+            "block 0 touches slot 0 -- must allocate a new accumulation var"
+        );
+        assert_eq!(
+            accum_info.steps[0].next_state[1], accum_info.init.next_state[1],
+            "block 0 does not touch slot 1 -- must skip accumulation entirely, not just skip the change"
+        );
 
         // Block 1 (steps[1]) touches slot 1 (new var, different from
         // steps[0]'s) but not slot 0 (must carry steps[0]'s own var
         // forward unchanged).
-        assert_eq!(accum_info.steps[1].next_state[0], accum_info.steps[0].next_state[0], "block 1 does not touch slot 0 -- must carry the running value forward untouched");
-        assert_ne!(accum_info.steps[1].next_state[1], accum_info.steps[0].next_state[1], "block 1 touches slot 1 -- must allocate a new accumulation var");
+        assert_eq!(
+            accum_info.steps[1].next_state[0], accum_info.steps[0].next_state[0],
+            "block 1 does not touch slot 0 -- must carry the running value forward untouched"
+        );
+        assert_ne!(
+            accum_info.steps[1].next_state[1], accum_info.steps[0].next_state[1],
+            "block 1 touches slot 1 -- must allocate a new accumulation var"
+        );
 
         // End-to-end sanity: still a well-typed, valid combined block (not
         // asserting an exact param count here -- irrelevant to what this
         // test targets, and sensitive to slot-splitting details of the
         // 3rd, return-only block that aren't this test's concern).
         for ty_id in &result.blocks[0].params {
-            assert!(matches!(types.0[ty_id.0 as usize], IRType::Primitive(Type::Bit)), "every combined param must still be a valid, well-typed Bit slot");
+            assert!(
+                matches!(types.0[ty_id.0 as usize], IRType::Primitive(Type::Bit)),
+                "every combined param must still be a valid, well-typed Bit slot"
+            );
         }
     }
 
@@ -3116,7 +3702,10 @@ mod tests {
     /// instead.
     #[test]
     fn test_ir_position_type_collision_splits_into_separate_slots() {
-        let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit), IRType::Primitive(Type::AES8)]);
+        let mut types = IRTypes(std::vec![
+            IRType::Primitive(Type::Bit),
+            IRType::Primitive(Type::AES8)
+        ]);
         let bit = IRTypeId(0);
         let g8 = IRTypeId(1);
 
@@ -3126,18 +3715,27 @@ mod tests {
                 // A trivial stmt -- `movfuscate_ir` needs at least one
                 // real statement somewhere to derive provenance for its
                 // own synthetic infrastructure gates.
-                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone())].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone())]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
                 // Jump to block 1, which expects [G8, Bit] -- swap args to
                 // stay internally type-correct (var 1 is G8, var 0 is Bit).
                 terminator: IRTerminator::Jmp {
-                    target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![IRVarId(1), IRVarId(0)]),
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(1), IRVarId(0)]
+                    ),
                 },
             },
             IRBlock {
                 params: std::vec![g8.clone(), bit.clone()], // position 0: G8 (collides with block 0's Bit), position 1: Bit (collides with block 0's G8)
                 stmts: std::vec![],
                 terminator: IRTerminator::Jmp {
-                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0), IRVarId(1)]),
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Return,
+                        std::vec![IRVarId(0), IRVarId(1)]
+                    ),
                 },
             },
         ]);
@@ -3152,14 +3750,26 @@ mod tests {
         // Position 0 sees {Bit, G8} (block 0's Bit, block 1's G8) -> 2
         // slots; position 1 sees {G8, Bit} -> 2 more slots. 4 total, not 2
         // -- pc(1) + state(4).
-        assert_eq!(result.blocks[0].params.len(), 5, "pc(1) + state(2 positions x 2 colliding types each)");
+        assert_eq!(
+            result.blocks[0].params.len(),
+            5,
+            "pc(1) + state(2 positions x 2 colliding types each)"
+        );
 
         let p = &result.blocks[0].params;
-        let is_bit = |tid: &IRTypeId| matches!(types.0[tid.0 as usize], IRType::Primitive(Type::Bit));
-        let is_g8 = |tid: &IRTypeId| matches!(types.0[tid.0 as usize], IRType::Primitive(Type::AES8));
+        let is_bit =
+            |tid: &IRTypeId| matches!(types.0[tid.0 as usize], IRType::Primitive(Type::Bit));
+        let is_g8 =
+            |tid: &IRTypeId| matches!(types.0[tid.0 as usize], IRType::Primitive(Type::AES8));
         assert!(is_bit(&p[0]), "PC slot must be Bit");
-        assert!(is_bit(&p[1]) && is_g8(&p[2]), "position 0's groups: block 0's Bit first, then block 1's G8");
-        assert!(is_g8(&p[3]) && is_bit(&p[4]), "position 1's groups: block 0's G8 first, then block 1's Bit");
+        assert!(
+            is_bit(&p[1]) && is_g8(&p[2]),
+            "position 0's groups: block 0's Bit first, then block 1's G8"
+        );
+        assert!(
+            is_g8(&p[3]) && is_bit(&p[4]),
+            "position 1's groups: block 0's G8 first, then block 1's Bit"
+        );
     }
 
     /// Two structurally unrelated blocks (no jump connects them at all --
@@ -3189,7 +3799,10 @@ mod tests {
                 // A trivial stmt -- `movfuscate_ir` needs at least one real
                 // statement somewhere to derive provenance for its own
                 // synthetic infrastructure gates.
-                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone())].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone())]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
                 terminator: IRTerminator::Jmp {
                     target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)]),
                 },
@@ -3209,7 +3822,11 @@ mod tests {
         assert!(result.is_movfuscated());
         // pc(1) + state(1) -- one shared slot for both blocks' position 0,
         // despite no edge connecting them.
-        assert_eq!(result.blocks[0].params.len(), 2, "pc(1) + state(1 shared slot)");
+        assert_eq!(
+            result.blocks[0].params.len(),
+            2,
+            "pc(1) + state(1 shared slot)"
+        );
     }
 
     /// Regression guard for the common case: blocks that genuinely *agree*
@@ -3221,7 +3838,11 @@ mod tests {
         let result = movfuscate_ir(&blocks, &mut types);
         assert!(result.is_movfuscated());
         // pc(1) + state(1) -- both blocks agree G8 at position 0, one slot.
-        assert_eq!(result.blocks[0].params.len(), 2, "agreeing blocks must not split into extra slots");
+        assert_eq!(
+            result.blocks[0].params.len(),
+            2,
+            "agreeing blocks must not split into extra slots"
+        );
     }
 
     // =========================================================================
@@ -3232,7 +3853,10 @@ mod tests {
     fn test_ir_poly_body_subst_correct() {
         // Block 0 (a: G8): c = Poly{[a]:1, constant:0} (= identity); Jmp(B1,[c])
         // Block 1 (x: G8): Jmp(Return,[x])
-        let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit), IRType::Primitive(Type::AES8)]);
+        let mut types = IRTypes(std::vec![
+            IRType::Primitive(Type::Bit),
+            IRType::Primitive(Type::AES8)
+        ]);
         let g8 = IRTypeId(1);
         let mut coeffs = BTreeMap::new();
         coeffs.insert(std::vec![IRVarId(0)], 1u8);
@@ -3243,13 +3867,23 @@ mod tests {
                     ty: g8,
                     coeffs,
                     constant: Constant { hi: 0, lo: 0 },
-                }].into_iter().map(|s| Node::new(s, (), None)).collect(),
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![IRVarId(1)]) }, // the Poly result,
+                }]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(1)]
+                    )
+                }, // the Poly result,
             },
             IRBlock {
                 params: std::vec![g8.clone()],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],)
+                },
             },
         ]);
         let result = movfuscate_ir(&blocks, &mut types);
@@ -3260,7 +3894,10 @@ mod tests {
             .iter()
             .filter(|node| matches!(&node.kind, IRStmt::Poly { .. }))
             .count();
-        assert!(poly_count >= 1, "re-emitted Poly should appear in combined block");
+        assert!(
+            poly_count >= 1,
+            "re-emitted Poly should appear in combined block"
+        );
     }
 
     // =========================================================================
@@ -3280,13 +3917,18 @@ mod tests {
         let bit = IRTypeId(0);
         // Register IRType::Block{[]} and get its type ID.
         let block_ty_id = IRTypeId(types.0.len() as u32);
-        types.0.push(IRType::Block { params: std::vec![] });
+        types.0.push(IRType::Block {
+            params: std::vec![],
+        });
 
         let blocks = IRBlocks::new(std::vec![
             // Block 0: Dyn(cont, [])
             IRBlock {
                 params: std::vec![block_ty_id.clone()],
-                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone())].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone())]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
                 terminator: IRTerminator::Jmp {
                     target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(0)), std::vec![]), // cont
                 },
@@ -3295,7 +3937,9 @@ mod tests {
             IRBlock {
                 params: std::vec![block_ty_id.clone()],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![],)
+                },
             },
         ]);
         (blocks, types)
@@ -3317,7 +3961,11 @@ mod tests {
         // `compute_static_slot_classes`'s (position, type)-keyed scheme
         // merges them onto ONE shared slot regardless of the Dyn jump
         // between them -- pc(1) + state(1). Combined params: [pc0, state0] = 2.
-        assert_eq!(result.blocks[0].params.len(), 2, "pc(1) + state(1 shared Block-param slot)");
+        assert_eq!(
+            result.blocks[0].params.len(),
+            2,
+            "pc(1) + state(1 shared Block-param slot)"
+        );
         // Both combined params must be Bit.
         for tid in &result.blocks[0].params {
             assert!(
@@ -3332,13 +3980,21 @@ mod tests {
         let (blocks, mut types) = two_block_dyn_param();
         let result = movfuscate_ir(&blocks, &mut types);
         match &result.blocks[0].terminator {
-            IRTerminator::JumpCond { then_target, else_target, .. } => {
+            IRTerminator::JumpCond {
+                then_target,
+                else_target,
+                ..
+            } => {
                 assert_eq!(then_target.dest, IRBlockTargetId::Return);
                 assert_eq!(then_target.args.len(), 0, "ret_width = 0");
                 assert_eq!(else_target.dest, IRBlockTargetId::Block(IRBlockId(0)));
                 // See `test_ir_block_dyn_param_combined_param_count`'s own
                 // comment for why this is 2 (pc(1) + state(1)).
-                assert_eq!(else_target.args.len(), 2, "loop-back args = pc(1) + state(1)");
+                assert_eq!(
+                    else_target.args.len(),
+                    2,
+                    "loop-back args = pc(1) + state(1)"
+                );
             }
             other => panic!("expected JumpCond, got {:?}", other),
         }
@@ -3356,17 +4012,20 @@ mod tests {
     fn two_block_dyn_const() -> (IRBlocks, IRTypes) {
         let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit)]);
         let block_ty_id = IRTypeId(types.0.len() as u32);
-        types.0.push(IRType::Block { params: std::vec![] });
+        types.0.push(IRType::Block {
+            params: std::vec![],
+        });
 
         let blocks = IRBlocks::new(std::vec![
             IRBlock {
                 params: std::vec![],
-                stmts: std::vec![
-                    IRStmt::Const(
-                        Constant { hi: 0, lo: 1 }, // block index 1
-                        block_ty_id.clone(),
-                    ),
-                ].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                stmts: std::vec![IRStmt::Const(
+                    Constant { hi: 0, lo: 1 }, // block index 1
+                    block_ty_id.clone(),
+                ),]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
                 terminator: IRTerminator::Jmp {
                     target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(0)), std::vec![]), // c (stmt result)
                 },
@@ -3374,7 +4033,9 @@ mod tests {
             IRBlock {
                 params: std::vec![],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![],)
+                },
             },
         ]);
         (blocks, types)
@@ -3393,7 +4054,10 @@ mod tests {
         // Both blocks have no params → state_width = 0; pc_width = 1.
         // Combined params: [pc0: Bit] only.
         assert_eq!(result.blocks[0].params.len(), 1, "only the PC bit");
-        assert!(matches!(types.0[result.blocks[0].params[0].0 as usize], IRType::Primitive(Type::Bit)));
+        assert!(matches!(
+            types.0[result.blocks[0].params[0].0 as usize],
+            IRType::Primitive(Type::Bit)
+        ));
     }
 
     #[test]
@@ -3428,7 +4092,9 @@ mod tests {
         let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit)]);
         let bit = IRTypeId(0);
         let block_ty_id = IRTypeId(types.0.len() as u32);
-        types.0.push(IRType::Block { params: std::vec![bit.clone()] });
+        types.0.push(IRType::Block {
+            params: std::vec![bit.clone()],
+        });
 
         let blocks = IRBlocks::new(std::vec![
             // Block 0: create ref to block 1, call it with `one`.
@@ -3439,16 +4105,24 @@ mod tests {
                     IRStmt::Const(Constant { hi: 0, lo: 1 }, block_ty_id.clone()),
                     // stmt 1: one = Const(1, Bit)
                     IRStmt::Const(Constant { hi: 0, lo: 1 }, bit.clone()),
-                ].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
                 terminator: IRTerminator::Jmp {
-                    target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(0)), std::vec![IRVarId(1)]), // c, one
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Dyn(IRVarId(0)),
+                        std::vec![IRVarId(1)]
+                    ), // c, one
                 },
             },
             // Block 1: take x: Bit and return it.
             IRBlock {
                 params: std::vec![bit.clone()],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],)
+                },
             },
         ]);
         (blocks, types)
@@ -3468,7 +4142,10 @@ mod tests {
         // Combined params: [pc0: Bit, state0: Bit].
         assert_eq!(result.blocks[0].params.len(), 2, "pc(1) + state(1)");
         for tid in &result.blocks[0].params {
-            assert!(matches!(types.0[tid.0 as usize], IRType::Primitive(Type::Bit)));
+            assert!(matches!(
+                types.0[tid.0 as usize],
+                IRType::Primitive(Type::Bit)
+            ));
         }
     }
 
@@ -3478,7 +4155,11 @@ mod tests {
         let result = movfuscate_ir(&blocks, &mut types);
         // Block 1 returns x: Bit → ret_width = 1.
         match &result.blocks[0].terminator {
-            IRTerminator::JumpCond { then_target, else_target, .. } => {
+            IRTerminator::JumpCond {
+                then_target,
+                else_target,
+                ..
+            } => {
                 assert_eq!(then_target.args.len(), 1, "return one Bit value");
                 assert_eq!(else_target.args.len(), 2, "loop-back = pc(1) + state(1)");
             }
@@ -3500,28 +4181,43 @@ mod tests {
     fn three_block_pass_block_arg() -> (IRBlocks, IRTypes) {
         let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit)]);
         let block_ty_id = IRTypeId(types.0.len() as u32);
-        types.0.push(IRType::Block { params: std::vec![] });
+        types.0.push(IRType::Block {
+            params: std::vec![],
+        });
 
         let blocks = IRBlocks::new(std::vec![
             // Block 0: create a ref to block 2 and pass it to block 1.
             IRBlock {
                 params: std::vec![],
-                stmts: std::vec![
-                    IRStmt::Const(Constant { hi: 0, lo: 2 }, block_ty_id.clone()),
-                ].into_iter().map(|s| Node::new(s, (), None)).collect(),
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![IRVarId(0)]) }, // pass the Block ref,
+                stmts: std::vec![IRStmt::Const(
+                    Constant { hi: 0, lo: 2 },
+                    block_ty_id.clone()
+                ),]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(0)]
+                    )
+                }, // pass the Block ref,
             },
             // Block 1: holds a cont and Dyn-jumps to it.
             IRBlock {
                 params: std::vec![block_ty_id.clone()],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(0)), std::vec![],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(0)), std::vec![],)
+                },
             },
             // Block 2: the target of the continuation.
             IRBlock {
                 params: std::vec![block_ty_id.clone()],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![],)
+                },
             },
         ]);
         (blocks, types)
@@ -3545,9 +4241,16 @@ mod tests {
         // merges them onto ONE shared pair of pc_width(2) Bit slots,
         // regardless of the Dyn indirection between them.
         // Combined params: [pc0, pc1, state0, state1] = 4.
-        assert_eq!(result.blocks[0].params.len(), 4, "pc(2) + state(2 Bit: 1 shared Block cont pair)");
+        assert_eq!(
+            result.blocks[0].params.len(),
+            4,
+            "pc(2) + state(2 Bit: 1 shared Block cont pair)"
+        );
         for tid in &result.blocks[0].params {
-            assert!(matches!(types.0[tid.0 as usize], IRType::Primitive(Type::Bit)));
+            assert!(matches!(
+                types.0[tid.0 as usize],
+                IRType::Primitive(Type::Bit)
+            ));
         }
     }
 
@@ -3556,7 +4259,11 @@ mod tests {
         let (blocks, mut types) = three_block_pass_block_arg();
         let result = movfuscate_ir(&blocks, &mut types);
         match &result.blocks[0].terminator {
-            IRTerminator::JumpCond { then_target, else_target, .. } => {
+            IRTerminator::JumpCond {
+                then_target,
+                else_target,
+                ..
+            } => {
                 assert_eq!(then_target.args.len(), 0, "ret_width = 0");
                 // See `test_ir_block_pass_arg_param_layout`'s own comment
                 // for why this is 4 (pc(2) + state(2)).
@@ -3591,13 +4298,23 @@ mod tests {
                     src: IRVarId(0),
                     ty: bit.clone(),
                     addr: IRVarId(0),
-                }].into_iter().map(|s| Node::new(s, (), None)).collect(),
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![IRVarId(0)],) },
+                }]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(0)],
+                    )
+                },
             },
             IRBlock {
                 params: std::vec![bit.clone()],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],)
+                },
             },
         ]);
         (blocks, types)
@@ -3613,7 +4330,10 @@ mod tests {
         let has_write = result.blocks[0].stmts.iter().any(|node| {
             matches!(&node.kind, IRStmt::StorageWrite { storage, .. } if *storage == odd_lane)
         });
-        assert!(has_write, "non-Block StorageWrite must be remapped to odd lane 11");
+        assert!(
+            has_write,
+            "non-Block StorageWrite must be remapped to odd lane 11"
+        );
         // Verify the original even ID 10 does not appear.
         let no_even = !result.blocks[0].stmts.iter().any(|node| {
             matches!(&node.kind, IRStmt::StorageWrite { storage, .. } if *storage == StorageId(5 * 2))
@@ -3639,13 +4359,23 @@ mod tests {
                     storage: StorageId(3),
                     ty: bit.clone(),
                     addr: IRVarId(0),
-                }].into_iter().map(|s| Node::new(s, (), None)).collect(),
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![IRVarId(1)]) }, // the read result,
+                }]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(1)]
+                    )
+                }, // the read result,
             },
             IRBlock {
                 params: std::vec![bit.clone()],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],)
+                },
             },
         ]);
         (blocks, types)
@@ -3660,7 +4390,10 @@ mod tests {
         let has_read = result.blocks[0].stmts.iter().any(|node| {
             matches!(&node.kind, IRStmt::StorageRead { storage, .. } if *storage == odd_lane)
         });
-        assert!(has_read, "non-Block StorageRead must be remapped to odd lane 7");
+        assert!(
+            has_read,
+            "non-Block StorageRead must be remapped to odd lane 7"
+        );
         let no_even = !result.blocks[0].stmts.iter().any(|node| {
             matches!(&node.kind, IRStmt::StorageRead { storage, .. } if *storage == StorageId(3 * 2))
         });
@@ -3681,7 +4414,9 @@ mod tests {
         let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit)]);
         let bit = IRTypeId(0);
         let block_ty = IRTypeId(types.0.len() as u32);
-        types.0.push(IRType::Block { params: std::vec![] });
+        types.0.push(IRType::Block {
+            params: std::vec![],
+        });
 
         let blocks = IRBlocks::new(std::vec![
             IRBlock {
@@ -3696,7 +4431,10 @@ mod tests {
                         ty: block_ty.clone(),
                         addr: IRVarId(0),
                     },
-                ].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
                 terminator: IRTerminator::Jmp {
                     target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(1)), std::vec![]), // c
                 },
@@ -3704,7 +4442,9 @@ mod tests {
             IRBlock {
                 params: std::vec![block_ty.clone()],
                 stmts: std::vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![],)
+                },
             },
         ]);
         (blocks, types)
@@ -3720,7 +4460,10 @@ mod tests {
         let has_even_write = result.blocks[0].stmts.iter().any(|node| {
             matches!(&node.kind, IRStmt::StorageWrite { storage, .. } if *storage == even_lane)
         });
-        assert!(has_even_write, "Block-typed StorageWrite must use even lane 4");
+        assert!(
+            has_even_write,
+            "Block-typed StorageWrite must use even lane 4"
+        );
         // Odd lane must not appear for this write.
         let no_odd = !result.blocks[0].stmts.iter().any(|node| {
             matches!(&node.kind, IRStmt::StorageWrite { storage, .. } if *storage == StorageId(2 * 2 + 1))
@@ -3733,10 +4476,14 @@ mod tests {
         let (blocks, mut types) = two_block_block_storage_write();
         let result = movfuscate_ir(&blocks, &mut types);
         // A Merge stmt must appear to pack the Block's PC bits into a Vec.
-        let has_merge = result.blocks[0].stmts.iter().any(|node| {
-            matches!(&node.kind, IRStmt::Merge { .. })
-        });
-        assert!(has_merge, "Block-typed StorageWrite must emit a Merge stmt to pack PC bits");
+        let has_merge = result.blocks[0]
+            .stmts
+            .iter()
+            .any(|node| matches!(&node.kind, IRStmt::Merge { .. }));
+        assert!(
+            has_merge,
+            "Block-typed StorageWrite must emit a Merge stmt to pack PC bits"
+        );
     }
 
     // =========================================================================
@@ -3745,21 +4492,39 @@ mod tests {
 
     fn sample_boundary() -> MovfuscBlockBoundary {
         MovfuscBlockBoundary {
-            start: 10, end: 20, is_active: 11, done: 12,
-            next_pc_bits: vec![13, 14], next_state: vec![15, 16], ret_vals: vec![17],
-            synthetic_out: vec![], synthetic_in: vec![],
+            start: 10,
+            end: 20,
+            is_active: 11,
+            done: 12,
+            next_pc_bits: vec![13, 14],
+            next_state: vec![15, 16],
+            ret_vals: vec![17],
+            synthetic_out: vec![],
+            synthetic_in: vec![],
         }
     }
 
     fn sample_accum_info() -> MovfuscAccumInfo {
         MovfuscAccumInfo {
             init: MovfuscAccumInit {
-                start: 0, end: 5, done_acc: 1, next_pc: vec![2], next_state: vec![3], ret_vals: vec![4],
-                synthetic_out: vec![], synthetic_in: vec![],
+                start: 0,
+                end: 5,
+                done_acc: 1,
+                next_pc: vec![2],
+                next_state: vec![3],
+                ret_vals: vec![4],
+                synthetic_out: vec![],
+                synthetic_in: vec![],
             },
             steps: vec![MovfuscAccumStep {
-                start: 5, end: 10, done_acc: 6, next_pc: vec![7], next_state: vec![8], ret_vals: vec![9],
-                synthetic_out: vec![], synthetic_in: vec![],
+                start: 5,
+                end: 10,
+                done_acc: 6,
+                next_pc: vec![7],
+                next_state: vec![8],
+                ret_vals: vec![9],
+                synthetic_out: vec![],
+                synthetic_in: vec![],
             }],
         }
     }
@@ -3841,19 +4606,37 @@ mod tests {
     /// 3=accum_info.init, 4=accum_step[0], 5=accum_step[1].
     fn sample_two_block_boundary_and_accum() -> (Vec<MovfuscBlockBoundary>, MovfuscAccumInfo) {
         let mk_boundary = || MovfuscBlockBoundary {
-            start: 0, end: 0, is_active: 0, done: 0,
-            next_pc_bits: vec![], next_state: vec![], ret_vals: vec![],
-            synthetic_out: vec![], synthetic_in: vec![],
+            start: 0,
+            end: 0,
+            is_active: 0,
+            done: 0,
+            next_pc_bits: vec![],
+            next_state: vec![],
+            ret_vals: vec![],
+            synthetic_out: vec![],
+            synthetic_in: vec![],
         };
         let boundary = vec![mk_boundary(), mk_boundary()];
         let mk_step = || MovfuscAccumStep {
-            start: 0, end: 0, done_acc: 0, next_pc: vec![], next_state: vec![], ret_vals: vec![],
-            synthetic_out: vec![], synthetic_in: vec![],
+            start: 0,
+            end: 0,
+            done_acc: 0,
+            next_pc: vec![],
+            next_state: vec![],
+            ret_vals: vec![],
+            synthetic_out: vec![],
+            synthetic_in: vec![],
         };
         let accum_info = MovfuscAccumInfo {
             init: MovfuscAccumInit {
-                start: 0, end: 0, done_acc: 0, next_pc: vec![], next_state: vec![], ret_vals: vec![],
-                synthetic_out: vec![], synthetic_in: vec![],
+                start: 0,
+                end: 0,
+                done_acc: 0,
+                next_pc: vec![],
+                next_state: vec![],
+                ret_vals: vec![],
+                synthetic_out: vec![],
+                synthetic_in: vec![],
             },
             steps: vec![mk_step(), mk_step()],
         };
@@ -3866,14 +4649,28 @@ mod tests {
     #[test]
     fn adjacent_boundary_functions_thread_directly() {
         let (mut boundary, mut accum_info) = sample_two_block_boundary_and_accum();
-        let region_sets: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::from([(42, BTreeSet::from([1, 2]))]);
+        let region_sets: BTreeMap<u32, BTreeSet<u32>> =
+            BTreeMap::from([(42, BTreeSet::from([1, 2]))]);
         thread_synthetic_slots(&mut boundary, &mut accum_info, &region_sets);
 
-        assert_eq!(boundary[0].synthetic_out, vec![42], "boundary[0] (region 1, the producer) must export it");
+        assert_eq!(
+            boundary[0].synthetic_out,
+            vec![42],
+            "boundary[0] (region 1, the producer) must export it"
+        );
         assert!(boundary[0].synthetic_in.is_empty());
-        assert_eq!(boundary[1].synthetic_in, vec![42], "boundary[1] (region 2, the sole consumer) must receive it");
-        assert!(boundary[1].synthetic_out.is_empty(), "no later consumer -- must not re-export");
-        assert!(accum_info.init.synthetic_out.is_empty() && accum_info.init.synthetic_in.is_empty());
+        assert_eq!(
+            boundary[1].synthetic_in,
+            vec![42],
+            "boundary[1] (region 2, the sole consumer) must receive it"
+        );
+        assert!(
+            boundary[1].synthetic_out.is_empty(),
+            "no later consumer -- must not re-export"
+        );
+        assert!(
+            accum_info.init.synthetic_out.is_empty() && accum_info.init.synthetic_in.is_empty()
+        );
         for s in &accum_info.steps {
             assert!(s.synthetic_out.is_empty() && s.synthetic_in.is_empty());
         }
@@ -3886,22 +4683,43 @@ mod tests {
     #[test]
     fn distant_sharing_threads_through_every_intervening_range() {
         let (mut boundary, mut accum_info) = sample_two_block_boundary_and_accum();
-        let region_sets: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::from([(7, BTreeSet::from([1, 5]))]);
+        let region_sets: BTreeMap<u32, BTreeSet<u32>> =
+            BTreeMap::from([(7, BTreeSet::from([1, 5]))]);
         thread_synthetic_slots(&mut boundary, &mut accum_info, &region_sets);
 
-        assert_eq!(boundary[0].synthetic_out, vec![7], "region 1 (producer): export only");
+        assert_eq!(
+            boundary[0].synthetic_out,
+            vec![7],
+            "region 1 (producer): export only"
+        );
         assert!(boundary[0].synthetic_in.is_empty());
 
-        assert_eq!(boundary[1].synthetic_in, vec![7], "region 2 (intervening): receive...");
+        assert_eq!(
+            boundary[1].synthetic_in,
+            vec![7],
+            "region 2 (intervening): receive..."
+        );
         assert_eq!(boundary[1].synthetic_out, vec![7], "...and re-export");
 
-        assert_eq!(accum_info.init.synthetic_in, vec![7], "region 3 (intervening)");
+        assert_eq!(
+            accum_info.init.synthetic_in,
+            vec![7],
+            "region 3 (intervening)"
+        );
         assert_eq!(accum_info.init.synthetic_out, vec![7]);
 
-        assert_eq!(accum_info.steps[0].synthetic_in, vec![7], "region 4 (intervening)");
+        assert_eq!(
+            accum_info.steps[0].synthetic_in,
+            vec![7],
+            "region 4 (intervening)"
+        );
         assert_eq!(accum_info.steps[0].synthetic_out, vec![7]);
 
-        assert_eq!(accum_info.steps[1].synthetic_in, vec![7], "region 5 (final consumer): receive only");
+        assert_eq!(
+            accum_info.steps[1].synthetic_in,
+            vec![7],
+            "region 5 (final consumer): receive only"
+        );
         assert!(accum_info.steps[1].synthetic_out.is_empty());
     }
 
@@ -3910,13 +4728,16 @@ mod tests {
     #[test]
     fn sharing_with_shared_prefix_needs_no_synthetic_slot() {
         let (mut boundary, mut accum_info) = sample_two_block_boundary_and_accum();
-        let region_sets: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::from([(9, BTreeSet::from([0, 1, 2]))]);
+        let region_sets: BTreeMap<u32, BTreeSet<u32>> =
+            BTreeMap::from([(9, BTreeSet::from([0, 1, 2]))]);
         thread_synthetic_slots(&mut boundary, &mut accum_info, &region_sets);
 
         for b in &boundary {
             assert!(b.synthetic_out.is_empty() && b.synthetic_in.is_empty());
         }
-        assert!(accum_info.init.synthetic_out.is_empty() && accum_info.init.synthetic_in.is_empty());
+        assert!(
+            accum_info.init.synthetic_out.is_empty() && accum_info.init.synthetic_in.is_empty()
+        );
         for s in &accum_info.steps {
             assert!(s.synthetic_out.is_empty() && s.synthetic_in.is_empty());
         }
@@ -3932,7 +4753,11 @@ mod tests {
         let second: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::from([(2, BTreeSet::from([1, 2]))]);
         thread_synthetic_slots(&mut boundary, &mut accum_info, &second);
 
-        assert_eq!(boundary[0].synthetic_out, vec![1, 2], "both rounds' own producer exports must accumulate");
+        assert_eq!(
+            boundary[0].synthetic_out,
+            vec![1, 2],
+            "both rounds' own producer exports must accumulate"
+        );
         assert_eq!(boundary[1].synthetic_in, vec![1, 2]);
     }
 }

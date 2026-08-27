@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 use volar_ir::ir::{IRBlockTargetId, IRBlocks, IRTerminator, IRVarId};
 use volar_ir_common::{MeasureSpec, ReentryHint, Stmt};
 
+use crate::AdaptiveSplitConfig;
 use crate::bytecode::{AppendedRegionKind, OperandMode, TripCount};
 use crate::layout::{BlockCompositePlan, RerollLoopSpec, SegmentInvoke, UnifiedBytecodeLayout};
-use crate::AdaptiveSplitConfig;
 
 #[derive(Clone, Debug)]
 struct HintedLoop {
@@ -74,7 +74,9 @@ pub fn plan_cfg_loops_from_hints<P: Clone>(
             covered_range: 0..(body_len * iterations),
         });
         used_ranges[hinted.body].push(body_range);
-        block_plans[hinted.body].segments.push(SegmentInvoke::RerollLoop { region_index });
+        block_plans[hinted.body]
+            .segments
+            .push(SegmentInvoke::RerollLoop { region_index });
         let _ = hinted.header;
     }
 }
@@ -193,7 +195,7 @@ fn overlaps(ranges: &[core::ops::Range<usize>], probe: &core::ops::Range<usize>)
 mod tests {
     use super::*;
     use alloc::vec;
-    use volar_ir::ir::{IRBlock, IRBranchTarget, IRBlockTargetId, IRType, IRTypes, PrimType};
+    use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBranchTarget, IRType, IRTypes, PrimType};
     use volar_ir_common::{Constant, Node};
 
     fn u32_ty(types: &mut IRTypes) -> volar_ir::ir::IRTypeId {
@@ -210,7 +212,10 @@ mod tests {
                 stmts: vec![
                     Stmt::Const(Constant { hi: 0, lo: 0 }, ty),
                     Stmt::Const(Constant { hi: 0, lo: 3 }, ty),
-                ].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
                 terminator: IRTerminator::Jmp {
                     target: IRBranchTarget::new(
                         IRBlockTargetId::Block(volar_ir::ir::IRBlockId(1)),
@@ -232,7 +237,10 @@ mod tests {
             },
             IRBlock {
                 params: vec![],
-                stmts: vec![Stmt::Const(Constant { hi: 0, lo: 7 }, ty)].into_iter().map(|s| Node::new(s, (), None)).collect(),
+                stmts: vec![Stmt::Const(Constant { hi: 0, lo: 7 }, ty)]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
                 terminator: IRTerminator::Jmp {
                     target: IRBranchTarget {
                         dest: IRBlockTargetId::Block(volar_ir::ir::IRBlockId(1)),

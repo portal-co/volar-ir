@@ -3,12 +3,12 @@
 //! Parse module for `volar-ir-text`.
 
 pub mod error;
-pub mod lexer;
 pub mod ir;
+pub mod lexer;
 
 pub use error::ParseError;
 
-use crate::{ParseText, SavedIrBlocks, SavedBIrBlocks};
+use crate::{ParseText, SavedBIrBlocks, SavedIrBlocks};
 
 impl ParseText for SavedIrBlocks {
     fn parse_text(s: &str) -> Result<Self, ParseError> {

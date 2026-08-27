@@ -115,10 +115,7 @@ fn test_ptr_offset() {
     b.end_function();
 
     let c_src = b.finish();
-    let output = compile_and_run(
-        &c_src,
-        r#"  printf("%u\n", (unsigned)ptr_offset_test());"#,
-    );
+    let output = compile_and_run(&c_src, r#"  printf("%u\n", (unsigned)ptr_offset_test());"#);
     assert_eq!(output.trim(), "5");
 }
 

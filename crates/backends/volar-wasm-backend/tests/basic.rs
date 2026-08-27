@@ -24,11 +24,8 @@ fn run_i32_binop(bytes: &[u8], name: &str, a: i32, b: i32) -> i32 {
 #[test]
 fn add_u32_via_lir_target() {
     let mut b = WasmBackend::new();
-    let (entry, params) = b.begin_function(
-        "add",
-        &[LirType::U32, LirType::U32],
-        Some(LirType::U32),
-    );
+    let (entry, params) =
+        b.begin_function("add", &[LirType::U32, LirType::U32], Some(LirType::U32));
     b.switch_to_block(entry);
     let sum = b.add(params[0][0], params[1][0]);
     b.ret(&[sum]);
@@ -42,11 +39,8 @@ fn add_u32_via_lir_target() {
 #[test]
 fn max_u32_with_block_params() {
     let mut be = WasmBackend::new();
-    let (entry, params) = be.begin_function(
-        "max",
-        &[LirType::U32, LirType::U32],
-        Some(LirType::U32),
-    );
+    let (entry, params) =
+        be.begin_function("max", &[LirType::U32, LirType::U32], Some(LirType::U32));
     let a = params[0][0];
     let b = params[1][0];
 
@@ -83,11 +77,8 @@ fn max_u32_with_block_params() {
 #[test]
 fn replay_into_many_targets() {
     let mut rec = RecordingTarget::new();
-    let (entry, params) = rec.begin_function(
-        "add",
-        &[LirType::I32, LirType::I32],
-        Some(LirType::I32),
-    );
+    let (entry, params) =
+        rec.begin_function("add", &[LirType::I32, LirType::I32], Some(LirType::I32));
     rec.switch_to_block(entry);
     let sum = rec.add(params[0][0], params[1][0]);
     rec.ret(&[sum]);

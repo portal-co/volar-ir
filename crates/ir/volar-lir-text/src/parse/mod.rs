@@ -9,10 +9,10 @@
 //! [`ParseText`](crate::ParseText) is also implemented for those types when
 //! `feature = "parse"` is active.
 
+pub mod calls;
 pub mod error;
 pub mod lexer;
 pub mod types;
-pub mod calls;
 
 pub use error::ParseError;
 

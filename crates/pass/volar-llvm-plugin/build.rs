@@ -26,5 +26,10 @@ fn main() {
     let source = generate_shim_source(&config);
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
-    compile_and_link_shim(&source, &out_dir, &llvm.includedir, "volar_llvm_plugin_shim");
+    compile_and_link_shim(
+        &source,
+        &out_dir,
+        &llvm.includedir,
+        "volar_llvm_plugin_shim",
+    );
 }

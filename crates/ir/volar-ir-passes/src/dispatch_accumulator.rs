@@ -77,7 +77,11 @@ pub fn emit_select_slot<C: DispatchSlotPrimitives>(
 }
 
 /// Emit `is_active` for `block_idx`: AND-of-(NOT-or-identity) per PC bit.
-pub fn emit_is_block<C: DispatchBitPrimitives>(c: &mut C, pc_vars: &[u32], block_idx: usize) -> u32 {
+pub fn emit_is_block<C: DispatchBitPrimitives>(
+    c: &mut C,
+    pc_vars: &[u32],
+    block_idx: usize,
+) -> u32 {
     if pc_vars.is_empty() {
         return c.emit_one_bit();
     }

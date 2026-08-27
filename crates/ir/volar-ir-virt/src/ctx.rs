@@ -88,9 +88,7 @@ impl<K: HandlerKey> DedupTable<K> {
         let entries: Vec<BytecodeEntry> = self
             .per_block
             .iter()
-            .map(|(h, imm)| {
-                BytecodeEntry::outer(*h, imm.consts.clone(), imm.targets.clone())
-            })
+            .map(|(h, imm)| BytecodeEntry::outer(*h, imm.consts.clone(), imm.targets.clone()))
             .collect();
         let outer_block_count = entries.len();
         VirtBytecode {

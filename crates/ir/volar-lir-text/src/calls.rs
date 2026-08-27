@@ -48,7 +48,13 @@ impl WriteText for LirCall {
             }
 
             // ---- Function management -----------------------------------------
-            LirCall::BeginFunction { name, params, ret, entry_block, param_vals } => {
+            LirCall::BeginFunction {
+                name,
+                params,
+                ret,
+                entry_block,
+                param_vals,
+            } => {
                 w.write_str("begin_function name=")?;
                 write_quoted_str(name, w)?;
                 w.write_str(" params=")?;
@@ -84,33 +90,72 @@ impl WriteText for LirCall {
             LirCall::Add { lhs, rhs, out } => write!(w, "add lhs={} rhs={} out={}", lhs, rhs, out),
             LirCall::Sub { lhs, rhs, out } => write!(w, "sub lhs={} rhs={} out={}", lhs, rhs, out),
             LirCall::Mul { lhs, rhs, out } => write!(w, "mul lhs={} rhs={} out={}", lhs, rhs, out),
-            LirCall::Udiv { lhs, rhs, out } => write!(w, "udiv lhs={} rhs={} out={}", lhs, rhs, out),
-            LirCall::Sdiv { lhs, rhs, out } => write!(w, "sdiv lhs={} rhs={} out={}", lhs, rhs, out),
+            LirCall::Udiv { lhs, rhs, out } => {
+                write!(w, "udiv lhs={} rhs={} out={}", lhs, rhs, out)
+            }
+            LirCall::Sdiv { lhs, rhs, out } => {
+                write!(w, "sdiv lhs={} rhs={} out={}", lhs, rhs, out)
+            }
 
             // ---- Bitwise ----------------------------------------------------
-            LirCall::And  { lhs, rhs, out } => write!(w, "and lhs={} rhs={} out={}", lhs, rhs, out),
-            LirCall::Or   { lhs, rhs, out } => write!(w, "or lhs={} rhs={} out={}", lhs, rhs, out),
-            LirCall::Xor  { lhs, rhs, out } => write!(w, "xor lhs={} rhs={} out={}", lhs, rhs, out),
-            LirCall::Not  { val, out }       => write!(w, "not val={} out={}", val, out),
-            LirCall::Shl  { val, shift, out } => write!(w, "shl val={} shift={} out={}", val, shift, out),
-            LirCall::Lshr { val, shift, out } => write!(w, "lshr val={} shift={} out={}", val, shift, out),
-            LirCall::Ashr { val, shift, out } => write!(w, "ashr val={} shift={} out={}", val, shift, out),
+            LirCall::And { lhs, rhs, out } => write!(w, "and lhs={} rhs={} out={}", lhs, rhs, out),
+            LirCall::Or { lhs, rhs, out } => write!(w, "or lhs={} rhs={} out={}", lhs, rhs, out),
+            LirCall::Xor { lhs, rhs, out } => write!(w, "xor lhs={} rhs={} out={}", lhs, rhs, out),
+            LirCall::Not { val, out } => write!(w, "not val={} out={}", val, out),
+            LirCall::Shl { val, shift, out } => {
+                write!(w, "shl val={} shift={} out={}", val, shift, out)
+            }
+            LirCall::Lshr { val, shift, out } => {
+                write!(w, "lshr val={} shift={} out={}", val, shift, out)
+            }
+            LirCall::Ashr { val, shift, out } => {
+                write!(w, "ashr val={} shift={} out={}", val, shift, out)
+            }
 
             // ---- Comparison -------------------------------------------------
-            LirCall::Icmp { pred, lhs, rhs, out } => {
+            LirCall::Icmp {
+                pred,
+                lhs,
+                rhs,
+                out,
+            } => {
                 w.write_str("icmp pred=")?;
                 pred.write_text(w)?;
                 write!(w, " lhs={} rhs={} out={}", lhs, rhs, out)
             }
 
             // ---- Conversions ------------------------------------------------
-            LirCall::Zext  { val, dst_ty, out } => { w.write_str("zext val=")?;  write!(w, "{} dst=", val)?; dst_ty.write_text(w)?; write!(w, " out={}", out) }
-            LirCall::Sext  { val, dst_ty, out } => { w.write_str("sext val=")?;  write!(w, "{} dst=", val)?; dst_ty.write_text(w)?; write!(w, " out={}", out) }
-            LirCall::Trunc { val, dst_ty, out } => { w.write_str("trunc val=")?; write!(w, "{} dst=", val)?; dst_ty.write_text(w)?; write!(w, " out={}", out) }
+            LirCall::Zext { val, dst_ty, out } => {
+                w.write_str("zext val=")?;
+                write!(w, "{} dst=", val)?;
+                dst_ty.write_text(w)?;
+                write!(w, " out={}", out)
+            }
+            LirCall::Sext { val, dst_ty, out } => {
+                w.write_str("sext val=")?;
+                write!(w, "{} dst=", val)?;
+                dst_ty.write_text(w)?;
+                write!(w, " out={}", out)
+            }
+            LirCall::Trunc { val, dst_ty, out } => {
+                w.write_str("trunc val=")?;
+                write!(w, "{} dst=", val)?;
+                dst_ty.write_text(w)?;
+                write!(w, " out={}", out)
+            }
 
             // ---- Select -----------------------------------------------------
-            LirCall::Select { cond, then_val, else_val, out } => {
-                write!(w, "select cond={} then={} else={} out={}", cond, then_val, else_val, out)
+            LirCall::Select {
+                cond,
+                then_val,
+                else_val,
+                out,
+            } => {
+                write!(
+                    w,
+                    "select cond={} then={} else={} out={}",
+                    cond, then_val, else_val, out
+                )
             }
 
             // ---- Terminators ------------------------------------------------
@@ -118,8 +163,18 @@ impl WriteText for LirCall {
                 write!(w, "jump target={} args=", target)?;
                 write_u32_list(args, w)
             }
-            LirCall::Branch { cond, then_block, then_args, else_block, else_args } => {
-                write!(w, "branch cond={} then_block={} then_args=", cond, then_block)?;
+            LirCall::Branch {
+                cond,
+                then_block,
+                then_args,
+                else_block,
+                else_args,
+            } => {
+                write!(
+                    w,
+                    "branch cond={} then_block={} then_args=",
+                    cond, then_block
+                )?;
                 write_u32_list(then_args, w)?;
                 write!(w, " else_block={} else_args=", else_block)?;
                 write_u32_list(else_args, w)
@@ -130,7 +185,13 @@ impl WriteText for LirCall {
             }
 
             // ---- Extern calls -----------------------------------------------
-            LirCall::CallExtern { name, arg_tys, args, ret_ty, outs } => {
+            LirCall::CallExtern {
+                name,
+                arg_tys,
+                args,
+                ret_ty,
+                outs,
+            } => {
                 w.write_str("call_extern name=")?;
                 write_quoted_str(name, w)?;
                 w.write_str(" arg_tys=")?;
@@ -144,7 +205,13 @@ impl WriteText for LirCall {
             }
 
             // ---- Sibling (intra-module) calls --------------------------------
-            LirCall::Call { name, arg_tys, args, ret_ty, outs } => {
+            LirCall::Call {
+                name,
+                arg_tys,
+                args,
+                ret_ty,
+                outs,
+            } => {
                 w.write_str("call name=")?;
                 write_quoted_str(name, w)?;
                 w.write_str(" arg_tys=")?;
@@ -158,7 +225,12 @@ impl WriteText for LirCall {
             }
 
             // ---- Switch / block references / dynamic jumps -------------------
-            LirCall::Switch { index, cases, default_block, default_args } => {
+            LirCall::Switch {
+                index,
+                cases,
+                default_block,
+                default_args,
+            } => {
                 write!(w, "switch index={} cases=", index)?;
                 write_switch_cases(cases, w)?;
                 write!(w, " default_block={} default_args=", default_block)?;
@@ -167,7 +239,11 @@ impl WriteText for LirCall {
             LirCall::BlockAddr { block, out } => {
                 write!(w, "block_addr block={} out={}", block, out)
             }
-            LirCall::DynJump { index, destinations, args } => {
+            LirCall::DynJump {
+                index,
+                destinations,
+                args,
+            } => {
                 write!(w, "dyn_jump index={} destinations=", index)?;
                 write_u32_list(destinations, w)?;
                 w.write_str(" args=")?;
@@ -175,7 +251,13 @@ impl WriteText for LirCall {
             }
 
             // ---- Crypto primitives ------------------------------------------
-            LirCall::Oracle { name, arg_tys, args, ret_tys, outs } => {
+            LirCall::Oracle {
+                name,
+                arg_tys,
+                args,
+                ret_tys,
+                outs,
+            } => {
                 w.write_str("oracle name=")?;
                 write_quoted_str(name, w)?;
                 w.write_str(" arg_tys=")?;
@@ -187,7 +269,15 @@ impl WriteText for LirCall {
                 w.write_str(" outs=")?;
                 write_u32_list(outs, w)
             }
-            LirCall::Action { name, guard, arg_tys, args, fallbacks, ret_tys, outs } => {
+            LirCall::Action {
+                name,
+                guard,
+                arg_tys,
+                args,
+                fallbacks,
+                ret_tys,
+                outs,
+            } => {
                 w.write_str("action name=")?;
                 write_quoted_str(name, w)?;
                 write!(w, " guard={} arg_tys=", guard)?;
@@ -208,7 +298,11 @@ impl WriteText for LirCall {
             }
 
             // ---- StackAllocExt ----------------------------------------------
-            LirCall::Alloca { elem_ty, count, out } => {
+            LirCall::Alloca {
+                elem_ty,
+                count,
+                out,
+            } => {
                 w.write_str("alloca elem=")?;
                 elem_ty.write_text(w)?;
                 write!(w, " count={} out={}", count, out)
@@ -224,13 +318,23 @@ impl WriteText for LirCall {
             LirCall::PtrOffset { ptr, idx, out } => {
                 write!(w, "ptr_offset ptr={} idx={} out={}", ptr, idx, out)
             }
-            LirCall::PtrIndexLoad { ptr, idx, pointee_ty, outs } => {
+            LirCall::PtrIndexLoad {
+                ptr,
+                idx,
+                pointee_ty,
+                outs,
+            } => {
                 write!(w, "ptr_index_load ptr={} idx={} pointee=", ptr, idx)?;
                 pointee_ty.write_text(w)?;
                 w.write_str(" outs=")?;
                 write_u32_list(outs, w)
             }
-            LirCall::PtrIndexStore { ptr, idx, vals, pointee_ty } => {
+            LirCall::PtrIndexStore {
+                ptr,
+                idx,
+                vals,
+                pointee_ty,
+            } => {
                 write!(w, "ptr_index_store ptr={} idx={} vals=", ptr, idx)?;
                 write_u32_list(vals, w)?;
                 w.write_str(" pointee=")?;

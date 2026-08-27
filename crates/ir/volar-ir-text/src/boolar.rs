@@ -15,12 +15,12 @@
 //! end_block
 //! ```
 
-use core::fmt;
-use alloc::string::ToString;
-use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTerminator};
-use volar_ir::ir::{IRBlockTargetId, IRVarId};
 use crate::WriteText;
 use crate::ir::{write_block_target, write_quoted_str, write_var, write_var_list};
+use alloc::string::ToString;
+use core::fmt;
+use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTerminator};
+use volar_ir::ir::{IRBlockTargetId, IRVarId};
 
 pub(crate) const FORMAT_HEADER: &str = "volar-bir v1";
 
@@ -41,8 +41,12 @@ fn write_bir_stmt(result: IRVarId, stmt: &BIrStmt, w: &mut dyn fmt::Write) -> fm
     write_var(result, w)?;
     w.write_str(" = ")?;
     match stmt {
-        BIrStmt::Zero => { w.write_str("zero")?; }
-        BIrStmt::One  => { w.write_str("one")?;  }
+        BIrStmt::Zero => {
+            w.write_str("zero")?;
+        }
+        BIrStmt::One => {
+            w.write_str("one")?;
+        }
         BIrStmt::And(a, b) => {
             w.write_str("and ")?;
             write_var(*a, w)?;
@@ -65,19 +69,41 @@ fn write_bir_stmt(result: IRVarId, stmt: &BIrStmt, w: &mut dyn fmt::Write) -> fm
             w.write_str("not ")?;
             write_var(*a, w)?;
         }
-        BIrStmt::OracleCall { name, args, num_bits } => {
+        BIrStmt::OracleCall {
+            name,
+            args,
+            num_bits,
+        } => {
             w.write_str("oracle_call ")?;
             write_quoted_str(name, w)?;
             w.write_str(" args=")?;
             write_var_list(args, w)?;
             write!(w, " num_bits={}", num_bits)?;
         }
-        BIrStmt::OracleBit { call, bit } => {
+        BIrStmt::OracleBit {
+            name,
+            args,
+            bit,
+            occurrence,
+        } => {
+            w.write_str("oracle_bit ")?;
+            write_quoted_str(name, w)?;
+            w.write_str(" args=")?;
+            write_var_list(args, w)?;
+            write!(w, " bit={} occurrence={}", bit, occurrence)?;
+        }
+        BIrStmt::OracleProjectedBit { call, bit } => {
             w.write_str("oracle_bit call=")?;
             write_var(*call, w)?;
             write!(w, " bit={}", bit)?;
         }
-        BIrStmt::ActionCall { name, guard, args, fallback, num_bits } => {
+        BIrStmt::ActionCall {
+            name,
+            guard,
+            args,
+            fallback,
+            num_bits,
+        } => {
             w.write_str("action_call ")?;
             write_quoted_str(name, w)?;
             w.write_str(" guard=")?;
@@ -93,21 +119,72 @@ fn write_bir_stmt(result: IRVarId, stmt: &BIrStmt, w: &mut dyn fmt::Write) -> fm
             write_var(*call, w)?;
             write!(w, " bit={}", bit)?;
         }
+        BIrStmt::ActionStoreBit {
+            name,
+            guard,
+            args,
+            fallback,
+            storage,
+            lane,
+            addr,
+            bit,
+            occurrence,
+        } => {
+            w.write_str("action_store_bit ")?;
+            write_quoted_str(name, w)?;
+            w.write_str(" guard=")?;
+            write_var(*guard, w)?;
+            w.write_str(" args=")?;
+            write_var_list(args, w)?;
+            w.write_str(" fallback=")?;
+            write_var(*fallback, w)?;
+            write!(w, " storage={} lane={} addr=", storage.0, lane.0)?;
+            write_var_list(addr, w)?;
+            write!(w, " bit={} occurrence={}", bit, occurrence)?;
+        }
         BIrStmt::Rng { name } => {
             w.write_str("rng ")?;
             write_quoted_str(name, w)?;
         }
-        BIrStmt::StorageRead { storage, lane, addr } => {
-            write!(w, "storage_read storage={} lane={} addr=", storage.0, lane.0)?;
+        BIrStmt::RngBit {
+            name,
+            bit,
+            occurrence,
+        } => {
+            w.write_str("rng_bit ")?;
+            write_quoted_str(name, w)?;
+            write!(w, " bit={} occurrence={}", bit, occurrence)?;
+        }
+        BIrStmt::StorageRead {
+            storage,
+            lane,
+            addr,
+        } => {
+            write!(
+                w,
+                "storage_read storage={} lane={} addr=",
+                storage.0, lane.0
+            )?;
             write_var_list(addr, w)?;
         }
-        BIrStmt::StorageWrite { storage, lane, src, addr } => {
-            write!(w, "storage_write storage={} lane={} src=", storage.0, lane.0)?;
+        BIrStmt::StorageWrite {
+            storage,
+            lane,
+            src,
+            addr,
+        } => {
+            write!(
+                w,
+                "storage_write storage={} lane={} src=",
+                storage.0, lane.0
+            )?;
             write_var(*src, w)?;
             w.write_str(" addr=")?;
             write_var_list(addr, w)?;
         }
-        _ => { w.write_str("<unknown-stmt>")?; }
+        _ => {
+            w.write_str("<unknown-stmt>")?;
+        }
     }
     w.write_char('\n')
 }
@@ -124,7 +201,11 @@ fn write_bir_terminator(term: &BIrTerminator, w: &mut dyn fmt::Write) -> fmt::Re
             w.write_str(" args=")?;
             write_var_list(&target.args, w)?;
         }
-        BIrTerminator::CondJmp { val, then_target, else_target } => {
+        BIrTerminator::CondJmp {
+            val,
+            then_target,
+            else_target,
+        } => {
             w.write_str("cond_jmp val=")?;
             write_var(*val, w)?;
             w.write_str(" then=")?;
@@ -136,7 +217,9 @@ fn write_bir_terminator(term: &BIrTerminator, w: &mut dyn fmt::Write) -> fmt::Re
             w.write_str(" else_args=")?;
             write_var_list(&else_target.args, w)?;
         }
-        _ => { w.write_str("<unknown-term>")?; }
+        _ => {
+            w.write_str("<unknown-term>")?;
+        }
     }
     w.write_char('\n')
 }

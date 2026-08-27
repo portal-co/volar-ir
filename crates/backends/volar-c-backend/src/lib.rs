@@ -19,14 +19,12 @@
 //! - `arr_set` emits a copy-and-mutate pattern (functional update).
 //! - `call_extern` emits `extern` declarations in `finish()`.
 
-use std::{
-    collections::BTreeSet,
-    fmt::Write as FmtWrite,
-    string::String,
-    vec::Vec,
-};
+use std::{collections::BTreeSet, fmt::Write as FmtWrite, string::String, vec::Vec};
 use volar_ir_common::Type as NativeType;
-use volar_lir::{BranchTarget, IcmpPred, LirTarget, LirType, LirAbi, HeapAllocExt, StackAllocExt, StructDef, StructId};
+use volar_lir::{
+    BranchTarget, HeapAllocExt, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef,
+    StructId,
+};
 
 pub use volar_lir::NameConfig;
 
@@ -161,7 +159,6 @@ pub struct CBackend {
     current: Option<FunctionState>,
 
     // --- Phase 2: aggregate type support ---
-
     /// Registered struct definitions in `define_struct` call order.
     struct_defs: Vec<StructDef>,
     /// Struct names indexed by `StructId`.
@@ -297,7 +294,9 @@ impl CBackend {
     // ---- Internal helpers ---------------------------------------------------
 
     fn state(&mut self) -> &mut FunctionState {
-        self.current.as_mut().expect("CBackend: not inside a function")
+        self.current
+            .as_mut()
+            .expect("CBackend: not inside a function")
     }
 
     /// Convert a `LirType` to its C type name string.
@@ -369,15 +368,25 @@ impl CBackend {
                     } else {
                         writeln!(self.state().body, "  {elem_c} v{id} = {expr};").unwrap();
                     }
-                    let child = self.state().alloc_value(*elem.clone(), elem_c.clone(), format!("v{id}"));
+                    let child =
+                        self.state()
+                            .alloc_value(*elem.clone(), elem_c.clone(), format!("v{id}"));
                     let mut children = self.unpack_to_scalars(child, &elem, to_preamble);
                     result.append(&mut children);
                 }
                 result
             }
             LirType::Struct(id) => {
-                let field_tys: Vec<LirType> = self.struct_defs[id as usize].fields.iter().map(|f| f.ty.clone()).collect();
-                let field_names: Vec<String> = self.struct_defs[id as usize].fields.iter().map(|f| f.name.clone()).collect();
+                let field_tys: Vec<LirType> = self.struct_defs[id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.ty.clone())
+                    .collect();
+                let field_names: Vec<String> = self.struct_defs[id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect();
                 let agg_name = self.state().name_of(agg).to_owned();
                 let mut result = Vec::new();
                 for (fname, fty) in field_names.iter().zip(field_tys.iter()) {
@@ -390,7 +399,9 @@ impl CBackend {
                     } else {
                         writeln!(self.state().body, "  {fc} v{vid} = {expr};").unwrap();
                     }
-                    let child = self.state().alloc_value(fty.clone(), fc.clone(), format!("v{vid}"));
+                    let child =
+                        self.state()
+                            .alloc_value(fty.clone(), fc.clone(), format!("v{vid}"));
                     let mut children = self.unpack_to_scalars(child, fty, to_preamble);
                     result.append(&mut children);
                 }
@@ -427,7 +438,8 @@ impl CBackend {
                 let arr_ty = LirType::Arr(elem.clone(), n);
                 self.register_array_typedef(&arr_ty);
                 let type_name = arr_typedef_name(&elem, n);
-                let elem_names: Vec<String> = packed_elems.iter()
+                let elem_names: Vec<String> = packed_elems
+                    .iter()
                     .map(|&v| self.state().name_of(v).to_owned())
                     .collect();
                 let data_init = elem_names.join(", ");
@@ -435,16 +447,28 @@ impl CBackend {
                 self.state().emit_instr(arr_ty, type_name, &expr)
             }
             LirType::Struct(id) => {
-                let field_tys: Vec<LirType> = self.struct_defs[id as usize].fields.iter().map(|f| f.ty.clone()).collect();
-                let field_names: Vec<String> = self.struct_defs[id as usize].fields.iter().map(|f| f.name.clone()).collect();
+                let field_tys: Vec<LirType> = self.struct_defs[id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.ty.clone())
+                    .collect();
+                let field_names: Vec<String> = self.struct_defs[id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect();
                 let struct_name = self.struct_names[id as usize].clone();
-                let packed_fields: Vec<CValue> = field_tys.iter()
+                let packed_fields: Vec<CValue> = field_tys
+                    .iter()
                     .map(|fty| self.pack_scalars(fty, scalars, offset))
                     .collect();
-                let val_names: Vec<String> = packed_fields.iter()
+                let val_names: Vec<String> = packed_fields
+                    .iter()
                     .map(|&v| self.state().name_of(v).to_owned())
                     .collect();
-                let init = field_names.iter().zip(val_names.iter())
+                let init = field_names
+                    .iter()
+                    .zip(val_names.iter())
                     .map(|(fname, vname)| {
                         let cfname = c_field_name(fname);
                         format!(".{cfname} = {vname}")
@@ -452,7 +476,8 @@ impl CBackend {
                     .collect::<Vec<_>>()
                     .join(", ");
                 let expr = format!("({struct_name}){{ {init} }}");
-                self.state().emit_instr(LirType::Struct(id), struct_name, &expr)
+                self.state()
+                    .emit_instr(LirType::Struct(id), struct_name, &expr)
             }
             // Scalar — consume one value from the flat list.
             _ => {
@@ -502,8 +527,11 @@ impl LirTarget for CBackend {
     // ---- Value type query ---------------------------------------------------
 
     fn value_scalar_type(&self, val: &CValue) -> LirType {
-        self.current.as_ref().expect("value_scalar_type: not inside a function")
-            .value_type[val.0 as usize].clone()
+        self.current
+            .as_ref()
+            .expect("value_scalar_type: not inside a function")
+            .value_type[val.0 as usize]
+            .clone()
     }
 
     // ---- Function management ------------------------------------------------
@@ -520,7 +548,10 @@ impl LirTarget for CBackend {
         params: &[LirType],
         ret: Option<LirType>,
     ) -> (CBlock, Vec<Vec<CValue>>) {
-        assert!(self.current.is_none(), "begin_function called while inside a function");
+        assert!(
+            self.current.is_none(),
+            "begin_function called while inside a function"
+        );
 
         // Register array typedefs for param and return types.
         for ty in params {
@@ -538,7 +569,10 @@ impl LirTarget for CBackend {
             func_param_count: params.len(),
             preamble: String::new(),
             body: String::new(),
-            blocks: vec![BlockMeta { param_count: 0, param_base: 0 }],
+            blocks: vec![BlockMeta {
+                param_count: 0,
+                param_base: 0,
+            }],
             value_name: Vec::new(),
             value_ctype: Vec::new(),
             value_type: Vec::new(),
@@ -553,9 +587,7 @@ impl LirTarget for CBackend {
             .iter()
             .zip(param_ctypes.iter())
             .enumerate()
-            .map(|(i, (ty, c_type))| {
-                state.alloc_value(ty.clone(), c_type.clone(), format!("v{i}"))
-            })
+            .map(|(i, (ty, c_type))| state.alloc_value(ty.clone(), c_type.clone(), format!("v{i}")))
             .collect();
 
         self.current = Some(state);
@@ -571,7 +603,10 @@ impl LirTarget for CBackend {
     }
 
     fn end_function(&mut self) {
-        let state = self.current.take().expect("end_function called outside a function");
+        let state = self
+            .current
+            .take()
+            .expect("end_function called outside a function");
 
         let ret_cty = state
             .ret_ty
@@ -603,7 +638,10 @@ impl LirTarget for CBackend {
     fn create_block(&mut self) -> CBlock {
         let state = self.state();
         let id = state.blocks.len() as u32;
-        state.blocks.push(BlockMeta { param_count: 0, param_base: state.next_value });
+        state.blocks.push(BlockMeta {
+            param_count: 0,
+            param_base: state.next_value,
+        });
         CBlock(id)
     }
 
@@ -663,22 +701,36 @@ impl LirTarget for CBackend {
         }
         self.binop(lhs, "*", rhs)
     }
-    fn udiv(&mut self, lhs: CValue, rhs: CValue) -> CValue { self.binop(lhs, "/", rhs) }
-    fn sdiv(&mut self, lhs: CValue, rhs: CValue) -> CValue { self.binop(lhs, "/", rhs) }
+    fn udiv(&mut self, lhs: CValue, rhs: CValue) -> CValue {
+        self.binop(lhs, "/", rhs)
+    }
+    fn sdiv(&mut self, lhs: CValue, rhs: CValue) -> CValue {
+        self.binop(lhs, "/", rhs)
+    }
 
     // ---- Bitwise ------------------------------------------------------------
 
-    fn and(&mut self, lhs: CValue, rhs: CValue) -> CValue { self.binop(lhs, "&", rhs) }
-    fn or(&mut self, lhs: CValue, rhs: CValue) -> CValue { self.binop(lhs, "|", rhs) }
-    fn xor(&mut self, lhs: CValue, rhs: CValue) -> CValue { self.binop(lhs, "^", rhs) }
+    fn and(&mut self, lhs: CValue, rhs: CValue) -> CValue {
+        self.binop(lhs, "&", rhs)
+    }
+    fn or(&mut self, lhs: CValue, rhs: CValue) -> CValue {
+        self.binop(lhs, "|", rhs)
+    }
+    fn xor(&mut self, lhs: CValue, rhs: CValue) -> CValue {
+        self.binop(lhs, "^", rhs)
+    }
     fn not(&mut self, val: CValue) -> CValue {
         let ty = self.state().type_of(val).clone();
         // For bools, use logical `!`; for integers, use bitwise `~`.
         let op = if ty == LirType::Bool { "!" } else { "~" };
         self.unop(op, val)
     }
-    fn shl(&mut self, val: CValue, shift: CValue) -> CValue { self.binop(val, "<<", shift) }
-    fn lshr(&mut self, val: CValue, shift: CValue) -> CValue { self.binop(val, ">>", shift) }
+    fn shl(&mut self, val: CValue, shift: CValue) -> CValue {
+        self.binop(val, "<<", shift)
+    }
+    fn lshr(&mut self, val: CValue, shift: CValue) -> CValue {
+        self.binop(val, ">>", shift)
+    }
 
     fn ashr(&mut self, val: CValue, shift: CValue) -> CValue {
         let ty = self.state().type_of(val).clone();
@@ -711,7 +763,8 @@ impl LirTarget for CBackend {
             }
             _ => format!("{l} {op} {r}"),
         };
-        self.state().emit_instr(LirType::Bool, "bool".to_string(), &expr)
+        self.state()
+            .emit_instr(LirType::Bool, "bool".to_string(), &expr)
     }
 
     // ---- Conversions --------------------------------------------------------
@@ -784,14 +837,18 @@ impl LirTarget for CBackend {
 
         // Build the extern declaration using the aggregate C types.
         let arg_c_tys: Vec<String> = arg_tys.iter().map(|ty| self.type_to_c(ty)).collect();
-        let ret_c_ty = ret_ty.as_ref().map(|ty| self.type_to_c(ty)).unwrap_or_else(|| "void".to_string());
+        let ret_c_ty = ret_ty
+            .as_ref()
+            .map(|ty| self.type_to_c(ty))
+            .unwrap_or_else(|| "void".to_string());
         let params_str = arg_c_tys.join(", ");
         let extern_decl = format!("extern {ret_c_ty} {name}({params_str});\n");
         if !self.extern_decls.contains(&extern_decl) {
             self.extern_decls.push(extern_decl);
         }
 
-        let packed_names: Vec<String> = packed_args.iter()
+        let packed_names: Vec<String> = packed_args
+            .iter()
             .map(|&v| self.state().name_of(v).to_owned())
             .collect();
         let args_str = packed_names.join(", ");
@@ -846,14 +903,18 @@ impl LirTarget for CBackend {
             .collect();
 
         let arg_c_tys: Vec<String> = arg_tys.iter().map(|ty| self.type_to_c(ty)).collect();
-        let ret_c_ty = ret_ty.as_ref().map(|ty| self.type_to_c(ty)).unwrap_or_else(|| "void".to_string());
+        let ret_c_ty = ret_ty
+            .as_ref()
+            .map(|ty| self.type_to_c(ty))
+            .unwrap_or_else(|| "void".to_string());
         let params_str = arg_c_tys.join(", ");
         let proto = format!("{ret_c_ty} {name}({params_str});\n");
         if !self.sibling_decls.contains(&proto) {
             self.sibling_decls.push(proto);
         }
 
-        let packed_names: Vec<String> = packed_args.iter()
+        let packed_names: Vec<String> = packed_args
+            .iter()
             .map(|&v| self.state().name_of(v).to_owned())
             .collect();
         let args_str = packed_names.join(", ");
@@ -948,7 +1009,12 @@ impl LirTarget for CBackend {
             }
             Some(ty) if ty.is_scalar() => {
                 // Single scalar return — emit directly.
-                assert_eq!(vals.len(), 1, "ret: scalar return type but {} values", vals.len());
+                assert_eq!(
+                    vals.len(),
+                    1,
+                    "ret: scalar return type but {} values",
+                    vals.len()
+                );
                 let name = self.state().name_of(vals[0]).to_owned();
                 writeln!(self.state().body, "  return {name};").unwrap();
             }
@@ -1048,12 +1114,7 @@ impl LirTarget for CBackend {
         LirAbi::C_NATIVE
     }
 
-    fn ptr_index_load(
-        &mut self,
-        ptr: CValue,
-        idx: CValue,
-        pointee_ty: &LirType,
-    ) -> Vec<CValue> {
+    fn ptr_index_load(&mut self, ptr: CValue, idx: CValue, pointee_ty: &LirType) -> Vec<CValue> {
         // Emit: pointee_ty vN = ptr[idx];
         let ptr_name = self.state().name_of(ptr).to_owned();
         let idx_name = self.state().name_of(idx).to_owned();
@@ -1063,13 +1124,7 @@ impl LirTarget for CBackend {
         self.unpack_to_scalars(loaded, pointee_ty, false)
     }
 
-    fn ptr_index_store(
-        &mut self,
-        ptr: CValue,
-        idx: CValue,
-        vals: &[CValue],
-        pointee_ty: &LirType,
-    ) {
+    fn ptr_index_store(&mut self, ptr: CValue, idx: CValue, vals: &[CValue], pointee_ty: &LirType) {
         // Pack flat scalars into the aggregate, then emit: ptr[idx] = packed;
         let mut offset = 0usize;
         let packed = self.pack_scalars(pointee_ty, vals, &mut offset);
@@ -1100,7 +1155,10 @@ impl StackAllocExt for CBackend {
         let ptr_c = format!("{elem_c}*");
         let ptr_ty = LirType::Ptr(Box::new(elem_ty));
 
-        let state = self.current.as_mut().expect("CBackend::alloca: not inside a function");
+        let state = self
+            .current
+            .as_mut()
+            .expect("CBackend::alloca: not inside a function");
         let id = state.next_value;
         let slot_name = format!("slot_v{id}");
         let ptr_name = format!("v{id}");
@@ -1169,14 +1227,18 @@ impl HeapAllocExt for CBackend {
         let ptr_c = format!("{elem_c}*");
         let ptr_ty = LirType::Ptr(Box::new(elem_ty));
 
-        let state = self.current.as_mut().expect("CBackend::heap_alloc: not inside a function");
+        let state = self
+            .current
+            .as_mut()
+            .expect("CBackend::heap_alloc: not inside a function");
         let id = state.next_value;
         let ptr_name = format!("v{id}");
 
         writeln!(
             state.preamble,
             "  {ptr_c} {ptr_name} = ({ptr_c})calloc({count}, sizeof({elem_c}));"
-        ).unwrap();
+        )
+        .unwrap();
 
         state.alloc_value(ptr_ty, ptr_c, ptr_name)
     }
@@ -1206,7 +1268,9 @@ fn lir_type_to_c_free(ty: &LirType, struct_names: &[String]) -> String {
         LirType::Native(t) => native_type_to_c(*t).to_string(),
         // Pointer: emit as `inner_type*`.
         LirType::Ptr(inner) => format!("{}*", lir_type_to_c_free(inner, struct_names)),
-        _ => panic!("lir_type_to_c_free: unhandled LirType variant — add C type mapping for this variant"),
+        _ => panic!(
+            "lir_type_to_c_free: unhandled LirType variant — add C type mapping for this variant"
+        ),
     }
 }
 
@@ -1249,7 +1313,9 @@ fn signed_variant(ty: &LirType) -> &'static str {
         LirType::Native(t) => native_type_signed(*t),
         LirType::Arr(_, _) | LirType::Struct(_) => panic!("signed_variant: aggregate type"),
         LirType::Ptr(_) => panic!("signed_variant: Ptr has no signed variant"),
-        _ => panic!("signed_variant: unhandled LirType variant — add signed C type for this variant"),
+        _ => {
+            panic!("signed_variant: unhandled LirType variant — add signed C type for this variant")
+        }
     }
 }
 
@@ -1264,7 +1330,7 @@ fn native_type_to_c(t: volar_ir_common::Type) -> &'static str {
         Type::_64 | Type::Galois64 => "uint64_t",
         Type::_128 => "__uint128_t",
         Type::_256 => "uint64_t", // no native 256-bit C integer; use u64 placeholder
-        _ => "uint64_t",           // future primitive types: conservative fallback
+        _ => "uint64_t",          // future primitive types: conservative fallback
     }
 }
 

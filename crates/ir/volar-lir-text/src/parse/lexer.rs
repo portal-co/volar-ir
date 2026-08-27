@@ -6,31 +6,39 @@
 //! tokens on the same line. This tokeniser is intentionally simple:
 //! it does not pre-scan the whole input but drives token-by-token.
 
-use alloc::string::{String, ToString};
 use super::error::ParseError;
+use alloc::string::{String, ToString};
 
 /// A position within the source text.
 #[derive(Clone, Copy, Debug)]
 pub struct Pos {
     pub line: u32,
-    pub col:  u32,
+    pub col: u32,
 }
 
 /// A thin wrapper around a `&str` that tracks position and yields tokens.
 pub struct Lexer<'a> {
-    src:  &'a str,
-    pos:  usize,
+    src: &'a str,
+    pos: usize,
     line: u32,
-    col:  u32,
+    col: u32,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(src: &'a str) -> Self {
-        Lexer { src, pos: 0, line: 1, col: 1 }
+        Lexer {
+            src,
+            pos: 0,
+            line: 1,
+            col: 1,
+        }
     }
 
     pub fn pos(&self) -> Pos {
-        Pos { line: self.line, col: self.col }
+        Pos {
+            line: self.line,
+            col: self.col,
+        }
     }
 
     pub fn remaining(&self) -> &'a str {
@@ -122,7 +130,8 @@ impl<'a> Lexer<'a> {
         if !b.is_ascii_alphabetic() && b != b'_' {
             let p = self.pos();
             return Err(ParseError::UnexpectedToken {
-                line: p.line, col: p.col,
+                line: p.line,
+                col: p.col,
                 got: alloc::format!("'{}'", b as char),
             });
         }
@@ -158,7 +167,8 @@ impl<'a> Lexer<'a> {
         if self.pos == start {
             let p = self.pos();
             return Err(ParseError::UnexpectedToken {
-                line: p.line, col: p.col,
+                line: p.line,
+                col: p.col,
                 got: alloc::format!("'{}'", self.src.as_bytes()[self.pos] as char),
             });
         }
@@ -177,7 +187,8 @@ impl<'a> Lexer<'a> {
             let p = self.pos();
             let got: String = self.src[self.pos..].chars().take(16).collect();
             Err(ParseError::UnexpectedToken {
-                line: p.line, col: p.col,
+                line: p.line,
+                col: p.col,
                 got: alloc::format!("expected {:?}, got {:?}", expected, got),
             })
         }
@@ -193,7 +204,8 @@ impl<'a> Lexer<'a> {
             let p = self.pos();
             let got = self.src.as_bytes().get(self.pos).copied().unwrap_or(0);
             Err(ParseError::UnexpectedToken {
-                line: p.line, col: p.col,
+                line: p.line,
+                col: p.col,
                 got: alloc::format!("expected '{}', got '{}'", expected as char, got as char),
             })
         }
@@ -219,7 +231,8 @@ impl<'a> Lexer<'a> {
             i64::from_str_radix(&raw[2..], 16)
                 .map_err(|_| ParseError::InvalidInt(raw.to_string()))?
         } else {
-            raw.parse::<i64>().map_err(|_| ParseError::InvalidInt(raw.to_string()))?
+            raw.parse::<i64>()
+                .map_err(|_| ParseError::InvalidInt(raw.to_string()))?
         };
         Ok(if negative { -n } else { n })
     }
@@ -228,10 +241,10 @@ impl<'a> Lexer<'a> {
         self.skip();
         let raw = self.read_unsigned_int_str()?;
         if raw.starts_with("0x") || raw.starts_with("0X") {
-            u32::from_str_radix(&raw[2..], 16)
-                .map_err(|_| ParseError::InvalidInt(raw.to_string()))
+            u32::from_str_radix(&raw[2..], 16).map_err(|_| ParseError::InvalidInt(raw.to_string()))
         } else {
-            raw.parse::<u32>().map_err(|_| ParseError::InvalidInt(raw.to_string()))
+            raw.parse::<u32>()
+                .map_err(|_| ParseError::InvalidInt(raw.to_string()))
         }
     }
 
@@ -244,7 +257,8 @@ impl<'a> Lexer<'a> {
         // consume optional 0x prefix
         if self.pos + 1 < self.src.len()
             && self.src.as_bytes()[self.pos] == b'0'
-            && (self.src.as_bytes()[self.pos + 1] == b'x' || self.src.as_bytes()[self.pos + 1] == b'X')
+            && (self.src.as_bytes()[self.pos + 1] == b'x'
+                || self.src.as_bytes()[self.pos + 1] == b'X')
         {
             self.pos += 2;
             self.col += 2;
@@ -305,10 +319,10 @@ impl<'a> Lexer<'a> {
                 self.advance_byte();
                 match esc {
                     b'\\' => s.push('\\'),
-                    b'"'  => s.push('"'),
-                    b'n'  => s.push('\n'),
-                    b't'  => s.push('\t'),
-                    b'r'  => s.push('\r'),
+                    b'"' => s.push('"'),
+                    b'n' => s.push('\n'),
+                    b't' => s.push('\t'),
+                    b'r' => s.push('\r'),
                     other => s.push(other as char),
                 }
             } else {
@@ -328,10 +342,14 @@ impl<'a> Lexer<'a> {
         let mut out = alloc::vec::Vec::new();
         loop {
             self.skip();
-            if self.try_byte(b']') { break; }
+            if self.try_byte(b']') {
+                break;
+            }
             out.push(self.read_u32()?);
             self.skip();
-            if self.try_byte(b',') { continue; }
+            if self.try_byte(b',') {
+                continue;
+            }
             self.expect_byte(b']')?;
             break;
         }
@@ -339,15 +357,21 @@ impl<'a> Lexer<'a> {
     }
 
     /// Read `[[u32,...],...]` into a Vec<Vec<u32>>.
-    pub fn read_u32_list_list(&mut self) -> Result<alloc::vec::Vec<alloc::vec::Vec<u32>>, ParseError> {
+    pub fn read_u32_list_list(
+        &mut self,
+    ) -> Result<alloc::vec::Vec<alloc::vec::Vec<u32>>, ParseError> {
         self.expect_byte(b'[')?;
         let mut out = alloc::vec::Vec::new();
         loop {
             self.skip();
-            if self.try_byte(b']') { break; }
+            if self.try_byte(b']') {
+                break;
+            }
             out.push(self.read_u32_list()?);
             self.skip();
-            if self.try_byte(b',') { continue; }
+            if self.try_byte(b',') {
+                continue;
+            }
             self.expect_byte(b']')?;
             break;
         }

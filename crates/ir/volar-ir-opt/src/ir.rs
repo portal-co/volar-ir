@@ -2,13 +2,20 @@
 // @ai: assisted
 //! Constant-folding pass for Volar IR (`IRBlocks`).
 
-use alloc::{collections::{BTreeMap, BTreeSet}, vec, vec::Vec};
-use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypes, IRVarId};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec,
+    vec::Vec,
+};
+use volar_ir::ir::{
+    IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypes,
+    IRVarId,
+};
 use volar_ir_common::{Constant, Node, Stmt, TypeId};
 
 use crate::common::{
-    apply_aliases_to_stmt, canon_alias, constant_is_zero, constant_rol, constant_ror, fold_poly_in_place, mask_constant, merge_poly_into, stmt_output_type,
-    type_bit_width,
+    apply_aliases_to_stmt, canon_alias, constant_is_zero, constant_rol, constant_ror,
+    fold_poly_in_place, mask_constant, merge_poly_into, stmt_output_type, type_bit_width,
 };
 
 // ============================================================================
@@ -214,10 +221,17 @@ fn poly_vars(coeffs: &BTreeMap<Vec<IRVarId>, u8>) -> BTreeSet<IRVarId> {
 /// collide after substitution via GF(2) coefficient XOR (dropping any
 /// that cancel to an even coefficient) -- mirrors `merge_poly_into`'s own
 /// GF(2) discipline elsewhere in this crate.
-fn substitute_var(coeffs: &BTreeMap<Vec<IRVarId>, u8>, from: IRVarId, to: IRVarId) -> BTreeMap<Vec<IRVarId>, u8> {
+fn substitute_var(
+    coeffs: &BTreeMap<Vec<IRVarId>, u8>,
+    from: IRVarId,
+    to: IRVarId,
+) -> BTreeMap<Vec<IRVarId>, u8> {
     let mut out: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
     for (mono, &c) in coeffs {
-        let mut new_mono: Vec<IRVarId> = mono.iter().map(|&v| if v == from { to } else { v }).collect();
+        let mut new_mono: Vec<IRVarId> = mono
+            .iter()
+            .map(|&v| if v == from { to } else { v })
+            .collect();
         new_mono.sort();
         let entry = out.entry(new_mono).or_insert(0);
         *entry ^= c;
@@ -253,7 +267,11 @@ struct PolyBatch {
 /// batch) to the pre-call var ids of that batch's own members -- see
 /// [`batch_ir_blocks_with_remap_and_members`]'s own doc for why this is
 /// needed.
-fn batch_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &mut IRTypes, region_of: Option<&[u32]>) -> (bool, BTreeMap<u32, u32>, BTreeMap<u32, Vec<u32>>) {
+fn batch_ir_block_once<P: Clone>(
+    block: &mut IRBlock<P>,
+    types: &mut IRTypes,
+    region_of: Option<&[u32]>,
+) -> (bool, BTreeMap<u32, u32>, BTreeMap<u32, Vec<u32>>) {
     let n_params = block.params.len();
 
     // ---- Phase 1: discover candidate batches (read-only). -----------------
@@ -298,7 +316,8 @@ fn batch_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &mut IRTypes, re
                     Stmt::Poly { coeffs, .. } => coeffs.clone(),
                     _ => continue,
                 };
-                let reconstructed = substitute_var(&template_coeffs, batches[bi].hole_var_in_template, hole);
+                let reconstructed =
+                    substitute_var(&template_coeffs, batches[bi].hole_var_in_template, hole);
                 if &reconstructed == coeffs && batches[bi].ty == ty {
                     batches[bi].members.push((i, hole));
                     joined = true;
@@ -317,7 +336,12 @@ fn batch_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &mut IRTypes, re
             let canon = substitute_var(coeffs, hole, IRVarId(POLY_BATCH_SENTINEL));
             let key = (region, ty, canon);
             canon_map.entry(key).or_insert_with(|| {
-                batches.push(PolyBatch { ty, template_idx: i, hole_var_in_template: hole, members: vec![(i, hole)] });
+                batches.push(PolyBatch {
+                    ty,
+                    template_idx: i,
+                    hole_var_in_template: hole,
+                    members: vec![(i, hole)],
+                });
                 batches.len() - 1
             });
         }
@@ -354,7 +378,11 @@ fn batch_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &mut IRTypes, re
         if batches[bi].members.len() < 2 || batches[bi].members.len() > 64 {
             continue; // no benefit, or beyond emit_poly_wide's own width<=64 scope
         }
-        if batches[bi].members.iter().any(|(idx, _)| claimed.contains(idx)) {
+        if batches[bi]
+            .members
+            .iter()
+            .any(|(idx, _)| claimed.contains(idx))
+        {
             continue;
         }
         for (idx, _) in &batches[bi].members {
@@ -363,7 +391,9 @@ fn batch_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &mut IRTypes, re
         accepted.push(bi);
     }
     if accepted.is_empty() {
-        let identity: BTreeMap<u32, u32> = (0..(n_params + block.stmts.len()) as u32).map(|v| (v, v)).collect();
+        let identity: BTreeMap<u32, u32> = (0..(n_params + block.stmts.len()) as u32)
+            .map(|v| (v, v))
+            .collect();
         return (false, identity, BTreeMap::new());
     }
 
@@ -389,7 +419,8 @@ fn batch_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &mut IRTypes, re
         sorted_members.insert(bi, members);
     }
 
-    let mut new_stmts: Vec<Node<IRStmt, P>> = Vec::with_capacity(block.stmts.len() + accepted.len());
+    let mut new_stmts: Vec<Node<IRStmt, P>> =
+        Vec::with_capacity(block.stmts.len() + accepted.len());
     let mut remap: BTreeMap<u32, u32> = (0..n_params as u32).map(|v| (v, v)).collect();
     let mut next_var = n_params as u32;
     let mut batch_wide_var: BTreeMap<usize, u32> = BTreeMap::new();
@@ -403,30 +434,48 @@ fn batch_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &mut IRTypes, re
 
             // Merge: bundle every member's own (remapped) hole var into
             // one wide value, LSB-first by ascending original stmt index.
-            let merge_parts: Vec<IRVarId> = members.iter()
+            let merge_parts: Vec<IRVarId> = members
+                .iter()
                 .map(|&(_, hole)| IRVarId(*remap.get(&hole.0).unwrap_or(&hole.0)))
                 .collect();
-            let merge_var = next_var; next_var += 1;
-            new_stmts.push(Node { kind: Stmt::Merge { parts: merge_parts, ty: wide_ty }, ..block.stmts[i].clone() });
+            let merge_var = next_var;
+            next_var += 1;
+            new_stmts.push(Node {
+                kind: Stmt::Merge {
+                    parts: merge_parts,
+                    ty: wide_ty,
+                },
+                ..block.stmts[i].clone()
+            });
 
             // Wide Poly: the template's own coeffs, with every non-hole
             // var remapped and the hole var replaced by the Merge's own
             // new var id.
-            let (template_coeffs, ) = match &block.stmts[batches[bi].template_idx].kind {
-                Stmt::Poly { coeffs, .. } => (coeffs.clone(), ),
+            let (template_coeffs,) = match &block.stmts[batches[bi].template_idx].kind {
+                Stmt::Poly { coeffs, .. } => (coeffs.clone(),),
                 _ => unreachable!("template_idx always points at a Poly (checked at open time)"),
             };
-            let remapped_template: BTreeMap<Vec<IRVarId>, u8> = template_coeffs.iter()
+            let remapped_template: BTreeMap<Vec<IRVarId>, u8> = template_coeffs
+                .iter()
                 .map(|(mono, &c)| {
-                    let mut new_mono: Vec<IRVarId> = mono.iter()
+                    let mut new_mono: Vec<IRVarId> = mono
+                        .iter()
                         .map(|v| IRVarId(*remap.get(&v.0).unwrap_or(&v.0)))
                         .collect();
                     new_mono.sort();
                     (new_mono, c)
                 })
                 .collect();
-            let template_hole_remapped = IRVarId(*remap.get(&batches[bi].hole_var_in_template.0).unwrap_or(&batches[bi].hole_var_in_template.0));
-            let wide_coeffs = substitute_var(&remapped_template, template_hole_remapped, IRVarId(merge_var));
+            let template_hole_remapped = IRVarId(
+                *remap
+                    .get(&batches[bi].hole_var_in_template.0)
+                    .unwrap_or(&batches[bi].hole_var_in_template.0),
+            );
+            let wide_coeffs = substitute_var(
+                &remapped_template,
+                template_hole_remapped,
+                IRVarId(merge_var),
+            );
 
             // Combined constant: bit j = member j's own original
             // constant's own bit 0 (each member is width=1).
@@ -438,14 +487,22 @@ fn batch_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &mut IRTypes, re
                     }
                 }
             }
-            let wide_poly_var = next_var; next_var += 1;
+            let wide_poly_var = next_var;
+            next_var += 1;
             new_stmts.push(Node {
-                kind: Stmt::Poly { ty: wide_ty, coeffs: wide_coeffs, constant: Constant { hi: 0, lo } },
+                kind: Stmt::Poly {
+                    ty: wide_ty,
+                    coeffs: wide_coeffs,
+                    constant: Constant { hi: 0, lo },
+                },
                 ..block.stmts[i].clone()
             });
             batch_wide_var.insert(bi, wide_poly_var);
 
-            let member_pre_vars: Vec<u32> = members.iter().map(|&(idx, _)| (n_params + idx) as u32).collect();
+            let member_pre_vars: Vec<u32> = members
+                .iter()
+                .map(|&(idx, _)| (n_params + idx) as u32)
+                .collect();
             new_var_members.insert(merge_var, member_pre_vars.clone());
             new_var_members.insert(wide_poly_var, member_pre_vars);
         }
@@ -454,35 +511,49 @@ fn batch_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &mut IRTypes, re
             let members = &sorted_members[&bi];
             let lane = members.iter().position(|(idx, _)| *idx == i).unwrap();
             let wide_var = batch_wide_var[&bi];
-            let new_var = next_var; next_var += 1;
+            let new_var = next_var;
+            next_var += 1;
             new_stmts.push(Node {
-                kind: Stmt::Shuffle { result_bits: vec![(lane as u8, IRVarId(wide_var))], ty: bit_ty },
+                kind: Stmt::Shuffle {
+                    result_bits: vec![(lane as u8, IRVarId(wide_var))],
+                    ty: bit_ty,
+                },
                 ..block.stmts[i].clone()
             });
             remap.insert((n_params + i) as u32, new_var);
             continue;
         }
 
-        let new_var = next_var; next_var += 1;
+        let new_var = next_var;
+        next_var += 1;
         let old_kind = block.stmts[i].kind.clone();
-        let new_kind = old_kind.map_var(
-            &mut (),
-            &mut |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
-                Ok(IRVarId(*remap.get(&v.0).unwrap_or(&v.0)))
-            },
-            &mut |_, ty| Ok(ty),
-            &mut |_, s| Ok(s),
-        ).unwrap();
-        new_stmts.push(Node { kind: new_kind, ..block.stmts[i].clone() });
+        let new_kind = old_kind
+            .map_var(
+                &mut (),
+                &mut |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
+                    Ok(IRVarId(*remap.get(&v.0).unwrap_or(&v.0)))
+                },
+                &mut |_, ty| Ok(ty),
+                &mut |_, s| Ok(s),
+            )
+            .unwrap();
+        new_stmts.push(Node {
+            kind: new_kind,
+            ..block.stmts[i].clone()
+        });
         remap.insert((n_params + i) as u32, new_var);
     }
 
-    let new_term = block.terminator.clone().map(
-        &mut (),
-        |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
-            Ok(IRVarId(*remap.get(&v.0).unwrap_or(&v.0)))
-        },
-    ).unwrap();
+    let new_term = block
+        .terminator
+        .clone()
+        .map(
+            &mut (),
+            |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
+                Ok(IRVarId(*remap.get(&v.0).unwrap_or(&v.0)))
+            },
+        )
+        .unwrap();
 
     block.stmts = new_stmts;
     block.terminator = new_term;
@@ -525,10 +596,13 @@ pub fn dce_ir_blocks_with_remap_and_roots<P: Clone>(
 
 fn collect_terminator_vars(term: &IRTerminator) -> Vec<IRVarId> {
     let mut out = Vec::new();
-    let _ = term.clone().map(&mut out, |acc: &mut Vec<IRVarId>, v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
-        acc.push(v);
-        Ok(v)
-    });
+    let _ = term.clone().map(
+        &mut out,
+        |acc: &mut Vec<IRVarId>, v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
+            acc.push(v);
+            Ok(v)
+        },
+    );
     out
 }
 
@@ -536,7 +610,10 @@ fn collect_stmt_vars(stmt: &volar_ir::ir::IRStmt) -> Vec<IRVarId> {
     let mut out = Vec::new();
     let _ = stmt.clone().map_var(
         &mut out,
-        &mut |acc: &mut Vec<IRVarId>, v: IRVarId| -> Result<IRVarId, core::convert::Infallible> { acc.push(v); Ok(v) },
+        &mut |acc: &mut Vec<IRVarId>, v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
+            acc.push(v);
+            Ok(v)
+        },
         &mut |_, ty| Ok(ty),
         &mut |_, s| Ok(s),
     );
@@ -548,12 +625,18 @@ fn collect_stmt_vars(stmt: &volar_ir::ir::IRStmt) -> Vec<IRVarId> {
 /// `false`). `extra_live` additionally roots any var id in this block's own
 /// statement range, exactly like a terminator reference — see
 /// [`dce_ir_blocks_with_remap_and_roots`]'s own doc for why this exists.
-fn dce_ir_block_once<P: Clone>(block: &mut IRBlock<P>, extra_live: &[u32]) -> (bool, BTreeMap<u32, u32>) {
+fn dce_ir_block_once<P: Clone>(
+    block: &mut IRBlock<P>,
+    extra_live: &[u32],
+) -> (bool, BTreeMap<u32, u32>) {
     let n_params = block.params.len();
     let n_stmts = block.stmts.len();
     let mut must_keep = vec![false; n_stmts];
     for i in 0..n_stmts {
-        if matches!(&block.stmts[i].kind, Stmt::StorageWrite { .. } | Stmt::ActionCall { .. }) {
+        if matches!(
+            &block.stmts[i].kind,
+            Stmt::StorageWrite { .. } | Stmt::ActionCall { .. } | Stmt::ActionStore { .. }
+        ) {
             must_keep[i] = true;
         }
     }
@@ -599,7 +682,8 @@ fn dce_ir_block_once<P: Clone>(block: &mut IRBlock<P>, extra_live: &[u32]) -> (b
     }
 
     if live.iter().all(|&l| l) {
-        let identity: BTreeMap<u32, u32> = (0..(n_params + n_stmts) as u32).map(|v| (v, v)).collect();
+        let identity: BTreeMap<u32, u32> =
+            (0..(n_params + n_stmts) as u32).map(|v| (v, v)).collect();
         return (false, identity);
     }
 
@@ -625,19 +709,34 @@ fn dce_ir_block_once<P: Clone>(block: &mut IRBlock<P>, extra_live: &[u32]) -> (b
     for i in 0..n_stmts {
         if live[i] {
             let node = block.stmts[i].clone();
-            let new_kind = node.kind.clone().map_var(
-                &mut (),
-                &mut |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> { Ok(remap_var(v)) },
-                &mut |_, ty| Ok(ty),
-                &mut |_, s| Ok(s),
-            ).unwrap();
-            new_stmts.push(Node { kind: new_kind, ..node });
+            let new_kind = node
+                .kind
+                .clone()
+                .map_var(
+                    &mut (),
+                    &mut |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
+                        Ok(remap_var(v))
+                    },
+                    &mut |_, ty| Ok(ty),
+                    &mut |_, s| Ok(s),
+                )
+                .unwrap();
+            new_stmts.push(Node {
+                kind: new_kind,
+                ..node
+            });
         }
     }
-    let new_term = block.terminator.clone().map(
-        &mut (),
-        |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> { Ok(remap_var(v)) },
-    ).unwrap();
+    let new_term = block
+        .terminator
+        .clone()
+        .map(
+            &mut (),
+            |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
+                Ok(remap_var(v))
+            },
+        )
+        .unwrap();
 
     block.stmts = new_stmts;
     block.terminator = new_term;
@@ -755,16 +854,28 @@ pub fn cse_ir_blocks_with_regions<P: Clone>(
 /// 0`), not silently `a`. Reuses the same XOR-combine-then-drop-even-
 /// coefficients discipline as `batch_ir_blocks`'s own `substitute_var`.
 fn remap_stmt_operands(kind: IRStmt, remap: &BTreeMap<u32, u32>) -> IRStmt {
-    if let Stmt::Poly { ty, coeffs, constant } = &kind {
+    if let Stmt::Poly {
+        ty,
+        coeffs,
+        constant,
+    } = &kind
+    {
         let mut new_coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
         for (mono, &c) in coeffs {
-            let mut new_mono: Vec<IRVarId> = mono.iter().map(|v| IRVarId(*remap.get(&v.0).unwrap_or(&v.0))).collect();
+            let mut new_mono: Vec<IRVarId> = mono
+                .iter()
+                .map(|v| IRVarId(*remap.get(&v.0).unwrap_or(&v.0)))
+                .collect();
             new_mono.sort();
             let entry = new_coeffs.entry(new_mono).or_insert(0);
             *entry ^= c;
         }
         new_coeffs.retain(|_, c| *c & 1 != 0);
-        return Stmt::Poly { ty: *ty, coeffs: new_coeffs, constant: *constant };
+        return Stmt::Poly {
+            ty: *ty,
+            coeffs: new_coeffs,
+            constant: *constant,
+        };
     }
     kind.map_var(
         &mut (),
@@ -773,7 +884,8 @@ fn remap_stmt_operands(kind: IRStmt, remap: &BTreeMap<u32, u32>) -> IRStmt {
         },
         &mut |_, ty| Ok(ty),
         &mut |_, s| Ok(s),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 /// One forward pass over a single block: dedup pure statements and
@@ -781,7 +893,10 @@ fn remap_stmt_operands(kind: IRStmt, remap: &BTreeMap<u32, u32>) -> IRStmt {
 /// Returns `(changed, remap)` -- `remap` maps every pre-call `IRVarId.0`
 /// to its post-call `IRVarId.0` (identity for every id when `changed` is
 /// `false`).
-fn cse_ir_block_once<P: Clone>(block: &mut IRBlock<P>, region_of: Option<&[u32]>) -> (bool, BTreeMap<u32, u32>) {
+fn cse_ir_block_once<P: Clone>(
+    block: &mut IRBlock<P>,
+    region_of: Option<&[u32]>,
+) -> (bool, BTreeMap<u32, u32>) {
     let n_params = block.params.len();
     let mut remap: BTreeMap<u32, u32> = (0..n_params as u32).map(|v| (v, v)).collect();
     let mut canon_map: BTreeMap<(u32, IRStmt), u32> = BTreeMap::new();
@@ -795,9 +910,14 @@ fn cse_ir_block_once<P: Clone>(block: &mut IRBlock<P>, region_of: Option<&[u32]>
 
         let is_pure = matches!(
             remapped_kind,
-            Stmt::Poly { .. } | Stmt::Merge { .. } | Stmt::Shuffle { .. }
-                | Stmt::Rol { .. } | Stmt::Ror { .. } | Stmt::Splat { .. }
-                | Stmt::Transmute { .. } | Stmt::Const(..)
+            Stmt::Poly { .. }
+                | Stmt::Merge { .. }
+                | Stmt::Shuffle { .. }
+                | Stmt::Rol { .. }
+                | Stmt::Ror { .. }
+                | Stmt::Splat { .. }
+                | Stmt::Transmute { .. }
+                | Stmt::Const(..)
         );
 
         if is_pure {
@@ -816,19 +936,26 @@ fn cse_ir_block_once<P: Clone>(block: &mut IRBlock<P>, region_of: Option<&[u32]>
         if is_pure {
             canon_map.insert((region, remapped_kind.clone()), new_var);
         }
-        new_stmts.push(Node { kind: remapped_kind, ..block.stmts[i].clone() });
+        new_stmts.push(Node {
+            kind: remapped_kind,
+            ..block.stmts[i].clone()
+        });
     }
 
     if !changed {
         return (false, remap);
     }
 
-    let new_term = block.terminator.clone().map(
-        &mut (),
-        |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
-            Ok(IRVarId(*remap.get(&v.0).unwrap_or(&v.0)))
-        },
-    ).unwrap();
+    let new_term = block
+        .terminator
+        .clone()
+        .map(
+            &mut (),
+            |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
+                Ok(IRVarId(*remap.get(&v.0).unwrap_or(&v.0)))
+            },
+        )
+        .unwrap();
 
     block.stmts = new_stmts;
     block.terminator = new_term;
@@ -888,7 +1015,11 @@ fn cse_ir_block_once<P: Clone>(block: &mut IRBlock<P>, region_of: Option<&[u32]>
 pub fn hoist_shared_statements<P: Clone>(
     blocks: &mut IRBlocks<P>,
     region_sets: &[BTreeSet<u32>],
-) -> (bool, Vec<BTreeMap<u32, u32>>, Vec<BTreeMap<u32, (u32, u32)>>) {
+) -> (
+    bool,
+    Vec<BTreeMap<u32, u32>>,
+    Vec<BTreeMap<u32, (u32, u32)>>,
+) {
     let mut any_changed = false;
     let mut remaps = Vec::with_capacity(blocks.blocks.len());
     let mut ranges = Vec::with_capacity(blocks.blocks.len());
@@ -906,11 +1037,19 @@ fn hoist_shared_statements_once<P: Clone>(
     region_sets: &[BTreeSet<u32>],
 ) -> (bool, BTreeMap<u32, u32>, BTreeMap<u32, (u32, u32)>) {
     let n_params = block.params.len();
-    assert_eq!(region_sets.len(), block.stmts.len(), "region_sets must have exactly one entry per statement");
+    assert_eq!(
+        region_sets.len(),
+        block.stmts.len(),
+        "region_sets must have exactly one entry per statement"
+    );
 
     let group_key = |i: usize| -> u32 {
         let set = &region_sets[i];
-        if set.len() == 1 { *set.iter().next().unwrap() } else { 0 }
+        if set.len() == 1 {
+            *set.iter().next().unwrap()
+        } else {
+            0
+        }
     };
 
     // Rank groups by first original appearance, with group 0 always rank 0
@@ -938,11 +1077,20 @@ fn hoist_shared_statements_once<P: Clone>(
     for (new_idx, &old_idx) in new_order.iter().enumerate() {
         let g = group_key(old_idx);
         let v = (n_params + new_idx) as u32;
-        region_ranges.entry(g).and_modify(|(_, end)| *end = v + 1).or_insert((v, v + 1));
+        region_ranges
+            .entry(g)
+            .and_modify(|(_, end)| *end = v + 1)
+            .or_insert((v, v + 1));
     }
 
-    if new_order.iter().enumerate().all(|(new_i, &old_i)| new_i == old_i) {
-        let identity: BTreeMap<u32, u32> = (0..(n_params + block.stmts.len()) as u32).map(|v| (v, v)).collect();
+    if new_order
+        .iter()
+        .enumerate()
+        .all(|(new_i, &old_i)| new_i == old_i)
+    {
+        let identity: BTreeMap<u32, u32> = (0..(n_params + block.stmts.len()) as u32)
+            .map(|v| (v, v))
+            .collect();
         return (false, identity, region_ranges);
     }
 
@@ -954,14 +1102,21 @@ fn hoist_shared_statements_once<P: Clone>(
     let mut new_stmts: Vec<Node<IRStmt, P>> = Vec::with_capacity(block.stmts.len());
     for &old_idx in &new_order {
         let new_kind = remap_stmt_operands(block.stmts[old_idx].kind.clone(), &remap);
-        new_stmts.push(Node { kind: new_kind, ..block.stmts[old_idx].clone() });
+        new_stmts.push(Node {
+            kind: new_kind,
+            ..block.stmts[old_idx].clone()
+        });
     }
-    let new_term = block.terminator.clone().map(
-        &mut (),
-        |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
-            Ok(IRVarId(*remap.get(&v.0).unwrap_or(&v.0)))
-        },
-    ).unwrap();
+    let new_term = block
+        .terminator
+        .clone()
+        .map(
+            &mut (),
+            |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
+                Ok(IRVarId(*remap.get(&v.0).unwrap_or(&v.0)))
+            },
+        )
+        .unwrap();
 
     block.stmts = new_stmts;
     block.terminator = new_term;
@@ -1028,7 +1183,10 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
                 // Phase A: fold in-place.
                 let ty = type_map.get(&rv).copied().unwrap_or(TypeId(0));
                 {
-                    if let Stmt::Poly { coeffs, constant, .. } = &mut block.stmts[i].kind {
+                    if let Stmt::Poly {
+                        coeffs, constant, ..
+                    } = &mut block.stmts[i].kind
+                    {
                         if fold_poly_in_place(ty, coeffs, constant, &const_map, &type_map, types) {
                             changed = true;
                         }
@@ -1038,7 +1196,12 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
                 // Phase B: poly merging — substitute any singleton key that
                 // refers to a previously seen Poly (with matching TypeId).
                 {
-                    if let Stmt::Poly { coeffs, constant, ty: poly_ty } = &mut block.stmts[i].kind {
+                    if let Stmt::Poly {
+                        coeffs,
+                        constant,
+                        ty: poly_ty,
+                    } = &mut block.stmts[i].kind
+                    {
                         let poly_ty_val = *poly_ty;
                         let singleton_srcs: Vec<IRVarId> = coeffs
                             .iter()
@@ -1059,7 +1222,13 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
                             if let Some((src_coeffs, src_const, _)) = poly_map.get(&src_var) {
                                 let src_coeffs = src_coeffs.clone();
                                 let src_const = *src_const;
-                                if merge_poly_into(coeffs, constant, &src_var, &src_coeffs, src_const) {
+                                if merge_poly_into(
+                                    coeffs,
+                                    constant,
+                                    &src_var,
+                                    &src_coeffs,
+                                    src_const,
+                                ) {
                                     changed = true;
                                 }
                             }
@@ -1067,24 +1236,34 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
 
                         // Re-fold after merging.
                         if changed {
-                            fold_poly_in_place(poly_ty_val, coeffs, constant, &const_map, &type_map, types);
+                            fold_poly_in_place(
+                                poly_ty_val,
+                                coeffs,
+                                constant,
+                                &const_map,
+                                &type_map,
+                                types,
+                            );
                         }
                     }
                 }
 
                 // Phase C: if poly collapsed, convert to Const or record alias.
                 let replacement = match &block.stmts[i].kind {
-                    Stmt::Poly { coeffs, constant, ty: poly_ty } if coeffs.is_empty() => {
-                        Some(IrPolyResult::Const(*constant, *poly_ty))
-                    }
-                    Stmt::Poly { coeffs, constant, .. }
-                        if coeffs.len() == 1
-                            && constant_is_zero(*constant)
-                            && coeffs
-                                .iter()
-                                .next()
-                                .map(|(k, &c)| k.len() == 1 && c & 1 != 0)
-                                .unwrap_or(false) =>
+                    Stmt::Poly {
+                        coeffs,
+                        constant,
+                        ty: poly_ty,
+                    } if coeffs.is_empty() => Some(IrPolyResult::Const(*constant, *poly_ty)),
+                    Stmt::Poly {
+                        coeffs, constant, ..
+                    } if coeffs.len() == 1
+                        && constant_is_zero(*constant)
+                        && coeffs
+                            .iter()
+                            .next()
+                            .map(|(k, &c)| k.len() == 1 && c & 1 != 0)
+                            .unwrap_or(false) =>
                     {
                         let v = *coeffs.iter().next().unwrap().0.first().unwrap();
                         Some(IrPolyResult::Alias(v))
@@ -1106,7 +1285,12 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
                     }
                     None => {
                         // Record surviving Poly in poly_map for downstream merging.
-                        if let Stmt::Poly { coeffs, constant, ty: poly_ty } = &block.stmts[i].kind {
+                        if let Stmt::Poly {
+                            coeffs,
+                            constant,
+                            ty: poly_ty,
+                        } = &block.stmts[i].kind
+                        {
                             poly_map.insert(rv, (coeffs.clone(), *constant, *poly_ty));
                         }
                     }
@@ -1157,11 +1341,15 @@ fn compute_action(
     match stmt {
         Stmt::Const(c, _) => IrAction::RecordConst(*c),
 
-        Stmt::Poly { coeffs, constant, ty } => {
+        Stmt::Poly {
+            coeffs,
+            constant,
+            ty,
+        } => {
             // Check if any var is in const_map or if the constant can be masked.
-            let any_foldable = coeffs.iter().any(|(key, _)| {
-                key.iter().any(|v| const_map.contains_key(v))
-            });
+            let any_foldable = coeffs
+                .iter()
+                .any(|(key, _)| key.iter().any(|v| const_map.contains_key(v)));
             let can_mask = type_bit_width(*ty, types).is_some();
             if any_foldable || can_mask {
                 IrAction::FoldPoly
@@ -1199,7 +1387,13 @@ fn compute_action(
                     // Splat: broadcast LSB of src across all `w` bits.
                     let bit = c.lo & 1;
                     let result = if bit != 0 {
-                        mask_constant(Constant { hi: u128::MAX, lo: u128::MAX }, w)
+                        mask_constant(
+                            Constant {
+                                hi: u128::MAX,
+                                lo: u128::MAX,
+                            },
+                            w,
+                        )
                     } else {
                         Constant { hi: 0, lo: 0 }
                     };
@@ -1209,7 +1403,11 @@ fn compute_action(
             IrAction::NoChange
         }
 
-        Stmt::Transmute { src, src_ty: _, dst_ty } => {
+        Stmt::Transmute {
+            src,
+            src_ty: _,
+            dst_ty,
+        } => {
             if let Some(&c) = const_map.get(src) {
                 // Transmute is a bit-reinterpretation; just mask to dst width.
                 if let Some(dst_w) = type_bit_width(*dst_ty, types) {
@@ -1233,10 +1431,8 @@ fn compute_action(
                             .and_then(|&tid| type_bit_width(tid, types))
                             .unwrap_or(1);
                         // Shift part into position.
-                        let shifted = crate::common::constant_shl(
-                            mask_constant(part_c, part_w),
-                            offset,
-                        );
+                        let shifted =
+                            crate::common::constant_shl(mask_constant(part_c, part_w), offset);
                         result = crate::common::constant_or(result, shifted);
                         offset += part_w;
                         if offset >= total_w {
@@ -1272,14 +1468,14 @@ fn apply_aliases_to_ir_target_id(
     false
 }
 
-fn apply_aliases_to_args(
-    args: &mut [IRVarId],
-    alias_map: &BTreeMap<IRVarId, IRVarId>,
-) -> bool {
+fn apply_aliases_to_args(args: &mut [IRVarId], alias_map: &BTreeMap<IRVarId, IRVarId>) -> bool {
     let mut changed = false;
     for v in args.iter_mut() {
         let c = canon_alias(alias_map, *v);
-        if c != *v { *v = c; changed = true; }
+        if c != *v {
+            *v = c;
+            changed = true;
+        }
     }
     changed
 }
@@ -1303,7 +1499,10 @@ pub(crate) fn apply_aliases_to_ir_terminator(
             else_target,
         } => {
             let c = canon_alias(alias_map, *condition);
-            if c != *condition { *condition = c; changed = true; }
+            if c != *condition {
+                *condition = c;
+                changed = true;
+            }
             changed |= apply_aliases_to_ir_target_id(&mut then_target.dest, alias_map);
             changed |= apply_aliases_to_args(&mut then_target.args, alias_map);
             changed |= apply_aliases_to_ir_target_id(&mut else_target.dest, alias_map);
@@ -1311,7 +1510,10 @@ pub(crate) fn apply_aliases_to_ir_terminator(
         }
         IRTerminator::JumpTable { index, cases } => {
             let c = canon_alias(alias_map, *index);
-            if c != *index { *index = c; changed = true; }
+            if c != *index {
+                *index = c;
+                changed = true;
+            }
             for branch in cases.values_mut() {
                 changed |= apply_aliases_to_ir_target_id(&mut branch.dest, alias_map);
                 changed |= apply_aliases_to_args(&mut branch.args, alias_map);
@@ -1367,7 +1569,9 @@ mod dce_tests {
     use volar_ir::ir::{IRBlock, IRType, IRTypeId};
     use volar_ir_common::Type;
 
-    fn bit() -> IRTypeId { IRTypeId(0) }
+    fn bit() -> IRTypeId {
+        IRTypeId(0)
+    }
     fn types_with_bit() -> IRTypes {
         IRTypes(alloc::vec![IRType::Primitive(Type::Bit)])
     }
@@ -1392,15 +1596,26 @@ mod dce_tests {
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
         let changed = dce_ir_blocks(&mut blocks, &mut types);
         assert!(changed, "the dead Const(1) statement must be removed");
-        assert_eq!(blocks.blocks[0].stmts.len(), 1, "only the live Const(0) statement should remain");
+        assert_eq!(
+            blocks.blocks[0].stmts.len(),
+            1,
+            "only the live Const(0) statement should remain"
+        );
         match &blocks.blocks[0].stmts[0].kind {
-            Stmt::Const(c, _) => assert_eq!(c.lo, 0, "the surviving statement must be the live Const(0), not the dead Const(1)"),
+            Stmt::Const(c, _) => assert_eq!(
+                c.lo, 0,
+                "the surviving statement must be the live Const(0), not the dead Const(1)"
+            ),
             other => panic!("expected a Const stmt, got {other:?}"),
         }
         // Terminator's own var reference must be renumbered: stmts[1] moved to index 0,
         // so its var id shifts from 2 (params.len()=1 + stmt-index 1) to 1 (params.len()=1 + stmt-index 0).
         match &blocks.blocks[0].terminator {
-            IRTerminator::Jmp { target } => assert_eq!(target.args, alloc::vec![IRVarId(1)], "terminator's own var reference must be renumbered after removal"),
+            IRTerminator::Jmp { target } => assert_eq!(
+                target.args,
+                alloc::vec![IRVarId(1)],
+                "terminator's own var reference must be renumbered after removal"
+            ),
             other => panic!("expected Jmp, got {other:?}"),
         }
     }
@@ -1412,18 +1627,26 @@ mod dce_tests {
         let mut types = types_with_bit();
         let block = IRBlock {
             params: alloc::vec![bit(), bit()], // [addr, src]
-            stmts: alloc::vec![
-                Node::new(Stmt::StorageWrite {
-                    storage: volar_ir_common::StorageId(0), src: IRVarId(1), ty: bit(), addr: IRVarId(0),
-                }, (), None),
-            ],
+            stmts: alloc::vec![Node::new(
+                Stmt::StorageWrite {
+                    storage: volar_ir_common::StorageId(0),
+                    src: IRVarId(1),
+                    ty: bit(),
+                    addr: IRVarId(0),
+                },
+                (),
+                None
+            ),],
             terminator: IRTerminator::Jmp {
                 target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![]),
             },
         };
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
         let changed = dce_ir_blocks(&mut blocks, &mut types);
-        assert!(!changed, "a StorageWrite must never be removed, even though its own result is unused");
+        assert!(
+            !changed,
+            "a StorageWrite must never be removed, even though its own result is unused"
+        );
         assert_eq!(blocks.blocks[0].stmts.len(), 1);
     }
 }
@@ -1434,7 +1657,9 @@ mod batch_tests {
     use volar_ir::ir::{IRBlock, IRType, IRTypeId};
     use volar_ir_common::Type;
 
-    fn bit() -> IRTypeId { IRTypeId(0) }
+    fn bit() -> IRTypeId {
+        IRTypeId(0)
+    }
     fn types_with_bit() -> IRTypes {
         IRTypes(alloc::vec![IRType::Primitive(Type::Bit)])
     }
@@ -1452,55 +1677,100 @@ mod batch_tests {
         let block = IRBlock {
             params: alloc::vec![bit(), bit(), bit()],
             stmts: alloc::vec![
-                Node::new(Stmt::Poly {
-                    ty: bit(),
-                    coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
-                    constant: Constant { hi: 0, lo: 0 },
-                }, (), None),
-                Node::new(Stmt::Poly {
-                    ty: bit(),
-                    coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]),
-                    constant: Constant { hi: 0, lo: 0 },
-                }, (), None),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 },
+                    },
+                    (),
+                    None
+                ),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 },
+                    },
+                    (),
+                    None
+                ),
             ],
             terminator: IRTerminator::Jmp {
-                target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(3), IRVarId(4)]),
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(3), IRVarId(4)],
+                ),
             },
         };
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
 
         let changed = batch_ir_blocks(&mut blocks, &mut types);
-        assert!(changed, "two same-shape Polys differing in one operand must be batched");
+        assert!(
+            changed,
+            "two same-shape Polys differing in one operand must be batched"
+        );
 
         let stmts = &blocks.blocks[0].stmts;
-        assert_eq!(stmts.len(), 4, "expected Merge + wide Poly + 2 Shuffles, got: {stmts:?}");
+        assert_eq!(
+            stmts.len(),
+            4,
+            "expected Merge + wide Poly + 2 Shuffles, got: {stmts:?}"
+        );
 
         let (merge_parts, merge_ty) = match &stmts[0].kind {
             Stmt::Merge { parts, ty } => (parts.clone(), *ty),
             other => panic!("expected Merge at position 0, got {other:?}"),
         };
-        assert_eq!(merge_parts, alloc::vec![b, c], "merge must bundle the two VARYING operands, in original statement order");
-        assert_eq!(types.0[merge_ty.0 as usize], IRType::Vec(2, bit()), "merge output must be a width-2 Bit vector");
+        assert_eq!(
+            merge_parts,
+            alloc::vec![b, c],
+            "merge must bundle the two VARYING operands, in original statement order"
+        );
+        assert_eq!(
+            types.0[merge_ty.0 as usize],
+            IRType::Vec(2, bit()),
+            "merge output must be a width-2 Bit vector"
+        );
 
         let (wide_coeffs, wide_ty, wide_const) = match &stmts[1].kind {
-            Stmt::Poly { ty, coeffs, constant } => (coeffs.clone(), *ty, *constant),
+            Stmt::Poly {
+                ty,
+                coeffs,
+                constant,
+            } => (coeffs.clone(), *ty, *constant),
             other => panic!("expected wide Poly at position 1, got {other:?}"),
         };
-        assert_eq!(wide_ty, merge_ty, "wide Poly's own output type must match the Merge's own wide type");
+        assert_eq!(
+            wide_ty, merge_ty,
+            "wide Poly's own output type must match the Merge's own wide type"
+        );
         assert_eq!(wide_const, Constant { hi: 0, lo: 0 });
         let merge_var = IRVarId(3); // Merge is the first new statement -> var (n_params + 0)
-        assert_eq!(wide_coeffs, BTreeMap::from([(alloc::vec![a, merge_var], 1u8)]), "wide Poly must keep the SHARED operand `a` broadcast and reference the merged wide value in place of the varying one");
+        assert_eq!(
+            wide_coeffs,
+            BTreeMap::from([(alloc::vec![a, merge_var], 1u8)]),
+            "wide Poly must keep the SHARED operand `a` broadcast and reference the merged wide value in place of the varying one"
+        );
 
         match &stmts[2].kind {
             Stmt::Shuffle { result_bits, ty } => {
-                assert_eq!(result_bits, &alloc::vec![(0u8, IRVarId(4))], "first original statement (a·b) must extract lane 0");
+                assert_eq!(
+                    result_bits,
+                    &alloc::vec![(0u8, IRVarId(4))],
+                    "first original statement (a·b) must extract lane 0"
+                );
                 assert_eq!(*ty, bit());
             }
             other => panic!("expected Shuffle at position 2, got {other:?}"),
         }
         match &stmts[3].kind {
             Stmt::Shuffle { result_bits, ty } => {
-                assert_eq!(result_bits, &alloc::vec![(1u8, IRVarId(4))], "second original statement (a·c) must extract lane 1");
+                assert_eq!(
+                    result_bits,
+                    &alloc::vec![(1u8, IRVarId(4))],
+                    "second original statement (a·c) must extract lane 1"
+                );
                 assert_eq!(*ty, bit());
             }
             other => panic!("expected Shuffle at position 3, got {other:?}"),
@@ -1511,7 +1781,11 @@ mod batch_tests {
         // be remapped to the new Shuffle statements' own var ids (5, 6),
         // not left dangling or silently dropped.
         match &blocks.blocks[0].terminator {
-            IRTerminator::Jmp { target } => assert_eq!(target.args, alloc::vec![IRVarId(5), IRVarId(6)], "terminator must be remapped to the new Shuffle statements' own var ids"),
+            IRTerminator::Jmp { target } => assert_eq!(
+                target.args,
+                alloc::vec![IRVarId(5), IRVarId(6)],
+                "terminator must be remapped to the new Shuffle statements' own var ids"
+            ),
             other => panic!("expected Jmp, got {other:?}"),
         }
     }
@@ -1531,12 +1805,39 @@ mod batch_tests {
         let block = IRBlock {
             params: alloc::vec![bit(), bit(), bit(), bit(), bit()],
             stmts: alloc::vec![
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None),
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None),
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![d, e], 1u8)]), constant: Constant { hi: 0, lo: 1 } }, (), None),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![d, e], 1u8)]),
+                        constant: Constant { hi: 0, lo: 1 }
+                    },
+                    (),
+                    None
+                ),
             ],
             terminator: IRTerminator::Jmp {
-                target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(5), IRVarId(6), IRVarId(7)]),
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(5), IRVarId(6), IRVarId(7)],
+                ),
             },
         };
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
@@ -1545,10 +1846,20 @@ mod batch_tests {
         assert!(changed);
 
         let stmts = &blocks.blocks[0].stmts;
-        assert_eq!(stmts.len(), 5, "Merge + wide Poly + 2 Shuffles for the batched pair, plus the untouched d·e Poly: {stmts:?}");
+        assert_eq!(
+            stmts.len(),
+            5,
+            "Merge + wide Poly + 2 Shuffles for the batched pair, plus the untouched d·e Poly: {stmts:?}"
+        );
         match &stmts[4].kind {
-            Stmt::Poly { coeffs, constant, .. } => {
-                assert_eq!(coeffs, &BTreeMap::from([(alloc::vec![d, e], 1u8)]), "the unrelated Poly's own coeffs must survive verbatim");
+            Stmt::Poly {
+                coeffs, constant, ..
+            } => {
+                assert_eq!(
+                    coeffs,
+                    &BTreeMap::from([(alloc::vec![d, e], 1u8)]),
+                    "the unrelated Poly's own coeffs must survive verbatim"
+                );
                 assert_eq!(*constant, Constant { hi: 0, lo: 1 });
             }
             other => panic!("expected the untouched d·e Poly at position 4, got {other:?}"),
@@ -1566,16 +1877,41 @@ mod batch_tests {
         let block = IRBlock {
             params: alloc::vec![bit(), bit(), bit()],
             stmts: alloc::vec![
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None),
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8), (alloc::vec![b, c], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([
+                            (alloc::vec![a, c], 1u8),
+                            (alloc::vec![b, c], 1u8)
+                        ]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ),
             ],
             terminator: IRTerminator::Jmp {
-                target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(3), IRVarId(4)]),
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(3), IRVarId(4)],
+                ),
             },
         };
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
         let changed = batch_ir_blocks(&mut blocks, &mut types);
-        assert!(!changed, "a degree-2-monomial-count mismatch (1 vs 2) must never be batched");
+        assert!(
+            !changed,
+            "a degree-2-monomial-count mismatch (1 vs 2) must never be batched"
+        );
         assert_eq!(blocks.blocks[0].stmts.len(), 2);
     }
 }
@@ -1586,7 +1922,9 @@ mod cse_tests {
     use volar_ir::ir::{IRBlock, IRTypeId};
     use volar_ir_common::Type;
 
-    fn bit() -> IRTypeId { IRTypeId(0) }
+    fn bit() -> IRTypeId {
+        IRTypeId(0)
+    }
     fn types_with_bit() -> IRTypes {
         IRTypes(alloc::vec![IRType::Primitive(Type::Bit)])
     }
@@ -1613,11 +1951,15 @@ mod cse_tests {
                 Node::new(and_poly(), (), None),
                 // consumer: NOT of the SECOND copy alone (var 3, soon
                 // deduped) -- no collision, just confirms remapping.
-                Node::new(Stmt::Poly {
-                    ty: bit(),
-                    coeffs: BTreeMap::from([(alloc::vec![IRVarId(3)], 1u8)]),
-                    constant: Constant { hi: 0, lo: 1 },
-                }, (), None),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![IRVarId(3)], 1u8)]),
+                        constant: Constant { hi: 0, lo: 1 },
+                    },
+                    (),
+                    None
+                ),
             ],
             terminator: IRTerminator::Jmp {
                 target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(4)]),
@@ -1626,12 +1968,21 @@ mod cse_tests {
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
 
         let changed = cse_ir_blocks(&mut blocks, &types);
-        assert!(changed, "two byte-for-byte identical Polys must be deduplicated");
+        assert!(
+            changed,
+            "two byte-for-byte identical Polys must be deduplicated"
+        );
 
         let stmts = &blocks.blocks[0].stmts;
-        assert_eq!(stmts.len(), 2, "the duplicate must be gone entirely, not just aliased-but-kept: {stmts:?}");
+        assert_eq!(
+            stmts.len(),
+            2,
+            "the duplicate must be gone entirely, not just aliased-but-kept: {stmts:?}"
+        );
         match &stmts[0].kind {
-            Stmt::Poly { coeffs, .. } => assert_eq!(coeffs, &BTreeMap::from([(alloc::vec![a, b], 1u8)])),
+            Stmt::Poly { coeffs, .. } => {
+                assert_eq!(coeffs, &BTreeMap::from([(alloc::vec![a, b], 1u8)]))
+            }
             other => panic!("expected the surviving a·b Poly at position 0, got {other:?}"),
         }
         match &stmts[1].kind {
@@ -1639,11 +1990,17 @@ mod cse_tests {
             // the consumer's own reference to the now-removed duplicate
             // (originally var 3) must have been remapped, not left
             // dangling.
-            Stmt::Poly { coeffs, .. } => assert_eq!(coeffs, &BTreeMap::from([(alloc::vec![IRVarId(2)], 1u8)])),
+            Stmt::Poly { coeffs, .. } => {
+                assert_eq!(coeffs, &BTreeMap::from([(alloc::vec![IRVarId(2)], 1u8)]))
+            }
             other => panic!("expected the consumer Poly at position 1, got {other:?}"),
         }
         match &blocks.blocks[0].terminator {
-            IRTerminator::Jmp { target } => assert_eq!(target.args, alloc::vec![IRVarId(3)], "terminator must be remapped to the consumer's own new (compacted) var id"),
+            IRTerminator::Jmp { target } => assert_eq!(
+                target.args,
+                alloc::vec![IRVarId(3)],
+                "terminator must be remapped to the consumer's own new (compacted) var id"
+            ),
             other => panic!("expected Jmp, got {other:?}"),
         }
     }
@@ -1671,11 +2028,18 @@ mod cse_tests {
                 Node::new(and_poly(), (), None),
                 // consumer: var2 XOR var3 -- BOTH operands, one of which
                 // is about to be deduped onto the other.
-                Node::new(Stmt::Poly {
-                    ty: bit(),
-                    coeffs: BTreeMap::from([(alloc::vec![IRVarId(2)], 1u8), (alloc::vec![IRVarId(3)], 1u8)]),
-                    constant: Constant { hi: 0, lo: 0 },
-                }, (), None),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([
+                            (alloc::vec![IRVarId(2)], 1u8),
+                            (alloc::vec![IRVarId(3)], 1u8)
+                        ]),
+                        constant: Constant { hi: 0, lo: 0 },
+                    },
+                    (),
+                    None
+                ),
             ],
             terminator: IRTerminator::Jmp {
                 target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(4)]),
@@ -1689,8 +2053,13 @@ mod cse_tests {
         let stmts = &blocks.blocks[0].stmts;
         assert_eq!(stmts.len(), 2, "{stmts:?}");
         match &stmts[1].kind {
-            Stmt::Poly { coeffs, constant, .. } => {
-                assert!(coeffs.is_empty(), "var2 XOR var2 must collapse to the empty monomial set (always 0), not silently keep one term: {coeffs:?}");
+            Stmt::Poly {
+                coeffs, constant, ..
+            } => {
+                assert!(
+                    coeffs.is_empty(),
+                    "var2 XOR var2 must collapse to the empty monomial set (always 0), not silently keep one term: {coeffs:?}"
+                );
                 assert_eq!(constant.lo & 1, 0, "must evaluate to constant 0");
             }
             other => panic!("expected the collapsed consumer Poly at position 1, got {other:?}"),
@@ -1709,16 +2078,37 @@ mod cse_tests {
         let block = IRBlock {
             params: alloc::vec![bit(), bit()],
             stmts: alloc::vec![
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None),
-                Node::new(Stmt::Merge { parts: alloc::vec![a, b], ty: bit() }, (), None),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ),
+                Node::new(
+                    Stmt::Merge {
+                        parts: alloc::vec![a, b],
+                        ty: bit()
+                    },
+                    (),
+                    None
+                ),
             ],
             terminator: IRTerminator::Jmp {
-                target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(2), IRVarId(3)]),
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(2), IRVarId(3)],
+                ),
             },
         };
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
         let changed = cse_ir_blocks(&mut blocks, &types);
-        assert!(!changed, "different Stmt variants must never be treated as duplicates");
+        assert!(
+            !changed,
+            "different Stmt variants must never be treated as duplicates"
+        );
         assert_eq!(blocks.blocks[0].stmts.len(), 2);
     }
 
@@ -1732,11 +2122,30 @@ mod cse_tests {
         let block = IRBlock {
             params: alloc::vec![bit()],
             stmts: alloc::vec![
-                Node::new(Stmt::StorageRead { storage: volar_ir_common::StorageId(0), ty: bit(), addr }, (), None),
-                Node::new(Stmt::StorageRead { storage: volar_ir_common::StorageId(0), ty: bit(), addr }, (), None),
+                Node::new(
+                    Stmt::StorageRead {
+                        storage: volar_ir_common::StorageId(0),
+                        ty: bit(),
+                        addr
+                    },
+                    (),
+                    None
+                ),
+                Node::new(
+                    Stmt::StorageRead {
+                        storage: volar_ir_common::StorageId(0),
+                        ty: bit(),
+                        addr
+                    },
+                    (),
+                    None
+                ),
             ],
             terminator: IRTerminator::Jmp {
-                target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(1), IRVarId(2)]),
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(1), IRVarId(2)],
+                ),
             },
         };
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
@@ -1753,7 +2162,11 @@ mod cse_tests {
         let types = types_with_bit();
         let a = IRVarId(0);
         let b = IRVarId(1);
-        let and_poly = || Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]), constant: Constant { hi: 0, lo: 0 } };
+        let and_poly = || Stmt::Poly {
+            ty: bit(),
+            coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+            constant: Constant { hi: 0, lo: 0 },
+        };
         let block = IRBlock {
             params: alloc::vec![bit(), bit()],
             stmts: alloc::vec![
@@ -1761,13 +2174,19 @@ mod cse_tests {
                 Node::new(and_poly(), (), None), // region 1 -- must NOT dedup with the above
             ],
             terminator: IRTerminator::Jmp {
-                target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(2), IRVarId(3)]),
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(2), IRVarId(3)],
+                ),
             },
         };
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
         let region_of = [0u32, 1u32];
         let (changed, _) = cse_ir_blocks_with_regions(&mut blocks, &types, &region_of);
-        assert!(!changed, "identical Polys in different regions must never be deduplicated");
+        assert!(
+            !changed,
+            "identical Polys in different regions must never be deduplicated"
+        );
         assert_eq!(blocks.blocks[0].stmts.len(), 2);
 
         // Sanity: the SAME input, unconstrained, DOES dedup -- confirms
@@ -1776,12 +2195,23 @@ mod cse_tests {
         let mut types2 = types_with_bit();
         let block2 = IRBlock {
             params: alloc::vec![bit(), bit()],
-            stmts: alloc::vec![Node::new(and_poly(), (), None), Node::new(and_poly(), (), None)],
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(2), IRVarId(3)]) },
+            stmts: alloc::vec![
+                Node::new(and_poly(), (), None),
+                Node::new(and_poly(), (), None)
+            ],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(2), IRVarId(3)],
+                ),
+            },
         };
         let mut blocks2: IRBlocks = IRBlocks::new(alloc::vec![block2]);
         let changed2 = cse_ir_blocks(&mut blocks2, &mut types2);
-        assert!(changed2, "sanity: unconstrained CSE must dedup the same input");
+        assert!(
+            changed2,
+            "sanity: unconstrained CSE must dedup the same input"
+        );
     }
 
     /// Same guard for `batch_ir_blocks`: two Polys that WOULD batch
@@ -1795,17 +2225,39 @@ mod cse_tests {
         let block = IRBlock {
             params: alloc::vec![bit(), bit(), bit()],
             stmts: alloc::vec![
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None), // region 0
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None), // region 1
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ), // region 0
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ), // region 1
             ],
             terminator: IRTerminator::Jmp {
-                target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(3), IRVarId(4)]),
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(3), IRVarId(4)],
+                ),
             },
         };
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
         let region_of = [0u32, 1u32];
         let (changed, _) = batch_ir_blocks_with_regions(&mut blocks, &mut types, &region_of);
-        assert!(!changed, "batchable Polys in different regions must never be merged");
+        assert!(
+            !changed,
+            "batchable Polys in different regions must never be merged"
+        );
         assert_eq!(blocks.blocks[0].stmts.len(), 2);
     }
 }
@@ -1816,7 +2268,9 @@ mod hoist_tests {
     use volar_ir::ir::{IRBlock, IRType, IRTypeId};
     use volar_ir_common::Type;
 
-    fn bit() -> IRTypeId { IRTypeId(0) }
+    fn bit() -> IRTypeId {
+        IRTypeId(0)
+    }
     fn types_with_bit() -> IRTypes {
         IRTypes(alloc::vec![IRType::Primitive(Type::Bit)])
     }
@@ -1838,13 +2292,40 @@ mod hoist_tests {
         let block = IRBlock {
             params: alloc::vec![bit(), bit(), bit()],
             stmts: alloc::vec![
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None), // var 3, region {0}
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ), // var 3, region {0}
                 Node::new(Stmt::Const(Constant { hi: 0, lo: 1 }, bit()), (), None), // var 4, region {1}, unrelated
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None), // var 5, region {1,2}
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![IRVarId(5)], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None), // var 6, region {2}
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ), // var 5, region {1,2}
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![IRVarId(5)], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ), // var 6, region {2}
             ],
             terminator: IRTerminator::Jmp {
-                target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(3), IRVarId(4), IRVarId(5), IRVarId(6)]),
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(3), IRVarId(4), IRVarId(5), IRVarId(6)],
+                ),
             },
         };
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);
@@ -1856,24 +2337,43 @@ mod hoist_tests {
         ];
 
         let (changed, remaps, region_ranges) = hoist_shared_statements(&mut blocks, &region_sets);
-        assert!(changed, "the multi-region statement must be physically relocated");
+        assert!(
+            changed,
+            "the multi-region statement must be physically relocated"
+        );
 
         let stmts = &blocks.blocks[0].stmts;
         assert_eq!(stmts.len(), 4);
         match &stmts[0].kind {
-            Stmt::Poly { coeffs, .. } => assert_eq!(coeffs, &BTreeMap::from([(alloc::vec![a, b], 1u8)]), "region-0 statement stays first"),
+            Stmt::Poly { coeffs, .. } => assert_eq!(
+                coeffs,
+                &BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                "region-0 statement stays first"
+            ),
             other => panic!("expected a·b first, got {other:?}"),
         }
         match &stmts[1].kind {
-            Stmt::Poly { coeffs, .. } => assert_eq!(coeffs, &BTreeMap::from([(alloc::vec![a, c], 1u8)]), "the multi-region a·c must be hoisted to position 1, ahead of the unrelated Const"),
+            Stmt::Poly { coeffs, .. } => assert_eq!(
+                coeffs,
+                &BTreeMap::from([(alloc::vec![a, c], 1u8)]),
+                "the multi-region a·c must be hoisted to position 1, ahead of the unrelated Const"
+            ),
             other => panic!("expected the hoisted a·c at position 1, got {other:?}"),
         }
         match &stmts[2].kind {
-            Stmt::Const(c, _) => assert_eq!(*c, Constant { hi: 0, lo: 1 }, "the unrelated region-1 Const is pushed after the hoisted statement"),
+            Stmt::Const(c, _) => assert_eq!(
+                *c,
+                Constant { hi: 0, lo: 1 },
+                "the unrelated region-1 Const is pushed after the hoisted statement"
+            ),
             other => panic!("expected the Const at position 2, got {other:?}"),
         }
         match &stmts[3].kind {
-            Stmt::Poly { coeffs, .. } => assert_eq!(coeffs, &BTreeMap::from([(alloc::vec![IRVarId(4)], 1u8)]), "the consumer's own reference to a·c must be remapped to a·c's new var id (4)"),
+            Stmt::Poly { coeffs, .. } => assert_eq!(
+                coeffs,
+                &BTreeMap::from([(alloc::vec![IRVarId(4)], 1u8)]),
+                "the consumer's own reference to a·c must be remapped to a·c's new var id (4)"
+            ),
             other => panic!("expected the consumer Poly last, got {other:?}"),
         }
         match &blocks.blocks[0].terminator {
@@ -1885,13 +2385,25 @@ mod hoist_tests {
             other => panic!("expected Jmp, got {other:?}"),
         }
         assert_eq!(remaps.len(), 1);
-        assert_eq!(remaps[0].get(&5), Some(&4), "old var 5 (a·c) must now resolve to var 4");
-        assert_eq!(remaps[0].get(&4), Some(&5), "old var 4 (Const) must now resolve to var 5");
+        assert_eq!(
+            remaps[0].get(&5),
+            Some(&4),
+            "old var 5 (a·c) must now resolve to var 4"
+        );
+        assert_eq!(
+            remaps[0].get(&4),
+            Some(&5),
+            "old var 4 (Const) must now resolve to var 5"
+        );
 
         assert_eq!(region_ranges.len(), 1);
         assert_eq!(
             region_ranges[0],
-            BTreeMap::from([(0u32, (3u32, 5u32)), (1u32, (5u32, 6u32)), (2u32, (6u32, 7u32))]),
+            BTreeMap::from([
+                (0u32, (3u32, 5u32)),
+                (1u32, (5u32, 6u32)),
+                (2u32, (6u32, 7u32))
+            ]),
             "group 0 (shared) must cover the two hoisted/existing-shared statements at [3,5), \
              region 1's own remainder shrinks to just the Const at [5,6), region 2's own consumer stays at [6,7)"
         );
@@ -1909,11 +2421,22 @@ mod hoist_tests {
         let block = IRBlock {
             params: alloc::vec![bit(), bit()],
             stmts: alloc::vec![
-                Node::new(Stmt::Poly { ty: bit(), coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]), constant: Constant { hi: 0, lo: 0 } }, (), None),
+                Node::new(
+                    Stmt::Poly {
+                        ty: bit(),
+                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 }
+                    },
+                    (),
+                    None
+                ),
                 Node::new(Stmt::Const(Constant { hi: 0, lo: 1 }, bit()), (), None),
             ],
             terminator: IRTerminator::Jmp {
-                target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(2), IRVarId(3)]),
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(2), IRVarId(3)],
+                ),
             },
         };
         let mut blocks: IRBlocks = IRBlocks::new(alloc::vec![block]);

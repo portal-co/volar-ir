@@ -16,7 +16,7 @@ use volar_ir::{
 };
 use volar_ir_common::StorageId;
 
-use crate::canon::{canonicalize_bir_block, BirHandlerKey, BlockImmediates};
+use crate::canon::{BirHandlerKey, BlockImmediates, canonicalize_bir_block};
 use crate::ctx::{DedupTable, VirtOutput};
 use crate::preinit::{build_bir_storage_init, merge_bir_pre_init};
 use crate::{DedupPolicy, DispatchMode, VirtualizeConfig};
@@ -42,7 +42,10 @@ pub fn virtualize_bir<P: Clone + Default>(
         matches!(cfg.dedup, DedupPolicy::ConstantsAndTargets),
         "volar-ir-virt v1 only implements DedupPolicy::ConstantsAndTargets"
     );
-    assert!(!blocks.blocks.is_empty(), "virtualize_bir: input has no blocks");
+    assert!(
+        !blocks.blocks.is_empty(),
+        "virtualize_bir: input has no blocks"
+    );
 
     let blocks_in = blocks.blocks.len();
     let common_params = blocks.blocks[0].params;
@@ -52,13 +55,20 @@ pub fn virtualize_bir<P: Clone + Default>(
     // CSE: merge duplicate OracleCall stmts within each block before
     // canonicalisation.
     let cse_blocks = BIrBlocks {
-        blocks: blocks.blocks.iter().map(deduplicate_bir_oracle_calls_in_block).collect(),
+        blocks: blocks
+            .blocks
+            .iter()
+            .map(deduplicate_bir_oracle_calls_in_block)
+            .collect(),
         pre_init: blocks.pre_init.clone(),
     };
 
     // Canonicalise every block.
-    let per_block_canon: Vec<(BirHandlerKey, BlockImmediates)> =
-        cse_blocks.blocks.iter().map(canonicalize_bir_block).collect();
+    let per_block_canon: Vec<(BirHandlerKey, BlockImmediates)> = cse_blocks
+        .blocks
+        .iter()
+        .map(canonicalize_bir_block)
+        .collect();
 
     let dedup = DedupTable::build(per_block_canon);
     let n_handlers = dedup.n_handlers();
@@ -76,7 +86,9 @@ pub fn virtualize_bir<P: Clone + Default>(
     let layout = BirSlotLayout::from_dedup(&dedup, handler_bits, pc_bits, cfg.bytecode_storage);
 
     // Derive ctrl_prov from the first statement in any input block.
-    let ctrl_prov: P = blocks.blocks.iter()
+    let ctrl_prov: P = blocks
+        .blocks
+        .iter()
         .flat_map(|b| b.stmts.iter())
         .map(|n| &n.prov)
         .next()
@@ -263,7 +275,9 @@ impl BirBlockUnfinished {
     fn into_bir_block<P: Clone>(self, ctrl_prov: &P) -> BIrBlock<P> {
         BIrBlock {
             params: self.params,
-            stmts: self.stmts.into_iter()
+            stmts: self
+                .stmts
+                .into_iter()
                 .map(|s| volar_ir_common::Node::new(s, ctrl_prov.clone(), None))
                 .collect(),
             terminator: self.terminator,
@@ -331,12 +345,7 @@ fn emit_output_bir<P: Clone>(
         .collect();
 
     // ---- Setup block -----------------------------------------------------
-    let setup = emit_setup_block(
-        common_params,
-        dispatcher_entry,
-        pc_bits,
-        ctrl_prov,
-    );
+    let setup = emit_setup_block(common_params, dispatcher_entry, pc_bits, ctrl_prov);
 
     // ---- Dispatcher + interior nodes -------------------------------------
     let (dispatcher, interior_blocks) = emit_dispatcher_blocks::<P>(
@@ -373,7 +382,10 @@ fn emit_output_bir<P: Clone>(
     debug_assert_eq!(out_blocks.len(), 2 + n_interior + n_handlers);
     let _ = setup_id;
 
-    BIrBlocks { blocks: out_blocks, pre_init: Vec::new() }
+    BIrBlocks {
+        blocks: out_blocks,
+        pre_init: Vec::new(),
+    }
 }
 
 // ============================================================================
@@ -641,14 +653,13 @@ fn emit_handler_block<P: Clone>(
 // ============================================================================
 
 /// Merge duplicate `OracleCall` stmts within a single BIR block.
-fn deduplicate_bir_oracle_calls_in_block<P: Clone>(
-    block: &BIrBlock<P>,
-) -> BIrBlock<P> {
+fn deduplicate_bir_oracle_calls_in_block<P: Clone>(block: &BIrBlock<P>) -> BIrBlock<P> {
     let n_params = block.params as usize;
     let mut var_remap: BTreeMap<IRVarId, IRVarId> = BTreeMap::new();
     // (name, remapped-args) → first-call new var
     let mut seen: BTreeMap<(alloc::string::String, Vec<IRVarId>), IRVarId> = BTreeMap::new();
-    let mut new_stmts: Vec<volar_ir_common::Node<BIrStmt, P>> = Vec::with_capacity(block.stmts.len());
+    let mut new_stmts: Vec<volar_ir_common::Node<BIrStmt, P>> =
+        Vec::with_capacity(block.stmts.len());
 
     let rv = |v: IRVarId, map: &BTreeMap<IRVarId, IRVarId>| -> IRVarId {
         map.get(&v).copied().unwrap_or(v)
@@ -657,9 +668,12 @@ fn deduplicate_bir_oracle_calls_in_block<P: Clone>(
     for (stmt_idx, node) in block.stmts.iter().enumerate() {
         let old_var = IRVarId((n_params + stmt_idx) as u32);
         match &node.kind {
-            BIrStmt::OracleCall { name, args, num_bits } => {
-                let remapped_args: Vec<IRVarId> =
-                    args.iter().map(|v| rv(*v, &var_remap)).collect();
+            BIrStmt::OracleCall {
+                name,
+                args,
+                num_bits,
+            } => {
+                let remapped_args: Vec<IRVarId> = args.iter().map(|v| rv(*v, &var_remap)).collect();
                 let key = (name.clone(), remapped_args.clone());
                 if let Some(&first_var) = seen.get(&key) {
                     var_remap.insert(old_var, first_var);
@@ -667,18 +681,24 @@ fn deduplicate_bir_oracle_calls_in_block<P: Clone>(
                     let new_var = IRVarId((n_params + new_stmts.len()) as u32);
                     seen.insert(key, new_var);
                     var_remap.insert(old_var, new_var);
-                    new_stmts.push(volar_ir_common::Node::new(BIrStmt::OracleCall {
-                        name: name.clone(),
-                        args: remapped_args,
-                        num_bits: *num_bits,
-                    }, node.prov.clone(), node.side));
+                    new_stmts.push(volar_ir_common::Node::new(
+                        BIrStmt::OracleCall {
+                            name: name.clone(),
+                            args: remapped_args,
+                            num_bits: *num_bits,
+                        },
+                        node.prov.clone(),
+                        node.side,
+                    ));
                 }
             }
             other => {
                 let new_var = IRVarId((n_params + new_stmts.len()) as u32);
                 var_remap.insert(old_var, new_var);
                 new_stmts.push(volar_ir_common::Node::new(
-                    remap_bir_stmt(other, &var_remap), node.prov.clone(), node.side,
+                    remap_bir_stmt(other, &var_remap),
+                    node.prov.clone(),
+                    node.side,
                 ));
             }
         }
@@ -691,10 +711,7 @@ fn deduplicate_bir_oracle_calls_in_block<P: Clone>(
     }
 }
 
-fn remap_bir_terminator_vars(
-    t: &BIrTerminator,
-    map: &BTreeMap<IRVarId, IRVarId>,
-) -> BIrTerminator {
+fn remap_bir_terminator_vars(t: &BIrTerminator, map: &BTreeMap<IRVarId, IRVarId>) -> BIrTerminator {
     let rv = |v: IRVarId| map.get(&v).copied().unwrap_or(v);
     let rt = |tgt: &BIrTarget| BIrTarget {
         block: tgt.block.clone(),
@@ -702,12 +719,18 @@ fn remap_bir_terminator_vars(
     };
     match t {
         BIrTerminator::Jmp(tgt) => BIrTerminator::Jmp(rt(tgt)),
-        BIrTerminator::CondJmp { val, then_target, else_target } => BIrTerminator::CondJmp {
+        BIrTerminator::CondJmp {
+            val,
+            then_target,
+            else_target,
+        } => BIrTerminator::CondJmp {
             val: rv(*val),
             then_target: rt(then_target),
             else_target: rt(else_target),
         },
-        _ => panic!("remap_bir_terminator_vars: unhandled BIrTerminator variant — add remapping for this variant"),
+        _ => panic!(
+            "remap_bir_terminator_vars: unhandled BIrTerminator variant — add remapping for this variant"
+        ),
     }
 }
 
@@ -727,12 +750,27 @@ fn remap_bir_stmt(s: &BIrStmt, map: &BTreeMap<IRVarId, IRVarId>) -> BIrStmt {
         BIrStmt::Or(a, b) => BIrStmt::Or(remap_v(*a, map), remap_v(*b, map)),
         BIrStmt::Xor(a, b) => BIrStmt::Xor(remap_v(*a, map), remap_v(*b, map)),
         BIrStmt::Not(a) => BIrStmt::Not(remap_v(*a, map)),
-        BIrStmt::OracleCall { name, args, num_bits } => BIrStmt::OracleCall {
+        BIrStmt::OracleCall {
+            name,
+            args,
+            num_bits,
+        } => BIrStmt::OracleCall {
             name: name.clone(),
             args: remap_vs(args, map),
             num_bits: *num_bits,
         },
-        BIrStmt::OracleBit { call, bit } => BIrStmt::OracleBit {
+        BIrStmt::OracleBit {
+            name,
+            args,
+            bit,
+            occurrence,
+        } => BIrStmt::OracleBit {
+            name: name.clone(),
+            args: remap_vs(args, map),
+            bit: *bit,
+            occurrence: *occurrence,
+        },
+        BIrStmt::OracleProjectedBit { call, bit } => BIrStmt::OracleProjectedBit {
             call: remap_v(*call, map),
             bit: *bit,
         },
@@ -753,13 +791,52 @@ fn remap_bir_stmt(s: &BIrStmt, map: &BTreeMap<IRVarId, IRVarId>) -> BIrStmt {
             call: remap_v(*call, map),
             bit: *bit,
         },
+        BIrStmt::ActionStoreBit {
+            name,
+            guard,
+            args,
+            fallback,
+            storage,
+            lane,
+            addr,
+            bit,
+            occurrence,
+        } => BIrStmt::ActionStoreBit {
+            name: name.clone(),
+            guard: remap_v(*guard, map),
+            args: remap_vs(args, map),
+            fallback: remap_v(*fallback, map),
+            storage: *storage,
+            lane: *lane,
+            addr: remap_vs(addr, map),
+            bit: *bit,
+            occurrence: *occurrence,
+        },
         BIrStmt::Rng { name } => BIrStmt::Rng { name: name.clone() },
-        BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
+        BIrStmt::RngBit {
+            name,
+            bit,
+            occurrence,
+        } => BIrStmt::RngBit {
+            name: name.clone(),
+            bit: *bit,
+            occurrence: *occurrence,
+        },
+        BIrStmt::StorageRead {
+            storage,
+            lane,
+            addr,
+        } => BIrStmt::StorageRead {
             storage: *storage,
             lane: *lane,
             addr: remap_vs(addr, map),
         },
-        BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
+        BIrStmt::StorageWrite {
+            storage,
+            lane,
+            src,
+            addr,
+        } => BIrStmt::StorageWrite {
             storage: *storage,
             lane: *lane,
             src: remap_v(*src, map),
@@ -776,19 +853,18 @@ fn rewrite_bir_terminator(
     state_vars: &[IRVarId],
     dispatcher_id: IRBlockId,
 ) -> BIrTerminator {
-    let to_dispatcher =
-        |pc_bits: &[IRVarId], extra_args: &[IRVarId]| -> BIrTarget {
-            let mut args: Vec<IRVarId> = remap_vs(extra_args, map);
-            args.truncate(state_vars.len());
-            while args.len() < state_vars.len() {
-                args.push(state_vars[args.len()]);
-            }
-            args.extend_from_slice(pc_bits);
-            BIrTarget {
-                block: IRBlockTargetId::Block(dispatcher_id),
-                args,
-            }
-        };
+    let to_dispatcher = |pc_bits: &[IRVarId], extra_args: &[IRVarId]| -> BIrTarget {
+        let mut args: Vec<IRVarId> = remap_vs(extra_args, map);
+        args.truncate(state_vars.len());
+        while args.len() < state_vars.len() {
+            args.push(state_vars[args.len()]);
+        }
+        args.extend_from_slice(pc_bits);
+        BIrTarget {
+            block: IRBlockTargetId::Block(dispatcher_id),
+            args,
+        }
+    };
 
     match term {
         BIrTerminator::Jmp(t) => match t.block {
@@ -800,7 +876,9 @@ fn rewrite_bir_terminator(
                 args: remap_vs(&t.args, map),
             }),
             IRBlockTargetId::Dyn(_) => unreachable!("validated away"),
-            _ => panic!("rewrite_bir_terminator: unhandled IRBlockTargetId variant — add handling for this variant"),
+            _ => panic!(
+                "rewrite_bir_terminator: unhandled IRBlockTargetId variant — add handling for this variant"
+            ),
         },
         BIrTerminator::CondJmp {
             val,
@@ -819,7 +897,9 @@ fn rewrite_bir_terminator(
                     args: remap_vs(&then_target.args, map),
                 },
                 IRBlockTargetId::Dyn(_) => unreachable!(),
-                _ => panic!("rewrite_bir_terminator: unhandled IRBlockTargetId variant in then_target — add handling for this variant"),
+                _ => panic!(
+                    "rewrite_bir_terminator: unhandled IRBlockTargetId variant in then_target — add handling for this variant"
+                ),
             };
             let else_t = match else_target.block {
                 IRBlockTargetId::Block(_) => {
@@ -831,7 +911,9 @@ fn rewrite_bir_terminator(
                     args: remap_vs(&else_target.args, map),
                 },
                 IRBlockTargetId::Dyn(_) => unreachable!(),
-                _ => panic!("rewrite_bir_terminator: unhandled IRBlockTargetId variant in else_target — add handling for this variant"),
+                _ => panic!(
+                    "rewrite_bir_terminator: unhandled IRBlockTargetId variant in else_target — add handling for this variant"
+                ),
             };
             BIrTerminator::CondJmp {
                 val: remap_v(*val, map),
@@ -839,7 +921,8 @@ fn rewrite_bir_terminator(
                 else_target: else_t,
             }
         }
-        _ => panic!("rewrite_bir_terminator: unhandled BIrTerminator variant — add handling for this variant"),
+        _ => panic!(
+            "rewrite_bir_terminator: unhandled BIrTerminator variant — add handling for this variant"
+        ),
     }
 }
-

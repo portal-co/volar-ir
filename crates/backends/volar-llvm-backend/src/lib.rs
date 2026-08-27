@@ -48,7 +48,9 @@ use inkwell::{
     values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PhiValue},
 };
 use volar_ir_common::Type as NativeType;
-use volar_lir::{BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef, StructId};
+use volar_lir::{
+    BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef, StructId,
+};
 
 pub use volar_lir::NameConfig;
 
@@ -203,7 +205,9 @@ impl<'ctx> LlvmBackend<'ctx> {
     // ---- Internal helpers ---------------------------------------------------
 
     fn state(&mut self) -> &mut FunctionState<'ctx> {
-        self.current.as_mut().expect("LlvmBackend: not inside a function")
+        self.current
+            .as_mut()
+            .expect("LlvmBackend: not inside a function")
     }
 
     /// Map a scalar `LirType` to its LLVM `BasicTypeEnum`.
@@ -248,15 +252,13 @@ impl<'ctx> LlvmBackend<'ctx> {
     }
 
     /// Declare an external function in the module (idempotent).
-    fn declare_extern(
-        &mut self,
-        name: &str,
-        fn_type: FunctionType<'ctx>,
-    ) -> FunctionValue<'ctx> {
+    fn declare_extern(&mut self, name: &str, fn_type: FunctionType<'ctx>) -> FunctionValue<'ctx> {
         if let Some(&fv) = self.extern_cache.get(name) {
             return fv;
         }
-        let fv = self.module.add_function(name, fn_type, Some(Linkage::External));
+        let fv = self
+            .module
+            .add_function(name, fn_type, Some(Linkage::External));
         self.extern_cache.insert(name.to_string(), fv);
         fv
     }
@@ -276,7 +278,10 @@ impl<'ctx> LlvmBackend<'ctx> {
         let l = lhs.inner.into_int_value();
         let r = rhs.inner.into_int_value();
         let result = op(&self.builder, l, r);
-        LlvmValue { inner: result.into(), ty }
+        LlvmValue {
+            inner: result.into(),
+            ty,
+        }
     }
 
     /// Return the current insertion block (panics if builder is not positioned).
@@ -333,8 +338,10 @@ impl<'ctx> LlvmBackend<'ctx> {
         if let Some(existing) = self.module.get_function(name) {
             return existing;
         }
-        let param_llvm_tys: Vec<BasicMetadataTypeEnum<'ctx>> =
-            param_tys.iter().map(|ty| self.lir_type_to_llvm(ty).into()).collect();
+        let param_llvm_tys: Vec<BasicMetadataTypeEnum<'ctx>> = param_tys
+            .iter()
+            .map(|ty| self.lir_type_to_llvm(ty).into())
+            .collect();
         let fn_type = match ret.as_ref().map(|ty| self.lir_type_to_llvm(ty)) {
             Some(r) => r.fn_type(&param_llvm_tys, false),
             None => self.context.void_type().fn_type(&param_llvm_tys, false),
@@ -412,7 +419,9 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         self.current = Some(FunctionState {
             func,
             ret_ty: ret,
-            blocks: vec![BlockState { phi_values: Vec::new() }],
+            blocks: vec![BlockState {
+                phi_values: Vec::new(),
+            }],
         });
 
         // Wrap each LLVM function parameter as LlvmValue.
@@ -420,14 +429,28 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
             .get_params()
             .iter()
             .zip(params.iter())
-            .map(|(param, ty)| vec![LlvmValue { inner: *param, ty: ty.clone() }])
+            .map(|(param, ty)| {
+                vec![LlvmValue {
+                    inner: *param,
+                    ty: ty.clone(),
+                }]
+            })
             .collect();
 
-        (LlvmBlock { inner: entry_llvm, id: 0 }, param_vals)
+        (
+            LlvmBlock {
+                inner: entry_llvm,
+                id: 0,
+            },
+            param_vals,
+        )
     }
 
     fn end_function(&mut self) {
-        let _ = self.current.take().expect("end_function called outside a function");
+        let _ = self
+            .current
+            .take()
+            .expect("end_function called outside a function");
         // Builder is left wherever the last instruction placed it; the caller
         // must have emitted a terminator in every block.
     }
@@ -442,8 +465,13 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         };
         let name = format!("block{id}");
         let llvm_block = self.context.append_basic_block(func, &name);
-        self.state().blocks.push(BlockState { phi_values: Vec::new() });
-        LlvmBlock { inner: llvm_block, id }
+        self.state().blocks.push(BlockState {
+            phi_values: Vec::new(),
+        });
+        LlvmBlock {
+            inner: llvm_block,
+            id,
+        }
     }
 
     /// Create a PHI node at the *start* of `block` and return its value.
@@ -473,7 +501,10 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
             .phi_values
             .push((phi, ty.clone()));
 
-        LlvmValue { inner: phi.as_basic_value(), ty }
+        LlvmValue {
+            inner: phi.as_basic_value(),
+            ty,
+        }
     }
 
     fn switch_to_block(&mut self, block: LlvmBlock<'ctx>) {
@@ -489,7 +520,10 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         // in narrower types (the truncation to the correct bit width is
         // implicit in `const_int`'s bit pattern).
         let int_val = int_ty.const_int(val as u64, true);
-        LlvmValue { inner: int_val.into(), ty }
+        LlvmValue {
+            inner: int_val.into(),
+            ty,
+        }
     }
 
     // ---- Arithmetic ---------------------------------------------------------
@@ -507,11 +541,15 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
     }
 
     fn udiv(&mut self, lhs: LlvmValue<'ctx>, rhs: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(lhs, rhs, |b, l, r| b.build_int_unsigned_div(l, r, "").unwrap())
+        self.int_binop(lhs, rhs, |b, l, r| {
+            b.build_int_unsigned_div(l, r, "").unwrap()
+        })
     }
 
     fn sdiv(&mut self, lhs: LlvmValue<'ctx>, rhs: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(lhs, rhs, |b, l, r| b.build_int_signed_div(l, r, "").unwrap())
+        self.int_binop(lhs, rhs, |b, l, r| {
+            b.build_int_signed_div(l, r, "").unwrap()
+        })
     }
 
     // ---- Bitwise ------------------------------------------------------------
@@ -538,7 +576,10 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         } else {
             self.builder.build_not(v, "").unwrap()
         };
-        LlvmValue { inner: result.into(), ty }
+        LlvmValue {
+            inner: result.into(),
+            ty,
+        }
     }
 
     fn shl(&mut self, val: LlvmValue<'ctx>, shift: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
@@ -547,12 +588,16 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
 
     fn lshr(&mut self, val: LlvmValue<'ctx>, shift: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
         // sign_extend = false → logical (zero-fill) right shift
-        self.int_binop(val, shift, |b, l, r| b.build_right_shift(l, r, false, "").unwrap())
+        self.int_binop(val, shift, |b, l, r| {
+            b.build_right_shift(l, r, false, "").unwrap()
+        })
     }
 
     fn ashr(&mut self, val: LlvmValue<'ctx>, shift: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
         // sign_extend = true → arithmetic (sign-fill) right shift
-        self.int_binop(val, shift, |b, l, r| b.build_right_shift(l, r, true, "").unwrap())
+        self.int_binop(val, shift, |b, l, r| {
+            b.build_right_shift(l, r, true, "").unwrap()
+        })
     }
 
     // ---- Comparison ---------------------------------------------------------
@@ -579,7 +624,10 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         let l = lhs.inner.into_int_value();
         let r = rhs.inner.into_int_value();
         let result = self.builder.build_int_compare(llvm_pred, l, r, "").unwrap();
-        LlvmValue { inner: result.into(), ty: LirType::Bool }
+        LlvmValue {
+            inner: result.into(),
+            ty: LirType::Bool,
+        }
     }
 
     // ---- Conversions --------------------------------------------------------
@@ -588,21 +636,30 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         let llvm_dst = self.lir_type_to_llvm(&dst_ty).into_int_type();
         let src = val.inner.into_int_value();
         let result = self.builder.build_int_z_extend(src, llvm_dst, "").unwrap();
-        LlvmValue { inner: result.into(), ty: dst_ty }
+        LlvmValue {
+            inner: result.into(),
+            ty: dst_ty,
+        }
     }
 
     fn sext(&mut self, val: LlvmValue<'ctx>, dst_ty: LirType) -> LlvmValue<'ctx> {
         let llvm_dst = self.lir_type_to_llvm(&dst_ty).into_int_type();
         let src = val.inner.into_int_value();
         let result = self.builder.build_int_s_extend(src, llvm_dst, "").unwrap();
-        LlvmValue { inner: result.into(), ty: dst_ty }
+        LlvmValue {
+            inner: result.into(),
+            ty: dst_ty,
+        }
     }
 
     fn trunc(&mut self, val: LlvmValue<'ctx>, dst_ty: LirType) -> LlvmValue<'ctx> {
         let llvm_dst = self.lir_type_to_llvm(&dst_ty).into_int_type();
         let src = val.inner.into_int_value();
         let result = self.builder.build_int_truncate(src, llvm_dst, "").unwrap();
-        LlvmValue { inner: result.into(), ty: dst_ty }
+        LlvmValue {
+            inner: result.into(),
+            ty: dst_ty,
+        }
     }
 
     // ---- Select -------------------------------------------------------------
@@ -646,17 +703,13 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         );
 
         for i in 0..phi_count {
-            let phi = self
-                .current
-                .as_ref()
-                .unwrap()
-                .blocks[target.id as usize]
-                .phi_values[i]
-                .0;
+            let phi = self.current.as_ref().unwrap().blocks[target.id as usize].phi_values[i].0;
             phi.add_incoming(&[(&args[i].inner, pred_block)]);
         }
 
-        self.builder.build_unconditional_branch(target.inner).unwrap();
+        self.builder
+            .build_unconditional_branch(target.inner)
+            .unwrap();
     }
 
     fn branch(
@@ -694,13 +747,7 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
             .unwrap_or(0);
         assert_eq!(then_args.len(), then_phi_count);
         for i in 0..then_phi_count {
-            let phi = self
-                .current
-                .as_ref()
-                .unwrap()
-                .blocks[then_block.id as usize]
-                .phi_values[i]
-                .0;
+            let phi = self.current.as_ref().unwrap().blocks[then_block.id as usize].phi_values[i].0;
             phi.add_incoming(&[(&then_args[i].inner, pred_block)]);
         }
 
@@ -712,13 +759,7 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
             .unwrap_or(0);
         assert_eq!(else_args.len(), else_phi_count);
         for i in 0..else_phi_count {
-            let phi = self
-                .current
-                .as_ref()
-                .unwrap()
-                .blocks[else_block.id as usize]
-                .phi_values[i]
-                .0;
+            let phi = self.current.as_ref().unwrap().blocks[else_block.id as usize].phi_values[i].0;
             phi.add_incoming(&[(&else_args[i].inner, pred_block)]);
         }
 
@@ -796,7 +837,10 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
                 block.id
             )
         });
-        LlvmValue { inner: addr.into(), ty: LirType::Ptr(Box::new(LirType::I8)) }
+        LlvmValue {
+            inner: addr.into(),
+            ty: LirType::Ptr(Box::new(LirType::I8)),
+        }
     }
 
     /// Native LLVM `indirectbr`.
@@ -811,7 +855,9 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
             self.wire_phis(*block, &branch.args, pred_block);
         }
         let dest_blocks: Vec<_> = destinations.iter().map(|b| b.inner).collect();
-        self.builder.build_indirect_branch(index.inner, &dest_blocks).unwrap();
+        self.builder
+            .build_indirect_branch(index.inner, &dest_blocks)
+            .unwrap();
     }
 
     // ---- Extern calls -------------------------------------------------------
@@ -840,17 +886,12 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         let call_args: Vec<BasicMetadataValueEnum<'ctx>> =
             args.iter().map(|v| v.inner.into()).collect();
 
-        let call = self
-            .builder
-            .build_call(func, &call_args, "")
-            .unwrap();
+        let call = self.builder.build_call(func, &call_args, "").unwrap();
 
         match ret_ty {
             None => vec![],
             Some(ty) => {
-                let ret_val = call
-                    .try_as_basic_value()
-                    .unwrap_basic();
+                let ret_val = call.try_as_basic_value().unwrap_basic();
                 vec![LlvmValue { inner: ret_val, ty }]
             }
         }
@@ -913,8 +954,7 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
     ) -> Vec<LlvmValue<'ctx>> {
         // Call the action unconditionally, then select between result and fallback.
         let ret_ty = ret_tys.first().cloned();
-        let action_result =
-            self.call_extern(&format!("action_{name}"), arg_tys, args, ret_ty);
+        let action_result = self.call_extern(&format!("action_{name}"), arg_tys, args, ret_ty);
         action_result
             .iter()
             .zip(fallbacks.iter())
@@ -930,18 +970,18 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         // We approximate: declare as (ptr, i64) -> void.
 
         let llvm_ty = self.lir_type_to_llvm(&ty);
-        let size_bytes = (llvm_ty.size_of().unwrap().get_zero_extended_constant().unwrap_or(8)) as u64;
+        let size_bytes = (llvm_ty
+            .size_of()
+            .unwrap()
+            .get_zero_extended_constant()
+            .unwrap_or(8)) as u64;
 
         // Alloca the slot.
-        let slot = self
-            .builder
-            .build_alloca(llvm_ty, "rng_slot")
-            .unwrap();
+        let slot = self.builder.build_alloca(llvm_ty, "rng_slot").unwrap();
 
         // Build the volar_rng call.
         let i64_ty = self.context.i64_type();
-        let ptr_ty: BasicTypeEnum<'ctx> =
-            self.context.ptr_type(AddressSpace::default()).into();
+        let ptr_ty: BasicTypeEnum<'ctx> = self.context.ptr_type(AddressSpace::default()).into();
         let rng_fn_type = self
             .context
             .void_type()
@@ -951,11 +991,7 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
 
         let size_val = i64_ty.const_int(size_bytes, false);
         self.builder
-            .build_call(
-                rng_func,
-                &[slot.into(), size_val.into()],
-                "",
-            )
+            .build_call(rng_func, &[slot.into(), size_val.into()], "")
             .unwrap();
 
         // Load and return.
@@ -963,9 +999,7 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         LlvmValue { inner: loaded, ty }
     }
 
-    fn stack_alloc_ext(
-        &mut self,
-    ) -> Option<&mut dyn StackAllocExt<Value = LlvmValue<'ctx>>> {
+    fn stack_alloc_ext(&mut self) -> Option<&mut dyn StackAllocExt<Value = LlvmValue<'ctx>>> {
         Some(self)
     }
 
@@ -988,7 +1022,11 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         vals: &[LlvmValue<'ctx>],
         _pointee_ty: &LirType,
     ) {
-        assert_eq!(vals.len(), 1, "ptr_index_store: expected 1 scalar (DEFAULT ABI)");
+        assert_eq!(
+            vals.len(),
+            1,
+            "ptr_index_store: expected 1 scalar (DEFAULT ABI)"
+        );
         let val = vals[0].clone();
         let ext = self.stack_alloc_ext().unwrap();
         let offset_ptr = ext.ptr_offset(ptr, idx);
@@ -1057,6 +1095,95 @@ impl<'ctx> StackAllocExt for LlvmBackend<'ctx> {
                 .build_gep(pointee_ty, ptr_val, &[idx_val], "")
                 .unwrap()
         };
-        LlvmValue { inner: gep.into(), ty: ptr.ty }
+        LlvmValue {
+            inner: gep.into(),
+            ty: ptr.ty,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use volar_ir::{
+        boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId},
+        ir::{IRBlockTargetId, IRVarId},
+    };
+    use volar_ir_common::{Node, StorageId};
+    use volar_ir_passes::lower_lir::lower_biir;
+
+    fn external_bit_fixture() -> BIrBlocks {
+        BIrBlocks {
+            blocks: vec![BIrBlock {
+                params: 4,
+                stmts: vec![
+                    Node::new(
+                        BIrStmt::OracleBit {
+                            name: "lookup".into(),
+                            args: vec![IRVarId(1)],
+                            bit: 2,
+                            occurrence: 7,
+                        },
+                        (),
+                        None,
+                    ),
+                    Node::new(
+                        BIrStmt::RngBit {
+                            name: "nonce".into(),
+                            bit: 3,
+                            occurrence: 8,
+                        },
+                        (),
+                        None,
+                    ),
+                    Node::new(
+                        BIrStmt::ActionStoreBit {
+                            name: "commit".into(),
+                            guard: IRVarId(0),
+                            args: vec![IRVarId(4), IRVarId(5)],
+                            fallback: IRVarId(3),
+                            storage: StorageId(9),
+                            lane: LaneId(4),
+                            addr: vec![IRVarId(2)],
+                            bit: 1,
+                            occurrence: 9,
+                        },
+                        (),
+                        None,
+                    ),
+                ],
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: vec![IRVarId(4), IRVarId(5)],
+                }),
+            }],
+            pre_init: vec![],
+        }
+    }
+
+    #[test]
+    fn lowers_direct_external_bits_to_configured_llvm_externs() {
+        let mut remap = BTreeMap::new();
+        remap.insert("oracle_lookup".into(), "host_lookup_bit".into());
+        remap.insert("rng_nonce".into(), "host_nonce_bit".into());
+        remap.insert("action_commit".into(), "host_commit_bit".into());
+        let context = Context::create();
+        let mut backend =
+            LlvmBackend::new(&context, "external_bits").with_name_config(NameConfig {
+                prefix: String::new(),
+                remap,
+            });
+        lower_biir(&external_bit_fixture(), "run", &mut backend);
+        let ir = backend.finish().print_to_string().to_string();
+        assert!(
+            ir.contains("declare i1 @host_lookup_bit(i1, i32, i64)"),
+            "{ir}"
+        );
+        assert!(ir.contains("declare i1 @host_nonce_bit(i32, i64)"), "{ir}");
+        assert!(
+            ir.contains("declare void @host_commit_bit(i1, i1, i1, i1, i64, i32, i64, i32, i64)"),
+            "{ir}"
+        );
     }
 }

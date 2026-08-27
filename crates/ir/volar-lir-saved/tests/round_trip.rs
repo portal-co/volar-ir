@@ -19,11 +19,8 @@ use volar_lir_saved::{RecordingTarget, SavedLirModule};
 /// ```
 fn build_add_module() -> SavedLirModule {
     let mut rec = RecordingTarget::new();
-    let (entry, params) = rec.begin_function(
-        "add",
-        &[LirType::U32, LirType::U32],
-        Some(LirType::U32),
-    );
+    let (entry, params) =
+        rec.begin_function("add", &[LirType::U32, LirType::U32], Some(LirType::U32));
     rec.switch_to_block(entry);
     let a = params[0][0];
     let b = params[1][0];
@@ -43,11 +40,8 @@ fn build_max_module() -> SavedLirModule {
     use volar_lir::IcmpPred;
 
     let mut rec = RecordingTarget::new();
-    let (entry, params) = rec.begin_function(
-        "max",
-        &[LirType::U32, LirType::U32],
-        Some(LirType::U32),
-    );
+    let (entry, params) =
+        rec.begin_function("max", &[LirType::U32, LirType::U32], Some(LirType::U32));
     let a = params[0][0];
     let b = params[1][0];
 
@@ -75,8 +69,7 @@ fn build_max_module() -> SavedLirModule {
 
 fn round_trip(original: &SavedLirModule) -> SavedLirModule {
     // Serialize.
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(original)
-        .expect("rkyv::to_bytes failed");
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(original).expect("rkyv::to_bytes failed");
     assert!(!bytes.is_empty(), "serialized bytes must be non-empty");
 
     // Deserialize.  We trust bytes we just serialized, so unchecked is fine.
@@ -115,5 +108,8 @@ fn max_module_round_trip() {
 fn empty_module_round_trip() {
     let original = SavedLirModule::default();
     let replayed = round_trip(&original);
-    assert_eq!(original, replayed, "round-tripped empty module does not match");
+    assert_eq!(
+        original, replayed,
+        "round-tripped empty module does not match"
+    );
 }

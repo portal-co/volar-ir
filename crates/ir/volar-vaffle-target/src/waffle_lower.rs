@@ -63,7 +63,6 @@ use alloc::{
 };
 
 use portal_pc_waffle_ir::{
-    entity::EntityRef, // for .index() on Func/Block/etc.
     Func,
     FuncDecl,
     FunctionBody,
@@ -75,16 +74,17 @@ use portal_pc_waffle_ir::{
     Type as WType,
     Value as WValue,
     ValueDef,
+    entity::EntityRef, // for .index() on Func/Block/etc.
 };
 
 use volar_ir_common::{Constant, PreInitSegment, StorageId};
 use volar_lir::circuits::{
-    bc_clz, bc_ctz, bc_popcnt, bc_rotl, bc_rotr, bc_srem, bc_urem, StorageEmitter,
+    StorageEmitter, bc_clz, bc_ctz, bc_popcnt, bc_rotl, bc_rotr, bc_srem, bc_urem,
 };
 use volar_lir::{BitCircuitBuilder, BranchTarget, IcmpPred, LirTarget, LirType};
 
 use crate::import_config::{WaffleImportConfig, WaffleImportKind};
-use crate::target::{bits_for_lir_type, VaffleBlock, VaffleTarget, VaffleValue};
+use crate::target::{VaffleBlock, VaffleTarget, VaffleValue, bits_for_lir_type};
 use vaffle::ValueId;
 
 // ============================================================================
@@ -151,7 +151,11 @@ pub fn lower_waffle_module_with_metadata(
     metadata_mode: WasmMetadataMode,
 ) -> Vec<(String, UnsupportedOp)> {
     let unused_ranges = if metadata_mode == WasmMetadataMode::RespectUnstable {
-        wasm.wsmm_manifest().ok().flatten().map(unused_memory_ranges).unwrap_or_default()
+        wasm.wsmm_manifest()
+            .ok()
+            .flatten()
+            .map(unused_memory_ranges)
+            .unwrap_or_default()
     } else {
         BTreeMap::new()
     };
@@ -243,7 +247,11 @@ pub fn lower_waffle_module_with_metadata(
             // legacy complete materialization path.
             if unused_ranges
                 .get(&(mem_ref.index() as u32))
-                .is_some_and(|ranges| ranges.iter().any(|&(start, end)| seg.offset >= start && seg.offset.saturating_add(seg.data.len()) <= end))
+                .is_some_and(|ranges| {
+                    ranges.iter().any(|&(start, end)| {
+                        seg.offset >= start && seg.offset.saturating_add(seg.data.len()) <= end
+                    })
+                })
             {
                 continue;
             }
@@ -269,16 +277,37 @@ pub fn lower_waffle_module_with_metadata(
 fn unused_memory_ranges(manifest: wax_meta::Manifest) -> BTreeMap<u32, Vec<(usize, usize)>> {
     let mut ranges = BTreeMap::new();
     for (key, value) in manifest.entries() {
-        let Some(index) = key.strip_prefix("memory/").and_then(|tail| tail.strip_suffix("/unused")) else { continue; };
-        let Ok(memory) = index.parse::<u32>() else { continue; };
-        let wax_meta::Value::List(items) = value else { continue; };
+        let Some(index) = key
+            .strip_prefix("memory/")
+            .and_then(|tail| tail.strip_suffix("/unused"))
+        else {
+            continue;
+        };
+        let Ok(memory) = index.parse::<u32>() else {
+            continue;
+        };
+        let wax_meta::Value::List(items) = value else {
+            continue;
+        };
         let mut parsed = Vec::new();
         for item in items {
-            let wax_meta::Value::Map(fields) = item else { continue; };
-            let (Some(wax_meta::Value::U64(start)), Some(wax_meta::Value::U64(length))) = (fields.get("start"), fields.get("length")) else { continue; };
-            let Ok(start) = usize::try_from(*start) else { continue; };
-            let Ok(length) = usize::try_from(*length) else { continue; };
-            if let Some(end) = start.checked_add(length) { parsed.push((start, end)); }
+            let wax_meta::Value::Map(fields) = item else {
+                continue;
+            };
+            let (Some(wax_meta::Value::U64(start)), Some(wax_meta::Value::U64(length))) =
+                (fields.get("start"), fields.get("length"))
+            else {
+                continue;
+            };
+            let Ok(start) = usize::try_from(*start) else {
+                continue;
+            };
+            let Ok(length) = usize::try_from(*length) else {
+                continue;
+            };
+            if let Some(end) = start.checked_add(length) {
+                parsed.push((start, end));
+            }
         }
         ranges.insert(memory, parsed);
     }
@@ -1204,7 +1233,11 @@ fn mem_load_bytes(
         };
 
         // StorageRead: reads one byte (Vec(8, Bit)) from memory.
-        let byte_var = tgt.emit_read(storage, byte_tid, memory_address_bits(&addr_val.bits, config));
+        let byte_var = tgt.emit_read(
+            storage,
+            byte_tid,
+            memory_address_bits(&addr_val.bits, config),
+        );
 
         // Decompose the byte into 8 individual bits via Shuffle.
         for bit_j in 0..8u8 {
@@ -1265,10 +1298,15 @@ fn mem_store_bytes(
 
         // Merge 8 bits into a byte-typed value.
         let byte_var = tgt.compose_address(&bits); // compose_address creates Merge → Vec(8, Bit)
-                                                   // Actually compose_address creates Vec(N, Bit) where N = bits.len().
-                                                   // For 8 bits this gives us Vec(8, Bit) = byte_tid. Perfect.
+        // Actually compose_address creates Vec(N, Bit) where N = bits.len().
+        // For 8 bits this gives us Vec(8, Bit) = byte_tid. Perfect.
 
-        tgt.emit_write(storage, byte_var, byte_tid, memory_address_bits(&addr_val.bits, config));
+        tgt.emit_write(
+            storage,
+            byte_var,
+            byte_tid,
+            memory_address_bits(&addr_val.bits, config),
+        );
     }
 }
 
@@ -1372,8 +1410,8 @@ mod tests {
     use super::*;
     use portal_pc_waffle_ir::entity::EntityVec;
     use portal_pc_waffle_ir::{
-        BlockTarget, Global, GlobalData, Memory, MemoryData, MemorySegment, Module as WModule, Operator,
-        Signature, SignatureData, Terminator as WTerminator, Type as WType, ValueDef,
+        BlockTarget, Global, GlobalData, Memory, MemoryData, MemorySegment, Module as WModule,
+        Operator, Signature, SignatureData, Terminator as WTerminator, Type as WType, ValueDef,
     };
     use volar_ir_common::Stmt;
 
@@ -1383,7 +1421,10 @@ mod tests {
         wasm.memories.push(MemoryData {
             initial_pages: 1,
             maximum_pages: Some(1),
-            segments: vec![MemorySegment { offset: 32, data: vec![1, 2, 3] }],
+            segments: vec![MemorySegment {
+                offset: 32,
+                data: vec![1, 2, 3],
+            }],
             memory64: false,
             shared: false,
             page_size_log2: None,
@@ -1392,15 +1433,30 @@ mod tests {
         range.insert("length".into(), wax_meta::Value::U64(3));
         range.insert("start".into(), wax_meta::Value::U64(32));
         let mut manifest = wax_meta::Manifest::new();
-        manifest.insert("memory/0/unused".into(), wax_meta::Value::List(vec![wax_meta::Value::Map(range)])).unwrap();
+        manifest
+            .insert(
+                "memory/0/unused".into(),
+                wax_meta::Value::List(vec![wax_meta::Value::Map(range)]),
+            )
+            .unwrap();
         wasm.set_wsmm_manifest(&manifest).unwrap();
 
         let mut respected = VaffleTarget::new();
-        lower_waffle_module_with_metadata(&wasm, &mut respected, &WaffleImportConfig::default(), WasmMetadataMode::RespectUnstable);
+        lower_waffle_module_with_metadata(
+            &wasm,
+            &mut respected,
+            &WaffleImportConfig::default(),
+            WasmMetadataMode::RespectUnstable,
+        );
         assert!(respected.module.pre_init.is_empty());
 
         let mut ignored = VaffleTarget::new();
-        lower_waffle_module_with_metadata(&wasm, &mut ignored, &WaffleImportConfig::default(), WasmMetadataMode::Ignore);
+        lower_waffle_module_with_metadata(
+            &wasm,
+            &mut ignored,
+            &WaffleImportConfig::default(),
+            WasmMetadataMode::Ignore,
+        );
         assert_eq!(ignored.module.pre_init.len(), 1);
     }
 
@@ -1534,30 +1590,47 @@ mod tests {
     fn bounded_memory_uses_only_configured_address_bits() {
         let wasm = build_store_load_module();
         let mut bounded = VaffleTarget::new();
-        let errors = lower_waffle_module(&wasm, &mut bounded, &WaffleImportConfig::default().with_memory_address_bits(5));
+        let errors = lower_waffle_module(
+            &wasm,
+            &mut bounded,
+            &WaffleImportConfig::default().with_memory_address_bits(5),
+        );
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
-        let body = match &bounded.module.funcs[0] { vaffle::FuncDecl::Body(body) => body, _ => panic!() };
+        let body = match &bounded.module.funcs[0] {
+            vaffle::FuncDecl::Body(body) => body,
+            _ => panic!(),
+        };
         let address_width = |addr: ValueId| match &body.values[addr.0].kind {
             vaffle::Value::Op(Stmt::Merge { parts, .. }) => parts.len(),
             other => panic!("memory address should be a merged bit vector, got {other:?}"),
         };
-        let widths: Vec<_> = body.values.iter().filter_map(|value| match &value.kind {
-            vaffle::Value::Op(Stmt::StorageRead { addr, .. }) | vaffle::Value::Op(Stmt::StorageWrite { addr, .. }) => Some(address_width(*addr)),
-            _ => None,
-        }).collect();
+        let widths: Vec<_> = body
+            .values
+            .iter()
+            .filter_map(|value| match &value.kind {
+                vaffle::Value::Op(Stmt::StorageRead { addr, .. })
+                | vaffle::Value::Op(Stmt::StorageWrite { addr, .. }) => Some(address_width(*addr)),
+                _ => None,
+            })
+            .collect();
         assert!(!widths.is_empty());
         assert!(widths.iter().all(|&width| width == 5));
 
         let mut full = VaffleTarget::new();
         let errors = lower_waffle_module(&wasm, &mut full, &WaffleImportConfig::default());
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
-        let body = match &full.module.funcs[0] { vaffle::FuncDecl::Body(body) => body, _ => panic!() };
+        let body = match &full.module.funcs[0] {
+            vaffle::FuncDecl::Body(body) => body,
+            _ => panic!(),
+        };
         let full_address_width = |addr: ValueId| match &body.values[addr.0].kind {
             vaffle::Value::Op(Stmt::Merge { parts, .. }) => parts.len(),
             other => panic!("memory address should be a merged bit vector, got {other:?}"),
         };
         assert!(body.values.iter().any(|value| match &value.kind {
-            vaffle::Value::Op(Stmt::StorageRead { addr, .. }) | vaffle::Value::Op(Stmt::StorageWrite { addr, .. }) => full_address_width(*addr) == MEM_ADDR_BITS,
+            vaffle::Value::Op(Stmt::StorageRead { addr, .. })
+            | vaffle::Value::Op(Stmt::StorageWrite { addr, .. }) =>
+                full_address_width(*addr) == MEM_ADDR_BITS,
             _ => false,
         }));
     }

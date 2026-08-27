@@ -15,8 +15,8 @@
 #![no_std]
 extern crate alloc;
 
-pub mod ir;
 pub mod boolar;
+pub mod ir;
 
 #[cfg(feature = "parse")]
 pub mod parse;
@@ -27,8 +27,8 @@ mod tests;
 use alloc::string::String;
 use core::fmt;
 
-pub use ir::SavedIrBlocks;
 pub use boolar::SavedBIrBlocks;
+pub use ir::SavedIrBlocks;
 
 // ============================================================================
 // WriteText

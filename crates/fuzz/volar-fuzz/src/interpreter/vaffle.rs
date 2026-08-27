@@ -16,7 +16,10 @@ use vaffle::{BlockId, FuncDecl, FuncId, Module, Terminator, Value, ValueId};
 use volar_ir_common::{Constant, OracleDecl, Stmt, StorageId, TypeId, TypeTable};
 
 use crate::generators::oracle::hash_oracle;
-use crate::interpreter::ir::{IrValue, StorageMap, bit_width, bits_to_u64, const_to_bits, rotate_left, rotate_right, transmute_bits};
+use crate::interpreter::ir::{
+    IrValue, StorageMap, bit_width, bits_to_u64, const_to_bits, rotate_left, rotate_right,
+    transmute_bits,
+};
 
 // ============================================================================
 // Public API
@@ -32,11 +35,7 @@ pub const MAX_ITERS: usize = 512;
 ///
 /// Returns the values listed in the `Return` terminator, or `None` if the
 /// iteration guard is exceeded.
-pub fn eval_vaffle(
-    module: &Module,
-    func_id: FuncId,
-    inputs: &[IrValue],
-) -> Option<Vec<IrValue>> {
+pub fn eval_vaffle(module: &Module, func_id: FuncId, inputs: &[IrValue]) -> Option<Vec<IrValue>> {
     eval_vaffle_depth(module, func_id, inputs, &mut BTreeMap::new(), 0)
 }
 
@@ -151,10 +150,18 @@ fn eval_vaffle_depth(
                 current_block_id = target.block;
             }
             Terminator::ReturnCall { .. } => panic!("eval_vaffle: ReturnCall not supported"),
-            Terminator::Table { index, targets, default_target } => {
+            Terminator::Table {
+                index,
+                targets,
+                default_target,
+            } => {
                 let index_val = get_val(&value_table, *index);
                 let idx = bits_to_u64(&index_val) as usize;
-                let target = if idx < targets.len() { &targets[idx] } else { default_target };
+                let target = if idx < targets.len() {
+                    &targets[idx]
+                } else {
+                    default_target
+                };
                 let args: Vec<IrValue> = target
                     .args
                     .iter()
@@ -166,7 +173,9 @@ fn eval_vaffle_depth(
                 }
                 current_block_id = target.block;
             }
-            _ => panic!("eval_vaffle: unhandled Terminator variant — add evaluation for this variant"),
+            _ => panic!(
+                "eval_vaffle: unhandled Terminator variant — add evaluation for this variant"
+            ),
         }
     }
 }
@@ -188,7 +197,15 @@ fn eval_vaffle_value(
 ) -> Option<IrValue> {
     let val = match &values[vid.0].kind {
         Value::Param { .. } => get_val(value_table, vid),
-        Value::Op(stmt) => eval_vaffle_stmt(stmt, vid.0, &module.types, &module.oracles, value_table, oracle_agg, storage),
+        Value::Op(stmt) => eval_vaffle_stmt(
+            stmt,
+            vid.0,
+            &module.types,
+            &module.oracles,
+            value_table,
+            oracle_agg,
+            storage,
+        ),
         Value::Call { func, args } => {
             // Collect argument values.
             let arg_vals: Vec<IrValue> = args.iter().map(|a| get_val(value_table, *a)).collect();
@@ -197,13 +214,11 @@ fn eval_vaffle_value(
             call_agg.insert(vid.0, results);
             vec![] // projected by Value::Output
         }
-        Value::Output { value, idx } => {
-            call_agg
-                .get(&value.0)
-                .and_then(|agg| agg.get(*idx))
-                .cloned()
-                .unwrap_or_default()
-        }
+        Value::Output { value, idx } => call_agg
+            .get(&value.0)
+            .and_then(|agg| agg.get(*idx))
+            .cloned()
+            .unwrap_or_default(),
         Value::StackAlloc { .. } => panic!("eval_vaffle: StackAlloc not supported"),
         Value::PtrLoad { .. } => panic!("eval_vaffle: PtrLoad not supported"),
         Value::PtrStore { .. } => panic!("eval_vaffle: PtrStore not supported"),
@@ -234,7 +249,9 @@ fn eval_vaffle_stmt(
             let dst_w = bit_width(*dst_ty, types);
             transmute_bits(&src_val, dst_w)
         }
-        Stmt::Poly { coeffs, constant, .. } => {
+        Stmt::Poly {
+            coeffs, constant, ..
+        } => {
             let width = coeffs
                 .iter()
                 .next()
@@ -281,7 +298,12 @@ fn eval_vaffle_stmt(
             }
             result
         }
-        Stmt::OracleCall { name, args, output_tys, .. } => {
+        Stmt::OracleCall {
+            name,
+            args,
+            output_tys,
+            ..
+        } => {
             // Seed the FNV hash oracle from the *name bytes* — the same
             // derivation `eval_biir` uses on lowered Boolar output, where no
             // oracle table is available. Keeps all three interpreters
@@ -314,7 +336,11 @@ fn eval_vaffle_stmt(
         Stmt::ActionCall { .. } => panic!("eval_vaffle: ActionCall not supported"),
         Stmt::ActionOutput { .. } => panic!("eval_vaffle: ActionOutput not supported"),
         Stmt::Rng { .. } => panic!("eval_vaffle: Rng not supported"),
-        Stmt::StorageRead { storage: sid, ty, addr } => {
+        Stmt::StorageRead {
+            storage: sid,
+            ty,
+            addr,
+        } => {
             let w = bit_width(*ty, types);
             let addr_u64 = bits_to_u64(&get(addr));
             storage
@@ -322,7 +348,12 @@ fn eval_vaffle_stmt(
                 .cloned()
                 .unwrap_or_else(|| vec![false; w])
         }
-        Stmt::StorageWrite { storage: sid, src, ty, addr } => {
+        Stmt::StorageWrite {
+            storage: sid,
+            src,
+            ty,
+            addr,
+        } => {
             let src_val = get(src);
             let addr_u64 = bits_to_u64(&get(addr));
             let w = bit_width(*ty, types);
@@ -360,12 +391,9 @@ fn eval_vaffle_poly(
             if coeff & 1 == 0 {
                 continue;
             }
-            let product = monomial.iter().all(|var| {
-                get_val(value_table, *var)
-                    .get(k)
-                    .copied()
-                    .unwrap_or(false)
-            });
+            let product = monomial
+                .iter()
+                .all(|var| get_val(value_table, *var).get(k).copied().unwrap_or(false));
             acc ^= product;
         }
         result[k] = acc;

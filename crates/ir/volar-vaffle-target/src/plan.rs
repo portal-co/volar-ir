@@ -29,12 +29,12 @@ use core::convert::Infallible;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use vaffle::{FuncDecl, FuncId, Module, Terminator, Value};
-use volar_ir::ir::{IRBlocks, IRTypes};
 use portal_lazy_transform::{
     AssemblyLimits, Demand, Fragment, NoopObserver, PlanSource, ResolvedInputs, SubElementCounter,
     SubElementId, SubElementObserver,
 };
+use vaffle::{FuncDecl, FuncId, Module, Terminator, Value};
+use volar_ir::ir::{IRBlocks, IRTypes};
 
 use crate::lower_to_ir::LowerCtx;
 
@@ -328,11 +328,8 @@ mod tests {
         let (module, root_id, _reachable_id, _unrelated_id) = three_function_module();
 
         let (eager_blocks, _eager_types) = crate::lower_vaffle_to_ir(&module);
-        let (planned_blocks, _planned_types) = lower_vaffle_to_ir_planned(
-            &module,
-            alloc::vec![root_id],
-            &LowerPlanOptions::default(),
-        );
+        let (planned_blocks, _planned_types) =
+            lower_vaffle_to_ir_planned(&module, alloc::vec![root_id], &LowerPlanOptions::default());
 
         // Total block count (and therefore every resolved function's index
         // range) is identical -- placeholder blocks preserve the layout
@@ -358,7 +355,11 @@ mod tests {
                     !eager.stmts.is_empty(),
                     "expected the eager path to have really lowered the unrelated function"
                 );
-                assert_eq!(planned.stmts.len(), 0, "expected an empty placeholder block");
+                assert_eq!(
+                    planned.stmts.len(),
+                    0,
+                    "expected an empty placeholder block"
+                );
                 continue;
             }
             assert_eq!(
@@ -402,7 +403,12 @@ mod tests {
             !observer.events.is_empty(),
             "expected at least one sub-element tracepoint for resolved functions"
         );
-        assert!(observer.events.iter().all(|f| *f == root_id || *f == reachable_id));
+        assert!(
+            observer
+                .events
+                .iter()
+                .all(|f| *f == root_id || *f == reachable_id)
+        );
         assert!(!observer.events.iter().any(|f| *f == unrelated_id));
     }
 }

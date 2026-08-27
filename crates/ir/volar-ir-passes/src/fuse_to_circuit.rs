@@ -20,7 +20,9 @@ use volar_ir::ir::IRBlocks;
 /// Errors if `blocks` is not a single block terminating in `Jmp { Return }`
 /// (run `movfuscate_ir` first), or if it carries module-level declarations
 /// (see [`CircuitFusionError::ModuleLevelStateUnsupported`]).
-pub fn to_circuit_fused_volar<P: Clone>(blocks: &IRBlocks<P>) -> Result<VCircuit<P>, CircuitFusionError> {
+pub fn to_circuit_fused_volar<P: Clone>(
+    blocks: &IRBlocks<P>,
+) -> Result<VCircuit<P>, CircuitFusionError> {
     VCircuit::try_from_ir(blocks)
 }
 
@@ -29,7 +31,9 @@ pub fn to_circuit_fused_volar<P: Clone>(blocks: &IRBlocks<P>) -> Result<VCircuit
 /// Errors if `blocks` is not a single block terminating in `Jmp(Return)`
 /// (run `movfuscate_biir` / `lower_to_circuit` first). Bit-granular static
 /// storage is preserved in the resulting circuit.
-pub fn to_circuit_fused_boolar<P: Clone>(blocks: &BIrBlocks<P>) -> Result<BCircuit<P>, CircuitFusionError> {
+pub fn to_circuit_fused_boolar<P: Clone>(
+    blocks: &BIrBlocks<P>,
+) -> Result<BCircuit<P>, CircuitFusionError> {
     BCircuit::try_from_ir(blocks)
 }
 
@@ -49,7 +53,10 @@ where
     // Use the control-provenance variant (with a default annotation) so that
     // statement-free movfuscated blocks — legal circuits — don't panic.
     to_circuit_fused_boolar(&crate::lower_to_circuit_with_control_provenance(
-        blocks, limit, mode, &P::default(),
+        blocks,
+        limit,
+        mode,
+        &P::default(),
     ))
 }
 
@@ -59,7 +66,9 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use volar_ir::boolar::{BIrBlock, BIrPreInitSegment, BIrTarget, BIrTerminator};
-    use volar_ir::ir::{IRBlock, IRBlockId, IRBlockTargetId, IRBranchTarget, IRTerminator, IRTypeId, IRVarId};
+    use volar_ir::ir::{
+        IRBlock, IRBlockId, IRBlockTargetId, IRBranchTarget, IRTerminator, IRTypeId, IRVarId,
+    };
     use volar_ir_common::{Constant, Stmt, StorageId};
 
     fn empty_pre_init() -> Vec<BIrPreInitSegment> {
@@ -80,7 +89,10 @@ mod tests {
     #[test]
     fn fuses_single_block_boolar() {
         let block = bir_block_return(2, vec![IRVarId(1)]);
-        let blocks = BIrBlocks { blocks: vec![block], pre_init: empty_pre_init() };
+        let blocks = BIrBlocks {
+            blocks: vec![block],
+            pre_init: empty_pre_init(),
+        };
         let fused = to_circuit_fused_boolar(&blocks).expect("should fuse");
         assert_eq!(fused.params, 2);
         assert_eq!(fused.outputs, vec![IRVarId(1)]);
@@ -89,14 +101,27 @@ mod tests {
         assert!(general.is_circuit());
         assert_eq!(
             BCircuit::try_from_ir(&general).expect("re-fuse"),
-            BCircuit { params: 2, stmts: vec![], pre_init: vec![], outputs: vec![IRVarId(1)] }
+            BCircuit {
+                params: 2,
+                stmts: vec![],
+                pre_init: vec![],
+                outputs: vec![IRVarId(1)]
+            }
         );
     }
 
     #[test]
     fn fusing_boolar_retains_static_storage() {
-        let pre_init = vec![BIrPreInitSegment { storage: StorageId(9), lane: volar_ir::boolar::LaneId(2), offset: 3, data: vec![true, false, true] }];
-        let blocks = BIrBlocks { blocks: vec![bir_block_return(0, vec![])], pre_init: pre_init.clone() };
+        let pre_init = vec![BIrPreInitSegment {
+            storage: StorageId(9),
+            lane: volar_ir::boolar::LaneId(2),
+            offset: 3,
+            data: vec![true, false, true],
+        }];
+        let blocks = BIrBlocks {
+            blocks: vec![bir_block_return(0, vec![])],
+            pre_init: pre_init.clone(),
+        };
         let fused = to_circuit_fused_boolar(&blocks).expect("data-bearing circuit should fuse");
         assert_eq!(fused.pre_init, pre_init);
         assert_eq!(fused.to_bir_blocks().pre_init, pre_init);
@@ -110,7 +135,10 @@ mod tests {
             block: IRBlockTargetId::Block(IRBlockId(0)),
             args: vec![],
         });
-        let blocks = BIrBlocks { blocks: vec![b0, b1], pre_init: empty_pre_init() };
+        let blocks = BIrBlocks {
+            blocks: vec![b0, b1],
+            pre_init: empty_pre_init(),
+        };
         let err = to_circuit_fused_boolar(&blocks).unwrap_err();
         assert_eq!(err, CircuitFusionError::NotSingleBlock { found: 2 });
     }
@@ -120,10 +148,19 @@ mod tests {
         let mut b0 = bir_block_return(2, vec![volar_ir::ir::IRVarId(1)]);
         b0.terminator = BIrTerminator::CondJmp {
             val: IRVarId(0),
-            then_target: BIrTarget { block: IRBlockTargetId::Return, args: vec![] },
-            else_target: BIrTarget { block: IRBlockTargetId::Return, args: vec![] },
+            then_target: BIrTarget {
+                block: IRBlockTargetId::Return,
+                args: vec![],
+            },
+            else_target: BIrTarget {
+                block: IRBlockTargetId::Return,
+                args: vec![],
+            },
         };
-        let blocks = BIrBlocks { blocks: vec![b0], pre_init: empty_pre_init() };
+        let blocks = BIrBlocks {
+            blocks: vec![b0],
+            pre_init: empty_pre_init(),
+        };
         assert_eq!(
             to_circuit_fused_boolar(&blocks).unwrap_err(),
             CircuitFusionError::NotReturnTerminator
@@ -133,10 +170,16 @@ mod tests {
     #[test]
     fn rejects_out_of_range_output() {
         let b0 = bir_block_return(1, vec![IRVarId(7)]);
-        let blocks = BIrBlocks { blocks: vec![b0], pre_init: empty_pre_init() };
+        let blocks = BIrBlocks {
+            blocks: vec![b0],
+            pre_init: empty_pre_init(),
+        };
         assert_eq!(
             to_circuit_fused_boolar(&blocks).unwrap_err(),
-            CircuitFusionError::OutputVarOutOfRange { var: 7, var_space: 1 }
+            CircuitFusionError::OutputVarOutOfRange {
+                var: 7,
+                var_space: 1
+            }
         );
     }
 
@@ -167,12 +210,28 @@ mod tests {
 
         // Two blocks -> rejected.
         let blocks2: IRBlocks<()> = IRBlocks::new(vec![
-            IRBlock { params: vec![], stmts: vec![], terminator: IRTerminator::Jmp {
-                target: IRBranchTarget { dest: IRBlockTargetId::Block(IRBlockId(1)), args: vec![], reentry: None },
-            } },
-            IRBlock { params: vec![], stmts: vec![], terminator: IRTerminator::Jmp {
-                target: IRBranchTarget { dest: IRBlockTargetId::Return, args: vec![], reentry: None },
-            } },
+            IRBlock {
+                params: vec![],
+                stmts: vec![],
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget {
+                        dest: IRBlockTargetId::Block(IRBlockId(1)),
+                        args: vec![],
+                        reentry: None,
+                    },
+                },
+            },
+            IRBlock {
+                params: vec![],
+                stmts: vec![],
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget {
+                        dest: IRBlockTargetId::Return,
+                        args: vec![],
+                        reentry: None,
+                    },
+                },
+            },
         ]);
         assert!(to_circuit_fused_volar(&blocks2).is_err());
     }

@@ -13,11 +13,11 @@
 use std::{fs, process::Command};
 use tempfile::TempDir;
 
+use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
-use inkwell::OptimizationLevel;
 
 use std::collections::BTreeMap;
 
@@ -26,18 +26,18 @@ use volar_ir::ir::{
     IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId, IRTypes, IRVarId,
 };
 use volar_ir_common::{Constant, IrType as CommonIrType, Node, Stmt as IRStmt, Type};
-use volar_llvm_backend::LlvmBackend;
 use volar_ir_passes::{
+    LoweringMode,
     lower_lir::{lower_biir, lower_ir},
     lower_to_circuit::lower_to_circuit,
-    movfuscate_biir, LoweringMode,
+    movfuscate_biir,
 };
 use volar_lir::LirTarget;
 use volar_lir_test_corpus::{
-    make_biir_and, make_biir_half_adder, make_biir_identity, make_biir_not,
-    make_biir_self_loop, make_biir_two_block_not, make_biir_xor,
-    make_ir_and, make_ir_not, make_ir_xor,
+    make_biir_and, make_biir_half_adder, make_biir_identity, make_biir_not, make_biir_self_loop,
+    make_biir_two_block_not, make_biir_xor, make_ir_and, make_ir_not, make_ir_xor,
 };
+use volar_llvm_backend::LlvmBackend;
 
 // ============================================================================
 // Test harness
@@ -73,11 +73,7 @@ fn native_machine() -> TargetMachine {
 ///
 /// `decl` is a C declaration for the generated function (e.g. `"uint64_t
 /// f(uint64_t a, uint64_t b);"`) and `main_body` is the body of `main()`.
-fn compile_and_run(
-    backend: LlvmBackend<'_>,
-    decl: &str,
-    main_body: &str,
-) -> String {
+fn compile_and_run(backend: LlvmBackend<'_>, decl: &str, main_body: &str) -> String {
     init_target();
 
     let dir = TempDir::new().expect("tempdir");
@@ -443,7 +439,10 @@ fn make_ir_jump_table() -> (IRBlocks, IRTypes) {
         IRBlock {
             params: vec![u8_tid()],
             stmts: vec![],
-            terminator: IRTerminator::JumpTable { index: IRVarId(0), cases },
+            terminator: IRTerminator::JumpTable {
+                index: IRVarId(0),
+                cases,
+            },
         },
         IRBlock {
             params: vec![],
@@ -478,8 +477,14 @@ fn run_ir_u8(blocks: &IRBlocks, types: &IRTypes, name: &str, input: u8, expected
     let decl = format!("uint64_t {name}(uint8_t a0);");
     let body = format!(r#"  printf("%llu\n", (unsigned long long){name}({input}));"#);
     let out = compile_and_run(b, &decl, &body);
-    let actual: u64 = out.trim().parse().unwrap_or_else(|_| panic!("parse error: {out:?}"));
-    assert_eq!(actual, expected, "{name}({input}): expected {expected}, got {actual}");
+    let actual: u64 = out
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("parse error: {out:?}"));
+    assert_eq!(
+        actual, expected,
+        "{name}({input}): expected {expected}, got {actual}"
+    );
 }
 
 #[test]

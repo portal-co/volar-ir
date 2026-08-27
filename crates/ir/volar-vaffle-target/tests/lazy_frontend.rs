@@ -1,9 +1,9 @@
 //! @ai: unreviewed
 //! Demand-indexed WAFFLE frontend regression coverage.
 
-use portal_pc_waffle_frontend::{from_wasm_bytes, FrontendOptions};
+use portal_pc_waffle_frontend::{FrontendOptions, from_wasm_bytes};
 use portal_pc_waffle_ir::{ExportKind, FuncDecl};
-use volar_vaffle_target::{lower_waffle_function_lazy, VaffleTarget, WaffleImportConfig};
+use volar_vaffle_target::{VaffleTarget, WaffleImportConfig, lower_waffle_function_lazy};
 
 #[test]
 fn selected_lazy_export_lowers_without_materializing_its_sibling() {

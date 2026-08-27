@@ -87,9 +87,11 @@ use alloc::{
 
 use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, Terminator, Value, ValueId};
 use volar_ir_common::{Constant, IrType, Node, Stmt, StorageId, TypeId};
-use volar_lir::circuits::{bc_add, BitCircuitBuilder};
+use volar_lir::circuits::{BitCircuitBuilder, bc_add};
 
-use crate::lower_to_ir::{collect_uses, compute_cross_block_values, compute_owner, vaffle_value_vtid};
+use crate::lower_to_ir::{
+    collect_uses, compute_cross_block_values, compute_owner, vaffle_value_vtid,
+};
 
 /// Bit-width of every `vaffle_ssa` address (`SP + ValueId`) and of SP
 /// itself. Wide enough for the largest `ValueId` in any module this
@@ -104,10 +106,15 @@ const SPILL_ADDR_BITS: usize = 64;
 /// never overlap regardless of which function is called or which values
 /// it happens to spill.
 fn compute_sp_step<P: Clone>(module: &Module<P>) -> u128 {
-    let max_vid = module.funcs.iter().map(|f| match f {
-        FuncDecl::Body(b) => b.values.len(),
-        _ => 0,
-    }).max().unwrap_or(0);
+    let max_vid = module
+        .funcs
+        .iter()
+        .map(|f| match f {
+            FuncDecl::Body(b) => b.values.len(),
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
     // Round up generously so the step is easy to eyeball in diagnostics
     // and has headroom against off-by-one errors in the max above.
     ((max_vid as u128) + 1).next_power_of_two().max(1 << 20)
@@ -130,8 +137,15 @@ impl<'a, P: Clone> BitCircuitBuilder for VecBuilder<'a, P> {
     fn bc_const(&mut self, val: bool) -> ValueId {
         let vid = ValueId(self.values.len());
         self.values.push(Node::new(
-            Value::Op(Stmt::Const(Constant { hi: 0, lo: val as u128 }, self.bit_tid)),
-            self.prov.clone(), self.side,
+            Value::Op(Stmt::Const(
+                Constant {
+                    hi: 0,
+                    lo: val as u128,
+                },
+                self.bit_tid,
+            )),
+            self.prov.clone(),
+            self.side,
         ));
         vid
     }
@@ -139,8 +153,16 @@ impl<'a, P: Clone> BitCircuitBuilder for VecBuilder<'a, P> {
     fn bc_poly(&mut self, coeffs: BTreeMap<Vec<ValueId>, u8>, constant: u128) -> ValueId {
         let vid = ValueId(self.values.len());
         self.values.push(Node::new(
-            Value::Op(Stmt::Poly { ty: self.bit_tid, coeffs, constant: Constant { hi: 0, lo: constant } }),
-            self.prov.clone(), self.side,
+            Value::Op(Stmt::Poly {
+                ty: self.bit_tid,
+                coeffs,
+                constant: Constant {
+                    hi: 0,
+                    lo: constant,
+                },
+            }),
+            self.prov.clone(),
+            self.side,
         ));
         vid
     }
@@ -161,16 +183,34 @@ pub fn ssa_ify_module<P: Clone>(module: &Module<P>) -> Module<P> {
     let addr_tid = types.intern(IrType::Vec(SPILL_ADDR_BITS, bit_tid));
     let sp_step = compute_sp_step(module);
 
-    let funcs = module.funcs.iter().enumerate().map(|(fi, f)| match f {
-        FuncDecl::Import { module: m, name, sig } => {
-            FuncDecl::Import { module: m.clone(), name: name.clone(), sig: *sig }
-        }
-        FuncDecl::Body(body) => FuncDecl::Body(ssa_ify_function(module, body, addr_tid, bit_tid, sp_step, fi == 0)),
-        // `FuncDecl` is `#[non_exhaustive]` (defined in the `vaffle`
-        // crate, matched here from a different crate) -- wildcard
-        // required even though only these two variants exist today.
-        _ => panic!("vaffle_ssa: unexpected FuncDecl variant"),
-    }).collect();
+    let funcs = module
+        .funcs
+        .iter()
+        .enumerate()
+        .map(|(fi, f)| match f {
+            FuncDecl::Import {
+                module: m,
+                name,
+                sig,
+            } => FuncDecl::Import {
+                module: m.clone(),
+                name: name.clone(),
+                sig: *sig,
+            },
+            FuncDecl::Body(body) => FuncDecl::Body(ssa_ify_function(
+                module,
+                body,
+                addr_tid,
+                bit_tid,
+                sp_step,
+                fi == 0,
+            )),
+            // `FuncDecl` is `#[non_exhaustive]` (defined in the `vaffle`
+            // crate, matched here from a different crate) -- wildcard
+            // required even though only these two variants exist today.
+            _ => panic!("vaffle_ssa: unexpected FuncDecl variant"),
+        })
+        .collect();
 
     Module {
         types,
@@ -232,7 +272,14 @@ pub fn ssa_ify_function<P: Clone>(
     };
 
     // ---- Phase 2: advance SP at every internal call site --------------------
-    wire_call_sites(&mut blocks, &mut values, &rpo, &sp_bits_for, sp_step, bit_tid);
+    wire_call_sites(
+        &mut blocks,
+        &mut values,
+        &rpo,
+        &sp_bits_for,
+        sp_step,
+        bit_tid,
+    );
 
     // ---- Phase 3: dominator-verified cross-block spill/reload ---------------
     let owner = compute_owner(&blocks);
@@ -288,16 +335,36 @@ pub fn ssa_ify_function<P: Clone>(
         let prov = values[v].prov.clone();
         let side = values[v].side;
         let sp_bits = sp_bits_for.get(&owner_bi).cloned();
-        let (mut new_stmts, addr_vid) = emit_spill_address(&mut values, prov.clone(), side, bit_tid, addr_tid, sp_bits.as_deref(), sp_step, v);
+        let (mut new_stmts, addr_vid) = emit_spill_address(
+            &mut values,
+            prov.clone(),
+            side,
+            bit_tid,
+            addr_tid,
+            sp_bits.as_deref(),
+            sp_step,
+            v,
+        );
         new_stmts.push(values.len() as u32);
         values.push(Node::new(
-            Value::Op(Stmt::StorageWrite { storage: StorageId::VAFFLE_SSA_SPILL, src: vid, ty, addr: ValueId(addr_vid as usize) }),
-            prov, side,
+            Value::Op(Stmt::StorageWrite {
+                storage: StorageId::VAFFLE_SSA_SPILL,
+                src: vid,
+                ty,
+                addr: ValueId(addr_vid as usize),
+            }),
+            prov,
+            side,
         ));
-        spills_by_owner.entry(owner_bi).or_default().extend(new_stmts);
+        spills_by_owner
+            .entry(owner_bi)
+            .or_default()
+            .extend(new_stmts);
     }
     for (owner_bi, new_stmt_ids) in spills_by_owner {
-        blocks[owner_bi].stmts.extend(new_stmt_ids.into_iter().map(|v| ValueId(v as usize)));
+        blocks[owner_bi]
+            .stmts
+            .extend(new_stmt_ids.into_iter().map(|v| ValueId(v as usize)));
     }
 
     // Emit reloads: prepend (address computation, storage-read) to the
@@ -317,11 +384,25 @@ pub fn ssa_ify_function<P: Clone>(
             let ty = vaffle_value_vtid(module, &values, vid);
             let prov = values[v].prov.clone();
             let side = values[v].side;
-            let (new_stmts, addr_vid) = emit_spill_address(&mut values, prov.clone(), side, bit_tid, addr_tid, sp_bits.as_deref(), sp_step, v);
+            let (new_stmts, addr_vid) = emit_spill_address(
+                &mut values,
+                prov.clone(),
+                side,
+                bit_tid,
+                addr_tid,
+                sp_bits.as_deref(),
+                sp_step,
+                v,
+            );
             let reload_vid = values.len();
             values.push(Node::new(
-                Value::Op(Stmt::StorageRead { storage: StorageId::VAFFLE_SSA_SPILL, ty, addr: ValueId(addr_vid) }),
-                prov, side,
+                Value::Op(Stmt::StorageRead {
+                    storage: StorageId::VAFFLE_SSA_SPILL,
+                    ty,
+                    addr: ValueId(addr_vid),
+                }),
+                prov,
+                side,
             ));
             prelude.extend(new_stmts.into_iter().map(|v| ValueId(v as usize)));
             prelude.push(ValueId(reload_vid));
@@ -336,14 +417,23 @@ pub fn ssa_ify_function<P: Clone>(
         for &svid in &blocks[bi].stmts {
             let placeholder = Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, TypeId(0)));
             let old = core::mem::replace(&mut values[svid.0].kind, placeholder);
-            values[svid.0].kind = old.map(&mut (), |_: &mut (), v: ValueId| subst_fn(v)).unwrap();
+            values[svid.0].kind = old
+                .map(&mut (), |_: &mut (), v: ValueId| subst_fn(v))
+                .unwrap();
         }
         let placeholder_term = Terminator::Return { values: Vec::new() };
         let old_term = core::mem::replace(&mut blocks[bi].terminator, placeholder_term);
-        blocks[bi].terminator = old_term.map(&mut (), |_: &mut (), v: ValueId| subst_fn(v)).unwrap();
+        blocks[bi].terminator = old_term
+            .map(&mut (), |_: &mut (), v: ValueId| subst_fn(v))
+            .unwrap();
     }
 
-    let out = FuncBody { sig: body.sig, blocks, values, entry: body.entry };
+    let out = FuncBody {
+        sig: body.sig,
+        blocks,
+        values,
+        entry: body.entry,
+    };
     debug_assert!(
         compute_cross_block_values(&out).is_empty(),
         "vaffle_ssa: postcondition violated -- cross-block values remain after spilling"
@@ -383,11 +473,22 @@ fn emit_spill_address<P: Clone>(
     vid: usize,
 ) -> (Vec<u32>, usize) {
     let k = sp_step.trailing_zeros() as usize;
-    debug_assert!((vid as u128) < sp_step, "vaffle_ssa: value id {vid} >= sp_step ({sp_step}) -- compute_sp_step's own invariant was violated");
-    debug_assert!(k <= SPILL_ADDR_BITS, "vaffle_ssa: sp_step ({sp_step}) needs more than SPILL_ADDR_BITS ({SPILL_ADDR_BITS}) low bits");
+    debug_assert!(
+        (vid as u128) < sp_step,
+        "vaffle_ssa: value id {vid} >= sp_step ({sp_step}) -- compute_sp_step's own invariant was violated"
+    );
+    debug_assert!(
+        k <= SPILL_ADDR_BITS,
+        "vaffle_ssa: sp_step ({sp_step}) needs more than SPILL_ADDR_BITS ({SPILL_ADDR_BITS}) low bits"
+    );
 
     let start = values.len();
-    let mut builder = VecBuilder { values, prov: prov.clone(), side, bit_tid };
+    let mut builder = VecBuilder {
+        values,
+        prov: prov.clone(),
+        side,
+        bit_tid,
+    };
     let low_bits: Vec<ValueId> = (0..k)
         .map(|i| builder.bc_const(((vid >> i) & 1) != 0))
         .collect();
@@ -397,7 +498,9 @@ fn emit_spill_address<P: Clone>(
     // zero consts right here instead of reused from a threaded param.
     let high_bits: Vec<ValueId> = match sp_bits {
         Some(sp) => sp[k..SPILL_ADDR_BITS].to_vec(),
-        None => (k..SPILL_ADDR_BITS).map(|_| builder.bc_const(false)).collect(),
+        None => (k..SPILL_ADDR_BITS)
+            .map(|_| builder.bc_const(false))
+            .collect(),
     };
     let sum_bits: Vec<ValueId> = low_bits.into_iter().chain(high_bits).collect();
     // Pack the sum's individual bits into one `SPILL_ADDR_BITS`-wide
@@ -405,7 +508,14 @@ fn emit_spill_address<P: Clone>(
     // (e.g. `lower_to_ir.rs`'s own `StackPtr`-based addressing) composes
     // a multi-bit address from individual bits.
     let addr_vid = values.len();
-    values.push(Node::new(Value::Op(Stmt::Merge { parts: sum_bits, ty: addr_tid }), prov, side));
+    values.push(Node::new(
+        Value::Op(Stmt::Merge {
+            parts: sum_bits,
+            ty: addr_tid,
+        }),
+        prov,
+        side,
+    ));
     let new_ids: Vec<u32> = (start as u32..=addr_vid as u32).collect();
     (new_ids, addr_vid)
 }
@@ -455,11 +565,19 @@ fn thread_sp<P: Clone>(
             Terminator::Jump(t) => {
                 t.args.extend(sp.iter().copied());
             }
-            Terminator::IfNonzero { then_target, else_target, .. } => {
+            Terminator::IfNonzero {
+                then_target,
+                else_target,
+                ..
+            } => {
                 then_target.args.extend(sp.iter().copied());
                 else_target.args.extend(sp.iter().copied());
             }
-            Terminator::Table { targets, default_target, .. } => {
+            Terminator::Table {
+                targets,
+                default_target,
+                ..
+            } => {
                 for t in targets.iter_mut() {
                     t.args.extend(sp.iter().copied());
                 }
@@ -487,7 +605,15 @@ fn push_block_param<P: Clone>(
 ) -> ValueId {
     let idx = blocks[bi].params.len();
     let vid = ValueId(values.len());
-    values.push(Node::new(Value::Param { block: BlockId(bi), ty, idx }, prov, side));
+    values.push(Node::new(
+        Value::Param {
+            block: BlockId(bi),
+            ty,
+            idx,
+        },
+        prov,
+        side,
+    ));
     blocks[bi].params.push((vid, ty));
     vid
 }
@@ -517,7 +643,9 @@ fn wire_call_sites<P: Clone>(
         let mut new_stmts: Vec<ValueId> = Vec::with_capacity(old_stmts.len());
         for svid in old_stmts {
             if matches!(&values[svid.0].kind, Value::Call { func, .. } if func.0 == 0) {
-                panic!("vaffle_ssa: a call site targets the module's own entry function (FuncId(0)) -- unsupported, nothing inside a VAFFLE module should call its own entry point");
+                panic!(
+                    "vaffle_ssa: a call site targets the module's own entry function (FuncId(0)) -- unsupported, nothing inside a VAFFLE module should call its own entry point"
+                );
             }
             let is_call = matches!(&values[svid.0].kind, Value::Call { func, .. } if func.0 != 0);
             if is_call {
@@ -541,7 +669,10 @@ fn wire_call_sites<P: Clone>(
         blocks[bi].stmts = new_stmts;
 
         if let Terminator::ReturnCall { func, args } = &mut blocks[bi].terminator {
-            assert_ne!(func.0, 0, "vaffle_ssa: a tail-call site targets the module's own entry function (FuncId(0)) -- unsupported");
+            assert_ne!(
+                func.0, 0,
+                "vaffle_ssa: a tail-call site targets the module's own entry function (FuncId(0)) -- unsupported"
+            );
             assert!(
                 !values.is_empty(),
                 "vaffle_ssa: a function whose entire body is a single tail call has zero \
@@ -573,7 +704,12 @@ fn advance_sp<P: Clone>(
     sp: Option<&[ValueId]>,
     sp_step: u128,
 ) -> Vec<ValueId> {
-    let mut builder = VecBuilder { values, prov, side, bit_tid };
+    let mut builder = VecBuilder {
+        values,
+        prov,
+        side,
+        bit_tid,
+    };
     let step_bits: Vec<ValueId> = (0..SPILL_ADDR_BITS)
         .map(|i| builder.bc_const(((sp_step >> i) & 1) != 0))
         .collect();
@@ -587,10 +723,18 @@ fn block_successors(term: &Terminator) -> Vec<usize> {
     match term {
         Terminator::Return { .. } | Terminator::ReturnCall { .. } => Vec::new(),
         Terminator::Jump(t) => alloc::vec![t.block.0],
-        Terminator::IfNonzero { then_target, else_target, .. } => {
+        Terminator::IfNonzero {
+            then_target,
+            else_target,
+            ..
+        } => {
             alloc::vec![then_target.block.0, else_target.block.0]
         }
-        Terminator::Table { targets, default_target, .. } => {
+        Terminator::Table {
+            targets,
+            default_target,
+            ..
+        } => {
             let mut v: Vec<usize> = targets.iter().map(|t| t.block.0).collect();
             v.push(default_target.block.0);
             v
@@ -647,7 +791,12 @@ fn compute_rpo(n: usize, entry: usize, preds: &[BTreeSet<usize>]) -> Vec<usize> 
 /// Simple, Fast Dominance Algorithm"). `idom[b] == b` for the entry block;
 /// `idom[b] == usize::MAX` for a block never reached during the RPO walk
 /// (unreachable from `entry`).
-fn compute_idom(rpo: &[usize], rpo_index: &[usize], preds: &[BTreeSet<usize>], entry: usize) -> Vec<usize> {
+fn compute_idom(
+    rpo: &[usize],
+    rpo_index: &[usize],
+    preds: &[BTreeSet<usize>],
+    entry: usize,
+) -> Vec<usize> {
     let n = preds.len();
     let mut idom = alloc::vec![usize::MAX; n];
     idom[entry] = entry;
@@ -726,7 +875,10 @@ mod tests {
             oracles: Vec::new(),
             actions: Vec::new(),
             funcs: Vec::new(),
-            sigs: alloc::vec![SigDecl { params: Vec::new(), results: Vec::new() }],
+            sigs: alloc::vec![SigDecl {
+                params: Vec::new(),
+                results: Vec::new()
+            }],
             exports: BTreeMap::new(),
             pre_init: Vec::new(),
         }
@@ -763,17 +915,44 @@ mod tests {
         // SP is provably always 0 and nothing needs it materialized.
         let values = vec![node(const_op(1)), node(const_op(2))];
         let blocks = vec![
-            Block { params: Vec::new(), stmts: vec![ValueId(0)], terminator: Terminator::Jump(Target { block: BlockId(1), args: Vec::new(), reentry: None }) },
-            Block { params: Vec::new(), stmts: vec![ValueId(1)], terminator: Terminator::Return { values: vec![ValueId(1)] } },
+            Block {
+                params: Vec::new(),
+                stmts: vec![ValueId(0)],
+                terminator: Terminator::Jump(Target {
+                    block: BlockId(1),
+                    args: Vec::new(),
+                    reentry: None,
+                }),
+            },
+            Block {
+                params: Vec::new(),
+                stmts: vec![ValueId(1)],
+                terminator: Terminator::Return {
+                    values: vec![ValueId(1)],
+                },
+            },
         ];
-        let body = FuncBody { sig: SigId(0), blocks, values, entry: BlockId(0) };
+        let body = FuncBody {
+            sig: SigId(0),
+            blocks,
+            values,
+            entry: BlockId(0),
+        };
         let mut module = mk_module(1);
         let (bit_tid, addr_tid, sp_step) = setup(&mut module);
 
         let out = ssa_ify_function(&module, &body, addr_tid, bit_tid, sp_step, true);
         assert_eq!(out.blocks[0].params.len(), 0);
-        assert_eq!(out.blocks[0].stmts.len(), 1, "no SP threading needed -- entry has no calls and no cross-block values");
-        assert_eq!(out.blocks[1].params.len(), 0, "no SP param threaded to block1 either -- entry never needs it");
+        assert_eq!(
+            out.blocks[0].stmts.len(),
+            1,
+            "no SP threading needed -- entry has no calls and no cross-block values"
+        );
+        assert_eq!(
+            out.blocks[1].params.len(),
+            0,
+            "no SP param threaded to block1 either -- entry never needs it"
+        );
         assert!(compute_cross_block_values(&out).is_empty());
     }
 
@@ -786,65 +965,148 @@ mod tests {
         // SP param threaded anywhere.
         let values = vec![node(const_op(7))];
         let blocks = vec![
-            Block { params: Vec::new(), stmts: vec![ValueId(0)], terminator: Terminator::Jump(Target { block: BlockId(1), args: Vec::new(), reentry: None }) },
-            Block { params: Vec::new(), stmts: Vec::new(), terminator: Terminator::Return { values: vec![ValueId(0)] } },
+            Block {
+                params: Vec::new(),
+                stmts: vec![ValueId(0)],
+                terminator: Terminator::Jump(Target {
+                    block: BlockId(1),
+                    args: Vec::new(),
+                    reentry: None,
+                }),
+            },
+            Block {
+                params: Vec::new(),
+                stmts: Vec::new(),
+                terminator: Terminator::Return {
+                    values: vec![ValueId(0)],
+                },
+            },
         ];
-        let body = FuncBody { sig: SigId(0), blocks, values, entry: BlockId(0) };
+        let body = FuncBody {
+            sig: SigId(0),
+            blocks,
+            values,
+            entry: BlockId(0),
+        };
         let mut module = mk_module(1);
         let (bit_tid, addr_tid, sp_step) = setup(&mut module);
 
         let out = ssa_ify_function(&module, &body, addr_tid, bit_tid, sp_step, true);
-        assert_eq!(out.blocks[0].params.len(), 0, "entry never receives/threads an SP param");
-        assert_eq!(out.blocks[1].params.len(), 0, "no SP param threaded to the use-block either");
-        assert!(out.blocks[0].stmts.iter().any(|&v| is_storage_write(&out.values, v)));
-        assert!(out.blocks[1].stmts.iter().any(|&v| is_storage_read(&out.values, v)));
+        assert_eq!(
+            out.blocks[0].params.len(),
+            0,
+            "entry never receives/threads an SP param"
+        );
+        assert_eq!(
+            out.blocks[1].params.len(),
+            0,
+            "no SP param threaded to the use-block either"
+        );
+        assert!(
+            out.blocks[0]
+                .stmts
+                .iter()
+                .any(|&v| is_storage_write(&out.values, v))
+        );
+        assert!(
+            out.blocks[1]
+                .stmts
+                .iter()
+                .any(|&v| is_storage_read(&out.values, v))
+        );
         assert!(compute_cross_block_values(&out).is_empty());
     }
 
     #[test]
     fn test_non_entry_function_sp_is_threaded_param() {
         let values = vec![node(const_op(1))];
-        let blocks = vec![
-            Block { params: Vec::new(), stmts: vec![ValueId(0)], terminator: Terminator::Return { values: vec![ValueId(0)] } },
-        ];
-        let body = FuncBody { sig: SigId(0), blocks, values, entry: BlockId(0) };
+        let blocks = vec![Block {
+            params: Vec::new(),
+            stmts: vec![ValueId(0)],
+            terminator: Terminator::Return {
+                values: vec![ValueId(0)],
+            },
+        }];
+        let body = FuncBody {
+            sig: SigId(0),
+            blocks,
+            values,
+            entry: BlockId(0),
+        };
         let mut module = mk_module(1);
         let (bit_tid, addr_tid, sp_step) = setup(&mut module);
 
         let out = ssa_ify_function(&module, &body, addr_tid, bit_tid, sp_step, false);
-        assert_eq!(out.blocks[0].params.len(), SPILL_ADDR_BITS, "non-entry function receives SP as 32 extra params");
+        assert_eq!(
+            out.blocks[0].params.len(),
+            SPILL_ADDR_BITS,
+            "non-entry function receives SP as 32 extra params"
+        );
     }
 
     #[test]
     fn test_diamond_join_spills_once_reloads_at_each_use_with_sp_addressing() {
         let values = vec![
             node(const_op(1)),
-            node(Value::Op(CommonStmt::Splat { src: ValueId(0), ty: TypeId(0) })),
-            node(Value::Op(CommonStmt::Splat { src: ValueId(0), ty: TypeId(0) })),
+            node(Value::Op(CommonStmt::Splat {
+                src: ValueId(0),
+                ty: TypeId(0),
+            })),
+            node(Value::Op(CommonStmt::Splat {
+                src: ValueId(0),
+                ty: TypeId(0),
+            })),
         ];
         let blocks = vec![
             Block {
-                params: Vec::new(), stmts: vec![ValueId(0)],
+                params: Vec::new(),
+                stmts: vec![ValueId(0)],
                 terminator: Terminator::IfNonzero {
                     cond: ValueId(0),
-                    then_target: Target { block: BlockId(1), args: Vec::new(), reentry: None },
-                    else_target: Target { block: BlockId(2), args: Vec::new(), reentry: None },
+                    then_target: Target {
+                        block: BlockId(1),
+                        args: Vec::new(),
+                        reentry: None,
+                    },
+                    else_target: Target {
+                        block: BlockId(2),
+                        args: Vec::new(),
+                        reentry: None,
+                    },
                 },
             },
             Block {
-                params: Vec::new(), stmts: vec![ValueId(1)],
-                terminator: Terminator::Jump(Target { block: BlockId(3), args: Vec::new(), reentry: None }),
+                params: Vec::new(),
+                stmts: vec![ValueId(1)],
+                terminator: Terminator::Jump(Target {
+                    block: BlockId(3),
+                    args: Vec::new(),
+                    reentry: None,
+                }),
             },
             Block {
-                params: Vec::new(), stmts: vec![ValueId(2)],
-                terminator: Terminator::Jump(Target { block: BlockId(3), args: Vec::new(), reentry: None }),
+                params: Vec::new(),
+                stmts: vec![ValueId(2)],
+                terminator: Terminator::Jump(Target {
+                    block: BlockId(3),
+                    args: Vec::new(),
+                    reentry: None,
+                }),
             },
             Block {
-                params: Vec::new(), stmts: Vec::new(),
-                terminator: Terminator::Return { values: vec![ValueId(0)] },
+                params: Vec::new(),
+                stmts: Vec::new(),
+                terminator: Terminator::Return {
+                    values: vec![ValueId(0)],
+                },
             },
         ];
-        let body = FuncBody { sig: SigId(0), blocks, values, entry: BlockId(0) };
+        let body = FuncBody {
+            sig: SigId(0),
+            blocks,
+            values,
+            entry: BlockId(0),
+        };
         let mut module = mk_module(1);
         let (bit_tid, addr_tid, sp_step) = setup(&mut module);
 
@@ -853,13 +1115,28 @@ mod tests {
         // stmts + Merge + StorageWrite) for the spill -- exact count
         // depends on bc_add's own internal stmt count, so just check the
         // LAST new stmt is genuinely a StorageWrite into our spill space.
-        assert!(is_storage_write(&out.values, *out.blocks[0].stmts.last().unwrap()));
+        assert!(is_storage_write(
+            &out.values,
+            *out.blocks[0].stmts.last().unwrap()
+        ));
         // block1/block2 each directly use v0 -- each gets its own reload,
         // prefixed before their own original stmt.
-        let block1_reload = out.blocks[1].stmts.iter().find(|&&v| is_storage_read(&out.values, v));
-        assert!(block1_reload.is_some(), "block1 should contain a reload of v0");
-        let block2_reload = out.blocks[2].stmts.iter().find(|&&v| is_storage_read(&out.values, v));
-        assert!(block2_reload.is_some(), "block2 should contain a reload of v0");
+        let block1_reload = out.blocks[1]
+            .stmts
+            .iter()
+            .find(|&&v| is_storage_read(&out.values, v));
+        assert!(
+            block1_reload.is_some(),
+            "block1 should contain a reload of v0"
+        );
+        let block2_reload = out.blocks[2]
+            .stmts
+            .iter()
+            .find(|&&v| is_storage_read(&out.values, v));
+        assert!(
+            block2_reload.is_some(),
+            "block2 should contain a reload of v0"
+        );
         assert!(compute_cross_block_values(&out).is_empty());
     }
 
@@ -869,40 +1146,74 @@ mod tests {
         // args, returns its output.
         // func1 (non-entry, callee): block0 just returns a fresh value.
         let f0_values = vec![
-            node(Value::Call { func: FuncId(1), args: Vec::new() }),
-            node(Value::Output { value: ValueId(0), idx: 0 }),
+            node(Value::Call {
+                func: FuncId(1),
+                args: Vec::new(),
+            }),
+            node(Value::Output {
+                value: ValueId(0),
+                idx: 0,
+            }),
         ];
-        let f0_blocks = vec![
-            Block { params: Vec::new(), stmts: vec![ValueId(0), ValueId(1)], terminator: Terminator::Return { values: vec![ValueId(1)] } },
-        ];
-        let f0 = FuncBody { sig: SigId(0), blocks: f0_blocks, values: f0_values, entry: BlockId(0) };
+        let f0_blocks = vec![Block {
+            params: Vec::new(),
+            stmts: vec![ValueId(0), ValueId(1)],
+            terminator: Terminator::Return {
+                values: vec![ValueId(1)],
+            },
+        }];
+        let f0 = FuncBody {
+            sig: SigId(0),
+            blocks: f0_blocks,
+            values: f0_values,
+            entry: BlockId(0),
+        };
 
         let f1_values = vec![node(const_op(7))];
-        let f1_blocks = vec![
-            Block { params: Vec::new(), stmts: vec![ValueId(0)], terminator: Terminator::Return { values: vec![ValueId(0)] } },
-        ];
-        let f1 = FuncBody { sig: SigId(0), blocks: f1_blocks, values: f1_values, entry: BlockId(0) };
+        let f1_blocks = vec![Block {
+            params: Vec::new(),
+            stmts: vec![ValueId(0)],
+            terminator: Terminator::Return {
+                values: vec![ValueId(0)],
+            },
+        }];
+        let f1 = FuncBody {
+            sig: SigId(0),
+            blocks: f1_blocks,
+            values: f1_values,
+            entry: BlockId(0),
+        };
 
         let mut module = mk_module(1);
         module.funcs.push(FuncDecl::Body(f0));
         module.funcs.push(FuncDecl::Body(f1));
 
         let out = ssa_ify_module(&module);
-        let FuncDecl::Body(out_f0) = &out.funcs[0] else { panic!("expected Body") };
-        let FuncDecl::Body(out_f1) = &out.funcs[1] else { panic!("expected Body") };
+        let FuncDecl::Body(out_f0) = &out.funcs[0] else {
+            panic!("expected Body")
+        };
+        let FuncDecl::Body(out_f1) = &out.funcs[1] else {
+            panic!("expected Body")
+        };
 
         // func1 (callee, non-entry) should have gained 32 SP params.
         assert_eq!(out_f1.blocks[0].params.len(), SPILL_ADDR_BITS);
 
         // func0's own call site should now pass 32 extra args (the
         // advanced SP) beyond whatever it originally passed (zero).
-        let call_stmt = out_f0.blocks[0].stmts.iter()
+        let call_stmt = out_f0.blocks[0]
+            .stmts
+            .iter()
             .find_map(|&svid| match &out_f0.values[svid.0].kind {
                 Value::Call { func, args } if func.0 == 1 => Some(args.clone()),
                 _ => None,
             })
             .expect("call to func1 must still exist");
-        assert_eq!(call_stmt.len(), SPILL_ADDR_BITS, "call site should carry exactly the 32 advanced-SP bits (no original args)");
+        assert_eq!(
+            call_stmt.len(),
+            SPILL_ADDR_BITS,
+            "call site should carry exactly the 32 advanced-SP bits (no original args)"
+        );
     }
 
     /// The core recursion-safety property this whole SP-threading design
@@ -917,15 +1228,25 @@ mod tests {
     #[test]
     fn test_compute_sp_step_exceeds_every_value_id_in_the_module() {
         let f_values: Vec<Node<Value, ()>> = (0..5000).map(|i| node(const_op(i))).collect();
-        let f_blocks = vec![
-            Block { params: Vec::new(), stmts: (0..5000).map(ValueId).collect(), terminator: Terminator::Return { values: Vec::new() } },
-        ];
-        let f = FuncBody { sig: SigId(0), blocks: f_blocks, values: f_values, entry: BlockId(0) };
+        let f_blocks = vec![Block {
+            params: Vec::new(),
+            stmts: (0..5000).map(ValueId).collect(),
+            terminator: Terminator::Return { values: Vec::new() },
+        }];
+        let f = FuncBody {
+            sig: SigId(0),
+            blocks: f_blocks,
+            values: f_values,
+            entry: BlockId(0),
+        };
         let mut module = mk_module(1);
         module.funcs.push(FuncDecl::Body(f));
 
         let sp_step = compute_sp_step(&module);
-        assert!(sp_step > 5000, "sp_step ({sp_step}) must exceed every ValueId in the module (max 4999) with margin");
+        assert!(
+            sp_step > 5000,
+            "sp_step ({sp_step}) must exceed every ValueId in the module (max 4999) with margin"
+        );
     }
 
     /// A self-recursive function's own internal call site (calling its
@@ -939,57 +1260,120 @@ mod tests {
     fn test_self_recursive_call_site_advances_its_own_sp() {
         // func1 (non-entry, self-recursive): calls itself, returns the result.
         let f0_values = vec![node(const_op(1))];
-        let f0_blocks = vec![
-            Block { params: Vec::new(), stmts: vec![ValueId(0)], terminator: Terminator::Return { values: vec![ValueId(0)] } },
-        ];
-        let f0 = FuncBody { sig: SigId(0), blocks: f0_blocks, values: f0_values, entry: BlockId(0) };
+        let f0_blocks = vec![Block {
+            params: Vec::new(),
+            stmts: vec![ValueId(0)],
+            terminator: Terminator::Return {
+                values: vec![ValueId(0)],
+            },
+        }];
+        let f0 = FuncBody {
+            sig: SigId(0),
+            blocks: f0_blocks,
+            values: f0_values,
+            entry: BlockId(0),
+        };
 
         let f1_values = vec![
-            node(Value::Call { func: FuncId(1), args: Vec::new() }),
-            node(Value::Output { value: ValueId(0), idx: 0 }),
+            node(Value::Call {
+                func: FuncId(1),
+                args: Vec::new(),
+            }),
+            node(Value::Output {
+                value: ValueId(0),
+                idx: 0,
+            }),
         ];
-        let f1_blocks = vec![
-            Block { params: Vec::new(), stmts: vec![ValueId(0), ValueId(1)], terminator: Terminator::Return { values: vec![ValueId(1)] } },
-        ];
-        let f1 = FuncBody { sig: SigId(0), blocks: f1_blocks, values: f1_values, entry: BlockId(0) };
+        let f1_blocks = vec![Block {
+            params: Vec::new(),
+            stmts: vec![ValueId(0), ValueId(1)],
+            terminator: Terminator::Return {
+                values: vec![ValueId(1)],
+            },
+        }];
+        let f1 = FuncBody {
+            sig: SigId(0),
+            blocks: f1_blocks,
+            values: f1_values,
+            entry: BlockId(0),
+        };
 
         let mut module = mk_module(1);
         module.funcs.push(FuncDecl::Body(f0));
         module.funcs.push(FuncDecl::Body(f1));
 
         let out = ssa_ify_module(&module);
-        let FuncDecl::Body(out_f1) = &out.funcs[1] else { panic!("expected Body") };
+        let FuncDecl::Body(out_f1) = &out.funcs[1] else {
+            panic!("expected Body")
+        };
 
-        assert_eq!(out_f1.blocks[0].params.len(), SPILL_ADDR_BITS, "self-recursive function still receives SP as a normal threaded param");
+        assert_eq!(
+            out_f1.blocks[0].params.len(),
+            SPILL_ADDR_BITS,
+            "self-recursive function still receives SP as a normal threaded param"
+        );
 
-        let call_args = out_f1.blocks[0].stmts.iter()
+        let call_args = out_f1.blocks[0]
+            .stmts
+            .iter()
             .find_map(|&svid| match &out_f1.values[svid.0].kind {
                 Value::Call { func, args } if func.0 == 1 => Some(args.clone()),
                 _ => None,
             })
             .expect("self-recursive call to func1 must still exist");
-        assert_eq!(call_args.len(), SPILL_ADDR_BITS, "self-recursive call site should carry the 64 advanced-SP bits");
+        assert_eq!(
+            call_args.len(),
+            SPILL_ADDR_BITS,
+            "self-recursive call site should carry the 64 advanced-SP bits"
+        );
         // The advanced SP must be a genuinely different value chain than
         // the block's own (unadvanced) SP params -- i.e. this is a real
         // `bc_add`, not an accidental pass-through of the caller's own SP.
-        let own_sp: BTreeSet<usize> = out_f1.blocks[0].params[..SPILL_ADDR_BITS].iter().map(|(v, _)| v.0).collect();
-        assert!(call_args.iter().all(|v| !own_sp.contains(&v.0)), "advanced SP must not alias the caller's own unadvanced SP bits");
+        let own_sp: BTreeSet<usize> = out_f1.blocks[0].params[..SPILL_ADDR_BITS]
+            .iter()
+            .map(|(v, _)| v.0)
+            .collect();
+        assert!(
+            call_args.iter().all(|v| !own_sp.contains(&v.0)),
+            "advanced SP must not alias the caller's own unadvanced SP bits"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "unsupported, nothing inside a VAFFLE module should call its own entry point")]
+    #[should_panic(
+        expected = "unsupported, nothing inside a VAFFLE module should call its own entry point"
+    )]
     fn test_call_to_entry_function_panics() {
         let f0_values = vec![node(const_op(1))];
-        let f0_blocks = vec![
-            Block { params: Vec::new(), stmts: vec![ValueId(0)], terminator: Terminator::Return { values: vec![ValueId(0)] } },
-        ];
-        let f0 = FuncBody { sig: SigId(0), blocks: f0_blocks, values: f0_values, entry: BlockId(0) };
+        let f0_blocks = vec![Block {
+            params: Vec::new(),
+            stmts: vec![ValueId(0)],
+            terminator: Terminator::Return {
+                values: vec![ValueId(0)],
+            },
+        }];
+        let f0 = FuncBody {
+            sig: SigId(0),
+            blocks: f0_blocks,
+            values: f0_values,
+            entry: BlockId(0),
+        };
 
-        let f1_values = vec![node(Value::Call { func: FuncId(0), args: Vec::new() })];
-        let f1_blocks = vec![
-            Block { params: Vec::new(), stmts: vec![ValueId(0)], terminator: Terminator::Return { values: Vec::new() } },
-        ];
-        let f1 = FuncBody { sig: SigId(0), blocks: f1_blocks, values: f1_values, entry: BlockId(0) };
+        let f1_values = vec![node(Value::Call {
+            func: FuncId(0),
+            args: Vec::new(),
+        })];
+        let f1_blocks = vec![Block {
+            params: Vec::new(),
+            stmts: vec![ValueId(0)],
+            terminator: Terminator::Return { values: Vec::new() },
+        }];
+        let f1 = FuncBody {
+            sig: SigId(0),
+            blocks: f1_blocks,
+            values: f1_values,
+            entry: BlockId(0),
+        };
 
         let mut module = mk_module(1);
         module.funcs.push(FuncDecl::Body(f0));
@@ -1011,18 +1395,54 @@ mod tests {
         let values = vec![node(const_op(1)), node(const_op(2))];
         let blocks = vec![
             Block {
-                params: Vec::new(), stmts: vec![ValueId(0)],
+                params: Vec::new(),
+                stmts: vec![ValueId(0)],
                 terminator: Terminator::IfNonzero {
                     cond: ValueId(0),
-                    then_target: Target { block: BlockId(1), args: Vec::new(), reentry: None },
-                    else_target: Target { block: BlockId(2), args: Vec::new(), reentry: None },
+                    then_target: Target {
+                        block: BlockId(1),
+                        args: Vec::new(),
+                        reentry: None,
+                    },
+                    else_target: Target {
+                        block: BlockId(2),
+                        args: Vec::new(),
+                        reentry: None,
+                    },
                 },
             },
-            Block { params: Vec::new(), stmts: vec![ValueId(1)], terminator: Terminator::Jump(Target { block: BlockId(3), args: Vec::new(), reentry: None }) },
-            Block { params: Vec::new(), stmts: Vec::new(), terminator: Terminator::Jump(Target { block: BlockId(3), args: Vec::new(), reentry: None }) },
-            Block { params: Vec::new(), stmts: Vec::new(), terminator: Terminator::Return { values: vec![ValueId(1)] } },
+            Block {
+                params: Vec::new(),
+                stmts: vec![ValueId(1)],
+                terminator: Terminator::Jump(Target {
+                    block: BlockId(3),
+                    args: Vec::new(),
+                    reentry: None,
+                }),
+            },
+            Block {
+                params: Vec::new(),
+                stmts: Vec::new(),
+                terminator: Terminator::Jump(Target {
+                    block: BlockId(3),
+                    args: Vec::new(),
+                    reentry: None,
+                }),
+            },
+            Block {
+                params: Vec::new(),
+                stmts: Vec::new(),
+                terminator: Terminator::Return {
+                    values: vec![ValueId(1)],
+                },
+            },
         ];
-        let body = FuncBody { sig: SigId(0), blocks, values, entry: BlockId(0) };
+        let body = FuncBody {
+            sig: SigId(0),
+            blocks,
+            values,
+            entry: BlockId(0),
+        };
         let mut module = mk_module(1);
         let (bit_tid, addr_tid, sp_step) = setup(&mut module);
         let _ = ssa_ify_function(&module, &body, addr_tid, bit_tid, sp_step, true);
@@ -1038,7 +1458,9 @@ mod tests {
         ];
         let rpo = compute_rpo(4, 0, &preds);
         let mut rpo_index = alloc::vec![usize::MAX; 4];
-        for (i, &b) in rpo.iter().enumerate() { rpo_index[b] = i; }
+        for (i, &b) in rpo.iter().enumerate() {
+            rpo_index[b] = i;
+        }
         let idom = compute_idom(&rpo, &rpo_index, &preds, 0);
         assert!(dominates(0, 3, &idom));
         assert!(dominates(0, 1, &idom));

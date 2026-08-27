@@ -30,7 +30,13 @@ pub fn constant_is_zero(c: Constant) -> bool {
 
 /// True if the lowest `width` bits of `c` are all 1 (and width ≤ 256).
 pub fn constant_is_all_ones(c: Constant, width: usize) -> bool {
-    let m = mask_constant(Constant { hi: u128::MAX, lo: u128::MAX }, width);
+    let m = mask_constant(
+        Constant {
+            hi: u128::MAX,
+            lo: u128::MAX,
+        },
+        width,
+    );
     c == m
 }
 
@@ -44,24 +50,43 @@ pub fn mask_constant(c: Constant, width: usize) -> Constant {
     }
     if width >= 128 {
         let hi_bits = width - 128;
-        let hi_mask = if hi_bits >= 128 { u128::MAX } else { (1u128 << hi_bits) - 1 };
-        Constant { lo: c.lo, hi: c.hi & hi_mask }
+        let hi_mask = if hi_bits >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << hi_bits) - 1
+        };
+        Constant {
+            lo: c.lo,
+            hi: c.hi & hi_mask,
+        }
     } else {
         let lo_mask = (1u128 << width) - 1;
-        Constant { lo: c.lo & lo_mask, hi: 0 }
+        Constant {
+            lo: c.lo & lo_mask,
+            hi: 0,
+        }
     }
 }
 
 pub fn constant_and(a: Constant, b: Constant) -> Constant {
-    Constant { hi: a.hi & b.hi, lo: a.lo & b.lo }
+    Constant {
+        hi: a.hi & b.hi,
+        lo: a.lo & b.lo,
+    }
 }
 
 pub fn constant_xor(a: Constant, b: Constant) -> Constant {
-    Constant { hi: a.hi ^ b.hi, lo: a.lo ^ b.lo }
+    Constant {
+        hi: a.hi ^ b.hi,
+        lo: a.lo ^ b.lo,
+    }
 }
 
 pub fn constant_or(a: Constant, b: Constant) -> Constant {
-    Constant { hi: a.hi | b.hi, lo: a.lo | b.lo }
+    Constant {
+        hi: a.hi | b.hi,
+        lo: a.lo | b.lo,
+    }
 }
 
 /// Shift `c` left by `n` bit positions (into a 256-bit field).
@@ -73,7 +98,10 @@ pub fn constant_shl(c: Constant, n: usize) -> Constant {
         return Constant { hi: 0, lo: 0 };
     }
     if n >= 128 {
-        Constant { hi: c.lo << (n - 128), lo: 0 }
+        Constant {
+            hi: c.lo << (n - 128),
+            lo: 0,
+        }
     } else {
         Constant {
             hi: (c.hi << n) | (c.lo >> (128 - n)),
@@ -91,7 +119,10 @@ pub fn constant_shr(c: Constant, n: usize) -> Constant {
         return Constant { hi: 0, lo: 0 };
     }
     if n >= 128 {
-        Constant { hi: 0, lo: c.hi >> (n - 128) }
+        Constant {
+            hi: 0,
+            lo: c.hi >> (n - 128),
+        }
     } else {
         Constant {
             hi: c.hi >> n,
@@ -183,6 +214,7 @@ pub fn stmt_output_type<V, A>(stmt: &Stmt<V, A>) -> Option<TypeId> {
         Stmt::OracleCall { result_ty, .. } => Some(*result_ty),
         Stmt::OracleOutput { ty, .. } => Some(*ty),
         Stmt::ActionCall { result_ty, .. } => Some(*result_ty),
+        Stmt::ActionStore { .. } => None,
         Stmt::ActionOutput { ty, .. } => Some(*ty),
         Stmt::Rng { ty, .. } => Some(*ty),
         Stmt::StorageRead { ty, .. } => Some(*ty),
@@ -210,18 +242,30 @@ pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
     match stmt {
         Stmt::StorageRead { addr, .. } => {
             let c = canon_alias(alias_map, *addr);
-            if c != *addr { *addr = c; changed = true; }
+            if c != *addr {
+                *addr = c;
+                changed = true;
+            }
         }
         Stmt::StorageWrite { src, addr, .. } => {
             let cs = canon_alias(alias_map, *src);
-            if cs != *src { *src = cs; changed = true; }
+            if cs != *src {
+                *src = cs;
+                changed = true;
+            }
             let ca = canon_alias(alias_map, *addr);
-            if ca != *addr { *addr = ca; changed = true; }
+            if ca != *addr {
+                *addr = ca;
+                changed = true;
+            }
         }
         Stmt::Const(_, _) | Stmt::Rng { .. } => {}
         Stmt::Transmute { src, .. } => {
             let c = canon_alias(alias_map, *src);
-            if c != *src { *src = c; changed = true; }
+            if c != *src {
+                *src = c;
+                changed = true;
+            }
         }
         Stmt::Poly { coeffs, .. } => {
             // Rebuild the BTreeMap with aliased, sorted, deduped keys.
@@ -254,45 +298,111 @@ pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
         }
         Stmt::Rol { src, .. } | Stmt::Ror { src, .. } | Stmt::Splat { src, .. } => {
             let c = canon_alias(alias_map, *src);
-            if c != *src { *src = c; changed = true; }
+            if c != *src {
+                *src = c;
+                changed = true;
+            }
         }
         Stmt::Merge { parts, .. } => {
             for p in parts.iter_mut() {
                 let c = canon_alias(alias_map, *p);
-                if c != *p { *p = c; changed = true; }
+                if c != *p {
+                    *p = c;
+                    changed = true;
+                }
             }
         }
         Stmt::Shuffle { result_bits, .. } => {
             for (_, v) in result_bits.iter_mut() {
                 let c = canon_alias(alias_map, *v);
-                if c != *v { *v = c; changed = true; }
+                if c != *v {
+                    *v = c;
+                    changed = true;
+                }
             }
         }
         Stmt::OracleCall { args, .. } => {
             for a in args.iter_mut() {
                 let c = canon_alias(alias_map, *a);
-                if c != *a { *a = c; changed = true; }
+                if c != *a {
+                    *a = c;
+                    changed = true;
+                }
             }
         }
         Stmt::OracleOutput { call, .. } => {
             let c = canon_alias(alias_map, *call);
-            if c != *call { *call = c; changed = true; }
+            if c != *call {
+                *call = c;
+                changed = true;
+            }
         }
-        Stmt::ActionCall { guard, args, fallbacks, .. } => {
+        Stmt::ActionCall {
+            guard,
+            args,
+            fallbacks,
+            ..
+        } => {
             let cg = canon_alias(alias_map, *guard);
-            if cg != *guard { *guard = cg; changed = true; }
+            if cg != *guard {
+                *guard = cg;
+                changed = true;
+            }
             for a in args.iter_mut() {
                 let c = canon_alias(alias_map, *a);
-                if c != *a { *a = c; changed = true; }
+                if c != *a {
+                    *a = c;
+                    changed = true;
+                }
             }
             for f in fallbacks.iter_mut() {
                 let c = canon_alias(alias_map, *f);
-                if c != *f { *f = c; changed = true; }
+                if c != *f {
+                    *f = c;
+                    changed = true;
+                }
+            }
+        }
+        Stmt::ActionStore {
+            guard,
+            args,
+            fallbacks,
+            targets,
+            ..
+        } => {
+            let cg = canon_alias(alias_map, *guard);
+            if cg != *guard {
+                *guard = cg;
+                changed = true;
+            }
+            for a in args.iter_mut() {
+                let c = canon_alias(alias_map, *a);
+                if c != *a {
+                    *a = c;
+                    changed = true;
+                }
+            }
+            for f in fallbacks.iter_mut() {
+                let c = canon_alias(alias_map, *f);
+                if c != *f {
+                    *f = c;
+                    changed = true;
+                }
+            }
+            for target in targets.iter_mut() {
+                let c = canon_alias(alias_map, target.addr);
+                if c != target.addr {
+                    target.addr = c;
+                    changed = true;
+                }
             }
         }
         Stmt::ActionOutput { call, .. } => {
             let c = canon_alias(alias_map, *call);
-            if c != *call { *call = c; changed = true; }
+            if c != *call {
+                *call = c;
+                changed = true;
+            }
         }
         _ => {}
     }
@@ -443,7 +553,13 @@ pub fn fold_poly_in_place<V: Clone + Ord>(
         if new_key.is_empty() {
             // Empty monomial (odd coeff) → contribute all-ones to constant.
             let w = type_bit_width(ty, types).unwrap_or(1);
-            let all_ones = mask_constant(Constant { hi: u128::MAX, lo: u128::MAX }, w);
+            let all_ones = mask_constant(
+                Constant {
+                    hi: u128::MAX,
+                    lo: u128::MAX,
+                },
+                w,
+            );
             *constant = constant_xor(*constant, all_ones);
             changed = true;
         } else {

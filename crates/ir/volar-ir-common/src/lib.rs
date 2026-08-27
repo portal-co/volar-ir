@@ -14,7 +14,10 @@ use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 /// Compound types (`Vec`, `Tuple`, `Block`, `Func`) are expressed by
 /// [`IrType`] and referenced via [`TypeId`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 pub enum Type {
     /// Single GF(2) element (one bit).
@@ -43,7 +46,10 @@ pub enum Type {
 
 /// A 256-bit compile-time constant, split into high and low 128-bit halves.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "rkyv", rkyv(attr(derive(PartialEq, Eq, PartialOrd, Ord))))]
 pub struct Constant {
     pub hi: u128,
@@ -59,7 +65,10 @@ pub struct Constant {
 /// Both Volar IR (`IRTypeId`) and VAFFLE use this; the former is now just a
 /// re-export alias in `volar-ir`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct TypeId(pub u32);
 
 /// The full IR type language, shared between Volar IR and VAFFLE.
@@ -72,7 +81,10 @@ pub struct TypeId(pub u32);
 /// [`Func`](IrType::Func) represents a first-class function type (used for
 /// imports, exports, and higher-order values in VAFFLE modules).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 pub enum IrType {
     /// A primitive scalar type (bit, integer, or Galois-field element).
@@ -84,9 +96,7 @@ pub enum IrType {
     /// A block / continuation type: a control-flow label that accepts the
     /// listed parameter types.  Used by Volar IR's `Block`-typed SSA params
     /// and dynamic jump targets.
-    Block {
-        params: alloc::vec::Vec<TypeId>,
-    },
+    Block { params: alloc::vec::Vec<TypeId> },
     /// A function type: a callable with the given parameter and result types.
     /// Present in VAFFLE for import/export declarations and first-class
     /// function values.  Not used by Volar IR (which represents functions via
@@ -108,7 +118,10 @@ pub enum IrType {
 /// before pushing.  Type tables are typically small (tens of entries), so
 /// this is acceptable; for large tables consider a separate index.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct TypeTable(pub alloc::vec::Vec<IrType>);
 
 impl TypeTable {
@@ -146,7 +159,10 @@ impl TypeTable {
 
     /// Return `true` if `id` resolves to `IrType::Primitive(Type::Bit)`.
     pub fn is_bit(&self, id: TypeId) -> bool {
-        matches!(self.0.get(id.0 as usize), Some(IrType::Primitive(Type::Bit)))
+        matches!(
+            self.0.get(id.0 as usize),
+            Some(IrType::Primitive(Type::Bit))
+        )
     }
 
     /// Return `true` if `id` resolves to `IrType::Block { .. }`.
@@ -170,7 +186,10 @@ impl Default for TypeTable {
 /// An oracle is a deterministic external function evaluated by all parties.
 /// Its implementation is provided by the execution environment at protocol time.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct OracleDecl {
     pub name: alloc::string::String,
     /// Parameter types in order.
@@ -184,13 +203,33 @@ pub struct OracleDecl {
 /// An action is a side-effectful external function invoked by one party
 /// (prover / evaluator) only when a boolean guard is 1.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct ActionDecl {
     pub name: alloc::string::String,
     /// Parameter types in order.
     pub params: alloc::vec::Vec<TypeId>,
     /// Return types in order (length ≥ 1).
     pub results: alloc::vec::Vec<TypeId>,
+}
+
+/// The storage destination for one declared result of an [`ActionDecl`].
+///
+/// Actions are effects, not values: their declared results are written to
+/// these destinations in declaration order.  A Boolar lowering expands each
+/// typed destination into its lane and one bit-address per result bit.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct ActionTarget<Addr, Stor = StorageId> {
+    /// Storage namespace receiving this result.
+    pub storage: Stor,
+    /// Element address within that namespace.
+    pub addr: Addr,
 }
 
 /// Declaration of a named RNG source.
@@ -203,7 +242,10 @@ pub struct ActionDecl {
 /// Each [`Stmt::Rng`] references an `RngDecl` by name.  The execution
 /// environment supplies the concrete implementation.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct RngDecl {
     pub name: alloc::string::String,
     /// Type of the fresh random value produced on each call.
@@ -220,7 +262,10 @@ pub struct RngDecl {
 /// separate stacks, heaps, or per-type scratch spaces.  The execution
 /// environment maps each `StorageId` to a concrete address space.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct StorageId(pub u32);
 
 impl StorageId {
@@ -241,7 +286,9 @@ impl StorageId {
     /// Base ID for WASM linear memories.  Memory `i` uses `StorageId(MEMORY_BASE + i)`.
     pub const MEMORY_BASE: u32 = 16;
     /// Convenience: StorageId for WASM memory index `i`.
-    pub const fn memory(i: u32) -> StorageId { StorageId(Self::MEMORY_BASE + i) }
+    pub const fn memory(i: u32) -> StorageId {
+        StorageId(Self::MEMORY_BASE + i)
+    }
     /// Dedicated scratch space for `vaffle_ssa`'s own cross-block value
     /// spilling (`crates/ir/volar-vaffle-target/src/vaffle_ssa.rs`).
     /// Addressed directly by the spilled VAFFLE `ValueId` itself (not
@@ -261,7 +308,10 @@ impl StorageId {
 /// Multiple segments may share the same `StorageId` but have different `TypeId`s
 /// (different element-width lanes of the same logical storage).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct PreInitSegment {
     /// Which storage space to initialise.
     pub storage: StorageId,
@@ -279,19 +329,33 @@ pub struct PreInitSegment {
 
 impl PreInitSegment {
     /// Value of element `i` as a `u8`.
-    pub fn as_u8(&self, i: usize) -> u8 { self.data[i].lo as u8 }
+    pub fn as_u8(&self, i: usize) -> u8 {
+        self.data[i].lo as u8
+    }
     /// Value of element `i` as a `u16`.
-    pub fn as_u16(&self, i: usize) -> u16 { self.data[i].lo as u16 }
+    pub fn as_u16(&self, i: usize) -> u16 {
+        self.data[i].lo as u16
+    }
     /// Value of element `i` as a `u32`.
-    pub fn as_u32(&self, i: usize) -> u32 { self.data[i].lo as u32 }
+    pub fn as_u32(&self, i: usize) -> u32 {
+        self.data[i].lo as u32
+    }
     /// Value of element `i` as a `u64`.
-    pub fn as_u64(&self, i: usize) -> u64 { self.data[i].lo as u64 }
+    pub fn as_u64(&self, i: usize) -> u64 {
+        self.data[i].lo as u64
+    }
     /// Value of element `i` as a `u128`.
-    pub fn as_u128(&self, i: usize) -> u128 { self.data[i].lo }
+    pub fn as_u128(&self, i: usize) -> u128 {
+        self.data[i].lo
+    }
     /// Full 256-bit `Constant` for element `i`.
-    pub fn as_constant(&self, i: usize) -> Constant { self.data[i] }
+    pub fn as_constant(&self, i: usize) -> Constant {
+        self.data[i]
+    }
     /// Absolute cell index for element `i`: `self.offset + i`.
-    pub fn cell_index(&self, i: usize) -> usize { self.offset + i }
+    pub fn cell_index(&self, i: usize) -> usize {
+        self.offset + i
+    }
 }
 
 /// Shared computational statement type for Volar IR and VAFFLE.
@@ -315,15 +379,14 @@ impl PreInitSegment {
 ///   from `var`; together they define every bit of the output, LSB first.
 ///   Length equals the output bit-width.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     /// Load a value from a storage location addressed by `addr`.
-    StorageRead {
-        storage: Stor,
-        ty: Ty,
-        addr: Addr,
-    },
+    StorageRead { storage: Stor, ty: Ty, addr: Addr },
     /// Write `src` to the storage location addressed by `addr`.
     StorageWrite {
         storage: Stor,
@@ -334,11 +397,7 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     /// A compile-time constant value of type `ty`.
     Const(Constant, Ty),
     /// Reinterpret `src` (of type `src_ty`) as `dst_ty` without changing bits.
-    Transmute {
-        src: Var,
-        src_ty: Ty,
-        dst_ty: Ty,
-    },
+    Transmute { src: Var, src_ty: Ty, dst_ty: Ty },
     /// Multivariate polynomial over variables.
     ///
     /// Each `(monomial, coeff)` contributes `coeff * product(monomial)` to
@@ -361,38 +420,20 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
         constant: Constant,
     },
     /// Rotate-left `src` (of type `ty`) by `n` bit positions.
-    Rol {
-        src: Var,
-        ty: Ty,
-        n: usize,
-    },
+    Rol { src: Var, ty: Ty, n: usize },
     /// Rotate-right `src` (of type `ty`) by `n` bit positions.
-    Ror {
-        src: Var,
-        ty: Ty,
-        n: usize,
-    },
+    Ror { src: Var, ty: Ty, n: usize },
     /// Concatenate `parts` in order (LSB-first) into a wider value of type `ty`.
-    Merge {
-        parts: Vec<Var>,
-        ty: Ty,
-    },
+    Merge { parts: Vec<Var>, ty: Ty },
     /// Broadcast a single-bit value across every bit position of type `ty`.
-    Splat {
-        src: Var,
-        ty: Ty,
-    },
+    Splat { src: Var, ty: Ty },
     /// Arbitrary bit shuffle: assemble an output from individually selected bits.
     ///
     /// `result_bits[i] = (bit_idx, var)` — bit `i` of the output is taken
     /// from bit `bit_idx` of `var`.  Length equals the output bit-width.
-    Shuffle {
-        result_bits: Vec<(u8, Var)>,
-        ty: Ty,
-    },
+    Shuffle { result_bits: Vec<(u8, Var)>, ty: Ty },
 
     // ---- External access primitives ----------------------------------------
-
     /// Invoke a named pure oracle, producing a multi-output aggregate result.
     ///
     /// The result type is `IrType::Tuple(output_tys)`, pre-interned as
@@ -415,11 +456,7 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     ///
     /// `call` must be the SSA var produced by an `OracleCall` in the same block.
     /// `ty` must equal `oracle_call.output_tys[idx]`.
-    OracleOutput {
-        call: Var,
-        idx: usize,
-        ty: Ty,
-    },
+    OracleOutput { call: Var, idx: usize, ty: Ty },
 
     /// Conditionally invoke a named impure action, producing a multi-output aggregate result.
     ///
@@ -443,15 +480,26 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
         result_ty: Ty,
     },
 
+    /// Conditionally invoke an action and store every declared result directly.
+    ///
+    /// `targets` has exactly one entry per `output_tys` item.  If `guard` is
+    /// false, the corresponding fallback is written instead.  This is the
+    /// effect-only replacement for the legacy `ActionCall`/`ActionOutput`
+    /// aggregate projection pair; it deliberately has no useful SSA result.
+    ActionStore {
+        name: alloc::string::String,
+        guard: Var,
+        args: Vec<Var>,
+        fallbacks: Vec<Var>,
+        output_tys: Vec<Ty>,
+        targets: Vec<ActionTarget<Addr, Stor>>,
+    },
+
     /// Project output `idx` from an [`ActionCall`] result var.
     ///
     /// `call` must be the SSA var produced by an `ActionCall` in the same block.
     /// `ty` must equal `action_call.output_tys[idx]`.
-    ActionOutput {
-        call: Var,
-        idx: usize,
-        ty: Ty,
-    },
+    ActionOutput { call: Var, idx: usize, ty: Ty },
 
     /// Produce a fresh random value drawn uniformly from the type’s domain.
     ///
@@ -487,36 +535,70 @@ impl<Var: Ord, Ty, Stor> Stmt<Var, Var, Ty, Stor> {
                 ty: ty_fn(ctx, ty)?,
                 addr: go(ctx, addr)?,
             },
-            Stmt::StorageWrite { storage, src, ty, addr } => Stmt::StorageWrite {
+            Stmt::StorageWrite {
+                storage,
+                src,
+                ty,
+                addr,
+            } => Stmt::StorageWrite {
                 storage: stor_fn(ctx, storage)?,
                 src: go(ctx, src)?,
                 ty: ty_fn(ctx, ty)?,
                 addr: go(ctx, addr)?,
             },
             Stmt::Const(c, ty) => Stmt::Const(c, ty_fn(ctx, ty)?),
-            Stmt::Transmute { src, src_ty, dst_ty } => Stmt::Transmute {
+            Stmt::Transmute {
+                src,
+                src_ty,
+                dst_ty,
+            } => Stmt::Transmute {
                 src: go(ctx, src)?,
                 src_ty: ty_fn(ctx, src_ty)?,
                 dst_ty: ty_fn(ctx, dst_ty)?,
             },
-            Stmt::Poly { ty, coeffs, constant } => {
+            Stmt::Poly {
+                ty,
+                coeffs,
+                constant,
+            } => {
                 let ty = ty_fn(ctx, ty)?;
                 let coeffs = coeffs
                     .into_iter()
                     .map(|(mono, coeff)| {
-                        let mono = mono.into_iter().map(|v| go(ctx, v)).collect::<Result<Vec<NV>, E>>()?;
+                        let mono = mono
+                            .into_iter()
+                            .map(|v| go(ctx, v))
+                            .collect::<Result<Vec<NV>, E>>()?;
                         Ok((mono, coeff))
                     })
                     .collect::<Result<BTreeMap<Vec<NV>, u8>, E>>()?;
-                Stmt::Poly { ty, coeffs, constant }
+                Stmt::Poly {
+                    ty,
+                    coeffs,
+                    constant,
+                }
             }
-            Stmt::Rol { src, ty, n } => Stmt::Rol { src: go(ctx, src)?, ty: ty_fn(ctx, ty)?, n },
-            Stmt::Ror { src, ty, n } => Stmt::Ror { src: go(ctx, src)?, ty: ty_fn(ctx, ty)?, n },
+            Stmt::Rol { src, ty, n } => Stmt::Rol {
+                src: go(ctx, src)?,
+                ty: ty_fn(ctx, ty)?,
+                n,
+            },
+            Stmt::Ror { src, ty, n } => Stmt::Ror {
+                src: go(ctx, src)?,
+                ty: ty_fn(ctx, ty)?,
+                n,
+            },
             Stmt::Merge { parts, ty } => Stmt::Merge {
-                parts: parts.into_iter().map(|v| go(ctx, v)).collect::<Result<Vec<NV>, E>>()?,
+                parts: parts
+                    .into_iter()
+                    .map(|v| go(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
                 ty: ty_fn(ctx, ty)?,
             },
-            Stmt::Splat { src, ty } => Stmt::Splat { src: go(ctx, src)?, ty: ty_fn(ctx, ty)? },
+            Stmt::Splat { src, ty } => Stmt::Splat {
+                src: go(ctx, src)?,
+                ty: ty_fn(ctx, ty)?,
+            },
             Stmt::Shuffle { result_bits, ty } => Stmt::Shuffle {
                 result_bits: result_bits
                     .into_iter()
@@ -524,29 +606,93 @@ impl<Var: Ord, Ty, Stor> Stmt<Var, Var, Ty, Stor> {
                     .collect::<Result<Vec<(u8, NV)>, E>>()?,
                 ty: ty_fn(ctx, ty)?,
             },
-            Stmt::OracleCall { name, args, output_tys, result_ty } => Stmt::OracleCall {
+            Stmt::OracleCall {
                 name,
-                args: args.into_iter().map(|v| go(ctx, v)).collect::<Result<Vec<NV>, E>>()?,
-                output_tys: output_tys.into_iter().map(|t| ty_fn(ctx, t)).collect::<Result<Vec<NT>, E>>()?,
+                args,
+                output_tys,
+                result_ty,
+            } => Stmt::OracleCall {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|v| go(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
+                output_tys: output_tys
+                    .into_iter()
+                    .map(|t| ty_fn(ctx, t))
+                    .collect::<Result<Vec<NT>, E>>()?,
                 result_ty: ty_fn(ctx, result_ty)?,
             },
-            Stmt::OracleOutput { call, idx, ty } => {
-                Stmt::OracleOutput { call: go(ctx, call)?, idx, ty: ty_fn(ctx, ty)? }
-            }
-            Stmt::ActionCall { name, guard, args, fallbacks, output_tys, result_ty } => {
-                Stmt::ActionCall {
-                    name,
-                    guard: go(ctx, guard)?,
-                    args: args.into_iter().map(|v| go(ctx, v)).collect::<Result<Vec<NV>, E>>()?,
-                    fallbacks: fallbacks.into_iter().map(|v| go(ctx, v)).collect::<Result<Vec<NV>, E>>()?,
-                    output_tys: output_tys.into_iter().map(|t| ty_fn(ctx, t)).collect::<Result<Vec<NT>, E>>()?,
-                    result_ty: ty_fn(ctx, result_ty)?,
-                }
-            }
-            Stmt::ActionOutput { call, idx, ty } => {
-                Stmt::ActionOutput { call: go(ctx, call)?, idx, ty: ty_fn(ctx, ty)? }
-            }
-            Stmt::Rng { name, ty } => Stmt::Rng { name, ty: ty_fn(ctx, ty)? },
+            Stmt::OracleOutput { call, idx, ty } => Stmt::OracleOutput {
+                call: go(ctx, call)?,
+                idx,
+                ty: ty_fn(ctx, ty)?,
+            },
+            Stmt::ActionCall {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                result_ty,
+            } => Stmt::ActionCall {
+                name,
+                guard: go(ctx, guard)?,
+                args: args
+                    .into_iter()
+                    .map(|v| go(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
+                fallbacks: fallbacks
+                    .into_iter()
+                    .map(|v| go(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
+                output_tys: output_tys
+                    .into_iter()
+                    .map(|t| ty_fn(ctx, t))
+                    .collect::<Result<Vec<NT>, E>>()?,
+                result_ty: ty_fn(ctx, result_ty)?,
+            },
+            Stmt::ActionStore {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                targets,
+            } => Stmt::ActionStore {
+                name,
+                guard: go(ctx, guard)?,
+                args: args
+                    .into_iter()
+                    .map(|v| go(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
+                fallbacks: fallbacks
+                    .into_iter()
+                    .map(|v| go(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
+                output_tys: output_tys
+                    .into_iter()
+                    .map(|t| ty_fn(ctx, t))
+                    .collect::<Result<Vec<NT>, E>>()?,
+                targets: targets
+                    .into_iter()
+                    .map(|target| {
+                        Ok(ActionTarget {
+                            storage: stor_fn(ctx, target.storage)?,
+                            addr: go(ctx, target.addr)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, E>>()?,
+            },
+            Stmt::ActionOutput { call, idx, ty } => Stmt::ActionOutput {
+                call: go(ctx, call)?,
+                idx,
+                ty: ty_fn(ctx, ty)?,
+            },
+            Stmt::Rng { name, ty } => Stmt::Rng {
+                name,
+                ty: ty_fn(ctx, ty)?,
+            },
         })
     }
 }
@@ -583,19 +729,32 @@ impl<Var, Addr, Ty, Stor> Stmt<Var, Addr, Ty, Stor> {
                 ty: ty_fn(ctx, ty)?,
                 addr: addr_fn(ctx, addr)?,
             },
-            Stmt::StorageWrite { storage, src, ty, addr } => Stmt::StorageWrite {
+            Stmt::StorageWrite {
+                storage,
+                src,
+                ty,
+                addr,
+            } => Stmt::StorageWrite {
                 storage: stor_fn(ctx, storage)?,
                 src: var_fn(ctx, src)?,
                 ty: ty_fn(ctx, ty)?,
                 addr: addr_fn(ctx, addr)?,
             },
             Stmt::Const(c, ty) => Stmt::Const(c, ty_fn(ctx, ty)?),
-            Stmt::Transmute { src, src_ty, dst_ty } => Stmt::Transmute {
+            Stmt::Transmute {
+                src,
+                src_ty,
+                dst_ty,
+            } => Stmt::Transmute {
                 src: var_fn(ctx, src)?,
                 src_ty: ty_fn(ctx, src_ty)?,
                 dst_ty: ty_fn(ctx, dst_ty)?,
             },
-            Stmt::Poly { ty, coeffs, constant } => {
+            Stmt::Poly {
+                ty,
+                coeffs,
+                constant,
+            } => {
                 let ty = ty_fn(ctx, ty)?;
                 let coeffs = coeffs
                     .into_iter()
@@ -607,7 +766,11 @@ impl<Var, Addr, Ty, Stor> Stmt<Var, Addr, Ty, Stor> {
                         Ok((mono, coeff))
                     })
                     .collect::<Result<BTreeMap<Vec<NV>, u8>, E>>()?;
-                Stmt::Poly { ty, coeffs, constant }
+                Stmt::Poly {
+                    ty,
+                    coeffs,
+                    constant,
+                }
             }
             Stmt::Rol { src, ty, n } => Stmt::Rol {
                 src: var_fn(ctx, src)?,
@@ -620,7 +783,10 @@ impl<Var, Addr, Ty, Stor> Stmt<Var, Addr, Ty, Stor> {
                 n,
             },
             Stmt::Merge { parts, ty } => Stmt::Merge {
-                parts: parts.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<Vec<NV>, E>>()?,
+                parts: parts
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
                 ty: ty_fn(ctx, ty)?,
             },
             Stmt::Splat { src, ty } => Stmt::Splat {
@@ -634,10 +800,21 @@ impl<Var, Addr, Ty, Stor> Stmt<Var, Addr, Ty, Stor> {
                     .collect::<Result<Vec<(u8, NV)>, E>>()?,
                 ty: ty_fn(ctx, ty)?,
             },
-            Stmt::OracleCall { name, args, output_tys, result_ty } => Stmt::OracleCall {
+            Stmt::OracleCall {
                 name,
-                args: args.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<Vec<NV>, E>>()?,
-                output_tys: output_tys.into_iter().map(|t| ty_fn(ctx, t)).collect::<Result<Vec<NT>, E>>()?,
+                args,
+                output_tys,
+                result_ty,
+            } => Stmt::OracleCall {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
+                output_tys: output_tys
+                    .into_iter()
+                    .map(|t| ty_fn(ctx, t))
+                    .collect::<Result<Vec<NT>, E>>()?,
                 result_ty: ty_fn(ctx, result_ty)?,
             },
             Stmt::OracleOutput { call, idx, ty } => Stmt::OracleOutput {
@@ -645,22 +822,71 @@ impl<Var, Addr, Ty, Stor> Stmt<Var, Addr, Ty, Stor> {
                 idx,
                 ty: ty_fn(ctx, ty)?,
             },
-            Stmt::ActionCall { name, guard, args, fallbacks, output_tys, result_ty } => {
-                Stmt::ActionCall {
-                    name,
-                    guard: var_fn(ctx, guard)?,
-                    args: args.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<Vec<NV>, E>>()?,
-                    fallbacks: fallbacks.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<Vec<NV>, E>>()?,
-                    output_tys: output_tys.into_iter().map(|t| ty_fn(ctx, t)).collect::<Result<Vec<NT>, E>>()?,
-                    result_ty: ty_fn(ctx, result_ty)?,
-                }
-            }
+            Stmt::ActionCall {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                result_ty,
+            } => Stmt::ActionCall {
+                name,
+                guard: var_fn(ctx, guard)?,
+                args: args
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
+                fallbacks: fallbacks
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
+                output_tys: output_tys
+                    .into_iter()
+                    .map(|t| ty_fn(ctx, t))
+                    .collect::<Result<Vec<NT>, E>>()?,
+                result_ty: ty_fn(ctx, result_ty)?,
+            },
+            Stmt::ActionStore {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                targets,
+            } => Stmt::ActionStore {
+                name,
+                guard: var_fn(ctx, guard)?,
+                args: args
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
+                fallbacks: fallbacks
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<Vec<NV>, E>>()?,
+                output_tys: output_tys
+                    .into_iter()
+                    .map(|t| ty_fn(ctx, t))
+                    .collect::<Result<Vec<NT>, E>>()?,
+                targets: targets
+                    .into_iter()
+                    .map(|target| {
+                        Ok(ActionTarget {
+                            storage: stor_fn(ctx, target.storage)?,
+                            addr: addr_fn(ctx, target.addr)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, E>>()?,
+            },
             Stmt::ActionOutput { call, idx, ty } => Stmt::ActionOutput {
                 call: var_fn(ctx, call)?,
                 idx,
                 ty: ty_fn(ctx, ty)?,
             },
-            Stmt::Rng { name, ty } => Stmt::Rng { name, ty: ty_fn(ctx, ty)? },
+            Stmt::Rng { name, ty } => Stmt::Rng {
+                name,
+                ty: ty_fn(ctx, ty)?,
+            },
         })
     }
 
@@ -682,54 +908,115 @@ impl<Var, Addr, Ty, Stor> Stmt<Var, Addr, Ty, Stor> {
         Var: Ord,
     {
         match self {
-            Stmt::StorageRead { storage, ty, addr } => {
-                Stmt::StorageRead { storage, ty, addr }
-            }
-            Stmt::StorageWrite { storage, src, ty, addr } => {
-                Stmt::StorageWrite { storage, src, ty, addr }
-            }
+            Stmt::StorageRead { storage, ty, addr } => Stmt::StorageRead { storage, ty, addr },
+            Stmt::StorageWrite {
+                storage,
+                src,
+                ty,
+                addr,
+            } => Stmt::StorageWrite {
+                storage,
+                src,
+                ty,
+                addr,
+            },
             Stmt::Const(c, ty) => Stmt::Const(*c, ty),
-            Stmt::Transmute { src, src_ty, dst_ty } => {
-                Stmt::Transmute { src, src_ty, dst_ty }
-            }
-            Stmt::Poly { ty, coeffs, constant } => {
+            Stmt::Transmute {
+                src,
+                src_ty,
+                dst_ty,
+            } => Stmt::Transmute {
+                src,
+                src_ty,
+                dst_ty,
+            },
+            Stmt::Poly {
+                ty,
+                coeffs,
+                constant,
+            } => {
                 let coeffs = coeffs
                     .iter()
                     .map(|(mono, coeff)| (mono.iter().collect::<Vec<&Var>>(), *coeff))
                     .collect::<BTreeMap<Vec<&Var>, u8>>();
-                Stmt::Poly { ty, coeffs, constant: *constant }
+                Stmt::Poly {
+                    ty,
+                    coeffs,
+                    constant: *constant,
+                }
             }
             Stmt::Rol { src, ty, n } => Stmt::Rol { src, ty, n: *n },
             Stmt::Ror { src, ty, n } => Stmt::Ror { src, ty, n: *n },
-            Stmt::Merge { parts, ty } => Stmt::Merge { parts: parts.iter().collect(), ty },
+            Stmt::Merge { parts, ty } => Stmt::Merge {
+                parts: parts.iter().collect(),
+                ty,
+            },
             Stmt::Splat { src, ty } => Stmt::Splat { src, ty },
             Stmt::Shuffle { result_bits, ty } => Stmt::Shuffle {
                 result_bits: result_bits.iter().map(|(b, v)| (*b, v)).collect(),
                 ty,
             },
-            Stmt::OracleCall { name, args, output_tys, result_ty } => Stmt::OracleCall {
+            Stmt::OracleCall {
+                name,
+                args,
+                output_tys,
+                result_ty,
+            } => Stmt::OracleCall {
                 name: name.clone(),
                 args: args.iter().collect(),
                 output_tys: output_tys.iter().collect(),
                 result_ty,
             },
-            Stmt::OracleOutput { call, idx, ty } => {
-                Stmt::OracleOutput { call, idx: *idx, ty }
-            }
-            Stmt::ActionCall { name, guard, args, fallbacks, output_tys, result_ty } => {
-                Stmt::ActionCall {
-                    name: name.clone(),
-                    guard,
-                    args: args.iter().collect(),
-                    fallbacks: fallbacks.iter().collect(),
-                    output_tys: output_tys.iter().collect(),
-                    result_ty,
-                }
-            }
-            Stmt::ActionOutput { call, idx, ty } => {
-                Stmt::ActionOutput { call, idx: *idx, ty }
-            }
-            Stmt::Rng { name, ty } => Stmt::Rng { name: name.clone(), ty },
+            Stmt::OracleOutput { call, idx, ty } => Stmt::OracleOutput {
+                call,
+                idx: *idx,
+                ty,
+            },
+            Stmt::ActionCall {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                result_ty,
+            } => Stmt::ActionCall {
+                name: name.clone(),
+                guard,
+                args: args.iter().collect(),
+                fallbacks: fallbacks.iter().collect(),
+                output_tys: output_tys.iter().collect(),
+                result_ty,
+            },
+            Stmt::ActionStore {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                targets,
+            } => Stmt::ActionStore {
+                name: name.clone(),
+                guard,
+                args: args.iter().collect(),
+                fallbacks: fallbacks.iter().collect(),
+                output_tys: output_tys.iter().collect(),
+                targets: targets
+                    .iter()
+                    .map(|target| ActionTarget {
+                        storage: &target.storage,
+                        addr: &target.addr,
+                    })
+                    .collect(),
+            },
+            Stmt::ActionOutput { call, idx, ty } => Stmt::ActionOutput {
+                call,
+                idx: *idx,
+                ty,
+            },
+            Stmt::Rng { name, ty } => Stmt::Rng {
+                name: name.clone(),
+                ty,
+            },
         }
     }
 }
@@ -791,7 +1078,9 @@ impl TypeRemapper {
                     .iter()
                     .map(|p| Self::remap_one(p.0 as usize, guest, host, map, done))
                     .collect();
-                IrType::Block { params: params_host }
+                IrType::Block {
+                    params: params_host,
+                }
             }
             IrType::Func { params, results } => {
                 let params_host: alloc::vec::Vec<TypeId> = params
@@ -802,7 +1091,10 @@ impl TypeRemapper {
                     .iter()
                     .map(|r| Self::remap_one(r.0 as usize, guest, host, map, done))
                     .collect();
-                IrType::Func { params: params_host, results: results_host }
+                IrType::Func {
+                    params: params_host,
+                    results: results_host,
+                }
             }
         };
         let host_id = host.intern(remapped);
@@ -834,7 +1126,11 @@ impl TypeRemapper {
                 *src_ty = self.remap(*src_ty);
                 *dst_ty = self.remap(*dst_ty);
             }
-            Stmt::Poly { ty, coeffs: _, constant: _ } => {
+            Stmt::Poly {
+                ty,
+                coeffs: _,
+                constant: _,
+            } => {
                 *ty = self.remap(*ty);
             }
             Stmt::Rol { ty, .. } | Stmt::Ror { ty, .. } => {
@@ -849,7 +1145,11 @@ impl TypeRemapper {
             Stmt::Shuffle { ty, .. } => {
                 *ty = self.remap(*ty);
             }
-            Stmt::OracleCall { output_tys, result_ty, .. } => {
+            Stmt::OracleCall {
+                output_tys,
+                result_ty,
+                ..
+            } => {
                 for t in output_tys.iter_mut() {
                     *t = self.remap(*t);
                 }
@@ -858,11 +1158,20 @@ impl TypeRemapper {
             Stmt::OracleOutput { ty, .. } => {
                 *ty = self.remap(*ty);
             }
-            Stmt::ActionCall { output_tys, result_ty, .. } => {
+            Stmt::ActionCall {
+                output_tys,
+                result_ty,
+                ..
+            } => {
                 for t in output_tys.iter_mut() {
                     *t = self.remap(*t);
                 }
                 *result_ty = self.remap(*result_ty);
+            }
+            Stmt::ActionStore { output_tys, .. } => {
+                for t in output_tys.iter_mut() {
+                    *t = self.remap(*t);
+                }
             }
             Stmt::ActionOutput { ty, .. } => {
                 *ty = self.remap(*ty);
@@ -875,14 +1184,22 @@ impl TypeRemapper {
 
     /// Remap [`TypeId`]s inside an [`OracleDecl`].
     pub fn remap_oracle_decl(&self, decl: &mut OracleDecl) {
-        for t in decl.params.iter_mut() { *t = self.remap(*t); }
-        for t in decl.results.iter_mut() { *t = self.remap(*t); }
+        for t in decl.params.iter_mut() {
+            *t = self.remap(*t);
+        }
+        for t in decl.results.iter_mut() {
+            *t = self.remap(*t);
+        }
     }
 
     /// Remap [`TypeId`]s inside an [`ActionDecl`].
     pub fn remap_action_decl(&self, decl: &mut ActionDecl) {
-        for t in decl.params.iter_mut() { *t = self.remap(*t); }
-        for t in decl.results.iter_mut() { *t = self.remap(*t); }
+        for t in decl.params.iter_mut() {
+            *t = self.remap(*t);
+        }
+        for t in decl.results.iter_mut() {
+            *t = self.remap(*t);
+        }
     }
 
     /// Remap the [`TypeId`] inside an [`RngDecl`].
@@ -935,7 +1252,10 @@ impl StorageAllocator {
 /// `side` is never touched by provenance mapping — the two annotations are
 /// independent axes (see the crate-level docs of `volar-side`).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct Node<T, P: Clone = ()> {
     pub kind: T,
     pub prov: P,
@@ -952,7 +1272,11 @@ impl<T, P: Clone> Node<T, P> {
     /// unchanged — the right operation whenever the payload `T` does not
     /// itself mention `P` (the common case for SSA/arena statement types).
     pub fn map_prov<Q: Clone>(self, f: impl FnOnce(P) -> Q) -> Node<T, Q> {
-        Node { kind: self.kind, prov: f(self.prov), side: self.side }
+        Node {
+            kind: self.kind,
+            prov: f(self.prov),
+            side: self.side,
+        }
     }
 }
 
@@ -979,6 +1303,10 @@ impl<T, P: Clone> Node<T, P> {
     where
         T: MapKind<P, Q>,
     {
-        Node { kind: self.kind.map_kind(f), prov: f(self.prov), side: self.side }
+        Node {
+            kind: self.kind.map_kind(f),
+            prov: f(self.prov),
+            side: self.side,
+        }
     }
 }

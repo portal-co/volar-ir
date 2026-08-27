@@ -6,12 +6,16 @@
 //! printing the resulting LLVM IR and checking that it compiles/verifies.
 
 use inkwell::context::Context;
-use volar_llvm_backend::LlvmBackend;
 use volar_lir::{BranchTarget, IcmpPred, LirTarget, LirType, StackAllocExt};
+use volar_llvm_backend::LlvmBackend;
 
 fn display_ir(ir: &str) -> String {
     let log = volar_log::LlmtrimLogger::from_env();
-    if log.autominify { volar_log::minify_llvm_ir(ir) } else { ir.to_owned() }
+    if log.autominify {
+        volar_log::minify_llvm_ir(ir)
+    } else {
+        ir.to_owned()
+    }
 }
 
 // ============================================================================
@@ -55,7 +59,11 @@ fn test_iconst_return() {
     let m = b.finish();
     m.verify().expect("verify");
     let ir = m.print_to_string().to_string();
-    assert!(ir.contains("ret i64 42"), "expected 'ret i64 42' in:\n{}", display_ir(&ir));
+    assert!(
+        ir.contains("ret i64 42"),
+        "expected 'ret i64 42' in:\n{}",
+        display_ir(&ir)
+    );
 }
 
 // ============================================================================
@@ -151,7 +159,11 @@ fn test_not_bool() {
     m.verify().expect("verify");
     // bool NOT should be xor with true (i1 1)
     let ir = m.print_to_string().to_string();
-    assert!(ir.contains("xor i1"), "expected xor i1 for bool not in:\n{}", display_ir(&ir));
+    assert!(
+        ir.contains("xor i1"),
+        "expected xor i1 for bool not in:\n{}",
+        display_ir(&ir)
+    );
 }
 
 #[test]
@@ -201,7 +213,11 @@ fn test_icmp_signed() {
     let m = b.finish();
     m.verify().expect("verify");
     let ir = m.print_to_string().to_string();
-    assert!(ir.contains("icmp slt"), "expected 'icmp slt' in:\n{}", display_ir(&ir));
+    assert!(
+        ir.contains("icmp slt"),
+        "expected 'icmp slt' in:\n{}",
+        display_ir(&ir)
+    );
 }
 
 // ============================================================================
@@ -220,7 +236,11 @@ fn test_zext() {
     let m = b.finish();
     m.verify().expect("verify");
     let ir = m.print_to_string().to_string();
-    assert!(ir.contains("zext i8"), "expected 'zext i8' in:\n{}", display_ir(&ir));
+    assert!(
+        ir.contains("zext i8"),
+        "expected 'zext i8' in:\n{}",
+        display_ir(&ir)
+    );
 }
 
 #[test]
@@ -235,7 +255,11 @@ fn test_sext() {
     let m = b.finish();
     m.verify().expect("verify");
     let ir = m.print_to_string().to_string();
-    assert!(ir.contains("sext i8"), "expected 'sext i8' in:\n{}", display_ir(&ir));
+    assert!(
+        ir.contains("sext i8"),
+        "expected 'sext i8' in:\n{}",
+        display_ir(&ir)
+    );
 }
 
 #[test]
@@ -294,7 +318,13 @@ fn test_block_param_phi() {
     let cond = b.icmp(IcmpPred::Eq, x, zero);
     let one = b.iconst(LirType::U64, 1);
     let two = b.iconst(LirType::U64, 2);
-    b.branch(cond, merge, BranchTarget::args(vec![one]), merge, BranchTarget::args(vec![two]));
+    b.branch(
+        cond,
+        merge,
+        BranchTarget::args(vec![one]),
+        merge,
+        BranchTarget::args(vec![two]),
+    );
 
     b.switch_to_block(merge);
     b.ret(&[p]);
@@ -303,7 +333,11 @@ fn test_block_param_phi() {
     let m = b.finish();
     m.verify().expect("verify");
     let ir = m.print_to_string().to_string();
-    assert!(ir.contains("phi i64"), "expected phi node in:\n{}", display_ir(&ir));
+    assert!(
+        ir.contains("phi i64"),
+        "expected phi node in:\n{}",
+        display_ir(&ir)
+    );
 }
 
 /// Loop: count down from n to 0, return 0.
@@ -334,7 +368,13 @@ fn test_loop_phi() {
     let cond = b.icmp(IcmpPred::Eq, i.clone(), zero.clone());
     let one = b.iconst(LirType::U64, 1);
     let i_minus_1 = b.sub(i, one);
-    b.branch(cond, exit_block, BranchTarget::args(vec![]), loop_block, BranchTarget::args(vec![i_minus_1]));
+    b.branch(
+        cond,
+        exit_block,
+        BranchTarget::args(vec![]),
+        loop_block,
+        BranchTarget::args(vec![i_minus_1]),
+    );
 
     b.switch_to_block(exit_block);
     b.ret(&[zero]);
@@ -464,8 +504,16 @@ fn test_call_extern_dedup() {
     let ir = m.print_to_string().to_string();
     let count = ir.matches("dup_extern").count();
     // 1 declaration + 2 call sites = 3 occurrences, but only 1 `declare`
-    assert_eq!(ir.matches("declare").filter(|_| true).count(), 1, "ir:\n{ir}");
-    assert!(count >= 3, "expected 3+ references to dup_extern, got {count}:\n{}", display_ir(&ir));
+    assert_eq!(
+        ir.matches("declare").filter(|_| true).count(),
+        1,
+        "ir:\n{ir}"
+    );
+    assert!(
+        count >= 3,
+        "expected 3+ references to dup_extern, got {count}:\n{}",
+        display_ir(&ir)
+    );
 }
 
 // ============================================================================
@@ -484,11 +532,7 @@ fn test_multiple_functions() {
     b.end_function();
 
     // Second function: add two u32
-    let (e2, pvs2) = b.begin_function(
-        "add_u32",
-        &[LirType::U32, LirType::U32],
-        Some(LirType::U32),
-    );
+    let (e2, pvs2) = b.begin_function("add_u32", &[LirType::U32, LirType::U32], Some(LirType::U32));
     b.switch_to_block(e2);
     let sum = b.add(pvs2[0][0].clone(), pvs2[1][0].clone());
     b.ret(&[sum]);
@@ -533,7 +577,10 @@ fn test_name_config_remap() {
 
     let mut remap = BTreeMap::new();
     remap.insert("add".to_string(), "vector_add".to_string());
-    let cfg = NameConfig { prefix: "pfx_".to_string(), remap };
+    let cfg = NameConfig {
+        prefix: "pfx_".to_string(),
+        remap,
+    };
 
     let ctx = Context::create();
     let mut b = LlvmBackend::new(&ctx, "test_remap").with_name_config(cfg);

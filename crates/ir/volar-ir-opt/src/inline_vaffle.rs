@@ -69,7 +69,9 @@ use alloc::{
 };
 use core::convert::Infallible;
 
-use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, Target, Terminator, Value, ValueId};
+use vaffle::{
+    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, Target, Terminator, Value, ValueId,
+};
 use volar_ir_common::{Node, TypeId};
 
 // ============================================================================
@@ -105,7 +107,14 @@ pub fn inline_vaffle_module<P: Clone>(module: &mut Module<P>, budget: InlineBudg
         if spent >= budget.total_budget {
             break;
         }
-        inline_calls_in_function(module, func_idx, &recursive, &budget, &mut spent, &mut total_inlined);
+        inline_calls_in_function(
+            module,
+            func_idx,
+            &recursive,
+            &budget,
+            &mut spent,
+            &mut total_inlined,
+        );
     }
 
     total_inlined
@@ -223,7 +232,9 @@ fn inline_calls_in_function<P: Clone>(
         }
 
         let next = {
-            let FuncDecl::Body(body) = &module.funcs[func_idx] else { return };
+            let FuncDecl::Body(body) = &module.funcs[func_idx] else {
+                return;
+            };
             body.values[..original_value_count]
                 .iter()
                 .enumerate()
@@ -231,7 +242,9 @@ fn inline_calls_in_function<P: Clone>(
                     if processed.contains(&i) {
                         return None;
                     }
-                    let Value::Call { func, .. } = &node.kind else { return None };
+                    let Value::Call { func, .. } = &node.kind else {
+                        return None;
+                    };
                     let callee_idx = func.0;
                     if callee_idx == func_idx || recursive.contains(&callee_idx) {
                         return None;
@@ -245,7 +258,9 @@ fn inline_calls_in_function<P: Clone>(
                 })
         };
 
-        let Some((call_vid, callee_id)) = next else { return };
+        let Some((call_vid, callee_id)) = next else {
+            return;
+        };
         processed.insert(call_vid.0);
 
         let (callee_body, sig_id) = match &module.funcs[callee_id.0] {
@@ -261,7 +276,12 @@ fn inline_calls_in_function<P: Clone>(
 }
 
 fn clone_func_body<P: Clone>(b: &FuncBody<P>) -> FuncBody<P> {
-    FuncBody { sig: b.sig, blocks: b.blocks.clone(), values: b.values.clone(), entry: b.entry }
+    FuncBody {
+        sig: b.sig,
+        blocks: b.blocks.clone(),
+        values: b.values.clone(),
+        entry: b.entry,
+    }
 }
 
 // ============================================================================
@@ -297,7 +317,9 @@ fn splice_call<P: Clone>(
     let added = remapped_values.len();
 
     let (call_args, call_block_id, call_stmt_pos) = {
-        let FuncDecl::Body(body) = &module.funcs[func_idx] else { unreachable!() };
+        let FuncDecl::Body(body) = &module.funcs[func_idx] else {
+            unreachable!()
+        };
         let Value::Call { args, .. } = &body.values[call_vid.0].kind else {
             panic!("inline_vaffle::splice_call: call_vid does not point at a Value::Call");
         };
@@ -309,7 +331,9 @@ fn splice_call<P: Clone>(
     // Existing `Value::Output { value: call_vid, idx }` nodes, keyed by
     // idx — these get repurposed in place as the continuation's params.
     let existing_outputs: BTreeMap<usize, ValueId> = {
-        let FuncDecl::Body(body) = &module.funcs[func_idx] else { unreachable!() };
+        let FuncDecl::Body(body) = &module.funcs[func_idx] else {
+            unreachable!()
+        };
         body.values
             .iter()
             .enumerate()
@@ -321,7 +345,9 @@ fn splice_call<P: Clone>(
     };
     let repurposed: BTreeSet<usize> = existing_outputs.values().map(|v| v.0).collect();
 
-    let FuncDecl::Body(body) = &mut module.funcs[func_idx] else { unreachable!() };
+    let FuncDecl::Body(body) = &mut module.funcs[func_idx] else {
+        unreachable!()
+    };
 
     body.values.extend(remapped_values);
     let callee_block_start = body.blocks.len();
@@ -335,12 +361,20 @@ fn splice_call<P: Clone>(
     let mut cont_params: Vec<(ValueId, TypeId)> = Vec::with_capacity(callee_results.len());
     for (k, ty) in callee_results.iter().enumerate() {
         let param_vid = if let Some(&vid) = existing_outputs.get(&k) {
-            body.values[vid.0].kind = Value::Param { block: cont_block_id, ty: *ty, idx: k };
+            body.values[vid.0].kind = Value::Param {
+                block: cont_block_id,
+                ty: *ty,
+                idx: k,
+            };
             vid
         } else {
             let vid = ValueId(body.values.len());
             body.values.push(Node::new(
-                Value::Param { block: cont_block_id, ty: *ty, idx: k },
+                Value::Param {
+                    block: cont_block_id,
+                    ty: *ty,
+                    idx: k,
+                },
                 call_prov.clone(),
                 call_side,
             ));
@@ -365,16 +399,28 @@ fn splice_call<P: Clone>(
         );
         let old_term = core::mem::replace(
             &mut b.terminator,
-            Terminator::Jump(Target { block: remapped_entry, args: call_args, reentry: None }),
+            Terminator::Jump(Target {
+                block: remapped_entry,
+                args: call_args,
+                reentry: None,
+            }),
         );
         (tail, old_term)
     };
-    body.blocks.push(Block { params: cont_params, stmts: cont_stmts, terminator: old_terminator });
+    body.blocks.push(Block {
+        params: cont_params,
+        stmts: cont_stmts,
+        terminator: old_terminator,
+    });
 
     for b in &mut body.blocks[callee_block_start..callee_block_start + callee_body.blocks.len()] {
         if let Terminator::Return { values } = &b.terminator {
             let values = values.clone();
-            b.terminator = Terminator::Jump(Target { block: cont_block_id, args: values, reentry: None });
+            b.terminator = Terminator::Jump(Target {
+                block: cont_block_id,
+                args: values,
+                reentry: None,
+            });
         }
     }
 
@@ -392,7 +438,9 @@ fn find_call_site<P: Clone>(body: &FuncBody<P>, call_vid: ValueId) -> Option<(Bl
 
 fn stack_slot_high_water<P: Clone>(body: &FuncBody<P>) -> u64 {
     body.values.iter().fold(0u64, |acc, n| match &n.kind {
-        Value::StackAlloc { count, base_slot, .. } => acc.max(base_slot + *count as u64),
+        Value::StackAlloc {
+            count, base_slot, ..
+        } => acc.max(base_slot + *count as u64),
         _ => acc,
     })
 }
@@ -410,14 +458,28 @@ fn remap_callee_node<P: Clone>(
     let shifted = node
         .kind
         .clone()
-        .map(&mut (), |_, v: ValueId| Ok::<_, Infallible>(ValueId(v.0 + value_base)))
+        .map(&mut (), |_, v: ValueId| {
+            Ok::<_, Infallible>(ValueId(v.0 + value_base))
+        })
         .unwrap();
     let kind = match shifted {
-        Value::Param { block, ty, idx } => Value::Param { block: BlockId(block.0 + block_base), ty, idx },
-        Value::BlockAddr { block } => Value::BlockAddr { block: BlockId(block.0 + block_base) },
-        Value::StackAlloc { elem_ty, count, base_slot } => {
-            Value::StackAlloc { elem_ty, count, base_slot: base_slot + slot_base }
-        }
+        Value::Param { block, ty, idx } => Value::Param {
+            block: BlockId(block.0 + block_base),
+            ty,
+            idx,
+        },
+        Value::BlockAddr { block } => Value::BlockAddr {
+            block: BlockId(block.0 + block_base),
+        },
+        Value::StackAlloc {
+            elem_ty,
+            count,
+            base_slot,
+        } => Value::StackAlloc {
+            elem_ty,
+            count,
+            base_slot: base_slot + slot_base,
+        },
         other => other,
     };
     Node::new(kind, node.prov.clone(), node.side)
@@ -425,15 +487,25 @@ fn remap_callee_node<P: Clone>(
 
 fn remap_callee_block(block: &Block, value_base: usize, block_base: usize) -> Block {
     Block {
-        params: block.params.iter().map(|(vid, ty)| (ValueId(vid.0 + value_base), *ty)).collect(),
-        stmts: block.stmts.iter().map(|vid| ValueId(vid.0 + value_base)).collect(),
+        params: block
+            .params
+            .iter()
+            .map(|(vid, ty)| (ValueId(vid.0 + value_base), *ty))
+            .collect(),
+        stmts: block
+            .stmts
+            .iter()
+            .map(|vid| ValueId(vid.0 + value_base))
+            .collect(),
         terminator: remap_callee_terminator(block.terminator.clone(), value_base, block_base),
     }
 }
 
 fn remap_callee_terminator(term: Terminator, value_base: usize, block_base: usize) -> Terminator {
     let mut term = term
-        .map(&mut (), |_, v: ValueId| Ok::<_, Infallible>(ValueId(v.0 + value_base)))
+        .map(&mut (), |_, v: ValueId| {
+            Ok::<_, Infallible>(ValueId(v.0 + value_base))
+        })
         .unwrap();
 
     fn shift_target(t: &mut Target, block_base: usize) {
@@ -442,11 +514,19 @@ fn remap_callee_terminator(term: Terminator, value_base: usize, block_base: usiz
 
     match &mut term {
         Terminator::Jump(t) => shift_target(t, block_base),
-        Terminator::IfNonzero { then_target, else_target, .. } => {
+        Terminator::IfNonzero {
+            then_target,
+            else_target,
+            ..
+        } => {
             shift_target(then_target, block_base);
             shift_target(else_target, block_base);
         }
-        Terminator::Table { targets, default_target, .. } => {
+        Terminator::Table {
+            targets,
+            default_target,
+            ..
+        } => {
             for t in targets.iter_mut() {
                 shift_target(t, block_base);
             }
@@ -468,10 +548,13 @@ fn remap_callee_terminator(term: Terminator, value_base: usize, block_base: usiz
 mod tests {
     extern crate std;
     use alloc::vec;
-    use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, Target, Terminator, Value, ValueId};
+    use vaffle::{
+        Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, Target, Terminator, Value,
+        ValueId,
+    };
     use volar_ir_common::{Constant, Node, Stmt, Type, TypeId, TypeTable};
 
-    use super::{inline_vaffle_module, InlineBudget};
+    use super::{InlineBudget, inline_vaffle_module};
 
     fn empty_module() -> Module {
         Module {
@@ -494,7 +577,10 @@ mod tests {
     }
 
     fn generous_budget() -> InlineBudget {
-        InlineBudget { max_callee_values: 64, total_budget: 1024 }
+        InlineBudget {
+            max_callee_values: 64,
+            total_budget: 1024,
+        }
     }
 
     /// Whether `callee` is still called from a *live* (listed in some
@@ -519,8 +605,14 @@ mod tests {
         let u64_ty = m.types.primitive(Type::_64);
 
         // sig 0: caller () -> u64. sig 1: callee (u64) -> u64.
-        m.sigs.push(SigDecl { params: vec![], results: vec![u64_ty] });
-        m.sigs.push(SigDecl { params: vec![u64_ty], results: vec![u64_ty] });
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        m.sigs.push(SigDecl {
+            params: vec![u64_ty],
+            results: vec![u64_ty],
+        });
 
         // Callee (FuncId 1): identity function, returns its own param.
         let callee = FuncBody {
@@ -528,9 +620,19 @@ mod tests {
             blocks: vec![Block {
                 params: vec![(ValueId(0), u64_ty)],
                 stmts: vec![],
-                terminator: Terminator::Return { values: vec![ValueId(0)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(0)],
+                },
             }],
-            values: vec![Node::new(Value::Param { block: BlockId(0), ty: u64_ty, idx: 0 }, (), None)],
+            values: vec![Node::new(
+                Value::Param {
+                    block: BlockId(0),
+                    ty: u64_ty,
+                    idx: 0,
+                },
+                (),
+                None,
+            )],
             entry: BlockId(0),
         };
 
@@ -540,7 +642,14 @@ mod tests {
         let v2 = ValueId(2);
         let caller_values = vec![
             const_node(5, u64_ty),
-            Node::new(Value::Call { func: FuncId(1), args: vec![v0] }, (), None),
+            Node::new(
+                Value::Call {
+                    func: FuncId(1),
+                    args: vec![v0],
+                },
+                (),
+                None,
+            ),
             Node::new(Value::Output { value: v1, idx: 0 }, (), None),
         ];
         let caller = FuncBody {
@@ -560,8 +669,13 @@ mod tests {
         let n = inline_vaffle_module(&mut m, generous_budget());
         assert_eq!(n, 1, "expected exactly one call site inlined");
 
-        let FuncDecl::Body(caller) = &m.funcs[0] else { panic!("expected FuncDecl::Body") };
-        assert!(!has_live_call_to(caller, FuncId(1)), "Value::Call to the inlined callee should be gone");
+        let FuncDecl::Body(caller) = &m.funcs[0] else {
+            panic!("expected FuncDecl::Body")
+        };
+        assert!(
+            !has_live_call_to(caller, FuncId(1)),
+            "Value::Call to the inlined callee should be gone"
+        );
 
         // v2 (the old Output node) was repurposed in place as the
         // continuation block's param.
@@ -576,7 +690,11 @@ mod tests {
 
         match &caller.blocks[0].terminator {
             Terminator::Jump(Target { block, args, .. }) => {
-                assert_eq!(*block, BlockId(1), "should jump into the spliced callee entry");
+                assert_eq!(
+                    *block,
+                    BlockId(1),
+                    "should jump into the spliced callee entry"
+                );
                 assert_eq!(args, &vec![v0], "should pass the original call args");
             }
             other => panic!("expected Terminator::Jump, got {other:?}"),
@@ -592,8 +710,14 @@ mod tests {
         let mut m = empty_module();
         let u64_ty = m.types.primitive(Type::_64);
 
-        m.sigs.push(SigDecl { params: vec![], results: vec![u64_ty] });
-        m.sigs.push(SigDecl { params: vec![u64_ty], results: vec![u64_ty] });
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        m.sigs.push(SigDecl {
+            params: vec![u64_ty],
+            results: vec![u64_ty],
+        });
 
         // Callee (FuncId 1): if (param) { return 1 } else { return 2 }
         let callee = FuncBody {
@@ -604,23 +728,43 @@ mod tests {
                     stmts: vec![],
                     terminator: Terminator::IfNonzero {
                         cond: ValueId(0),
-                        then_target: Target { block: BlockId(1), args: vec![], reentry: None },
-                        else_target: Target { block: BlockId(2), args: vec![], reentry: None },
+                        then_target: Target {
+                            block: BlockId(1),
+                            args: vec![],
+                            reentry: None,
+                        },
+                        else_target: Target {
+                            block: BlockId(2),
+                            args: vec![],
+                            reentry: None,
+                        },
                     },
                 },
                 Block {
                     params: vec![],
                     stmts: vec![ValueId(1)],
-                    terminator: Terminator::Return { values: vec![ValueId(1)] },
+                    terminator: Terminator::Return {
+                        values: vec![ValueId(1)],
+                    },
                 },
                 Block {
                     params: vec![],
                     stmts: vec![ValueId(2)],
-                    terminator: Terminator::Return { values: vec![ValueId(2)] },
+                    terminator: Terminator::Return {
+                        values: vec![ValueId(2)],
+                    },
                 },
             ],
             values: vec![
-                Node::new(Value::Param { block: BlockId(0), ty: u64_ty, idx: 0 }, (), None),
+                Node::new(
+                    Value::Param {
+                        block: BlockId(0),
+                        ty: u64_ty,
+                        idx: 0,
+                    },
+                    (),
+                    None,
+                ),
                 const_node(1, u64_ty),
                 const_node(2, u64_ty),
             ],
@@ -639,7 +783,14 @@ mod tests {
             }],
             values: vec![
                 const_node(1, u64_ty),
-                Node::new(Value::Call { func: FuncId(1), args: vec![v0] }, (), None),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![v0],
+                    },
+                    (),
+                    None,
+                ),
                 Node::new(Value::Output { value: v1, idx: 0 }, (), None),
             ],
             entry: BlockId(0),
@@ -651,7 +802,9 @@ mod tests {
         let n = inline_vaffle_module(&mut m, generous_budget());
         assert_eq!(n, 1);
 
-        let FuncDecl::Body(caller) = &m.funcs[0] else { panic!("expected FuncDecl::Body") };
+        let FuncDecl::Body(caller) = &m.funcs[0] else {
+            panic!("expected FuncDecl::Body")
+        };
         // 1 original block + 3 spliced callee blocks + 1 continuation = 5.
         assert_eq!(caller.blocks.len(), 5);
 
@@ -669,7 +822,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(jumps_to_cont, 2, "both callee exits should reconverge at the continuation");
+        assert_eq!(
+            jumps_to_cont, 2,
+            "both callee exits should reconverge at the continuation"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -681,8 +837,14 @@ mod tests {
         let mut m = empty_module();
         let u64_ty = m.types.primitive(Type::_64);
 
-        m.sigs.push(SigDecl { params: vec![], results: vec![u64_ty] });
-        m.sigs.push(SigDecl { params: vec![u64_ty], results: vec![u64_ty] });
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        m.sigs.push(SigDecl {
+            params: vec![u64_ty],
+            results: vec![u64_ty],
+        });
 
         // Callee (FuncId 1): calls itself, then returns a constant (never
         // actually reached at eval time -- structure only matters here).
@@ -691,11 +853,28 @@ mod tests {
             blocks: vec![Block {
                 params: vec![(ValueId(0), u64_ty)],
                 stmts: vec![ValueId(1)],
-                terminator: Terminator::Return { values: vec![ValueId(0)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(0)],
+                },
             }],
             values: vec![
-                Node::new(Value::Param { block: BlockId(0), ty: u64_ty, idx: 0 }, (), None),
-                Node::new(Value::Call { func: FuncId(1), args: vec![ValueId(0)] }, (), None),
+                Node::new(
+                    Value::Param {
+                        block: BlockId(0),
+                        ty: u64_ty,
+                        idx: 0,
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![ValueId(0)],
+                    },
+                    (),
+                    None,
+                ),
             ],
             entry: BlockId(0),
         };
@@ -712,7 +891,14 @@ mod tests {
             }],
             values: vec![
                 const_node(1, u64_ty),
-                Node::new(Value::Call { func: FuncId(1), args: vec![v0] }, (), None),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![v0],
+                    },
+                    (),
+                    None,
+                ),
                 Node::new(Value::Output { value: v1, idx: 0 }, (), None),
             ],
             entry: BlockId(0),
@@ -724,10 +910,20 @@ mod tests {
         let n = inline_vaffle_module(&mut m, generous_budget());
         assert_eq!(n, 0, "a recursive callee must never be inlined");
 
-        let FuncDecl::Body(caller) = &m.funcs[0] else { panic!("expected FuncDecl::Body") };
-        assert!(has_live_call_to(caller, FuncId(1)), "the call site should be left untouched");
-        let FuncDecl::Body(callee) = &m.funcs[1] else { panic!("expected FuncDecl::Body") };
-        assert!(has_live_call_to(callee, FuncId(1)), "the callee's own self-call should be left untouched");
+        let FuncDecl::Body(caller) = &m.funcs[0] else {
+            panic!("expected FuncDecl::Body")
+        };
+        assert!(
+            has_live_call_to(caller, FuncId(1)),
+            "the call site should be left untouched"
+        );
+        let FuncDecl::Body(callee) = &m.funcs[1] else {
+            panic!("expected FuncDecl::Body")
+        };
+        assert!(
+            has_live_call_to(callee, FuncId(1)),
+            "the callee's own self-call should be left untouched"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -739,7 +935,10 @@ mod tests {
         let mut m = empty_module();
         let u64_ty = m.types.primitive(Type::_64);
 
-        m.sigs.push(SigDecl { params: vec![u64_ty], results: vec![u64_ty] });
+        m.sigs.push(SigDecl {
+            params: vec![u64_ty],
+            results: vec![u64_ty],
+        });
 
         // FuncId 0 calls FuncId 1; FuncId 1 calls FuncId 0.
         let func0 = FuncBody {
@@ -747,12 +946,36 @@ mod tests {
             blocks: vec![Block {
                 params: vec![(ValueId(0), u64_ty)],
                 stmts: vec![ValueId(1), ValueId(2)],
-                terminator: Terminator::Return { values: vec![ValueId(2)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(2)],
+                },
             }],
             values: vec![
-                Node::new(Value::Param { block: BlockId(0), ty: u64_ty, idx: 0 }, (), None),
-                Node::new(Value::Call { func: FuncId(1), args: vec![ValueId(0)] }, (), None),
-                Node::new(Value::Output { value: ValueId(1), idx: 0 }, (), None),
+                Node::new(
+                    Value::Param {
+                        block: BlockId(0),
+                        ty: u64_ty,
+                        idx: 0,
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![ValueId(0)],
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(
+                    Value::Output {
+                        value: ValueId(1),
+                        idx: 0,
+                    },
+                    (),
+                    None,
+                ),
             ],
             entry: BlockId(0),
         };
@@ -761,12 +984,36 @@ mod tests {
             blocks: vec![Block {
                 params: vec![(ValueId(0), u64_ty)],
                 stmts: vec![ValueId(1), ValueId(2)],
-                terminator: Terminator::Return { values: vec![ValueId(2)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(2)],
+                },
             }],
             values: vec![
-                Node::new(Value::Param { block: BlockId(0), ty: u64_ty, idx: 0 }, (), None),
-                Node::new(Value::Call { func: FuncId(0), args: vec![ValueId(0)] }, (), None),
-                Node::new(Value::Output { value: ValueId(1), idx: 0 }, (), None),
+                Node::new(
+                    Value::Param {
+                        block: BlockId(0),
+                        ty: u64_ty,
+                        idx: 0,
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(0),
+                        args: vec![ValueId(0)],
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(
+                    Value::Output {
+                        value: ValueId(1),
+                        idx: 0,
+                    },
+                    (),
+                    None,
+                ),
             ],
             entry: BlockId(0),
         };
@@ -775,10 +1022,17 @@ mod tests {
         m.funcs.push(FuncDecl::Body(func1));
 
         let n = inline_vaffle_module(&mut m, generous_budget());
-        assert_eq!(n, 0, "mutually-recursive functions must never be inlined into each other");
+        assert_eq!(
+            n, 0,
+            "mutually-recursive functions must never be inlined into each other"
+        );
 
-        let FuncDecl::Body(func0) = &m.funcs[0] else { panic!() };
-        let FuncDecl::Body(func1) = &m.funcs[1] else { panic!() };
+        let FuncDecl::Body(func0) = &m.funcs[0] else {
+            panic!()
+        };
+        let FuncDecl::Body(func1) = &m.funcs[1] else {
+            panic!()
+        };
         assert!(has_live_call_to(func0, FuncId(1)));
         assert!(has_live_call_to(func1, FuncId(0)));
     }
@@ -792,8 +1046,14 @@ mod tests {
         let mut m = empty_module();
         let u64_ty = m.types.primitive(Type::_64);
 
-        m.sigs.push(SigDecl { params: vec![], results: vec![u64_ty] });
-        m.sigs.push(SigDecl { params: vec![u64_ty], results: vec![u64_ty] });
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        m.sigs.push(SigDecl {
+            params: vec![u64_ty],
+            results: vec![u64_ty],
+        });
 
         // Callee (FuncId 1): identity, 1 Value in its body.
         let callee = FuncBody {
@@ -801,9 +1061,19 @@ mod tests {
             blocks: vec![Block {
                 params: vec![(ValueId(0), u64_ty)],
                 stmts: vec![],
-                terminator: Terminator::Return { values: vec![ValueId(0)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(0)],
+                },
             }],
-            values: vec![Node::new(Value::Param { block: BlockId(0), ty: u64_ty, idx: 0 }, (), None)],
+            values: vec![Node::new(
+                Value::Param {
+                    block: BlockId(0),
+                    ty: u64_ty,
+                    idx: 0,
+                },
+                (),
+                None,
+            )],
             entry: BlockId(0),
         };
 
@@ -822,9 +1092,23 @@ mod tests {
             }],
             values: vec![
                 const_node(1, u64_ty),
-                Node::new(Value::Call { func: FuncId(1), args: vec![v0] }, (), None),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![v0],
+                    },
+                    (),
+                    None,
+                ),
                 Node::new(Value::Output { value: v1, idx: 0 }, (), None),
-                Node::new(Value::Call { func: FuncId(1), args: vec![v2] }, (), None),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![v2],
+                    },
+                    (),
+                    None,
+                ),
                 Node::new(Value::Output { value: v3, idx: 0 }, (), None),
             ],
             entry: BlockId(0),
@@ -834,11 +1118,16 @@ mod tests {
         m.funcs.push(FuncDecl::Body(callee));
 
         // Exactly enough budget for one inlining (callee has 1 Value), not two.
-        let budget = InlineBudget { max_callee_values: 64, total_budget: 1 };
+        let budget = InlineBudget {
+            max_callee_values: 64,
+            total_budget: 1,
+        };
         let n = inline_vaffle_module(&mut m, budget);
         assert_eq!(n, 1, "only the first call site should fit the budget");
 
-        let FuncDecl::Body(caller) = &m.funcs[0] else { panic!() };
+        let FuncDecl::Body(caller) = &m.funcs[0] else {
+            panic!()
+        };
         // The second call (originally v3) must still be a real Value::Call.
         match &caller.values[v3.0].kind {
             Value::Call { func, .. } => assert_eq!(*func, FuncId(1)),
@@ -867,8 +1156,14 @@ mod tests {
         let mut m = empty_module();
         let u64_ty = m.types.primitive(Type::_64);
 
-        m.sigs.push(SigDecl { params: vec![], results: vec![u64_ty] });
-        m.sigs.push(SigDecl { params: vec![], results: vec![u64_ty, u64_ty] });
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u64_ty, u64_ty],
+        });
 
         // Callee (FuncId 1): () -> (1, 2)
         let callee = FuncBody {
@@ -876,7 +1171,9 @@ mod tests {
             blocks: vec![Block {
                 params: vec![],
                 stmts: vec![ValueId(0), ValueId(1)],
-                terminator: Terminator::Return { values: vec![ValueId(0), ValueId(1)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(0), ValueId(1)],
+                },
             }],
             values: vec![const_node(1, u64_ty), const_node(2, u64_ty)],
             entry: BlockId(0),
@@ -893,7 +1190,14 @@ mod tests {
                 terminator: Terminator::Return { values: vec![v1] },
             }],
             values: vec![
-                Node::new(Value::Call { func: FuncId(1), args: vec![] }, (), None),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![],
+                    },
+                    (),
+                    None,
+                ),
                 Node::new(Value::Output { value: v0, idx: 0 }, (), None),
                 Node::new(Value::Output { value: v0, idx: 1 }, (), None),
             ],
@@ -906,7 +1210,9 @@ mod tests {
         let n = inline_vaffle_module(&mut m, generous_budget());
         assert_eq!(n, 1);
 
-        let FuncDecl::Body(caller) = &m.funcs[0] else { panic!() };
+        let FuncDecl::Body(caller) = &m.funcs[0] else {
+            panic!()
+        };
         match &caller.values[v1.0].kind {
             Value::Param { idx: 0, .. } => {}
             other => panic!("expected v1 -> Value::Param{{idx:0}}, got {other:?}"),

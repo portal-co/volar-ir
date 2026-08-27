@@ -23,12 +23,12 @@
 //! end_block
 //! ```
 
-use core::fmt;
-use volar_ir_common::{
-    ActionDecl, Constant, IrType, OracleDecl, RngDecl, StorageId, Stmt, Type, TypeId, TypeTable,
-};
-use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId};
 use crate::WriteText;
+use core::fmt;
+use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId};
+use volar_ir_common::{
+    ActionDecl, Constant, IrType, OracleDecl, RngDecl, Stmt, StorageId, Type, TypeId, TypeTable,
+};
 
 pub(crate) const FORMAT_HEADER: &str = "volar-ir v1";
 
@@ -38,7 +38,7 @@ pub(crate) const FORMAT_HEADER: &str = "volar-ir v1";
 
 /// A complete, serialisable snapshot of an IR module (type table + blocks).
 pub struct SavedIrBlocks {
-    pub types:  TypeTable,
+    pub types: TypeTable,
     pub blocks: IRBlocks<()>,
 }
 
@@ -51,11 +51,11 @@ pub(crate) fn write_quoted_str(s: &str, w: &mut dyn fmt::Write) -> fmt::Result {
     for ch in s.chars() {
         match ch {
             '\\' => w.write_str("\\\\")?,
-            '"'  => w.write_str("\\\"")?,
+            '"' => w.write_str("\\\"")?,
             '\n' => w.write_str("\\n")?,
             '\t' => w.write_str("\\t")?,
             '\r' => w.write_str("\\r")?,
-            c    => w.write_char(c)?,
+            c => w.write_char(c)?,
         }
     }
     w.write_char('"')
@@ -73,7 +73,9 @@ pub(crate) fn write_var(v: IRVarId, w: &mut dyn fmt::Write) -> fmt::Result {
 pub(crate) fn write_var_list(vars: &[IRVarId], w: &mut dyn fmt::Write) -> fmt::Result {
     w.write_char('[')?;
     for (i, v) in vars.iter().enumerate() {
-        if i > 0 { w.write_char(',')?; }
+        if i > 0 {
+            w.write_char(',')?;
+        }
         write_var(*v, w)?;
     }
     w.write_char(']')
@@ -82,7 +84,9 @@ pub(crate) fn write_var_list(vars: &[IRVarId], w: &mut dyn fmt::Write) -> fmt::R
 pub(crate) fn write_type_id_list(ids: &[TypeId], w: &mut dyn fmt::Write) -> fmt::Result {
     w.write_char('[')?;
     for (i, id) in ids.iter().enumerate() {
-        if i > 0 { w.write_char(',')?; }
+        if i > 0 {
+            w.write_char(',')?;
+        }
         write!(w, "{}", id.0)?;
     }
     w.write_char(']')
@@ -102,9 +106,12 @@ pub(crate) fn write_storage(s: StorageId, w: &mut dyn fmt::Write) -> fmt::Result
 
 pub(crate) fn write_block_target(t: &IRBlockTargetId, w: &mut dyn fmt::Write) -> fmt::Result {
     match t {
-        IRBlockTargetId::Return      => w.write_str("return"),
-        IRBlockTargetId::Block(id)   => write!(w, "block:{}", id.0),
-        IRBlockTargetId::Dyn(var)    => { w.write_str("dyn:")?; write_var(*var, w) }
+        IRBlockTargetId::Return => w.write_str("return"),
+        IRBlockTargetId::Block(id) => write!(w, "block:{}", id.0),
+        IRBlockTargetId::Dyn(var) => {
+            w.write_str("dyn:")?;
+            write_var(*var, w)
+        }
         _ => w.write_str("<unknown-target>"),
     }
 }
@@ -115,16 +122,16 @@ pub(crate) fn write_block_target(t: &IRBlockTargetId, w: &mut dyn fmt::Write) ->
 
 fn write_prim_type(ty: Type, w: &mut dyn fmt::Write) -> fmt::Result {
     w.write_str(match ty {
-        Type::Bit      => "bit",
-        Type::_8       => "u8",
-        Type::_16      => "u16",
-        Type::_32      => "u32",
-        Type::_64      => "u64",
-        Type::_128     => "u128",
-        Type::_256     => "u256",
-        Type::AES8     => "aes8",
+        Type::Bit => "bit",
+        Type::_8 => "u8",
+        Type::_16 => "u16",
+        Type::_32 => "u32",
+        Type::_64 => "u64",
+        Type::_128 => "u128",
+        Type::_256 => "u256",
+        Type::AES8 => "aes8",
         Type::Galois64 => "galois64",
-        _              => "unknown",
+        _ => "unknown",
     })
 }
 
@@ -158,7 +165,9 @@ impl WriteText for TypeTable {
                     w.write_str("->")?;
                     write_type_id_list(results, w)?;
                 }
-                _ => { w.write_str("unknown")?; }
+                _ => {
+                    w.write_str("unknown")?;
+                }
             }
             w.write_char('\n')?;
         }
@@ -200,11 +209,7 @@ fn write_rng_decl(d: &RngDecl, w: &mut dyn fmt::Write) -> fmt::Result {
 // WriteText for IRStmt  (Stmt<IRVarId>)
 // ============================================================================
 
-fn write_ir_stmt(
-    result: IRVarId,
-    stmt:   &Stmt<IRVarId>,
-    w:      &mut dyn fmt::Write,
-) -> fmt::Result {
+fn write_ir_stmt(result: IRVarId, stmt: &Stmt<IRVarId>, w: &mut dyn fmt::Write) -> fmt::Result {
     write_var(result, w)?;
     w.write_str(" = ")?;
     match stmt {
@@ -219,7 +224,12 @@ fn write_ir_stmt(
             write!(w, " ty={} addr=", ty.0)?;
             write_var(*addr, w)?;
         }
-        Stmt::StorageWrite { storage, src, ty, addr } => {
+        Stmt::StorageWrite {
+            storage,
+            src,
+            ty,
+            addr,
+        } => {
             w.write_str("storage_write storage=")?;
             write_storage(*storage, w)?;
             w.write_str(" src=")?;
@@ -227,12 +237,20 @@ fn write_ir_stmt(
             write!(w, " ty={} addr=", ty.0)?;
             write_var(*addr, w)?;
         }
-        Stmt::Transmute { src, src_ty, dst_ty } => {
+        Stmt::Transmute {
+            src,
+            src_ty,
+            dst_ty,
+        } => {
             w.write_str("transmute src=")?;
             write_var(*src, w)?;
             write!(w, " src_ty={} dst_ty={}", src_ty.0, dst_ty.0)?;
         }
-        Stmt::Poly { ty, coeffs, constant } => {
+        Stmt::Poly {
+            ty,
+            coeffs,
+            constant,
+        } => {
             write!(w, "poly ty={} const=", ty.0)?;
             write_constant(constant, w)?;
             for (vars, coeff) in coeffs {
@@ -263,14 +281,21 @@ fn write_ir_stmt(
         Stmt::Shuffle { result_bits, ty } => {
             write!(w, "shuffle ty={} bits=[", ty.0)?;
             for (i, (bit, var)) in result_bits.iter().enumerate() {
-                if i > 0 { w.write_char(',')?; }
+                if i > 0 {
+                    w.write_char(',')?;
+                }
                 write!(w, "({},", bit)?;
                 write_var(*var, w)?;
                 w.write_char(')')?;
             }
             w.write_char(']')?;
         }
-        Stmt::OracleCall { name, args, output_tys, result_ty } => {
+        Stmt::OracleCall {
+            name,
+            args,
+            output_tys,
+            result_ty,
+        } => {
             w.write_str("oracle_call ")?;
             write_quoted_str(name, w)?;
             w.write_str(" args=")?;
@@ -284,7 +309,14 @@ fn write_ir_stmt(
             write_var(*call, w)?;
             write!(w, " idx={} ty={}", idx, ty.0)?;
         }
-        Stmt::ActionCall { name, guard, args, fallbacks, output_tys, result_ty } => {
+        Stmt::ActionCall {
+            name,
+            guard,
+            args,
+            fallbacks,
+            output_tys,
+            result_ty,
+        } => {
             w.write_str("action_call ")?;
             write_quoted_str(name, w)?;
             w.write_str(" guard=")?;
@@ -307,7 +339,9 @@ fn write_ir_stmt(
             write_quoted_str(name, w)?;
             write!(w, " ty={}", ty.0)?;
         }
-        _ => { w.write_str("<unknown-stmt>")?; }
+        _ => {
+            w.write_str("<unknown-stmt>")?;
+        }
     }
     w.write_char('\n')
 }
@@ -324,7 +358,11 @@ fn write_ir_terminator(term: &IRTerminator, w: &mut dyn fmt::Write) -> fmt::Resu
             w.write_str(" args=")?;
             write_var_list(&target.args, w)?;
         }
-        IRTerminator::JumpCond { condition, then_target, else_target } => {
+        IRTerminator::JumpCond {
+            condition,
+            then_target,
+            else_target,
+        } => {
             w.write_str("jmp_cond cond=")?;
             write_var(*condition, w)?;
             w.write_str(" then=")?;
@@ -348,7 +386,9 @@ fn write_ir_terminator(term: &IRTerminator, w: &mut dyn fmt::Write) -> fmt::Resu
                 write_var_list(&branch.args, w)?;
             }
         }
-        _ => { w.write_str("<unknown-term>")?; }
+        _ => {
+            w.write_str("<unknown-term>")?;
+        }
     }
     w.write_char('\n')
 }
@@ -379,9 +419,15 @@ impl WriteText for SavedIrBlocks {
         w.write_str(FORMAT_HEADER)?;
         w.write_char('\n')?;
         self.types.write_text(w)?;
-        for d in &self.blocks.oracles { write_oracle_decl(d, w)?; }
-        for d in &self.blocks.actions { write_action_decl(d, w)?; }
-        for d in &self.blocks.rngs    { write_rng_decl(d, w)?;    }
+        for d in &self.blocks.oracles {
+            write_oracle_decl(d, w)?;
+        }
+        for d in &self.blocks.actions {
+            write_action_decl(d, w)?;
+        }
+        for d in &self.blocks.rngs {
+            write_rng_decl(d, w)?;
+        }
         for (i, block) in self.blocks.blocks.iter().enumerate() {
             write_ir_block(i, block, w)?;
         }

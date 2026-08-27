@@ -10,9 +10,10 @@
 // Pure data structure definitions and evaluation helpers; no cryptographic
 // claims.
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use crate::boolar::LaneId;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 use volar_ir_common::StorageId;
 
 /// A single reversible gate. Every variant is a bijection on the joint
@@ -20,22 +21,18 @@ use volar_ir_common::StorageId;
 ///
 /// Indices refer to positions in `0..num_wires` of the enclosing [`RCircuit`].
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 pub enum RGate {
     /// Pauli-X (NOT) on one wire.
     X(usize),
     /// Controlled-NOT: `target ^= ctrl`.
-    Cnot {
-        ctrl: usize,
-        target: usize,
-    },
+    Cnot { ctrl: usize, target: usize },
     /// Toffoli (CCNOT): `target ^= c1 & c2`.
-    Ccnot {
-        c1: usize,
-        c2: usize,
-        target: usize,
-    },
+    Ccnot { c1: usize, c2: usize, target: usize },
     /// Reversible storage exchange: atomically SWAP the target wire with the
     /// bit stored at `((storage, lane), addr)`.
     ///
@@ -69,6 +66,59 @@ pub enum RGate {
         target: usize,
         table: u8,
     },
+    /// Reversibly inject one deterministic external source bit:
+    /// `target ^= source(args, bit, occurrence)`.
+    ///
+    /// Re-applying the gate with the same replayable source registry undoes
+    /// it, so this is the reversible form of direct oracle/RNG bit lowering.
+    ExternalXor {
+        kind: RExternalKind,
+        name: String,
+        args: Vec<usize>,
+        target: usize,
+        bit: usize,
+        occurrence: u64,
+    },
+    /// Reversibly inject a guarded action result into storage:
+    /// `storage[address] ^= guard ? action(args, bit, occurrence) : fallback`.
+    ///
+    /// This intentionally uses XOR rather than the ordinary direct-store
+    /// action semantics. That makes the joint wire/storage transition an
+    /// involution and lets the inverse replay the same occurrence token.
+    ExternalStorageXor {
+        name: String,
+        guard: usize,
+        args: Vec<usize>,
+        fallback: usize,
+        storage: StorageId,
+        lane: LaneId,
+        addr: Vec<usize>,
+        bit: usize,
+        occurrence: u64,
+    },
+}
+
+/// External source class for [`RGate::ExternalXor`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum RExternalKind {
+    Oracle,
+    Rng,
+}
+
+/// Replayable external source dispatch for reversible circuits.
+///
+/// Implementations must return the same bit whenever they are invoked with
+/// the same name, flattened inputs, bit index, and occurrence token. In
+/// particular, an RNG implementation must derive its result from a replay
+/// transcript or seeded PRF rather than sampling fresh entropy on inverse.
+pub trait ReversibleExternalRegistry {
+    fn oracle_bit(&mut self, name: &str, args: &[bool], bit: usize, occurrence: u64) -> bool;
+    fn rng_bit(&mut self, name: &str, bit: usize, occurrence: u64) -> bool;
+    fn action_bit(&mut self, name: &str, args: &[bool], bit: usize, occurrence: u64) -> bool;
 }
 
 /// Why an [`RCircuit`] could not be constructed (gate validation failed).
@@ -106,13 +156,13 @@ pub enum RCircuitError {
         width: usize,
     },
     /// Wire-count mismatch when composing two circuits.
-    WireCountMismatch {
-        lhs: usize,
-        rhs: usize,
-    },
+    WireCountMismatch { lhs: usize, rhs: usize },
     /// [`RCircuit::apply_pure`] was called on a circuit that references
     /// storage; use [`RCircuit::apply`] with a [`StorageState`] instead.
     StorageOpsUnsupported,
+    /// [`RCircuit::apply`] or [`RCircuit::apply_pure`] was called on a
+    /// circuit with external gates. Use [`RCircuit::apply_with_externals`].
+    ExternalOpsUnsupported,
 }
 
 impl core::fmt::Display for RCircuitError {
@@ -122,13 +172,19 @@ impl core::fmt::Display for RCircuitError {
                 write!(f, "gate {gate} references wire {wire} out of range")
             }
             RCircuitError::TargetAliased { gate, wire } => {
-                write!(f, "gate {gate} aliases control/address wire {wire} with its target")
+                write!(
+                    f,
+                    "gate {gate} aliases control/address wire {wire} with its target"
+                )
             }
             RCircuitError::ControlAliased { gate, wire } => {
                 write!(f, "gate {gate} uses wire {wire} for both lookup controls")
             }
             RCircuitError::InvalidTruthTable { gate, table } => {
-                write!(f, "gate {gate} has invalid two-input truth table {table:#04x}")
+                write!(
+                    f,
+                    "gate {gate} has invalid two-input truth table {table:#04x}"
+                )
             }
             RCircuitError::AddressTooWide { gate, width } => {
                 write!(f, "gate {gate} has a {width}-bit storage address (max 64)")
@@ -137,7 +193,16 @@ impl core::fmt::Display for RCircuitError {
                 write!(f, "cannot compose circuits with {lhs} and {rhs} wires")
             }
             RCircuitError::StorageOpsUnsupported => {
-                write!(f, "circuit references storage; use `apply` with a StorageState")
+                write!(
+                    f,
+                    "circuit references storage; use `apply` with a StorageState"
+                )
+            }
+            RCircuitError::ExternalOpsUnsupported => {
+                write!(
+                    f,
+                    "circuit references external sources; use `apply_with_externals`"
+                )
             }
         }
     }
@@ -178,7 +243,10 @@ fn addr_cell_index(addr_wires: &[usize], wires: &[bool]) -> u64 {
 /// the watchlist machinery produced alongside circuits by `to_reversible`
 /// (in `volar-ir-passes`), not through embedded names.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct RCircuit {
     pub num_wires: usize,
     pub gates: Vec<RGate>,
@@ -194,7 +262,10 @@ impl RCircuit {
 
     /// An empty circuit over `num_wires` wires.
     pub fn empty(num_wires: usize) -> Self {
-        RCircuit { num_wires, gates: Vec::new() }
+        RCircuit {
+            num_wires,
+            gates: Vec::new(),
+        }
     }
 
     /// The gate list.
@@ -225,7 +296,10 @@ impl RCircuit {
                 check(*ctrl)?;
                 check(*target)?;
                 if ctrl == target {
-                    return Err(RCircuitError::TargetAliased { gate: i, wire: *ctrl });
+                    return Err(RCircuitError::TargetAliased {
+                        gate: i,
+                        wire: *ctrl,
+                    });
                 }
                 Ok(())
             }
@@ -234,22 +308,38 @@ impl RCircuit {
                 check(*c2)?;
                 check(*target)?;
                 if target == c1 || target == c2 {
-                    return Err(RCircuitError::TargetAliased { gate: i, wire: *target });
+                    return Err(RCircuitError::TargetAliased {
+                        gate: i,
+                        wire: *target,
+                    });
                 }
                 Ok(())
             }
-            RGate::XorLut2 { controls, target, table } => {
+            RGate::XorLut2 {
+                controls,
+                target,
+                table,
+            } => {
                 check(controls[0])?;
                 check(controls[1])?;
                 check(*target)?;
                 if *target == controls[0] || *target == controls[1] {
-                    return Err(RCircuitError::TargetAliased { gate: i, wire: *target });
+                    return Err(RCircuitError::TargetAliased {
+                        gate: i,
+                        wire: *target,
+                    });
                 }
                 if controls[0] == controls[1] {
-                    return Err(RCircuitError::ControlAliased { gate: i, wire: controls[0] });
+                    return Err(RCircuitError::ControlAliased {
+                        gate: i,
+                        wire: controls[0],
+                    });
                 }
                 if table & !0x0f != 0 {
-                    return Err(RCircuitError::InvalidTruthTable { gate: i, table: *table });
+                    return Err(RCircuitError::InvalidTruthTable {
+                        gate: i,
+                        table: *table,
+                    });
                 }
                 Ok(())
             }
@@ -262,7 +352,43 @@ impl RCircuit {
                     }
                 }
                 if addr.len() > 64 {
-                    return Err(RCircuitError::AddressTooWide { gate: i, width: addr.len() });
+                    return Err(RCircuitError::AddressTooWide {
+                        gate: i,
+                        width: addr.len(),
+                    });
+                }
+                Ok(())
+            }
+            RGate::ExternalXor { args, target, .. } => {
+                check(*target)?;
+                for wire in args {
+                    check(*wire)?;
+                    if wire == target {
+                        return Err(RCircuitError::TargetAliased {
+                            gate: i,
+                            wire: *wire,
+                        });
+                    }
+                }
+                Ok(())
+            }
+            RGate::ExternalStorageXor {
+                guard,
+                args,
+                fallback,
+                addr,
+                ..
+            } => {
+                check(*guard)?;
+                check(*fallback)?;
+                for wire in args.iter().chain(addr) {
+                    check(*wire)?;
+                }
+                if addr.len() > 64 {
+                    return Err(RCircuitError::AddressTooWide {
+                        gate: i,
+                        width: addr.len(),
+                    });
                 }
                 Ok(())
             }
@@ -278,7 +404,22 @@ impl RCircuit {
 
     /// Does this circuit reference storage at all?
     pub fn uses_storage(&self) -> bool {
-        self.gates.iter().any(|g| matches!(g, RGate::StorageSwap { .. }))
+        self.gates.iter().any(|g| {
+            matches!(
+                g,
+                RGate::StorageSwap { .. } | RGate::ExternalStorageXor { .. }
+            )
+        })
+    }
+
+    /// Does this circuit require a replayable external source registry?
+    pub fn uses_externals(&self) -> bool {
+        self.gates.iter().any(|g| {
+            matches!(
+                g,
+                RGate::ExternalXor { .. } | RGate::ExternalStorageXor { .. }
+            )
+        })
     }
 
     /// Apply the circuit to a wire vector, exchanging with `storage` for any
@@ -287,20 +428,117 @@ impl RCircuit {
     /// Panics if `wires.len() != num_wires` — callers own the wire vector.
     pub fn apply(&self, wires: &mut [bool], storage: &mut StorageState) {
         assert_eq!(wires.len(), self.num_wires, "wire vector length mismatch");
+        assert!(
+            !self.uses_externals(),
+            "circuit references external sources; use apply_with_externals"
+        );
         for gate in &self.gates {
             match gate {
                 RGate::X(w) => wires[*w] = !wires[*w],
                 RGate::Cnot { ctrl, target } => wires[*target] ^= wires[*ctrl],
                 RGate::Ccnot { c1, c2, target } => wires[*target] ^= wires[*c1] & wires[*c2],
-                RGate::XorLut2 { controls, target, table } => {
+                RGate::XorLut2 {
+                    controls,
+                    target,
+                    table,
+                } => {
                     let input = ((wires[controls[0]] as u8) << 1) | wires[controls[1]] as u8;
                     wires[*target] ^= (table >> (3 - input)) & 1 == 1;
                 }
-                RGate::StorageSwap { storage: sid, lane, addr, target } => {
+                RGate::StorageSwap {
+                    storage: sid,
+                    lane,
+                    addr,
+                    target,
+                } => {
                     let cell = ((*sid, *lane), addr_cell_index(addr, wires));
                     let stored = storage.remove(&cell).unwrap_or(false);
                     storage.insert(cell, wires[*target]);
                     wires[*target] = stored;
+                }
+                RGate::ExternalXor { .. } | RGate::ExternalStorageXor { .. } => {
+                    unreachable!("external gates were checked before evaluation")
+                }
+            }
+        }
+    }
+
+    /// Apply a circuit with deterministic/replayable external primitives.
+    pub fn apply_with_externals<R: ReversibleExternalRegistry>(
+        &self,
+        wires: &mut [bool],
+        storage: &mut StorageState,
+        externals: &mut R,
+    ) {
+        assert_eq!(wires.len(), self.num_wires, "wire vector length mismatch");
+        for gate in &self.gates {
+            match gate {
+                RGate::X(w) => wires[*w] = !wires[*w],
+                RGate::Cnot { ctrl, target } => wires[*target] ^= wires[*ctrl],
+                RGate::Ccnot { c1, c2, target } => wires[*target] ^= wires[*c1] & wires[*c2],
+                RGate::XorLut2 {
+                    controls,
+                    target,
+                    table,
+                } => {
+                    let input = ((wires[controls[0]] as u8) << 1) | wires[controls[1]] as u8;
+                    wires[*target] ^= (table >> (3 - input)) & 1 == 1;
+                }
+                RGate::StorageSwap {
+                    storage: sid,
+                    lane,
+                    addr,
+                    target,
+                } => {
+                    let cell = ((*sid, *lane), addr_cell_index(addr, wires));
+                    let stored = storage.remove(&cell).unwrap_or(false);
+                    storage.insert(cell, wires[*target]);
+                    wires[*target] = stored;
+                }
+                RGate::ExternalXor {
+                    kind,
+                    name,
+                    args,
+                    target,
+                    bit,
+                    occurrence,
+                } => {
+                    let args: Vec<_> = args.iter().map(|wire| wires[*wire]).collect();
+                    let value = match kind {
+                        RExternalKind::Oracle => {
+                            externals.oracle_bit(name, &args, *bit, *occurrence)
+                        }
+                        RExternalKind::Rng => externals.rng_bit(name, *bit, *occurrence),
+                    };
+                    wires[*target] ^= value;
+                }
+                RGate::ExternalStorageXor {
+                    name,
+                    guard,
+                    args,
+                    fallback,
+                    storage: sid,
+                    lane,
+                    addr,
+                    bit,
+                    occurrence,
+                } => {
+                    let value = if wires[*guard] {
+                        let args: Vec<_> = args.iter().map(|wire| wires[*wire]).collect();
+                        externals.action_bit(name, &args, *bit, *occurrence)
+                    } else {
+                        wires[*fallback]
+                    };
+                    let cell = ((*sid, *lane), addr_cell_index(addr, wires));
+                    let next = storage.get(&cell).copied().unwrap_or(false) ^ value;
+                    if next {
+                        storage.insert(cell, true);
+                    } else {
+                        // The storage model's absence is canonically false;
+                        // remove a cleared cell so inverse replay restores
+                        // the exact sparse state as well as its value.
+                        storage.remove(&cell);
+                    }
                 }
             }
         }
@@ -311,6 +549,9 @@ impl RCircuit {
     /// Fails closed on circuits containing [`RGate::StorageSwap`] so that
     /// consumers unaware of the storage model cannot silently mis-evaluate.
     pub fn apply_pure(&self, wires: &mut [bool]) -> Result<(), RCircuitError> {
+        if self.uses_externals() {
+            return Err(RCircuitError::ExternalOpsUnsupported);
+        }
         if self.uses_storage() {
             return Err(RCircuitError::StorageOpsUnsupported);
         }
@@ -322,13 +563,19 @@ impl RCircuit {
     /// The inverse circuit: same wires, gates reversed. Every v1 gate is an
     /// involution, so inversion is exactly gate-list reversal.
     pub fn inverse(&self) -> RCircuit {
-        RCircuit { num_wires: self.num_wires, gates: self.gates.iter().rev().cloned().collect() }
+        RCircuit {
+            num_wires: self.num_wires,
+            gates: self.gates.iter().rev().cloned().collect(),
+        }
     }
 
     /// Compose: run `self`, then `next`, over the shared wire vector.
     pub fn then(&self, next: &RCircuit) -> Result<RCircuit, RCircuitError> {
         if self.num_wires != next.num_wires {
-            return Err(RCircuitError::WireCountMismatch { lhs: self.num_wires, rhs: next.num_wires });
+            return Err(RCircuitError::WireCountMismatch {
+                lhs: self.num_wires,
+                rhs: next.num_wires,
+            });
         }
         let mut gates = self.gates.clone();
         gates.extend(next.gates.iter().cloned());
@@ -352,7 +599,15 @@ mod tests {
             RCircuitError::TargetAliased { gate: 0, wire: 0 }
         );
         assert_eq!(
-            RCircuit::new(2, vec![RGate::Ccnot { c1: 0, c2: 1, target: 1 }]).unwrap_err(),
+            RCircuit::new(
+                2,
+                vec![RGate::Ccnot {
+                    c1: 0,
+                    c2: 1,
+                    target: 1
+                }]
+            )
+            .unwrap_err(),
             RCircuitError::TargetAliased { gate: 0, wire: 1 }
         );
         assert_eq!(
@@ -368,11 +623,25 @@ mod tests {
             .unwrap_err(),
             RCircuitError::TargetAliased { gate: 0, wire: 0 }
         );
-        assert!(RCircuit::new(3, vec![RGate::Ccnot { c1: 0, c2: 1, target: 2 }]).is_ok());
+        assert!(
+            RCircuit::new(
+                3,
+                vec![RGate::Ccnot {
+                    c1: 0,
+                    c2: 1,
+                    target: 2
+                }]
+            )
+            .is_ok()
+        );
         assert_eq!(
             RCircuit::new(
                 3,
-                vec![RGate::XorLut2 { controls: [0, 1], target: 1, table: 0x1 }],
+                vec![RGate::XorLut2 {
+                    controls: [0, 1],
+                    target: 1,
+                    table: 0x1
+                }],
             )
             .unwrap_err(),
             RCircuitError::TargetAliased { gate: 0, wire: 1 }
@@ -380,7 +649,11 @@ mod tests {
         assert_eq!(
             RCircuit::new(
                 3,
-                vec![RGate::XorLut2 { controls: [0, 0], target: 2, table: 0x1 }],
+                vec![RGate::XorLut2 {
+                    controls: [0, 0],
+                    target: 2,
+                    table: 0x1
+                }],
             )
             .unwrap_err(),
             RCircuitError::ControlAliased { gate: 0, wire: 0 }
@@ -388,10 +661,17 @@ mod tests {
         assert_eq!(
             RCircuit::new(
                 3,
-                vec![RGate::XorLut2 { controls: [0, 1], target: 2, table: 0x10 }],
+                vec![RGate::XorLut2 {
+                    controls: [0, 1],
+                    target: 2,
+                    table: 0x10
+                }],
             )
             .unwrap_err(),
-            RCircuitError::InvalidTruthTable { gate: 0, table: 0x10 }
+            RCircuitError::InvalidTruthTable {
+                gate: 0,
+                table: 0x10
+            }
         );
     }
 
@@ -402,7 +682,11 @@ mod tests {
             vec![
                 RGate::X(0),
                 RGate::Cnot { ctrl: 0, target: 2 },
-                RGate::Ccnot { c1: 0, c2: 1, target: 2 },
+                RGate::Ccnot {
+                    c1: 0,
+                    c2: 1,
+                    target: 2,
+                },
             ],
         )
         .unwrap();
@@ -421,7 +705,11 @@ mod tests {
         for table in 0u8..16 {
             let c = RCircuit::new(
                 3,
-                vec![RGate::XorLut2 { controls: [0, 1], target: 2, table }],
+                vec![RGate::XorLut2 {
+                    controls: [0, 1],
+                    target: 2,
+                    table,
+                }],
             )
             .unwrap();
             for input in 0u8..8 {
@@ -433,7 +721,11 @@ mod tests {
                 let mut wires = vec![a, b, target];
 
                 c.apply_pure(&mut wires).unwrap();
-                assert_eq!(wires, vec![a, b, expected], "table={table:#x}, input={input:#x}");
+                assert_eq!(
+                    wires,
+                    vec![a, b, expected],
+                    "table={table:#x}, input={input:#x}"
+                );
                 c.inverse().apply_pure(&mut wires).unwrap();
                 assert_eq!(wires, vec![a, b, target]);
             }
@@ -445,7 +737,12 @@ mod tests {
         let sid = StorageId::DEFAULT;
         let c = RCircuit::new(
             3,
-            vec![RGate::StorageSwap { storage: sid, lane: LaneId(0), addr: vec![0, 1], target: 2 }],
+            vec![RGate::StorageSwap {
+                storage: sid,
+                lane: LaneId(0),
+                addr: vec![0, 1],
+                target: 2,
+            }],
         )
         .unwrap();
         // LSB-first address over wires [0, 1]: wires[1]=1 selects cell 2.
@@ -461,13 +758,19 @@ mod tests {
         assert_eq!(wires[2], false);
         assert_eq!(storage.get(&((sid, LaneId(0)), 2)), Some(&true));
         // apply_pure rejects storage-using circuits.
-        assert_eq!(c.apply_pure(&mut vec![false; 3]).unwrap_err(), RCircuitError::StorageOpsUnsupported);
+        assert_eq!(
+            c.apply_pure(&mut vec![false; 3]).unwrap_err(),
+            RCircuitError::StorageOpsUnsupported
+        );
     }
 
     #[test]
     fn then_requires_matching_wire_counts() {
         let a = RCircuit::empty(2);
         let b = RCircuit::empty(3);
-        assert_eq!(a.then(&b).unwrap_err(), RCircuitError::WireCountMismatch { lhs: 2, rhs: 3 });
+        assert_eq!(
+            a.then(&b).unwrap_err(),
+            RCircuitError::WireCountMismatch { lhs: 2, rhs: 3 }
+        );
     }
 }

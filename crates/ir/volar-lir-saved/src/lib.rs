@@ -24,7 +24,9 @@
 extern crate alloc;
 
 use alloc::{vec, vec::Vec};
-use volar_lir::{BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef, StructId};
+use volar_lir::{
+    BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef, StructId,
+};
 
 // ============================================================================
 // Call log
@@ -36,7 +38,10 @@ use volar_lir::{BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocEx
 /// The special index `u32::MAX` is never assigned and can be used as a
 /// sentinel.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum LirCall {
     // ---- Type registration --------------------------------------------------
     DefineStruct {
@@ -81,34 +86,106 @@ pub enum LirCall {
     },
 
     // ---- Arithmetic ---------------------------------------------------------
-    Add { lhs: u32, rhs: u32, out: u32 },
-    Sub { lhs: u32, rhs: u32, out: u32 },
-    Mul { lhs: u32, rhs: u32, out: u32 },
-    Udiv { lhs: u32, rhs: u32, out: u32 },
-    Sdiv { lhs: u32, rhs: u32, out: u32 },
+    Add {
+        lhs: u32,
+        rhs: u32,
+        out: u32,
+    },
+    Sub {
+        lhs: u32,
+        rhs: u32,
+        out: u32,
+    },
+    Mul {
+        lhs: u32,
+        rhs: u32,
+        out: u32,
+    },
+    Udiv {
+        lhs: u32,
+        rhs: u32,
+        out: u32,
+    },
+    Sdiv {
+        lhs: u32,
+        rhs: u32,
+        out: u32,
+    },
 
     // ---- Bitwise ------------------------------------------------------------
-    And { lhs: u32, rhs: u32, out: u32 },
-    Or  { lhs: u32, rhs: u32, out: u32 },
-    Xor { lhs: u32, rhs: u32, out: u32 },
-    Not { val: u32, out: u32 },
-    Shl  { val: u32, shift: u32, out: u32 },
-    Lshr { val: u32, shift: u32, out: u32 },
-    Ashr { val: u32, shift: u32, out: u32 },
+    And {
+        lhs: u32,
+        rhs: u32,
+        out: u32,
+    },
+    Or {
+        lhs: u32,
+        rhs: u32,
+        out: u32,
+    },
+    Xor {
+        lhs: u32,
+        rhs: u32,
+        out: u32,
+    },
+    Not {
+        val: u32,
+        out: u32,
+    },
+    Shl {
+        val: u32,
+        shift: u32,
+        out: u32,
+    },
+    Lshr {
+        val: u32,
+        shift: u32,
+        out: u32,
+    },
+    Ashr {
+        val: u32,
+        shift: u32,
+        out: u32,
+    },
 
     // ---- Comparison ---------------------------------------------------------
-    Icmp { pred: IcmpPred, lhs: u32, rhs: u32, out: u32 },
+    Icmp {
+        pred: IcmpPred,
+        lhs: u32,
+        rhs: u32,
+        out: u32,
+    },
 
     // ---- Conversions --------------------------------------------------------
-    Zext { val: u32, dst_ty: LirType, out: u32 },
-    Sext { val: u32, dst_ty: LirType, out: u32 },
-    Trunc { val: u32, dst_ty: LirType, out: u32 },
+    Zext {
+        val: u32,
+        dst_ty: LirType,
+        out: u32,
+    },
+    Sext {
+        val: u32,
+        dst_ty: LirType,
+        out: u32,
+    },
+    Trunc {
+        val: u32,
+        dst_ty: LirType,
+        out: u32,
+    },
 
     // ---- Select -------------------------------------------------------------
-    Select { cond: u32, then_val: u32, else_val: u32, out: u32 },
+    Select {
+        cond: u32,
+        then_val: u32,
+        else_val: u32,
+        out: u32,
+    },
 
     // ---- Terminators --------------------------------------------------------
-    Jump { target: u32, args: Vec<u32> },
+    Jump {
+        target: u32,
+        args: Vec<u32>,
+    },
     Branch {
         cond: u32,
         then_block: u32,
@@ -116,7 +193,9 @@ pub enum LirCall {
         else_block: u32,
         else_args: Vec<u32>,
     },
-    Ret { vals: Vec<u32> },
+    Ret {
+        vals: Vec<u32>,
+    },
 
     // ---- Extern calls -------------------------------------------------------
     CallExtern {
@@ -230,7 +309,10 @@ pub enum LirCall {
 /// A recorded sequence of [`LirTarget`] API calls that can be replayed into
 /// any target.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct SavedLirModule {
     pub calls: Vec<LirCall>,
 }
@@ -294,7 +376,13 @@ impl SavedLirModule {
                     target.define_struct(def.clone());
                 }
 
-                LirCall::BeginFunction { name, params, ret, entry_block: _, param_vals: _ } => {
+                LirCall::BeginFunction {
+                    name,
+                    params,
+                    ret,
+                    entry_block: _,
+                    param_vals: _,
+                } => {
                     let (entry, pvs) = target.begin_function(name, params, ret.clone());
                     push_block!(entry);
                     for pv_group in pvs {
@@ -395,7 +483,12 @@ impl SavedLirModule {
                     push_val!(v);
                 }
 
-                LirCall::Select { cond, then_val, else_val, .. } => {
+                LirCall::Select {
+                    cond,
+                    then_val,
+                    else_val,
+                    ..
+                } => {
                     let v = target.select(val!(cond), val!(then_val), val!(else_val));
                     push_val!(v);
                 }
@@ -405,10 +498,22 @@ impl SavedLirModule {
                     target.jump(block!(tgt), BranchTarget::args(real_args));
                 }
 
-                LirCall::Branch { cond, then_block, then_args, else_block, else_args } => {
+                LirCall::Branch {
+                    cond,
+                    then_block,
+                    then_args,
+                    else_block,
+                    else_args,
+                } => {
                     let real_then: Vec<T::Value> = then_args.iter().map(|a| val!(a)).collect();
                     let real_else: Vec<T::Value> = else_args.iter().map(|a| val!(a)).collect();
-                    target.branch(val!(cond), block!(then_block), BranchTarget::args(real_then), block!(else_block), BranchTarget::args(real_else));
+                    target.branch(
+                        val!(cond),
+                        block!(then_block),
+                        BranchTarget::args(real_then),
+                        block!(else_block),
+                        BranchTarget::args(real_else),
+                    );
                 }
 
                 LirCall::Ret { vals: ret_vals } => {
@@ -416,7 +521,13 @@ impl SavedLirModule {
                     target.ret(&real);
                 }
 
-                LirCall::CallExtern { name, arg_tys, args, ret_ty, .. } => {
+                LirCall::CallExtern {
+                    name,
+                    arg_tys,
+                    args,
+                    ret_ty,
+                    ..
+                } => {
                     let real_args: Vec<T::Value> = args.iter().map(|a| val!(a)).collect();
                     let outs = target.call_extern(name, arg_tys, &real_args, ret_ty.clone());
                     for v in outs {
@@ -424,7 +535,13 @@ impl SavedLirModule {
                     }
                 }
 
-                LirCall::Call { name, arg_tys, args, ret_ty, .. } => {
+                LirCall::Call {
+                    name,
+                    arg_tys,
+                    args,
+                    ret_ty,
+                    ..
+                } => {
                     let real_args: Vec<T::Value> = args.iter().map(|a| val!(a)).collect();
                     let outs = target.call(name, arg_tys, &real_args, ret_ty.clone());
                     for v in outs {
@@ -432,7 +549,12 @@ impl SavedLirModule {
                     }
                 }
 
-                LirCall::Switch { index, cases, default_block, default_args } => {
+                LirCall::Switch {
+                    index,
+                    cases,
+                    default_block,
+                    default_args,
+                } => {
                     let real_cases: Vec<(i64, T::Block, BranchTarget<T::Value>)> = cases
                         .iter()
                         .map(|(key, block, args)| {
@@ -440,8 +562,14 @@ impl SavedLirModule {
                             (*key, block!(block), BranchTarget::args(real_args))
                         })
                         .collect();
-                    let real_default_args: Vec<T::Value> = default_args.iter().map(|a| val!(a)).collect();
-                    target.switch(val!(index), &real_cases, block!(default_block), BranchTarget::args(real_default_args));
+                    let real_default_args: Vec<T::Value> =
+                        default_args.iter().map(|a| val!(a)).collect();
+                    target.switch(
+                        val!(index),
+                        &real_cases,
+                        block!(default_block),
+                        BranchTarget::args(real_default_args),
+                    );
                 }
 
                 LirCall::BlockAddr { block, .. } => {
@@ -449,13 +577,28 @@ impl SavedLirModule {
                     push_val!(v);
                 }
 
-                LirCall::DynJump { index, destinations, args } => {
-                    let real_destinations: Vec<T::Block> = destinations.iter().map(|d| block!(d)).collect();
+                LirCall::DynJump {
+                    index,
+                    destinations,
+                    args,
+                } => {
+                    let real_destinations: Vec<T::Block> =
+                        destinations.iter().map(|d| block!(d)).collect();
                     let real_args: Vec<T::Value> = args.iter().map(|a| val!(a)).collect();
-                    target.dyn_jump(val!(index), &real_destinations, BranchTarget::args(real_args));
+                    target.dyn_jump(
+                        val!(index),
+                        &real_destinations,
+                        BranchTarget::args(real_args),
+                    );
                 }
 
-                LirCall::Oracle { name, arg_tys, args, ret_tys, .. } => {
+                LirCall::Oracle {
+                    name,
+                    arg_tys,
+                    args,
+                    ret_tys,
+                    ..
+                } => {
                     let real_args: Vec<T::Value> = args.iter().map(|a| val!(a)).collect();
                     let outs = target.oracle(name, arg_tys, &real_args, ret_tys);
                     for v in outs {
@@ -463,10 +606,25 @@ impl SavedLirModule {
                     }
                 }
 
-                LirCall::Action { name, guard, arg_tys, args, fallbacks, ret_tys, .. } => {
+                LirCall::Action {
+                    name,
+                    guard,
+                    arg_tys,
+                    args,
+                    fallbacks,
+                    ret_tys,
+                    ..
+                } => {
                     let real_args: Vec<T::Value> = args.iter().map(|a| val!(a)).collect();
                     let real_fallbacks: Vec<T::Value> = fallbacks.iter().map(|f| val!(f)).collect();
-                    let outs = target.action(name, val!(guard), arg_tys, &real_args, &real_fallbacks, ret_tys);
+                    let outs = target.action(
+                        name,
+                        val!(guard),
+                        arg_tys,
+                        &real_args,
+                        &real_fallbacks,
+                        ret_tys,
+                    );
                     for v in outs {
                         push_val!(v);
                     }
@@ -505,13 +663,23 @@ impl SavedLirModule {
                     push_val!(v);
                 }
 
-                LirCall::PtrIndexLoad { ptr, idx, pointee_ty, .. } => {
+                LirCall::PtrIndexLoad {
+                    ptr,
+                    idx,
+                    pointee_ty,
+                    ..
+                } => {
                     let outs = target.ptr_index_load(val!(ptr), val!(idx), pointee_ty);
                     for v in outs {
                         push_val!(v);
                     }
                 }
-                LirCall::PtrIndexStore { ptr, idx, vals: store_vals, pointee_ty } => {
+                LirCall::PtrIndexStore {
+                    ptr,
+                    idx,
+                    vals: store_vals,
+                    pointee_ty,
+                } => {
                     let real: Vec<T::Value> = store_vals.iter().map(|v| val!(v)).collect();
                     target.ptr_index_store(val!(ptr), val!(idx), &real, pointee_ty);
                 }
@@ -521,7 +689,6 @@ impl SavedLirModule {
             }
         }
     }
-
 }
 
 // ============================================================================
@@ -656,7 +823,9 @@ impl LirTarget for RecordingTarget {
 
     fn add_block_param(&mut self, block: u32, ty: LirType) -> u32 {
         let v = self.alloc_val(ty.clone());
-        self.module.calls.push(LirCall::AddBlockParam { block, ty, val: v });
+        self.module
+            .calls
+            .push(LirCall::AddBlockParam { block, ty, val: v });
         v
     }
 
@@ -756,7 +925,12 @@ impl LirTarget for RecordingTarget {
 
     fn icmp(&mut self, pred: IcmpPred, lhs: u32, rhs: u32) -> u32 {
         let out = self.alloc_val(LirType::Bool);
-        self.module.calls.push(LirCall::Icmp { pred, lhs, rhs, out });
+        self.module.calls.push(LirCall::Icmp {
+            pred,
+            lhs,
+            rhs,
+            out,
+        });
         out
     }
 
@@ -781,7 +955,12 @@ impl LirTarget for RecordingTarget {
     fn select(&mut self, cond: u32, then_val: u32, else_val: u32) -> u32 {
         let ty = self.val_types[then_val as usize].clone();
         let out = self.alloc_val(ty);
-        self.module.calls.push(LirCall::Select { cond, then_val, else_val, out });
+        self.module.calls.push(LirCall::Select {
+            cond,
+            then_val,
+            else_val,
+            out,
+        });
         out
     }
 
@@ -846,7 +1025,10 @@ impl LirTarget for RecordingTarget {
     fn jump(&mut self, target: u32, branch: BranchTarget<u32>) {
         // NOTE: the saved format records block args only; reentry hints are not
         // persisted (the recorder predates `BranchTarget::reentry`).
-        self.module.calls.push(LirCall::Jump { target, args: branch.args });
+        self.module.calls.push(LirCall::Jump {
+            target,
+            args: branch.args,
+        });
     }
 
     fn branch(
@@ -867,7 +1049,9 @@ impl LirTarget for RecordingTarget {
     }
 
     fn ret(&mut self, vals: &[u32]) {
-        self.module.calls.push(LirCall::Ret { vals: vals.to_vec() });
+        self.module.calls.push(LirCall::Ret {
+            vals: vals.to_vec(),
+        });
     }
 
     /// Recorded verbatim (not via the default `switch`-based expansion) so
@@ -919,7 +1103,10 @@ impl LirTarget for RecordingTarget {
         args: &[u32],
         ret_tys: &[LirType],
     ) -> Vec<u32> {
-        let outs: Vec<u32> = ret_tys.iter().map(|ty| self.alloc_val(ty.clone())).collect();
+        let outs: Vec<u32> = ret_tys
+            .iter()
+            .map(|ty| self.alloc_val(ty.clone()))
+            .collect();
         self.module.calls.push(LirCall::Oracle {
             name: alloc::string::String::from(name),
             arg_tys: arg_tys.to_vec(),
@@ -939,7 +1126,10 @@ impl LirTarget for RecordingTarget {
         fallbacks: &[u32],
         ret_tys: &[LirType],
     ) -> Vec<u32> {
-        let outs: Vec<u32> = ret_tys.iter().map(|ty| self.alloc_val(ty.clone())).collect();
+        let outs: Vec<u32> = ret_tys
+            .iter()
+            .map(|ty| self.alloc_val(ty.clone()))
+            .collect();
         self.module.calls.push(LirCall::Action {
             name: alloc::string::String::from(name),
             guard,
@@ -997,7 +1187,11 @@ impl StackAllocExt for RecordingTarget {
 
     fn alloca(&mut self, elem_ty: LirType, count: usize) -> u32 {
         let out = self.alloc_val(LirType::Ptr(alloc::boxed::Box::new(elem_ty.clone())));
-        self.module.calls.push(LirCall::Alloca { elem_ty, count, out });
+        self.module.calls.push(LirCall::Alloca {
+            elem_ty,
+            count,
+            out,
+        });
         out
     }
 

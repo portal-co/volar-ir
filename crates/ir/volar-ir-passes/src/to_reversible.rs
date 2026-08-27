@@ -59,18 +59,18 @@ use volar_ir::boolar::BIrStmt;
 use volar_ir::boolar::LaneId;
 use volar_ir::circuit::BCircuit;
 use volar_ir::ir::IRVarId;
-use volar_ir::rcircuit::{RCircuit, RGate};
 #[cfg(test)]
 use volar_ir::rcircuit::StorageState;
+use volar_ir::rcircuit::{RCircuit, RExternalKind, RGate};
 #[cfg(test)]
 use volar_ir_common::StorageId;
 
 /// Why a Boolar circuit could not be converted to a reversible circuit.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ToReversibleError {
-    /// External primitives have no reversible-gate realization in the naive
-    /// scheme (oracles, actions, RNG). Storage access *is* synthesized — via
-    /// [`RGate::StorageSwap`] — but only for the fused single-block form.
+    /// A legacy external primitive has no direct reversible-gate realization.
+    /// New bit-granular external nodes lower through XOR gates; this remains
+    /// for old call-handle nodes until their callers migrate.
     UnsupportedStmt {
         /// Var id of the offending statement result.
         var: u32,
@@ -95,13 +95,19 @@ impl core::fmt::Display for ToReversibleError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ToReversibleError::UnsupportedStmt { var } => {
-                write!(f, "stmt var {var} is an external primitive with no reversible lowering")
+                write!(
+                    f,
+                    "stmt var {var} is a legacy primitive with no reversible lowering"
+                )
             }
             ToReversibleError::UseBeforeDef { user, operand } => {
                 write!(f, "stmt var {user} uses var {operand} before it is defined")
             }
             ToReversibleError::StatefulStmtInHardenedMode { var } => {
-                write!(f, "stmt var {var} is stateful and cannot use hardened lowering")
+                write!(
+                    f,
+                    "stmt var {var} is stateful and cannot use hardened lowering"
+                )
             }
         }
     }
@@ -211,7 +217,9 @@ pub struct ValueWatchlist {
 
 impl ValueWatchlist {
     pub fn from_vars(vars: impl IntoIterator<Item = u32>) -> Self {
-        ValueWatchlist { vars: vars.into_iter().collect() }
+        ValueWatchlist {
+            vars: vars.into_iter().collect(),
+        }
     }
 }
 
@@ -246,9 +254,7 @@ pub fn translate_watchlist(
 ) -> Result<WireWatchlist, UnknownVar> {
     let mut entries: Vec<WireWatchEntry> = Vec::with_capacity(watchlist.vars.len());
     for &var in &watchlist.vars {
-        let wire = map
-            .wire(IRVarId(var))
-            .ok_or(UnknownVar { var })?;
+        let wire = map.wire(IRVarId(var)).ok_or(UnknownVar { var })?;
         entries.push(WireWatchEntry { wire, var });
     }
     entries.sort_by_key(|e| e.wire);
@@ -282,7 +288,12 @@ pub fn to_reversible_with_mode(
 ) -> Result<(RCircuit, VarWireMap), ToReversibleError> {
     if mode == ReversibleMode::Hardened {
         for (i, node) in circ.stmts.iter().enumerate() {
-            if matches!(node.kind, BIrStmt::StorageRead { .. } | BIrStmt::StorageWrite { .. }) {
+            if matches!(
+                node.kind,
+                BIrStmt::StorageRead { .. }
+                    | BIrStmt::StorageWrite { .. }
+                    | BIrStmt::ActionStoreBit { .. }
+            ) {
                 return Err(ToReversibleError::StatefulStmtInHardenedMode {
                     var: circ.params + i as u32,
                 });
@@ -327,6 +338,27 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                         bump(*v);
                     }
                 }
+                BIrStmt::OracleBit { args, .. } => {
+                    for v in args {
+                        bump(*v);
+                    }
+                }
+                BIrStmt::ActionStoreBit {
+                    guard,
+                    args,
+                    fallback,
+                    addr,
+                    ..
+                } => {
+                    bump(*guard);
+                    for v in args {
+                        bump(*v);
+                    }
+                    bump(*fallback);
+                    for v in addr {
+                        bump(*v);
+                    }
+                }
                 _ => {}
             }
         }
@@ -355,16 +387,21 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
     // On-demand stmt-result ancilla allocator.
     let mut next_anc = params as usize;
 
-
     // SSA order check + synthesis per statement.
     for (i, node) in circ.stmts.iter().enumerate() {
         let r = IRVarId(params + i as u32); // this stmt's result var
         let check_operand = |v: IRVarId| -> Result<(), ToReversibleError> {
             if v.0 > r.0 {
-                Err(ToReversibleError::UseBeforeDef { user: r.0, operand: v.0 })
+                Err(ToReversibleError::UseBeforeDef {
+                    user: r.0,
+                    operand: v.0,
+                })
             } else if v.0 >= params + i as u32 && v.0 != r.0 {
                 // Operand is a *later* stmt's result.
-                Err(ToReversibleError::UseBeforeDef { user: r.0, operand: v.0 })
+                Err(ToReversibleError::UseBeforeDef {
+                    user: r.0,
+                    operand: v.0,
+                })
             } else {
                 Ok(())
             }
@@ -412,15 +449,24 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                 if let Some(c) = cand {
                     let wc = map_vec[c.0 as usize];
                     let other_wire = if c == *a { wb } else { wa };
-                    gates.push(RGate::Cnot { ctrl: other_wire, target: wc });
+                    gates.push(RGate::Cnot {
+                        ctrl: other_wire,
+                        target: wc,
+                    });
                     // The result now lives at the consumed operand's wire.
                     map_vec.push(wc);
                 } else {
                     // w_r starts 0; XOR-copy both operands into it.
                     let wr = next_anc;
                     next_anc += 1;
-                    gates.push(RGate::Cnot { ctrl: wa, target: wr });
-                    gates.push(RGate::Cnot { ctrl: wb, target: wr });
+                    gates.push(RGate::Cnot {
+                        ctrl: wa,
+                        target: wr,
+                    });
+                    gates.push(RGate::Cnot {
+                        ctrl: wb,
+                        target: wr,
+                    });
                     map_vec.push(wr);
                 }
             }
@@ -442,7 +488,10 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                 next_anc += 1;
                 // Copy-then-invert: never invert an input wire (would break
                 // the `(x, ·) ↦ (x, ·)` contract).
-                gates.push(RGate::Cnot { ctrl: map_vec[a.0 as usize], target: wr });
+                gates.push(RGate::Cnot {
+                    ctrl: map_vec[a.0 as usize],
+                    target: wr,
+                });
                 gates.push(RGate::X(wr));
                 map_vec.push(wr);
             }
@@ -456,15 +505,29 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                 next_scratch += 1;
                 let nb = next_scratch;
                 next_scratch += 1;
-                gates.push(RGate::Cnot { ctrl: map_vec[a.0 as usize], target: na });
+                gates.push(RGate::Cnot {
+                    ctrl: map_vec[a.0 as usize],
+                    target: na,
+                });
                 gates.push(RGate::X(na));
-                gates.push(RGate::Cnot { ctrl: map_vec[b.0 as usize], target: nb });
+                gates.push(RGate::Cnot {
+                    ctrl: map_vec[b.0 as usize],
+                    target: nb,
+                });
                 gates.push(RGate::X(nb));
-                gates.push(RGate::Ccnot { c1: na, c2: nb, target: wr });
+                gates.push(RGate::Ccnot {
+                    c1: na,
+                    c2: nb,
+                    target: wr,
+                });
                 gates.push(RGate::X(wr));
                 map_vec.push(wr);
             }
-            BIrStmt::StorageRead { storage, lane, addr } => {
+            BIrStmt::StorageRead {
+                storage,
+                lane,
+                addr,
+            } => {
                 check_operand_list(addr)?;
                 // Bennett-style non-destructive read:
                 //   swap cell ↔ scratch (cell value now in scratch, cell = 0)
@@ -472,8 +535,7 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                 //   swap again (restore the cell, clear the scratch)
                 let s = next_scratch;
                 next_scratch += 1;
-                let addr_wires: Vec<usize> =
-                    addr.iter().map(|v| map_vec[v.0 as usize]).collect();
+                let addr_wires: Vec<usize> = addr.iter().map(|v| map_vec[v.0 as usize]).collect();
                 let swap = |target| RGate::StorageSwap {
                     storage: *storage,
                     lane: *lane,
@@ -483,11 +545,19 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                 gates.push(swap(s));
                 let wr = next_anc;
                 next_anc += 1;
-                gates.push(RGate::Cnot { ctrl: s, target: wr });
+                gates.push(RGate::Cnot {
+                    ctrl: s,
+                    target: wr,
+                });
                 gates.push(swap(s));
                 map_vec.push(wr);
             }
-            BIrStmt::StorageWrite { storage, lane, src, addr } => {
+            BIrStmt::StorageWrite {
+                storage,
+                lane,
+                src,
+                addr,
+            } => {
                 check_operand(*src)?;
                 check_operand_list(addr)?;
                 // Copy the source bit into a fresh scratch wire, then swap it
@@ -497,13 +567,84 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                 // that stays 0 and is never read.
                 let t = next_scratch;
                 next_scratch += 1;
-                gates.push(RGate::Cnot { ctrl: map_vec[src.0 as usize], target: t });
+                gates.push(RGate::Cnot {
+                    ctrl: map_vec[src.0 as usize],
+                    target: t,
+                });
                 gates.push(RGate::StorageSwap {
                     storage: *storage,
                     lane: *lane,
                     addr: addr.iter().map(|v| map_vec[v.0 as usize]).collect(),
                     target: t,
                 });
+                let wr = next_anc;
+                next_anc += 1;
+                map_vec.push(wr);
+            }
+            BIrStmt::OracleBit {
+                name,
+                args,
+                bit,
+                occurrence,
+            } => {
+                check_operand_list(args)?;
+                let wr = next_anc;
+                next_anc += 1;
+                gates.push(RGate::ExternalXor {
+                    kind: RExternalKind::Oracle,
+                    name: name.clone(),
+                    args: args.iter().map(|v| map_vec[v.0 as usize]).collect(),
+                    target: wr,
+                    bit: *bit,
+                    occurrence: *occurrence,
+                });
+                map_vec.push(wr);
+            }
+            BIrStmt::RngBit {
+                name,
+                bit,
+                occurrence,
+            } => {
+                let wr = next_anc;
+                next_anc += 1;
+                gates.push(RGate::ExternalXor {
+                    kind: RExternalKind::Rng,
+                    name: name.clone(),
+                    args: Vec::new(),
+                    target: wr,
+                    bit: *bit,
+                    occurrence: *occurrence,
+                });
+                map_vec.push(wr);
+            }
+            BIrStmt::ActionStoreBit {
+                name,
+                guard,
+                args,
+                fallback,
+                storage,
+                lane,
+                addr,
+                bit,
+                occurrence,
+            } => {
+                check_operand(*guard)?;
+                check_operand_list(args)?;
+                check_operand(*fallback)?;
+                check_operand_list(addr)?;
+                gates.push(RGate::ExternalStorageXor {
+                    name: name.clone(),
+                    guard: map_vec[guard.0 as usize],
+                    args: args.iter().map(|v| map_vec[v.0 as usize]).collect(),
+                    fallback: map_vec[fallback.0 as usize],
+                    storage: *storage,
+                    lane: *lane,
+                    addr: addr.iter().map(|v| map_vec[v.0 as usize]).collect(),
+                    bit: *bit,
+                    occurrence: *occurrence,
+                });
+                // Preserve Boolar's positional effect result as a zero
+                // ancilla. The reversible semantic effect is the storage XOR.
                 let wr = next_anc;
                 next_anc += 1;
                 map_vec.push(wr);
@@ -556,6 +697,28 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                     }
                     shift(target);
                 }
+                RGate::ExternalXor { args, target, .. } => {
+                    for wire in args.iter_mut() {
+                        shift(wire);
+                    }
+                    shift(target);
+                }
+                RGate::ExternalStorageXor {
+                    guard,
+                    args,
+                    fallback,
+                    addr,
+                    ..
+                } => {
+                    shift(guard);
+                    for wire in args.iter_mut() {
+                        shift(wire);
+                    }
+                    shift(fallback);
+                    for wire in addr.iter_mut() {
+                        shift(wire);
+                    }
+                }
                 // Fail closed on future gate variants rather than silently
                 // leaving stale wire indices behind.
                 _ => panic!("to_reversible compaction: unknown RGate variant"),
@@ -575,9 +738,8 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
     }
 
     let num_wires_total = next_scratch - delta;
-    let circuit = RCircuit::new(num_wires_total, gates).expect(
-        "to_reversible synthesis produces validated gates by construction",
-    );
+    let circuit = RCircuit::new(num_wires_total, gates)
+        .expect("to_reversible synthesis produces validated gates by construction");
     let y_end = y_base + circ.outputs.len();
     let workspace = (params as usize..y_base)
         .chain(y_end..num_wires_total)
@@ -603,11 +765,7 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
 /// gates. Let `T` toggle one dirty borrowed bit exactly when all workspace
 /// wires are zero. `S; T; S; T` then runs exactly one clean copy for zero
 /// workspace and either zero or two copies otherwise.
-fn harden(
-    circ: &BCircuit,
-    circuit: RCircuit,
-    mut map: VarWireMap,
-) -> (RCircuit, VarWireMap) {
+fn harden(circ: &BCircuit, circuit: RCircuit, mut map: VarWireMap) -> (RCircuit, VarWireMap) {
     let output_count = circ.outputs.len();
     let compute_len = circuit.gates.len() - output_count;
     let compute = &circuit.gates[..compute_len];
@@ -621,8 +779,7 @@ fn harden(
     }
 
     let borrowed_base = circuit.num_wires;
-    let borrowed: Vec<usize> =
-        (borrowed_base..borrowed_base + map.workspace.len()).collect();
+    let borrowed: Vec<usize> = (borrowed_base..borrowed_base + map.workspace.len()).collect();
     let selector = *borrowed.last().expect("nonempty workspace has a selector");
 
     let mut controlled_clean_copy = Vec::with_capacity(compute.len() * 2 + output_count);
@@ -660,12 +817,7 @@ fn harden(
 
 /// Append `target ^= 1` iff every control wire is zero, restoring all dirty
 /// borrowed wires for every initial assignment.
-fn append_zero_test(
-    gates: &mut Vec<RGate>,
-    controls: &[usize],
-    target: usize,
-    dirty: &[usize],
-) {
+fn append_zero_test(gates: &mut Vec<RGate>, controls: &[usize], target: usize, dirty: &[usize]) {
     debug_assert!(!controls.is_empty());
     debug_assert!(dirty.len() >= controls.len().saturating_sub(2));
 
@@ -688,8 +840,15 @@ fn append_mcx_with_dirty(
     dirty: &[usize],
 ) {
     match controls {
-        [control] => gates.push(RGate::Cnot { ctrl: *control, target }),
-        [c1, c2] => gates.push(RGate::Ccnot { c1: *c1, c2: *c2, target }),
+        [control] => gates.push(RGate::Cnot {
+            ctrl: *control,
+            target,
+        }),
+        [c1, c2] => gates.push(RGate::Ccnot {
+            c1: *c1,
+            c2: *c2,
+            target,
+        }),
         _ => {
             let ladder_len = controls.len() - 2;
             let ladder = &dirty[..ladder_len];
@@ -717,10 +876,16 @@ fn append_dirty_ladder(
         } else {
             (dirty[i - 1], controls[i + 1])
         };
-        gates.push(RGate::Ccnot { c1, c2, target: dirty[i] });
+        gates.push(RGate::Ccnot {
+            c1,
+            c2,
+            target: dirty[i],
+        });
     }
     gates.push(RGate::Ccnot {
-        c1: *dirty.last().expect("three controls require a borrowed wire"),
+        c1: *dirty
+            .last()
+            .expect("three controls require a borrowed wire"),
         c2: *controls.last().expect("nonempty controls"),
         target,
     });
@@ -730,7 +895,11 @@ fn append_dirty_ladder(
         } else {
             (dirty[i - 1], controls[i + 1])
         };
-        gates.push(RGate::Ccnot { c1, c2, target: dirty[i] });
+        gates.push(RGate::Ccnot {
+            c1,
+            c2,
+            target: dirty[i],
+        });
     }
 }
 
@@ -782,14 +951,16 @@ mod tests {
             let px: Vec<bool> = (0..n_params).map(|i| (x >> i) & 1 == 1).collect();
             let f = {
                 let vals = eval_bir(circ, &px);
-                circ.outputs.iter().map(|o| vals[o.0 as usize]).collect::<Vec<_>>()
+                circ.outputs
+                    .iter()
+                    .map(|o| vals[o.0 as usize])
+                    .collect::<Vec<_>>()
             };
             // Wire layout mirrors the transform:
             // Locate the y register through the map (reuse may compact it).
             let y_base = map.y_base();
             for ymask in 0..(1u32 << n_out.min(6)) {
-                let py: Vec<bool> =
-                    (0..n_out).map(|i| (ymask >> i) & 1 == 1).collect();
+                let py: Vec<bool> = (0..n_out).map(|i| (ymask >> i) & 1 == 1).collect();
                 let mut wires = vec![false; rc.num_wires];
                 for (i, b) in px.iter().enumerate() {
                     wires[map.wire(IRVarId(i as u32)).unwrap()] = *b;
@@ -820,18 +991,15 @@ mod tests {
     /// initialized-ancilla path: x/z/u are restored for every assignment and
     /// y changes exactly when z was all zero.
     fn check_hardened_semantics(circ: &BCircuit) {
-        let (rc, map) =
-            to_reversible_with_mode(circ, ReversibleMode::Hardened).expect("converts");
+        let (rc, map) = to_reversible_with_mode(circ, ReversibleMode::Hardened).expect("converts");
         assert_eq!(map.mode(), ReversibleMode::Hardened);
         assert_eq!(map.num_wires(), rc.num_wires);
         assert_eq!(map.borrowed_wires().len(), map.workspace_wires().len());
 
         let n_params = circ.params as usize;
         let n_out = circ.outputs.len();
-        let state_bits = n_params
-            + n_out
-            + map.workspace_wires().len()
-            + map.borrowed_wires().len();
+        let state_bits =
+            n_params + n_out + map.workspace_wires().len() + map.borrowed_wires().len();
         assert_eq!(state_bits, rc.num_wires);
         assert!(state_bits <= 12, "test circuit state space must stay small");
 
@@ -864,9 +1032,7 @@ mod tests {
             for wire in 0..rc.num_wires {
                 let output_index = wire.checked_sub(map.y_base()).filter(|&k| k < n_out);
                 let expected = if let Some(k) = output_index {
-                    before[wire]
-                        ^ (workspace_is_zero
-                            && values[circ.outputs[k].0 as usize])
+                    before[wire] ^ (workspace_is_zero && values[circ.outputs[k].0 as usize])
                 } else {
                     before[wire]
                 };
@@ -921,8 +1087,7 @@ mod tests {
     fn hardened_mode_without_workspace_keeps_the_direct_embedding() {
         let mut circ = BCircuit::new(2);
         circ.outputs = vec![IRVarId(0), IRVarId(1)];
-        let (rc, map) =
-            to_reversible_with_mode(&circ, ReversibleMode::Hardened).expect("converts");
+        let (rc, map) = to_reversible_with_mode(&circ, ReversibleMode::Hardened).expect("converts");
         assert!(map.workspace_wires().is_empty());
         assert!(map.borrowed_wires().is_empty());
         assert_eq!(rc.gates().len(), 2);
@@ -974,8 +1139,7 @@ mod tests {
         let composed = rc.then(&inv).expect("compose");
         // For arbitrary initial wires, composed must be identity.
         for mask in 0..(1u32 << rc.num_wires.min(10)) {
-            let mut wires: Vec<bool> =
-                (0..rc.num_wires).map(|i| (mask >> i) & 1 == 1).collect();
+            let mut wires: Vec<bool> = (0..rc.num_wires).map(|i| (mask >> i) & 1 == 1).collect();
             let orig = wires.clone();
             composed.apply_pure(&mut wires).expect("pure");
             assert_eq!(wires, orig, "inverse∘circuit ≠ identity for mask {mask}");
@@ -1000,7 +1164,10 @@ mod tests {
         let translated = translate_watchlist(&wl, &map).expect("translates");
         assert_eq!(
             translated.entries,
-            vec![WireWatchEntry { wire: 0, var: 0 }, WireWatchEntry { wire: 3, var: a.0 }]
+            vec![
+                WireWatchEntry { wire: 0, var: 0 },
+                WireWatchEntry { wire: 3, var: a.0 }
+            ]
         );
 
         // Unknown id fails closed.
@@ -1012,14 +1179,108 @@ mod tests {
     }
 
     #[test]
-    fn rejects_external_primitives() {
+    fn rejects_legacy_external_primitives() {
         let mut circ = BCircuit::new(1);
-        let rng = circ.push_stmt(BIrStmt::Rng { name: alloc::string::String::from("r") }, ());
+        let rng = circ.push_stmt(
+            BIrStmt::Rng {
+                name: alloc::string::String::from("r"),
+            },
+            (),
+        );
         circ.outputs = vec![rng];
         assert_eq!(
             to_reversible(&circ).unwrap_err(),
             ToReversibleError::UnsupportedStmt { var: 1 }
         );
+    }
+
+    #[derive(Default)]
+    struct ReplaySources;
+
+    impl volar_ir::rcircuit::ReversibleExternalRegistry for ReplaySources {
+        fn oracle_bit(&mut self, name: &str, args: &[bool], bit: usize, occurrence: u64) -> bool {
+            assert_eq!(name, "lookup");
+            args[0] ^ ((bit as u64 ^ occurrence) & 1 != 0)
+        }
+
+        fn rng_bit(&mut self, name: &str, bit: usize, occurrence: u64) -> bool {
+            assert_eq!(name, "nonce");
+            (bit as u64 ^ occurrence) & 1 != 0
+        }
+
+        fn action_bit(&mut self, name: &str, args: &[bool], bit: usize, occurrence: u64) -> bool {
+            assert_eq!(name, "commit");
+            args[bit % args.len()] ^ (occurrence & 1 != 0)
+        }
+    }
+
+    #[test]
+    fn lowers_replayable_external_bits_to_xor_gates_and_restores_on_inverse() {
+        let sid = StorageId::DEFAULT;
+        let lane = LaneId(0);
+        // params: guard, oracle argument, storage address, action fallback.
+        let mut circ = BCircuit::new(4);
+        let oracle = circ.push_stmt(
+            BIrStmt::OracleBit {
+                name: "lookup".into(),
+                args: vec![IRVarId(1)],
+                bit: 2,
+                occurrence: 7,
+            },
+            (),
+        );
+        let rng = circ.push_stmt(
+            BIrStmt::RngBit {
+                name: "nonce".into(),
+                bit: 3,
+                occurrence: 8,
+            },
+            (),
+        );
+        circ.push_stmt(
+            BIrStmt::ActionStoreBit {
+                name: "commit".into(),
+                guard: IRVarId(0),
+                args: vec![oracle, rng],
+                fallback: IRVarId(3),
+                storage: sid,
+                lane,
+                addr: vec![IRVarId(2)],
+                bit: 0,
+                occurrence: 9,
+            },
+            (),
+        );
+        circ.outputs = vec![oracle, rng];
+
+        let (rc, map) = to_reversible(&circ).expect("direct externals convert");
+        assert!(rc.uses_externals());
+        assert!(rc.uses_storage());
+        assert_eq!(
+            to_reversible_with_mode(&circ, ReversibleMode::Hardened).unwrap_err(),
+            ToReversibleError::StatefulStmtInHardenedMode { var: 6 }
+        );
+        let mut wires = vec![false; rc.num_wires];
+        wires[0] = true;
+        wires[1] = true;
+        wires[2] = true;
+        wires[3] = false;
+        let before_wires = wires.clone();
+        let mut storage = StorageState::new();
+        let before_storage = storage.clone();
+        let mut sources = ReplaySources;
+        rc.apply_with_externals(&mut wires, &mut storage, &mut sources);
+        // lookup(1, 2, 7) = 0 and rng(3, 8) = 1, copied into y by XOR.
+        assert_eq!(wires[map.y_base()..map.y_base() + 2], [false, true]);
+        // guarded action bit 0 is lookup(0) XOR occurrence parity = 1.
+        assert_eq!(
+            storage.get(&((sid, lane), 1)).copied().unwrap_or(false),
+            true
+        );
+        rc.inverse()
+            .apply_with_externals(&mut wires, &mut storage, &mut sources);
+        assert_eq!(wires, before_wires);
+        assert_eq!(storage, before_storage);
     }
 
     #[test]
@@ -1031,7 +1292,10 @@ mod tests {
         circ.outputs = vec![s0];
         assert_eq!(
             to_reversible(&circ).unwrap_err(),
-            ToReversibleError::UseBeforeDef { user: 1, operand: 2 }
+            ToReversibleError::UseBeforeDef {
+                user: 1,
+                operand: 2
+            }
         );
     }
 
@@ -1113,9 +1377,21 @@ mod tests {
         // output-phase CNOT.
         let g = rc.gates();
         assert_eq!(g.len(), 5);
-        assert_eq!(g[1], RGate::Cnot { ctrl: 0, target: 1 }, "x ⊕ c1 into c1's wire");
-        assert_eq!(g[2], RGate::Cnot { ctrl: 2, target: 1 }, "⊕ c2 into the chain wire");
-        assert_eq!(g[3], RGate::Cnot { ctrl: 0, target: 1 }, "⊕ x into the chain wire");
+        assert_eq!(
+            g[1],
+            RGate::Cnot { ctrl: 0, target: 1 },
+            "x ⊕ c1 into c1's wire"
+        );
+        assert_eq!(
+            g[2],
+            RGate::Cnot { ctrl: 2, target: 1 },
+            "⊕ c2 into the chain wire"
+        );
+        assert_eq!(
+            g[3],
+            RGate::Cnot { ctrl: 0, target: 1 },
+            "⊕ x into the chain wire"
+        );
         // All three results alias the same consumed chain wire.
         assert_eq!(map.wire(t1), Some(1));
         assert_eq!(map.wire(t2), Some(1));
@@ -1152,7 +1428,11 @@ mod tests {
 
         let mut read_circ = BCircuit::new(1);
         let r = read_circ.push_stmt(
-            BIrStmt::StorageRead { storage: sid, lane, addr: vec![IRVarId(0)] },
+            BIrStmt::StorageRead {
+                storage: sid,
+                lane,
+                addr: vec![IRVarId(0)],
+            },
             (),
         );
         read_circ.outputs = vec![r];
@@ -1172,7 +1452,10 @@ mod tests {
                 let y_base = map.y_base();
                 assert_eq!(wires[y_base], stored, "read at addr={addr_bit}");
                 // Cell restored by the swap-back pair.
-                let got = storage.get(&((sid, lane), addr_bit as u64)).copied().unwrap_or(false);
+                let got = storage
+                    .get(&((sid, lane), addr_bit as u64))
+                    .copied()
+                    .unwrap_or(false);
                 assert_eq!(got, stored, "cell must hold its original value");
             }
         }
@@ -1221,6 +1504,9 @@ mod tests {
             to_reversible_with_mode(&circ, ReversibleMode::Hardened).unwrap_err(),
             ToReversibleError::StatefulStmtInHardenedMode { var: 1 }
         );
-        assert!(to_reversible(&circ).is_ok(), "naive storage lowering remains available");
+        assert!(
+            to_reversible(&circ).is_ok(),
+            "naive storage lowering remains available"
+        );
     }
 }

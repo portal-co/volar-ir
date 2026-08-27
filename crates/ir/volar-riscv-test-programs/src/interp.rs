@@ -40,14 +40,45 @@ pub const MAX_STEPS: i32 = 40;
 pub fn assemble_program() -> Vec<u32> {
     let e = |inst: Inst| inst.encode_normal(Xlen::Rv32);
     vec![
-        e(Inst::Addi { imm: Imm::new_i32(N_WORDS as i32), dest: R_BOUND, src1: Reg::ZERO }),
-        e(Inst::Beq { offset: Imm::new_i32(24), src1: R_I, src2: R_BOUND }),
-        e(Inst::Lw { offset: Imm::new_i32(0), dest: R_TMP, base: R_PTR }),
-        e(Inst::Add { dest: R_SUM, src1: R_SUM, src2: R_TMP }),
-        e(Inst::Addi { imm: Imm::new_i32(4), dest: R_PTR, src1: R_PTR }),
-        e(Inst::Addi { imm: Imm::new_i32(1), dest: R_I, src1: R_I }),
-        e(Inst::Jal { offset: Imm::new_i32(-20), dest: Reg::ZERO }),
-        e(Inst::Sw { offset: Imm::new_i32(RESULT_ADDR), src: R_SUM, base: Reg::ZERO }),
+        e(Inst::Addi {
+            imm: Imm::new_i32(N_WORDS as i32),
+            dest: R_BOUND,
+            src1: Reg::ZERO,
+        }),
+        e(Inst::Beq {
+            offset: Imm::new_i32(24),
+            src1: R_I,
+            src2: R_BOUND,
+        }),
+        e(Inst::Lw {
+            offset: Imm::new_i32(0),
+            dest: R_TMP,
+            base: R_PTR,
+        }),
+        e(Inst::Add {
+            dest: R_SUM,
+            src1: R_SUM,
+            src2: R_TMP,
+        }),
+        e(Inst::Addi {
+            imm: Imm::new_i32(4),
+            dest: R_PTR,
+            src1: R_PTR,
+        }),
+        e(Inst::Addi {
+            imm: Imm::new_i32(1),
+            dest: R_I,
+            src1: R_I,
+        }),
+        e(Inst::Jal {
+            offset: Imm::new_i32(-20),
+            dest: Reg::ZERO,
+        }),
+        e(Inst::Sw {
+            offset: Imm::new_i32(RESULT_ADDR),
+            src: R_SUM,
+            base: Reg::ZERO,
+        }),
     ]
 }
 
@@ -68,7 +99,10 @@ pub fn initial_data_bytes() -> Vec<u8> {
 
 /// Little-endian byte image of the program (code memory).
 pub fn program_bytes() -> Vec<u8> {
-    assemble_program().iter().flat_map(|w| w.to_le_bytes()).collect()
+    assemble_program()
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect()
 }
 
 /// Native Rust reference interpreter -- the trusted oracle. Decodes with
@@ -158,11 +192,19 @@ mod tests {
         let sum = native_reference(&program, &mut mem);
 
         let expected: i32 = initial_data_words().iter().sum();
-        assert_eq!(sum, expected, "native reference must compute the correct sum");
+        assert_eq!(
+            sum, expected,
+            "native reference must compute the correct sum"
+        );
 
         let stored = i32::from_le_bytes(
-            mem[RESULT_ADDR as usize..RESULT_ADDR as usize + 4].try_into().unwrap(),
+            mem[RESULT_ADDR as usize..RESULT_ADDR as usize + 4]
+                .try_into()
+                .unwrap(),
         );
-        assert_eq!(stored, expected, "native reference must store the sum to RAM");
+        assert_eq!(
+            stored, expected,
+            "native reference must store the sum to RAM"
+        );
     }
 }

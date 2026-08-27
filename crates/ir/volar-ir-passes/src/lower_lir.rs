@@ -53,9 +53,13 @@ pub fn lower_biir_with_handler<P, T, H>(
     // For blocks beyond the first we pre-allocate after begin_function.
 
     let input_tys: Vec<LirType> = (0..num_inputs).map(|_| LirType::Bool).collect();
-    let (entry_handle, entry_param_groups) = target.begin_function(name, &input_tys, Some(LirType::U64));
+    let (entry_handle, entry_param_groups) =
+        target.begin_function(name, &input_tys, Some(LirType::U64));
     // Each param is scalar (Bool), so each group has exactly one value.
-    let entry_params: Vec<T::Value> = entry_param_groups.into_iter().map(|g| g.into_iter().next().unwrap()).collect();
+    let entry_params: Vec<T::Value> = entry_param_groups
+        .into_iter()
+        .map(|g| g.into_iter().next().unwrap())
+        .collect();
     block_handles.push(entry_handle);
 
     // Pre-create handles for all blocks after the entry.
@@ -99,7 +103,11 @@ pub fn lower_biir_with_handler<P, T, H>(
     target.end_function();
 }
 
-fn lower_biir_stmt<Q: Clone, T: LirTarget<Q>>(stmt: &BIrStmt, vals: &[T::Value], target: &mut T) -> T::Value {
+fn lower_biir_stmt<Q: Clone, T: LirTarget<Q>>(
+    stmt: &BIrStmt,
+    vals: &[T::Value],
+    target: &mut T,
+) -> T::Value {
     match stmt {
         BIrStmt::Zero => target.iconst(LirType::Bool, 0),
         BIrStmt::One => target.iconst(LirType::Bool, 1),
@@ -122,14 +130,68 @@ fn lower_biir_stmt<Q: Clone, T: LirTarget<Q>>(stmt: &BIrStmt, vals: &[T::Value],
             let va = vals[a.0 as usize].clone();
             target.not(va)
         }
+        BIrStmt::OracleBit {
+            name,
+            args,
+            bit,
+            occurrence,
+        } => {
+            let args = args
+                .iter()
+                .map(|id| vals[id.0 as usize].clone())
+                .collect::<Vec<_>>();
+            target.oracle_bit(name, &args, *bit, *occurrence)
+        }
+        BIrStmt::RngBit {
+            name,
+            bit,
+            occurrence,
+        } => target.rng_bit(name, *bit, *occurrence),
+        BIrStmt::ActionStoreBit {
+            name,
+            guard,
+            args,
+            fallback,
+            storage,
+            lane,
+            addr,
+            bit,
+            occurrence,
+        } => {
+            let args = args
+                .iter()
+                .map(|id| vals[id.0 as usize].clone())
+                .collect::<Vec<_>>();
+            let address = addr
+                .iter()
+                .map(|id| vals[id.0 as usize].clone())
+                .collect::<Vec<_>>();
+            let address = pack_bits_to_u64(&address, target);
+            target.action_store_bit(
+                name,
+                vals[guard.0 as usize].clone(),
+                &args,
+                vals[fallback.0 as usize].clone(),
+                storage.0 as u64,
+                lane.0,
+                address,
+                *bit,
+                *occurrence,
+            );
+            // Preserve Boolar's positional SSA convention for an effect-only
+            // statement. Its value is intentionally unusable data.
+            target.iconst(LirType::Bool, 0)
+        }
         BIrStmt::OracleCall { .. }
-        | BIrStmt::OracleBit { .. }
+        | BIrStmt::OracleProjectedBit { .. }
         | BIrStmt::ActionCall { .. }
         | BIrStmt::ActionBit { .. }
         | BIrStmt::Rng { .. }
         | BIrStmt::StorageRead { .. }
         | BIrStmt::StorageWrite { .. } => {
-            unimplemented!("lower_biir_stmt: extended BIrStmt variants not supported in plain LIR lowering")
+            unimplemented!(
+                "lower_biir_stmt: extended BIrStmt variants not supported in plain LIR lowering"
+            )
         }
         _ => panic!("lower_biir_stmt: unhandled BIrStmt variant — add lowering for this variant"),
     }
@@ -151,16 +213,26 @@ fn lower_biir_terminator<Q: Clone, T: LirTarget<Q>>(
             else_target,
         } => {
             let cond = vals[val.0 as usize].clone();
-            let (then_block, then_args) = resolve_biir_target::<Q, T>(then_target, vals, block_handles);
-            let (else_block, else_args) = resolve_biir_target::<Q, T>(else_target, vals, block_handles);
+            let (then_block, then_args) =
+                resolve_biir_target::<Q, T>(then_target, vals, block_handles);
+            let (else_block, else_args) =
+                resolve_biir_target::<Q, T>(else_target, vals, block_handles);
             match (then_block, else_block) {
                 (Some(tb), Some(eb)) => {
-                    target.branch(cond, tb, BranchTarget::args(then_args), eb, BranchTarget::args(else_args));
+                    target.branch(
+                        cond,
+                        tb,
+                        BranchTarget::args(then_args),
+                        eb,
+                        BranchTarget::args(else_args),
+                    );
                 }
                 _ => unimplemented!("CondJmp with Return/Dyn target"),
             }
         }
-        _ => panic!("lower_biir_terminator: unhandled BIrTerminator variant — add lowering for this variant"),
+        _ => panic!(
+            "lower_biir_terminator: unhandled BIrTerminator variant — add lowering for this variant"
+        ),
     }
 }
 
@@ -172,16 +244,29 @@ fn lower_biir_jump<P: Clone, T: LirTarget<P>>(
 ) {
     match &tgt.block {
         IRBlockTargetId::Return => {
-            let args: Vec<T::Value> = tgt.args.iter().map(|id| vals[id.0 as usize].clone()).collect();
+            let args: Vec<T::Value> = tgt
+                .args
+                .iter()
+                .map(|id| vals[id.0 as usize].clone())
+                .collect();
             let ret_val = pack_bits_to_u64(&args, target);
             target.ret(&[ret_val]);
         }
         IRBlockTargetId::Block(id) => {
-            let args: Vec<T::Value> = tgt.args.iter().map(|id| vals[id.0 as usize].clone()).collect();
-            target.jump(block_handles[id.0 as usize].clone(), BranchTarget::args(args.clone()));
+            let args: Vec<T::Value> = tgt
+                .args
+                .iter()
+                .map(|id| vals[id.0 as usize].clone())
+                .collect();
+            target.jump(
+                block_handles[id.0 as usize].clone(),
+                BranchTarget::args(args.clone()),
+            );
         }
         IRBlockTargetId::Dyn(_) => unimplemented!("dynamic jump target in BIrBlocks lowering"),
-        _ => panic!("lower_biir_jump: unhandled IRBlockTargetId variant — add lowering for this variant"),
+        _ => panic!(
+            "lower_biir_jump: unhandled IRBlockTargetId variant — add lowering for this variant"
+        ),
     }
 }
 
@@ -190,12 +275,18 @@ fn resolve_biir_target<Q: Clone, T: LirTarget<Q>>(
     vals: &[T::Value],
     block_handles: &[T::Block],
 ) -> (Option<T::Block>, Vec<T::Value>) {
-    let args: Vec<T::Value> = tgt.args.iter().map(|id| vals[id.0 as usize].clone()).collect();
+    let args: Vec<T::Value> = tgt
+        .args
+        .iter()
+        .map(|id| vals[id.0 as usize].clone())
+        .collect();
     match &tgt.block {
         IRBlockTargetId::Block(id) => (Some(block_handles[id.0 as usize].clone()), args),
         IRBlockTargetId::Return => (None, args),
         IRBlockTargetId::Dyn(_) => unimplemented!("dynamic jump target in BIrBlocks lowering"),
-        _ => panic!("resolve_biir_target: unhandled IRBlockTargetId variant — add handling for this variant"),
+        _ => panic!(
+            "resolve_biir_target: unhandled IRBlockTargetId variant — add handling for this variant"
+        ),
     }
 }
 
@@ -231,7 +322,14 @@ pub fn lower_ir<P: Clone, T: LirTarget<P>>(
     name: &str,
     target: &mut T,
 ) {
-    lower_ir_with_handler(blocks, types, name, target, &volar_provenance::KeepProvenance, &IrLoweringConfig::default())
+    lower_ir_with_handler(
+        blocks,
+        types,
+        name,
+        target,
+        &volar_provenance::KeepProvenance,
+        &IrLoweringConfig::default(),
+    )
 }
 
 /// Lower typed Volar IR (`IRBlocks<P>`) to any `LirTarget<H::Output>`
@@ -242,7 +340,7 @@ pub fn lower_ir_with_handler<P, T, H>(
     name: &str,
     target: &mut T,
     handler: &H,
-    config: &IrLoweringConfig,
+    _config: &IrLoweringConfig,
 ) where
     P: Clone,
     H: ProvenanceHandler<P>,
@@ -251,7 +349,11 @@ pub fn lower_ir_with_handler<P, T, H>(
     let entry = &blocks.blocks[0];
 
     // Map entry block param types to LirType.
-    let input_tys: Vec<LirType> = entry.params.iter().map(|tid| ir_type_to_lir(&types.0[tid.0 as usize], types)).collect();
+    let input_tys: Vec<LirType> = entry
+        .params
+        .iter()
+        .map(|tid| ir_type_to_lir(&types.0[tid.0 as usize], types))
+        .collect();
 
     // Determine return type from the return terminator's args.
     // For simplicity, assume single-output; we'll pack multi-output below.
@@ -259,7 +361,10 @@ pub fn lower_ir_with_handler<P, T, H>(
 
     let (entry_handle, entry_param_groups) = target.begin_function(name, &input_tys, ret_ty);
     // All params are scalar types, so each group has exactly one value.
-    let entry_params: Vec<T::Value> = entry_param_groups.into_iter().map(|g| g.into_iter().next().unwrap()).collect();
+    let entry_params: Vec<T::Value> = entry_param_groups
+        .into_iter()
+        .map(|g| g.into_iter().next().unwrap())
+        .collect();
 
     let mut block_handles: Vec<T::Block> = vec![entry_handle];
     for _ in 1..blocks.blocks.len() {
@@ -295,14 +400,22 @@ pub fn lower_ir_with_handler<P, T, H>(
             let var_idx = vals_per_block[bi].len(); // index of this stmt's result
             match &stmt.kind {
                 // ---- Oracle: emit target.oracle(), stash results ------------
-                IRStmt::OracleCall { name, args, output_tys, .. } => {
-                    let arg_vals: Vec<T::Value> = args.iter()
+                IRStmt::OracleCall {
+                    name,
+                    args,
+                    output_tys,
+                    ..
+                } => {
+                    let arg_vals: Vec<T::Value> = args
+                        .iter()
                         .map(|id| vals_per_block[bi][id.0 as usize].clone())
                         .collect();
-                    let arg_lir_tys: Vec<LirType> = args.iter()
+                    let arg_lir_tys: Vec<LirType> = args
+                        .iter()
                         .map(|_| LirType::U64) // conservative; full impl should track types
                         .collect();
-                    let ret_tys: Vec<LirType> = output_tys.iter()
+                    let ret_tys: Vec<LirType> = output_tys
+                        .iter()
                         .map(|tid| ir_type_to_lir(&types.0[tid.0 as usize], types))
                         .collect();
                     let results = target.oracle(name, &arg_lir_tys, &arg_vals, &ret_tys);
@@ -312,37 +425,50 @@ pub fn lower_ir_with_handler<P, T, H>(
                 }
                 IRStmt::OracleOutput { call, idx, .. } => {
                     let call_idx = call.0 as usize;
-                    let results = multi_results.get(&call_idx).expect(
-                        "OracleOutput: no stashed results for OracleCall"
-                    );
+                    let results = multi_results
+                        .get(&call_idx)
+                        .expect("OracleOutput: no stashed results for OracleCall");
                     vals_per_block[bi].push(results[*idx].clone());
                 }
                 // ---- Action: emit target.action(), stash results -----------
-                IRStmt::ActionCall { name, guard, args, fallbacks, output_tys, .. } => {
+                IRStmt::ActionCall {
+                    name,
+                    guard,
+                    args,
+                    fallbacks,
+                    output_tys,
+                    ..
+                } => {
                     let guard_val = vals_per_block[bi][guard.0 as usize].clone();
-                    let arg_vals: Vec<T::Value> = args.iter()
+                    let arg_vals: Vec<T::Value> = args
+                        .iter()
                         .map(|id| vals_per_block[bi][id.0 as usize].clone())
                         .collect();
-                    let fallback_vals: Vec<T::Value> = fallbacks.iter()
+                    let fallback_vals: Vec<T::Value> = fallbacks
+                        .iter()
                         .map(|id| vals_per_block[bi][id.0 as usize].clone())
                         .collect();
-                    let arg_lir_tys: Vec<LirType> = args.iter()
-                        .map(|_| LirType::U64)
-                        .collect();
-                    let ret_tys: Vec<LirType> = output_tys.iter()
+                    let arg_lir_tys: Vec<LirType> = args.iter().map(|_| LirType::U64).collect();
+                    let ret_tys: Vec<LirType> = output_tys
+                        .iter()
                         .map(|tid| ir_type_to_lir(&types.0[tid.0 as usize], types))
                         .collect();
                     let results = target.action(
-                        name, guard_val, &arg_lir_tys, &arg_vals, &fallback_vals, &ret_tys,
+                        name,
+                        guard_val,
+                        &arg_lir_tys,
+                        &arg_vals,
+                        &fallback_vals,
+                        &ret_tys,
                     );
                     multi_results.insert(var_idx, results);
                     vals_per_block[bi].push(target.iconst(LirType::Bool, 0));
                 }
                 IRStmt::ActionOutput { call, idx, .. } => {
                     let call_idx = call.0 as usize;
-                    let results = multi_results.get(&call_idx).expect(
-                        "ActionOutput: no stashed results for ActionCall"
-                    );
+                    let results = multi_results
+                        .get(&call_idx)
+                        .expect("ActionOutput: no stashed results for ActionCall");
                     vals_per_block[bi].push(results[*idx].clone());
                 }
                 // ---- Rng: emit target.rng() --------------------------------
@@ -359,7 +485,13 @@ pub fn lower_ir_with_handler<P, T, H>(
         }
 
         let block_vals = vals_per_block[bi].clone();
-        lower_ir_terminator(&block.terminator, &block_vals, &block_handles, &block_param_counts, target);
+        lower_ir_terminator(
+            &block.terminator,
+            &block_vals,
+            &block_handles,
+            &block_param_counts,
+            target,
+        );
     }
 
     target.end_function();
@@ -393,7 +525,8 @@ fn ir_type_to_lir(ty: &IRType, types: &IRTypes) -> LirType {
         w => unimplemented!(
             "ir_type_to_lir: {}-bit type {:?} exceeds 64-bit word; \
              multi-word lowering is not yet implemented",
-            w, ty
+            w,
+            ty
         ),
     }
 }
@@ -409,7 +542,11 @@ fn lower_ir_stmt<Q: Clone, T: LirTarget<Q>>(
             let lir_ty = ir_type_to_lir(&types.0[tid.0 as usize], types);
             target.iconst(lir_ty, c.lo as i64)
         }
-        IRStmt::Transmute { src, src_ty, dst_ty } => {
+        IRStmt::Transmute {
+            src,
+            src_ty,
+            dst_ty,
+        } => {
             let sv = vals[src.0 as usize].clone();
             let src_lir = ir_type_to_lir(&types.0[src_ty.0 as usize], types);
             let dst_lir = ir_type_to_lir(&types.0[dst_ty.0 as usize], types);
@@ -421,7 +558,11 @@ fn lower_ir_stmt<Q: Clone, T: LirTarget<Q>>(
                 sv
             }
         }
-        IRStmt::Poly { ty, coeffs, constant } => {
+        IRStmt::Poly {
+            ty,
+            coeffs,
+            constant,
+        } => {
             // Use the declared output type to determine LIR type.
             let lir_ty = ir_type_to_lir(&types.0[ty.0 as usize], types);
             let mut acc = target.iconst(lir_ty, (constant.lo & 1) as i64);
@@ -486,9 +627,7 @@ fn lower_ir_stmt<Q: Clone, T: LirTarget<Q>>(
             // For Vec(n, elem_ty): src_bits = bits(elem_ty).
             // For non-Vec dst, fall back to 1-bit broadcast.
             let src_bits = match &types.0[ty.0 as usize] {
-                IRType::Vec(_, elem_tid) => {
-                    ir_type_bits(&types.0[elem_tid.0 as usize], types)
-                }
+                IRType::Vec(_, elem_tid) => ir_type_bits(&types.0[elem_tid.0 as usize], types),
                 _ => 1,
             };
             let total_bits = dst_lir.bit_width();
@@ -533,20 +672,37 @@ fn lower_ir_terminator<Q: Clone, T: LirTarget<Q>>(
     target: &mut T,
 ) {
     match term {
-        IRTerminator::Jmp { target: jump_target } => {
-            let arg_vals: Vec<T::Value> = jump_target.args.iter().map(|id| vals[id.0 as usize].clone()).collect();
+        IRTerminator::Jmp {
+            target: jump_target,
+        } => {
+            let arg_vals: Vec<T::Value> = jump_target
+                .args
+                .iter()
+                .map(|id| vals[id.0 as usize].clone())
+                .collect();
             match &jump_target.dest {
                 IRBlockTargetId::Return => {
                     let ret = pack_bits_to_u64(&arg_vals, target);
                     target.ret(&[ret]);
                 }
                 IRBlockTargetId::Block(id) => {
-                    target.jump(block_handles[id.0 as usize].clone(), BranchTarget::args(arg_vals));
+                    target.jump(
+                        block_handles[id.0 as usize].clone(),
+                        BranchTarget::args(arg_vals),
+                    );
                 }
                 IRBlockTargetId::Dyn(v) => {
-                    lower_dyn_jump(vals[v.0 as usize].clone(), arg_vals, block_handles, block_param_counts, target);
+                    lower_dyn_jump(
+                        vals[v.0 as usize].clone(),
+                        arg_vals,
+                        block_handles,
+                        block_param_counts,
+                        target,
+                    );
                 }
-                _ => panic!("lower_ir_terminator: unhandled IRBlockTargetId variant — add lowering for this variant"),
+                _ => panic!(
+                    "lower_ir_terminator: unhandled IRBlockTargetId variant — add lowering for this variant"
+                ),
             }
         }
         IRTerminator::JumpCond {
@@ -555,11 +711,25 @@ fn lower_ir_terminator<Q: Clone, T: LirTarget<Q>>(
             else_target,
         } => {
             let cond = vals[condition.0 as usize].clone();
-            let true_vals: Vec<T::Value> = then_target.args.iter().map(|id| vals[id.0 as usize].clone()).collect();
-            let false_vals: Vec<T::Value> = else_target.args.iter().map(|id| vals[id.0 as usize].clone()).collect();
+            let true_vals: Vec<T::Value> = then_target
+                .args
+                .iter()
+                .map(|id| vals[id.0 as usize].clone())
+                .collect();
+            let false_vals: Vec<T::Value> = else_target
+                .args
+                .iter()
+                .map(|id| vals[id.0 as usize].clone())
+                .collect();
             match (&then_target.dest, &else_target.dest) {
                 (IRBlockTargetId::Block(t), IRBlockTargetId::Block(f)) => {
-                    target.branch(cond, block_handles[t.0 as usize].clone(), BranchTarget::args(true_vals), block_handles[f.0 as usize].clone(), BranchTarget::args(false_vals));
+                    target.branch(
+                        cond,
+                        block_handles[t.0 as usize].clone(),
+                        BranchTarget::args(true_vals),
+                        block_handles[f.0 as usize].clone(),
+                        BranchTarget::args(false_vals),
+                    );
                 }
                 _ => unimplemented!("JumpCond with Return/Dyn target"),
             }
@@ -570,15 +740,23 @@ fn lower_ir_terminator<Q: Clone, T: LirTarget<Q>>(
             let (_, default_target) = iter
                 .next()
                 .unwrap_or_else(|| panic!("JumpTable with no cases: no valid destination"));
-            let (default_block, default_args) = resolve_ir_block_target::<Q, T>(default_target, vals, block_handles);
+            let (default_block, default_args) =
+                resolve_ir_block_target::<Q, T>(default_target, vals, block_handles);
             let mut switch_cases = Vec::with_capacity(cases.len().saturating_sub(1));
             for (key, t) in iter {
                 let (blk, args) = resolve_ir_block_target::<Q, T>(t, vals, block_handles);
                 switch_cases.push((key.lo as i64, blk, BranchTarget::args(args)));
             }
-            target.switch(idx_val, &switch_cases, default_block, BranchTarget::args(default_args));
+            target.switch(
+                idx_val,
+                &switch_cases,
+                default_block,
+                BranchTarget::args(default_args),
+            );
         }
-        _ => panic!("lower_ir_terminator: unhandled IRTerminator variant — add lowering for this variant"),
+        _ => panic!(
+            "lower_ir_terminator: unhandled IRTerminator variant — add lowering for this variant"
+        ),
     }
 }
 
@@ -587,7 +765,11 @@ fn resolve_ir_block_target<Q: Clone, T: LirTarget<Q>>(
     vals: &[T::Value],
     block_handles: &[T::Block],
 ) -> (T::Block, Vec<T::Value>) {
-    let args: Vec<T::Value> = t.args.iter().map(|id| vals[id.0 as usize].clone()).collect();
+    let args: Vec<T::Value> = t
+        .args
+        .iter()
+        .map(|id| vals[id.0 as usize].clone())
+        .collect();
     match &t.dest {
         IRBlockTargetId::Block(id) => (block_handles[id.0 as usize].clone(), args),
         _ => unimplemented!("JumpTable case with Return/Dyn target"),
@@ -633,7 +815,16 @@ fn lower_dyn_jump<Q: Clone, T: LirTarget<Q>>(
     let default_bi = candidates[0];
     let mut switch_cases = Vec::with_capacity(candidates.len().saturating_sub(1));
     for &bi in &candidates[1..] {
-        switch_cases.push((bi as i64, block_handles[bi].clone(), BranchTarget::args(args.clone())));
+        switch_cases.push((
+            bi as i64,
+            block_handles[bi].clone(),
+            BranchTarget::args(args.clone()),
+        ));
     }
-    target.switch(index, &switch_cases, block_handles[default_bi].clone(), BranchTarget::args(args));
+    target.switch(
+        index,
+        &switch_cases,
+        block_handles[default_bi].clone(),
+        BranchTarget::args(args),
+    );
 }

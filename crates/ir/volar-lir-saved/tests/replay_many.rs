@@ -7,11 +7,8 @@ use volar_lir_saved::{RecordingTarget, SavedLirModule};
 
 fn build_add() -> SavedLirModule {
     let mut rec = RecordingTarget::new();
-    let (entry, params) = rec.begin_function(
-        "add",
-        &[LirType::U32, LirType::U32],
-        Some(LirType::U32),
-    );
+    let (entry, params) =
+        rec.begin_function("add", &[LirType::U32, LirType::U32], Some(LirType::U32));
     rec.switch_to_block(entry);
     let sum = rec.add(params[0][0], params[1][0]);
     rec.ret(&[sum]);
@@ -22,7 +19,11 @@ fn build_add() -> SavedLirModule {
 #[test]
 fn replay_into_many_identical_targets() {
     let saved = build_add();
-    let mut a = [RecordingTarget::new(), RecordingTarget::new(), RecordingTarget::new()];
+    let mut a = [
+        RecordingTarget::new(),
+        RecordingTarget::new(),
+        RecordingTarget::new(),
+    ];
     saved.replay_into_many(&mut a);
     let finished: Vec<SavedLirModule> = a.into_iter().map(|t| t.finish()).collect();
     assert_eq!(finished[0], finished[1]);

@@ -63,8 +63,22 @@ use volar_ir::{
         IRVarId, PrimType,
     },
 };
-use volar_ir_common::Constant;
-use volar_ir_common::StorageId;
+use volar_ir_common::{Constant, StorageId};
+
+/// A source call did not match the external declarations carried by its
+/// containing [`IRBlocks`].  Lowering is deliberately fail-closed: a backend
+/// never guesses a handler for an undeclared primitive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternalLoweringError {
+    UndeclaredSource {
+        kind: &'static str,
+        name: alloc::string::String,
+    },
+    SignatureMismatch {
+        kind: &'static str,
+        name: alloc::string::String,
+    },
+}
 
 // ============================================================================
 // Public API
@@ -86,7 +100,16 @@ use volar_ir_common::StorageId;
 /// in `BIrTerminator`), and mismatched element-address widths within one
 /// `(StorageId, LaneId)` space.
 pub fn lower_ir_to_boolar<P: Clone>(blocks: &IRBlocks<P>, types: &IRTypes) -> BIrBlocks<P> {
-    lower_ir_to_boolar_with_lane_table(blocks, types).0
+    try_lower_ir_to_boolar(blocks, types)
+        .unwrap_or_else(|error| panic!("lower_ir_to_boolar: invalid external primitive: {error:?}"))
+}
+
+/// Fallible counterpart to [`lower_ir_to_boolar`].
+pub fn try_lower_ir_to_boolar<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+) -> Result<BIrBlocks<P>, ExternalLoweringError> {
+    try_lower_ir_to_boolar_with_lane_table(blocks, types).map(|(blocks, _)| blocks)
 }
 
 /// Like [`lower_ir_to_boolar`], but also returns the watchlist-style side
@@ -97,6 +120,16 @@ pub fn lower_ir_to_boolar_with_lane_table<P: Clone>(
     blocks: &IRBlocks<P>,
     types: &IRTypes,
 ) -> (BIrBlocks<P>, BTreeMap<LaneId, IRTypeId>) {
+    try_lower_ir_to_boolar_with_lane_table(blocks, types)
+        .unwrap_or_else(|error| panic!("lower_ir_to_boolar: invalid external primitive: {error:?}"))
+}
+
+/// Fallible variant of [`lower_ir_to_boolar_with_lane_table`].
+pub fn try_lower_ir_to_boolar_with_lane_table<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+) -> Result<(BIrBlocks<P>, BTreeMap<LaneId, IRTypeId>), ExternalLoweringError> {
+    validate_external_sources(blocks, types)?;
     // ---- 1. Allocate lanes: dense first-use renumbering -------------------
     let mut lane_of: BTreeMap<IRTypeId, LaneId> = BTreeMap::new();
     let mut next_lane: u32 = 0;
@@ -114,6 +147,11 @@ pub fn lower_ir_to_boolar_with_lane_table<P: Clone>(
                     IRStmt::StorageRead { ty, .. } | IRStmt::StorageWrite { ty, .. } => {
                         alloc_lane(*ty)
                     }
+                    IRStmt::ActionStore { output_tys, .. } => {
+                        for ty in output_tys {
+                            alloc_lane(*ty);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -127,10 +165,11 @@ pub fn lower_ir_to_boolar_with_lane_table<P: Clone>(
 
     // ---- 2. Lower blocks, recording per-lane element-address widths -------
     let mut addr_widths: BTreeMap<(StorageId, LaneId), usize> = BTreeMap::new();
+    let mut occurrence = 0u64;
     let out_blocks: Vec<BIrBlock<P>> = blocks
         .blocks
         .iter()
-        .map(|block| lower_block(block, types, &lane_of, &mut addr_widths))
+        .map(|block| lower_block(block, types, &lane_of, &mut addr_widths, &mut occurrence))
         .collect();
 
     // ---- 3. Expand typed pre-init to bit-granular segments ---------------
@@ -140,10 +179,176 @@ pub fn lower_ir_to_boolar_with_lane_table<P: Clone>(
         .flat_map(|seg| expand_pre_init_segment(seg, types, &lane_of, &addr_widths))
         .collect();
 
-    (
-        BIrBlocks { blocks: out_blocks, pre_init },
+    Ok((
+        BIrBlocks {
+            blocks: out_blocks,
+            pre_init,
+        },
         lane_table,
-    )
+    ))
+}
+
+fn validate_external_sources<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+) -> Result<(), ExternalLoweringError> {
+    for block in &blocks.blocks {
+        let mut var_types: Vec<Option<IRTypeId>> = block.params.iter().copied().map(Some).collect();
+        for node in &block.stmts {
+            match &node.kind {
+                IRStmt::OracleCall {
+                    name,
+                    args,
+                    output_tys,
+                    ..
+                } => {
+                    let decl = blocks
+                        .oracles
+                        .iter()
+                        .find(|decl| decl.name == *name)
+                        .ok_or_else(|| ExternalLoweringError::UndeclaredSource {
+                            kind: "oracle",
+                            name: name.clone(),
+                        })?;
+                    if decl.params.len() != args.len()
+                        || decl.results.as_slice() != output_tys.as_slice()
+                        || !external_arg_types_match(&var_types, args, &decl.params)
+                    {
+                        return Err(ExternalLoweringError::SignatureMismatch {
+                            kind: "oracle",
+                            name: name.clone(),
+                        });
+                    }
+                }
+                IRStmt::ActionCall {
+                    name,
+                    guard,
+                    args,
+                    fallbacks,
+                    output_tys,
+                    ..
+                } => {
+                    let decl = blocks
+                        .actions
+                        .iter()
+                        .find(|decl| decl.name == *name)
+                        .ok_or_else(|| ExternalLoweringError::UndeclaredSource {
+                            kind: "action",
+                            name: name.clone(),
+                        })?;
+                    if decl.params.len() != args.len()
+                        || decl.results.as_slice() != output_tys.as_slice()
+                        || fallbacks.len() != output_tys.len()
+                        || !external_arg_types_match(&var_types, args, &decl.params)
+                        || !external_arg_types_match(&var_types, fallbacks, &decl.results)
+                        || !var_is_bit(&var_types, *guard, types)
+                    {
+                        return Err(ExternalLoweringError::SignatureMismatch {
+                            kind: "action",
+                            name: name.clone(),
+                        });
+                    }
+                }
+                IRStmt::ActionStore {
+                    name,
+                    guard,
+                    args,
+                    fallbacks,
+                    output_tys,
+                    targets,
+                    ..
+                } => {
+                    let decl = blocks
+                        .actions
+                        .iter()
+                        .find(|decl| decl.name == *name)
+                        .ok_or_else(|| ExternalLoweringError::UndeclaredSource {
+                            kind: "action",
+                            name: name.clone(),
+                        })?;
+                    if decl.params.len() != args.len()
+                        || decl.results.as_slice() != output_tys.as_slice()
+                        || fallbacks.len() != output_tys.len()
+                        || targets.len() != output_tys.len()
+                        || !external_arg_types_match(&var_types, args, &decl.params)
+                        || !external_arg_types_match(&var_types, fallbacks, &decl.results)
+                        || !targets.iter().all(|target| {
+                            var_types
+                                .get(target.addr.0 as usize)
+                                .and_then(|ty| *ty)
+                                .is_some()
+                        })
+                        || !var_is_bit(&var_types, *guard, types)
+                    {
+                        return Err(ExternalLoweringError::SignatureMismatch {
+                            kind: "action",
+                            name: name.clone(),
+                        });
+                    }
+                }
+                IRStmt::Rng { name, ty } => {
+                    let decl = blocks
+                        .rngs
+                        .iter()
+                        .find(|decl| decl.name == *name)
+                        .ok_or_else(|| ExternalLoweringError::UndeclaredSource {
+                            kind: "rng",
+                            name: name.clone(),
+                        })?;
+                    if decl.ty != *ty {
+                        return Err(ExternalLoweringError::SignatureMismatch {
+                            kind: "rng",
+                            name: name.clone(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            var_types.push(stmt_result_type(&node.kind));
+        }
+    }
+    Ok(())
+}
+
+fn external_arg_types_match(
+    var_types: &[Option<IRTypeId>],
+    args: &[IRVarId],
+    expected: &[IRTypeId],
+) -> bool {
+    args.iter()
+        .zip(expected)
+        .all(|(arg, expected)| var_types.get(arg.0 as usize).and_then(|ty| *ty) == Some(*expected))
+}
+
+fn var_is_bit(var_types: &[Option<IRTypeId>], var: IRVarId, types: &IRTypes) -> bool {
+    var_types
+        .get(var.0 as usize)
+        .and_then(|ty| *ty)
+        .is_some_and(|ty| types.is_bit(ty))
+}
+
+/// Keep declaration validation independent of lowering's bit-expansion state.
+/// Effect-only statements intentionally produce no type: any attempt to feed
+/// one back into a source call is therefore rejected as a signature mismatch.
+fn stmt_result_type(stmt: &IRStmt) -> Option<IRTypeId> {
+    match stmt {
+        IRStmt::StorageRead { ty, .. }
+        | IRStmt::Const(_, ty)
+        | IRStmt::Rol { ty, .. }
+        | IRStmt::Ror { ty, .. }
+        | IRStmt::Merge { ty, .. }
+        | IRStmt::Splat { ty, .. }
+        | IRStmt::Shuffle { ty, .. }
+        | IRStmt::OracleOutput { ty, .. }
+        | IRStmt::ActionOutput { ty, .. }
+        | IRStmt::Rng { ty, .. }
+        | IRStmt::Poly { ty, .. } => Some(*ty),
+        IRStmt::Transmute { dst_ty, .. } => Some(*dst_ty),
+        IRStmt::OracleCall { result_ty, .. } | IRStmt::ActionCall { result_ty, .. } => {
+            Some(*result_ty)
+        }
+        IRStmt::StorageWrite { .. } | IRStmt::ActionStore { .. } | _ => None,
+    }
 }
 
 // ============================================================================
@@ -155,6 +360,7 @@ fn lower_block<P: Clone>(
     types: &IRTypes,
     lane_of: &BTreeMap<IRTypeId, LaneId>,
     addr_widths: &mut BTreeMap<(StorageId, LaneId), usize>,
+    occurrence: &mut u64,
 ) -> BIrBlock<P> {
     // ---- 1. Expand params --------------------------------------------------
     // Each IR param of type T becomes ir_type_bits(T) consecutive Boolar params.
@@ -180,7 +386,18 @@ fn lower_block<P: Clone>(
     for (si, stmt) in block.stmts.iter().enumerate() {
         let prov = stmt.prov.clone();
         let ir_var_idx = block.params.len() as u32 + si as u32;
-        lower_stmt(&stmt.kind, prov, ir_var_idx, &mut var_bits, &mut call_output_bits, &mut emitter, types, lane_of, addr_widths);
+        lower_stmt(
+            &stmt.kind,
+            prov,
+            ir_var_idx,
+            &mut var_bits,
+            &mut call_output_bits,
+            &mut emitter,
+            types,
+            lane_of,
+            addr_widths,
+            occurrence,
+        );
     }
 
     // ---- 3. Convert terminator --------------------------------------------
@@ -208,6 +425,7 @@ fn lower_stmt<P: Clone>(
     types: &IRTypes,
     lane_of: &BTreeMap<IRTypeId, LaneId>,
     addr_widths: &mut BTreeMap<(StorageId, LaneId), usize>,
+    occurrence: &mut u64,
 ) {
     match stmt {
         // ---- Constant ------------------------------------------------------
@@ -233,7 +451,9 @@ fn lower_stmt<P: Clone>(
         }
 
         // ---- GF(2) polynomial ----------------------------------------------
-        IRStmt::Poly { coeffs, constant, .. } => {
+        IRStmt::Poly {
+            coeffs, constant, ..
+        } => {
             let w = infer_poly_width(coeffs, var_bits);
             let bits: Vec<IRVarId> = (0..w)
                 .map(|j| lower_poly_bit(coeffs, constant, j, var_bits, emitter, prov.clone()))
@@ -246,7 +466,9 @@ fn lower_stmt<P: Clone>(
         IRStmt::Rol { src, n, .. } => {
             let src_bits = var_bits[&src.0].clone();
             let w = src_bits.len();
-            let rotated: Vec<IRVarId> = (0..w).map(|j| src_bits[(j + w - n % w.max(1)) % w]).collect();
+            let rotated: Vec<IRVarId> = (0..w)
+                .map(|j| src_bits[(j + w - n % w.max(1)) % w])
+                .collect();
             var_bits.insert(ir_var_idx, rotated);
         }
 
@@ -301,7 +523,11 @@ fn lower_stmt<P: Clone>(
                 let mut full_addr = base_addr.clone();
                 full_addr.extend(const_index_bits(emitter, i, k, &prov));
                 let h = emitter.emit(
-                    BIrStmt::StorageRead { storage: *storage, lane, addr: full_addr },
+                    BIrStmt::StorageRead {
+                        storage: *storage,
+                        lane,
+                        addr: full_addr,
+                    },
                     prov.clone(),
                 );
                 bits.push(h);
@@ -312,7 +538,12 @@ fn lower_stmt<P: Clone>(
         // ---- StorageWrite --------------------------------------------------
         // One Boolar write per bit of the value; same address layout as
         // reads. The result slot carries the per-bit dummy sentinels.
-        IRStmt::StorageWrite { storage, src, ty, addr } => {
+        IRStmt::StorageWrite {
+            storage,
+            src,
+            ty,
+            addr,
+        } => {
             let k = ir_type_bits(&types.0[ty.0 as usize], types);
             let lane = *lane_of.get(ty).expect("lane allocated for storage type");
             let base_addr: Vec<IRVarId> = var_bits[&addr.0].clone();
@@ -330,7 +561,12 @@ fn lower_stmt<P: Clone>(
                 let mut full_addr = base_addr.clone();
                 full_addr.extend(const_index_bits(emitter, i, k, &prov));
                 let h = emitter.emit(
-                    BIrStmt::StorageWrite { storage: *storage, lane, src: b, addr: full_addr },
+                    BIrStmt::StorageWrite {
+                        storage: *storage,
+                        lane,
+                        src: b,
+                        addr: full_addr,
+                    },
                     prov.clone(),
                 );
                 sentinels.push(h);
@@ -339,7 +575,12 @@ fn lower_stmt<P: Clone>(
         }
 
         // ---- OracleCall ----------------------------------------------------
-        IRStmt::OracleCall { name, args, output_tys, .. } => {
+        IRStmt::OracleCall {
+            name,
+            args,
+            output_tys,
+            ..
+        } => {
             let flat_args: Vec<IRVarId> = args
                 .iter()
                 .flat_map(|a| var_bits[&a.0].iter().cloned())
@@ -348,13 +589,23 @@ fn lower_stmt<P: Clone>(
                 .iter()
                 .map(|tid| ir_type_bits(&types.0[tid.0 as usize], types))
                 .sum();
-            let handle = emitter.emit(
-                BIrStmt::OracleCall { name: name.clone(), args: flat_args, num_bits: total_bits },
-                prov.clone(),
-            );
-            // Pre-project all output bits immediately after the handle.
+            // Emit every result bit as its own source invocation.  The
+            // legacy aggregate is only retained in the high IR so existing
+            // frontends can still use `OracleOutput` projections.
             let all_bit_vars: Vec<IRVarId> = (0..total_bits)
-                .map(|bit| emitter.emit(BIrStmt::OracleBit { call: handle, bit }, prov.clone()))
+                .map(|bit| {
+                    let current = *occurrence;
+                    *occurrence += 1;
+                    emitter.emit(
+                        BIrStmt::OracleBit {
+                            name: name.clone(),
+                            args: flat_args.clone(),
+                            bit,
+                            occurrence: current,
+                        },
+                        prov.clone(),
+                    )
+                })
                 .collect();
             // Partition into per-output bit lists for OracleOutput resolution.
             let mut output_bit_lists: Vec<Vec<IRVarId>> = Vec::new();
@@ -364,24 +615,32 @@ fn lower_stmt<P: Clone>(
                 output_bit_lists.push(all_bit_vars[offset..offset + w].to_vec());
                 offset += w;
             }
-            var_bits.insert(ir_var_idx, vec![handle]);
+            var_bits.insert(ir_var_idx, vec![]);
             call_output_bits.insert(ir_var_idx, output_bit_lists);
         }
 
         // ---- OracleOutput --------------------------------------------------
         // Resolved from the pre-projected bit stash; no new Boolar stmts.
         IRStmt::OracleOutput { call, idx, .. } => {
-            let bits = call_output_bits
-                .get(&call.0)
-                .unwrap_or_else(|| panic!(
-                    "lower_ir_to_boolar: OracleOutput references unknown call var {}", call.0
-                ))[*idx]
+            let bits = call_output_bits.get(&call.0).unwrap_or_else(|| {
+                panic!(
+                    "lower_ir_to_boolar: OracleOutput references unknown call var {}",
+                    call.0
+                )
+            })[*idx]
                 .clone();
             var_bits.insert(ir_var_idx, bits);
         }
 
         // ---- ActionCall ----------------------------------------------------
-        IRStmt::ActionCall { name, guard, args, fallbacks, output_tys, .. } => {
+        IRStmt::ActionCall {
+            name,
+            guard,
+            args,
+            fallbacks,
+            output_tys,
+            ..
+        } => {
             let guard_bit = var_bits[&guard.0][0];
             let flat_args: Vec<IRVarId> = args
                 .iter()
@@ -421,13 +680,70 @@ fn lower_stmt<P: Clone>(
 
         // ---- ActionOutput --------------------------------------------------
         IRStmt::ActionOutput { call, idx, .. } => {
-            let bits = call_output_bits
-                .get(&call.0)
-                .unwrap_or_else(|| panic!(
-                    "lower_ir_to_boolar: ActionOutput references unknown call var {}", call.0
-                ))[*idx]
+            let bits = call_output_bits.get(&call.0).unwrap_or_else(|| {
+                panic!(
+                    "lower_ir_to_boolar: ActionOutput references unknown call var {}",
+                    call.0
+                )
+            })[*idx]
                 .clone();
             var_bits.insert(ir_var_idx, bits);
+        }
+
+        // ---- ActionStore ---------------------------------------------------
+        IRStmt::ActionStore {
+            name,
+            guard,
+            args,
+            fallbacks,
+            output_tys,
+            targets,
+        } => {
+            let guard_bit = var_bits[&guard.0][0];
+            let flat_args: Vec<IRVarId> = args
+                .iter()
+                .flat_map(|a| var_bits[&a.0].iter().cloned())
+                .collect();
+            let mut flat_bit = 0usize;
+            for ((fallback, ty), target) in fallbacks.iter().zip(output_tys).zip(targets) {
+                let lane = *lane_of
+                    .get(ty)
+                    .expect("lane allocated for action result type");
+                let base_addr = var_bits[&target.addr.0].clone();
+                let fallback_bits = &var_bits[&fallback.0];
+                let width = ir_type_bits(&types.0[ty.0 as usize], types);
+                assert_eq!(
+                    fallback_bits.len(),
+                    width,
+                    "ActionStore fallback width mismatch"
+                );
+                check_addr_budget(base_addr.len(), width);
+                record_addr_width(target.storage, lane, base_addr.len(), addr_widths);
+                for (result_bit, fallback) in fallback_bits.iter().copied().enumerate() {
+                    let mut addr = base_addr.clone();
+                    addr.extend(const_index_bits(emitter, result_bit, width, &prov));
+                    let current = *occurrence;
+                    *occurrence += 1;
+                    emitter.emit(
+                        BIrStmt::ActionStoreBit {
+                            name: name.clone(),
+                            guard: guard_bit,
+                            args: flat_args.clone(),
+                            fallback,
+                            storage: target.storage,
+                            lane,
+                            addr,
+                            bit: flat_bit,
+                            occurrence: current,
+                        },
+                        prov.clone(),
+                    );
+                    flat_bit += 1;
+                }
+            }
+            // Effects have no data result.  Keep the statement position in
+            // the SSA numbering while making accidental consumption obvious.
+            var_bits.insert(ir_var_idx, vec![]);
         }
 
         // ---- Rng -----------------------------------------------------------
@@ -435,7 +751,18 @@ fn lower_stmt<P: Clone>(
         IRStmt::Rng { name, ty } => {
             let w = ir_type_bits(&types.0[ty.0 as usize], types);
             let bits: Vec<IRVarId> = (0..w)
-                .map(|_| emitter.emit(BIrStmt::Rng { name: name.clone() }, prov.clone()))
+                .map(|bit| {
+                    let current = *occurrence;
+                    *occurrence += 1;
+                    emitter.emit(
+                        BIrStmt::RngBit {
+                            name: name.clone(),
+                            bit,
+                            occurrence: current,
+                        },
+                        prov.clone(),
+                    )
+                })
                 .collect();
             var_bits.insert(ir_var_idx, bits);
         }
@@ -460,7 +787,11 @@ fn lower_terminator(term: &IRTerminator, var_bits: &BTreeMap<u32, Vec<IRVarId>>)
             })
         }
 
-        IRTerminator::JumpCond { condition, then_target, else_target } => {
+        IRTerminator::JumpCond {
+            condition,
+            then_target,
+            else_target,
+        } => {
             let cond_bits = &var_bits[&condition.0];
             assert_eq!(
                 cond_bits.len(),
@@ -488,7 +819,9 @@ fn lower_terminator(term: &IRTerminator, var_bits: &BTreeMap<u32, Vec<IRVarId>>)
                  convert to nested JumpCond first"
             )
         }
-        _ => panic!("lower_ir_to_boolar: unhandled IRTerminator variant — add lowering for this variant"),
+        _ => panic!(
+            "lower_ir_to_boolar: unhandled IRTerminator variant — add lowering for this variant"
+        ),
     }
 }
 
@@ -599,9 +932,10 @@ pub fn ir_type_bits(ty: &IRType, types: &IRTypes) -> usize {
             );
         }
         IRType::Vec(n, elem_id) => n * ir_type_bits(&types.0[elem_id.0 as usize], types),
-        IRType::Tuple(ids) => {
-            ids.iter().map(|id| ir_type_bits(&types.0[id.0 as usize], types)).sum()
-        }
+        IRType::Tuple(ids) => ids
+            .iter()
+            .map(|id| ir_type_bits(&types.0[id.0 as usize], types))
+            .sum(),
         IRType::Block { .. } | IRType::Func { .. } => 0,
         IRType::Primitive(_) => unimplemented!("ir_type_bits: unknown PrimType variant"),
         _ => panic!("ir_type_bits: unhandled IrType variant — add bit-width calculation"),
@@ -635,12 +969,17 @@ struct Emitter<P: Clone> {
 
 impl<P: Clone> Emitter<P> {
     fn new(params: u32) -> Self {
-        Emitter { stmts: vec![], next_var: params, const_wires: BTreeMap::new() }
+        Emitter {
+            stmts: vec![],
+            next_var: params,
+            const_wires: BTreeMap::new(),
+        }
     }
 
     fn emit(&mut self, stmt: BIrStmt, prov: P) -> IRVarId {
         let id = IRVarId(self.next_var);
-        self.stmts.push(volar_ir_common::Node::new(stmt, prov, None));
+        self.stmts
+            .push(volar_ir_common::Node::new(stmt, prov, None));
         self.next_var += 1;
         id
     }
@@ -671,7 +1010,11 @@ impl<P: Clone> Emitter<P> {
 /// addresses would alias distinct cells and corrupt read/write semantics.
 fn check_addr_budget(addr_bits: usize, value_bits: usize) {
     // Same minimal bit count `const_index_bits` emits for indices 0..k.
-    let index_bits = if value_bits <= 1 { 0 } else { (u32::BITS - (value_bits as u32 - 1).leading_zeros()) as usize };
+    let index_bits = if value_bits <= 1 {
+        0
+    } else {
+        (u32::BITS - (value_bits as u32 - 1).leading_zeros()) as usize
+    };
     let total = addr_bits + index_bits;
     assert!(
         total <= 64,
@@ -690,7 +1033,8 @@ fn record_addr_width(
     match addr_widths.entry((storage, lane)) {
         alloc::collections::btree_map::Entry::Occupied(e) => {
             assert_eq!(
-                *e.get(), width,
+                *e.get(),
+                width,
                 "mixed element-address widths within one (StorageId, LaneId) \
                  storage space: {} vs {width}",
                 e.get()
@@ -710,8 +1054,14 @@ fn const_index_bits<P: Clone>(
     k: usize,
     prov: &P,
 ) -> Vec<IRVarId> {
-    let s = if k <= 1 { 0 } else { (usize::BITS - (k - 1).leading_zeros()) as usize };
-    (0..s as u32).map(|j| emitter.const_bit_wire(i, j, prov)).collect()
+    let s = if k <= 1 {
+        0
+    } else {
+        (usize::BITS - (k - 1).leading_zeros()) as usize
+    };
+    (0..s as u32)
+        .map(|j| emitter.const_bit_wire(i, j, prov))
+        .collect()
 }
 
 /// Expand one typed pre-init segment into bit-granular Boolar segments.
@@ -728,7 +1078,9 @@ fn expand_pre_init_segment(
     addr_widths: &BTreeMap<(StorageId, LaneId), usize>,
 ) -> alloc::vec::Vec<BIrPreInitSegment> {
     let k = ir_type_bits(&types.0[seg.ty.0 as usize], types);
-    let lane = *lane_of.get(&seg.ty).expect("lane allocated for pre-init type");
+    let lane = *lane_of
+        .get(&seg.ty)
+        .expect("lane allocated for pre-init type");
     let n_addr = *addr_widths.get(&(seg.storage, lane)).unwrap_or(&0);
     check_addr_budget(n_addr, k);
     (0..k)
@@ -736,7 +1088,9 @@ fn expand_pre_init_segment(
             storage: seg.storage,
             lane,
             offset: seg.offset as u64 + ((i as u64) << n_addr),
-            data: (0..seg.data.len()).map(|e| constant_bit(&seg.data[e], i)).collect(),
+            data: (0..seg.data.len())
+                .map(|e| constant_bit(&seg.data[e], i))
+                .collect(),
         })
         .collect()
 }
@@ -749,9 +1103,9 @@ fn expand_pre_init_segment(
 mod tests {
     extern crate std;
     use super::*;
-    use std::collections::BTreeMap as StdBTreeMap;
     use volar_ir::ir::{
-        IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRType, IRTypes, IRVarId, PrimType,
+        IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRType, IRTypes, IRVarId,
+        PrimType,
     };
     use volar_ir_common::{Constant, Node, TypeTable};
 
@@ -797,10 +1151,19 @@ mod tests {
         assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_16), &types), 16);
         assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_32), &types), 32);
         assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_64), &types), 64);
-        assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_128), &types), 128);
-        assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_256), &types), 256);
+        assert_eq!(
+            ir_type_bits(&IRType::Primitive(PrimType::_128), &types),
+            128
+        );
+        assert_eq!(
+            ir_type_bits(&IRType::Primitive(PrimType::_256), &types),
+            256
+        );
         assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::AES8), &types), 8);
-        assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::Galois64), &types), 64);
+        assert_eq!(
+            ir_type_bits(&IRType::Primitive(PrimType::Galois64), &types),
+            64
+        );
     }
 
     #[test]
@@ -853,7 +1216,9 @@ mod tests {
         let block = IRBlock {
             params: std::vec![u8_id],
             stmts: std::vec![],
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)]),
+            },
         };
         let blocks = IRBlocks::<()>::new(std::vec![block]);
         let lowered = lower_ir_to_boolar::<()>(&blocks, &types);
@@ -871,7 +1236,9 @@ mod tests {
         let mut block = IRBlock::<()> {
             params: std::vec![],
             stmts: std::vec![],
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)]),
+            },
         };
         block.push_stmt(volar_ir::ir::IRStmt::Const(zero_const(), bit_id), ());
 
@@ -891,7 +1258,9 @@ mod tests {
         let mut block = IRBlock::<()> {
             params: std::vec![],
             stmts: std::vec![],
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)]),
+            },
         };
         // Const = 0b00000001 (value 1, bit 0 = One, rest = Zero).
         let c = Constant { lo: 1, hi: 0 };
@@ -929,8 +1298,13 @@ mod tests {
                     src_ty: u8_src,
                     dst_ty: u8_dst,
                 },
-            ].into_iter().map(|s| Node::new(s, (), None)).collect(),
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(2)]) }, // return the transmuted value
+            ]
+            .into_iter()
+            .map(|s| Node::new(s, (), None))
+            .collect(),
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(2)]),
+            }, // return the transmuted value
         };
         let blocks = IRBlocks::new(std::vec![block]);
         let lowered = lower_ir_to_boolar::<()>(&blocks, &types);
@@ -972,8 +1346,13 @@ mod tests {
                 ty: aes8_id,
                 coeffs,
                 constant: zero_const(),
-            }].into_iter().map(|s| Node::new(s, (), None)).collect(),
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(2)],) },
+            }]
+            .into_iter()
+            .map(|s| Node::new(s, (), None))
+            .collect(),
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(2)]),
+            },
         };
         let blocks = IRBlocks::new(std::vec![block]);
         let lowered = lower_ir_to_boolar::<()>(&blocks, &types);
@@ -1013,8 +1392,13 @@ mod tests {
         let c = Constant { lo: 0, hi: 0 };
         let block = IRBlock::<u32> {
             params: std::vec![bit_id],
-            stmts: std::vec![volar_ir::ir::IRStmt::Const(c, bit_id)].into_iter().map(|s| Node::new(s, 42u32, None)).collect(),
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)],) },
+            stmts: std::vec![volar_ir::ir::IRStmt::Const(c, bit_id)]
+                .into_iter()
+                .map(|s| Node::new(s, 42u32, None))
+                .collect(),
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)]),
+            },
         };
         let blocks = IRBlocks::new(std::vec![block]);
         let lowered = lower_ir_to_boolar::<u32>(&blocks, &types);
@@ -1022,5 +1406,67 @@ mod tests {
         // The single Const(Bit, 0) emits one Zero stmt with provenance 42.
         assert_eq!(b.stmts.len(), 1);
         assert_eq!(b.stmts[0].prov, 42u32);
+    }
+
+    #[test]
+    fn action_store_lowers_each_result_bit_to_its_storage_target() {
+        use volar_ir::ir::{ActionDecl, ActionTarget};
+
+        let mut types = TypeTable::new();
+        let bit = types.bit();
+        let byte = types.primitive(PrimType::_8);
+        let block = IRBlock::<()> {
+            // guard, argument, fallback byte, and element address.
+            params: std::vec![bit, bit, byte, bit],
+            stmts: std::vec![Node::new(
+                IRStmt::ActionStore {
+                    name: "write_byte".into(),
+                    guard: IRVarId(0),
+                    args: std::vec![IRVarId(1)],
+                    fallbacks: std::vec![IRVarId(2)],
+                    output_tys: std::vec![byte],
+                    targets: std::vec![ActionTarget {
+                        storage: StorageId::DEFAULT,
+                        addr: IRVarId(3),
+                    }],
+                },
+                (),
+                None,
+            )],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![]),
+            },
+        };
+        let mut blocks = IRBlocks::new(std::vec![block]);
+        blocks.actions.push(ActionDecl {
+            name: "write_byte".into(),
+            params: std::vec![bit],
+            results: std::vec![byte],
+        });
+
+        let lowered = try_lower_ir_to_boolar(&blocks, &types).unwrap();
+        let effects: std::vec::Vec<_> = lowered.blocks[0]
+            .stmts
+            .iter()
+            .filter_map(|node| match &node.kind {
+                BIrStmt::ActionStoreBit {
+                    name,
+                    storage,
+                    lane,
+                    bit,
+                    occurrence,
+                    ..
+                } => Some((name, storage, lane, bit, occurrence)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(effects.len(), 8);
+        for (index, (name, storage, lane, bit, occurrence)) in effects.into_iter().enumerate() {
+            assert_eq!(name, "write_byte");
+            assert_eq!(*storage, StorageId::DEFAULT);
+            assert_eq!(*lane, LaneId(0));
+            assert_eq!(*bit, index);
+            assert_eq!(*occurrence, index as u64);
+        }
     }
 }

@@ -9,18 +9,13 @@
 //! Live values from before the call are spilled to per-site slot offsets
 //! within the same storage.
 
-use alloc::{
-    collections::BTreeMap,
-    string::String,
-    vec,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
 use volar_ir::ir::{
-    IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRVarId, IRTypes,
+    IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRTypes,
+    IRVarId,
 };
 use volar_ir_common::{
-    Constant, IrType, Stmt, StorageAllocator, StorageId,
-    Type as PrimType, TypeId, TypeRemapper,
+    Constant, IrType, Stmt, StorageAllocator, StorageId, Type as PrimType, TypeId, TypeRemapper,
 };
 
 use crate::common::{apply_aliases_to_stmt, stmt_output_type};
@@ -32,9 +27,17 @@ use crate::ir::apply_aliases_to_ir_terminator;
 
 /// One substitution entry for Volar IR.
 pub enum IrSubstitution {
-    Oracle { name: String, replacement: IRBlocks, types: IRTypes },
-    Action { name: String, replacement: IRBlocks, types: IRTypes },
-    Rng    {
+    Oracle {
+        name: String,
+        replacement: IRBlocks,
+        types: IRTypes,
+    },
+    Action {
+        name: String,
+        replacement: IRBlocks,
+        types: IRTypes,
+    },
+    Rng {
         name: String,
         replacement: IRBlocks,
         types: IRTypes,
@@ -49,14 +52,20 @@ impl IrSubstitution {
         match self {
             IrSubstitution::Oracle { name, .. } => name,
             IrSubstitution::Action { name, .. } => name,
-            IrSubstitution::Rng    { name, .. } => name,
+            IrSubstitution::Rng { name, .. } => name,
         }
     }
     fn repl(&self) -> (&IRBlocks, &IRTypes) {
         match self {
-            IrSubstitution::Oracle { replacement, types, .. } => (replacement, types),
-            IrSubstitution::Action { replacement, types, .. } => (replacement, types),
-            IrSubstitution::Rng    { replacement, types, .. } => (replacement, types),
+            IrSubstitution::Oracle {
+                replacement, types, ..
+            } => (replacement, types),
+            IrSubstitution::Action {
+                replacement, types, ..
+            } => (replacement, types),
+            IrSubstitution::Rng {
+                replacement, types, ..
+            } => (replacement, types),
         }
     }
 }
@@ -98,23 +107,40 @@ fn apply_one(
     let tr = TypeRemapper::merge(types, repl_types);
 
     // ── 2. Merge nested declarations ─────────────────────────────────────────
-    for mut d in repl_blocks.oracles.iter().cloned() { tr.remap_oracle_decl(&mut d); blocks.oracles.push(d); }
-    for mut d in repl_blocks.actions.iter().cloned() { tr.remap_action_decl(&mut d); blocks.actions.push(d); }
-    for mut d in repl_blocks.rngs.iter().cloned()    { tr.remap_rng_decl(&mut d);    blocks.rngs.push(d); }
+    for mut d in repl_blocks.oracles.iter().cloned() {
+        tr.remap_oracle_decl(&mut d);
+        blocks.oracles.push(d);
+    }
+    for mut d in repl_blocks.actions.iter().cloned() {
+        tr.remap_action_decl(&mut d);
+        blocks.actions.push(d);
+    }
+    for mut d in repl_blocks.rngs.iter().cloned() {
+        tr.remap_rng_decl(&mut d);
+        blocks.rngs.push(d);
+    }
 
     // ── 3. Allocate storages ─────────────────────────────────────────────────
     let spill_storage = allocator.alloc();
     let mut storage_map: BTreeMap<u32, StorageId> = BTreeMap::new();
     storage_map.insert(StorageId::DEFAULT.0, spill_storage);
     storage_map.insert(StorageId::STACK.0, allocator.alloc());
-    if let IrSubstitution::Rng { state_storage_guest, .. } = sub {
-        storage_map.entry(state_storage_guest.0).or_insert_with(|| allocator.alloc());
+    if let IrSubstitution::Rng {
+        state_storage_guest,
+        ..
+    } = sub
+    {
+        storage_map
+            .entry(state_storage_guest.0)
+            .or_insert_with(|| allocator.alloc());
     }
     for rb in &repl_blocks.blocks {
         for stmt in &rb.stmts {
             match &stmt.kind {
                 Stmt::StorageRead { storage, .. } | Stmt::StorageWrite { storage, .. } => {
-                    storage_map.entry(storage.0).or_insert_with(|| allocator.alloc());
+                    storage_map
+                        .entry(storage.0)
+                        .or_insert_with(|| allocator.alloc());
                 }
                 _ => {}
             }
@@ -126,12 +152,16 @@ fn apply_one(
     for rb in repl_blocks.blocks.iter() {
         let new_block = IRBlock {
             params: rb.params.iter().map(|&t| tr.remap(t)).collect(),
-            stmts: rb.stmts.iter().map(|s| {
-                let mut s2 = s.clone();
-                tr.remap_stmt_types(&mut s2.kind);
-                remap_storage_in_stmt(&mut s2.kind, &storage_map);
-                s2
-            }).collect(),
+            stmts: rb
+                .stmts
+                .iter()
+                .map(|s| {
+                    let mut s2 = s.clone();
+                    tr.remap_stmt_types(&mut s2.kind);
+                    remap_storage_in_stmt(&mut s2.kind, &storage_map);
+                    s2
+                })
+                .collect(),
             terminator: remap_block_ids(&rb.terminator, block_offset),
         };
         blocks.blocks.push(new_block);
@@ -141,7 +171,7 @@ fn apply_one(
     // ── 5. Determine call signature from declarations ─────────────────────────
     let (n_args, output_tys) = call_signature(sub, blocks, &tr);
     let n_results = output_tys.len();
-    let addr_ty  = types.primitive(PrimType::_64);
+    let addr_ty = types.primitive(PrimType::_64);
     let block_ty = types.intern(IrType::Block { params: vec![] });
 
     // ── 6. Rewrite all call sites ─────────────────────────────────────────────
@@ -151,11 +181,15 @@ fn apply_one(
     while bi < blocks.blocks.len() {
         let si = match find_call_site(&blocks.blocks[bi], sub.name(), sub) {
             Some(s) => s,
-            None => { bi += 1; continue; }
+            None => {
+                bi += 1;
+                continue;
+            }
         };
 
         // Snapshot call-site info BEFORE any mutation.
-        let (call_args, opt_guard, fallbacks) = snapshot_call(&blocks.blocks[bi].stmts[si].kind, sub);
+        let (call_args, opt_guard, fallbacks) =
+            snapshot_call(&blocks.blocks[bi].stmts[si].kind, sub);
         let n_params = blocks.blocks[bi].params.len();
         let call_vid = IRVarId(n_params as u32 + si as u32);
 
@@ -164,7 +198,12 @@ fn apply_one(
 
         // Determine live vars across the call.
         let live_vars = collect_live_vars(
-            &blocks.blocks[bi], si, n_params, call_vid, &eliminated, types,
+            &blocks.blocks[bi],
+            si,
+            n_params,
+            call_vid,
+            &eliminated,
+            types,
         );
         let n_live = live_vars.len();
         let live_base = 1 + n_args + n_results + live_slot_offset;
@@ -173,8 +212,8 @@ fn apply_one(
         // Compute prefix size in the continuation block.
         // Each result and each live var needs (Const addr, StorageRead) = 2 stmts.
         let result_prefix = 2 * n_results;
-        let live_prefix   = 2 * n_live;
-        let kept_base     = result_prefix + live_prefix;
+        let live_prefix = 2 * n_live;
+        let kept_base = result_prefix + live_prefix;
 
         // Build alias map: old IRVarId → new IRVarId in continuation block.
         let mut alias: BTreeMap<IRVarId, IRVarId> = BTreeMap::new();
@@ -195,7 +234,8 @@ fn apply_one(
         }
 
         // Pre-compute arg types while we still have an immutable borrow.
-        let arg_tys: Vec<TypeId> = call_args.iter()
+        let arg_tys: Vec<TypeId> = call_args
+            .iter()
             .map(|&a| var_type_in_block(&blocks.blocks[bi], a, types))
             .collect();
 
@@ -242,30 +282,55 @@ fn apply_one(
 
             // Const(cont_bi) → cont_ref_var.
             let cont_ref_var = IRVarId(base + block.stmts.len() as u32);
-            block.push_stmt(Stmt::Const(
-                Constant { hi: 0, lo: cont_bi as u128 }, block_ty,
-            ), ());
+            block.push_stmt(
+                Stmt::Const(
+                    Constant {
+                        hi: 0,
+                        lo: cont_bi as u128,
+                    },
+                    block_ty,
+                ),
+                (),
+            );
 
             // Write cont ref to slot 0.
             let a0 = emit_const_addr(block, base, 0, addr_ty);
-            block.push_stmt(Stmt::StorageWrite {
-                storage: spill_storage, src: cont_ref_var, ty: block_ty, addr: a0,
-            }, ());
+            block.push_stmt(
+                Stmt::StorageWrite {
+                    storage: spill_storage,
+                    src: cont_ref_var,
+                    ty: block_ty,
+                    addr: a0,
+                },
+                (),
+            );
 
             // Write args to slots 1..1+n_args (using pre-computed types).
             for (j, (&arg, &aty)) in call_args.iter().zip(arg_tys.iter()).enumerate() {
                 let a = emit_const_addr(block, base, 1 + j, addr_ty);
-                block.push_stmt(Stmt::StorageWrite {
-                    storage: spill_storage, src: arg, ty: aty, addr: a,
-                }, ());
+                block.push_stmt(
+                    Stmt::StorageWrite {
+                        storage: spill_storage,
+                        src: arg,
+                        ty: aty,
+                        addr: a,
+                    },
+                    (),
+                );
             }
 
             // Write live vars to slots live_base..
             for (k, &(lv, lty)) in live_vars.iter().enumerate() {
                 let a = emit_const_addr(block, base, live_base + k, addr_ty);
-                block.push_stmt(Stmt::StorageWrite {
-                    storage: spill_storage, src: lv, ty: lty, addr: a,
-                }, ());
+                block.push_stmt(
+                    Stmt::StorageWrite {
+                        storage: spill_storage,
+                        src: lv,
+                        ty: lty,
+                        addr: a,
+                    },
+                    (),
+                );
             }
 
             // Set terminator.
@@ -326,7 +391,7 @@ fn build_continuation_block(
 ) -> IRBlock {
     let n_live = live_vars.len();
     let result_prefix = 2 * n_results;
-    let _live_prefix   = 2 * n_live;
+    let _live_prefix = 2 * n_live;
 
     let mut stmts: Vec<volar_ir_common::Node<IRStmt, ()>> = Vec::new();
 
@@ -337,31 +402,56 @@ fn build_continuation_block(
     // Result reads: (Const addr, StorageRead) × n_results.
     for j in 0..n_results {
         let addr_var = IRVarId((2 * j) as u32);
-        push(&mut stmts, Stmt::Const(
-            Constant { hi: 0, lo: (1 + n_args + j) as u128 },
-            addr_ty,
-        ));
-        push(&mut stmts, Stmt::StorageRead {
-            storage: spill, ty: output_tys[j], addr: addr_var,
-        });
+        push(
+            &mut stmts,
+            Stmt::Const(
+                Constant {
+                    hi: 0,
+                    lo: (1 + n_args + j) as u128,
+                },
+                addr_ty,
+            ),
+        );
+        push(
+            &mut stmts,
+            Stmt::StorageRead {
+                storage: spill,
+                ty: output_tys[j],
+                addr: addr_var,
+            },
+        );
     }
 
     // Live reloads: (Const addr, StorageRead) × n_live.
     for (k, &(_, lty)) in live_vars.iter().enumerate() {
         let addr_var = IRVarId((result_prefix + 2 * k) as u32);
-        push(&mut stmts, Stmt::Const(
-            Constant { hi: 0, lo: (live_base + k) as u128 }, addr_ty,
-        ));
-        push(&mut stmts, Stmt::StorageRead {
-            storage: spill, ty: lty, addr: addr_var,
-        });
+        push(
+            &mut stmts,
+            Stmt::Const(
+                Constant {
+                    hi: 0,
+                    lo: (live_base + k) as u128,
+                },
+                addr_ty,
+            ),
+        );
+        push(
+            &mut stmts,
+            Stmt::StorageRead {
+                storage: spill,
+                ty: lty,
+                addr: addr_var,
+            },
+        );
     }
 
     // Kept stmts from orig_block.stmts[si+1..], var-remapped.
     let n_params = orig_block.params.len() as u32;
     for (j, stmt) in orig_block.stmts[si + 1..].iter().enumerate() {
         let orig_var = n_params + (si + 1 + j) as u32;
-        if eliminated.contains_key(&orig_var) { continue; }
+        if eliminated.contains_key(&orig_var) {
+            continue;
+        }
         let mut s = stmt.kind.clone();
         apply_aliases_to_stmt(&mut s, alias);
         push(&mut stmts, s);
@@ -371,7 +461,11 @@ fn build_continuation_block(
     let mut terminator = orig_block.terminator.clone();
     apply_aliases_to_ir_terminator(&mut terminator, alias);
 
-    IRBlock { params: vec![], stmts, terminator }
+    IRBlock {
+        params: vec![],
+        stmts,
+        terminator,
+    }
 }
 
 fn build_fallback_block(
@@ -388,22 +482,36 @@ fn build_fallback_block(
     for (j, &fb) in fallbacks.iter().enumerate().take(n_results) {
         let addr_var = IRVarId((2 * j) as u32);
         stmts.push(volar_ir_common::Node::new(
-            Stmt::Const(Constant { hi: 0, lo: (1 + n_args + j) as u128 }, addr_ty), (), None,
+            Stmt::Const(
+                Constant {
+                    hi: 0,
+                    lo: (1 + n_args + j) as u128,
+                },
+                addr_ty,
+            ),
+            (),
+            None,
         ));
         stmts.push(volar_ir_common::Node::new(
             Stmt::StorageWrite {
-                storage: spill, src: fb, ty: output_tys.get(j).copied().unwrap_or(TypeId(0)), addr: addr_var,
-            }, (), None,
+                storage: spill,
+                src: fb,
+                ty: output_tys.get(j).copied().unwrap_or(TypeId(0)),
+                addr: addr_var,
+            },
+            (),
+            None,
         ));
     }
 
     let terminator = IRTerminator::Jmp {
-        target: IRBranchTarget::new(
-            IRBlockTargetId::Block(IRBlockId(cont_bi as u32)),
-            vec![],
-        ),
+        target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(cont_bi as u32)), vec![]),
     };
-    IRBlock { params: vec![], stmts, terminator }
+    IRBlock {
+        params: vec![],
+        stmts,
+        terminator,
+    }
 }
 
 // ============================================================================
@@ -412,7 +520,16 @@ fn build_fallback_block(
 
 fn emit_const_addr(block: &mut IRBlock, base: u32, slot: usize, addr_ty: TypeId) -> IRVarId {
     let vid = IRVarId(base + block.stmts.len() as u32);
-    block.push_stmt(Stmt::Const(Constant { hi: 0, lo: slot as u128 }, addr_ty), ());
+    block.push_stmt(
+        Stmt::Const(
+            Constant {
+                hi: 0,
+                lo: slot as u128,
+            },
+            addr_ty,
+        ),
+        (),
+    );
     vid
 }
 
@@ -428,12 +545,16 @@ fn snapshot_call(
         (IrSubstitution::Oracle { .. }, Stmt::OracleCall { args, .. }) => {
             (args.clone(), None, vec![])
         }
-        (IrSubstitution::Action { .. }, Stmt::ActionCall { guard, args, fallbacks, .. }) => {
-            (args.clone(), Some(*guard), fallbacks.clone())
-        }
-        (IrSubstitution::Rng { .. }, Stmt::Rng { .. }) => {
-            (vec![], None, vec![])
-        }
+        (
+            IrSubstitution::Action { .. },
+            Stmt::ActionCall {
+                guard,
+                args,
+                fallbacks,
+                ..
+            },
+        ) => (args.clone(), Some(*guard), fallbacks.clone()),
+        (IrSubstitution::Rng { .. }, Stmt::Rng { .. }) => (vec![], None, vec![]),
         _ => (vec![], None, vec![]),
     }
 }
@@ -443,10 +564,12 @@ fn find_call_site(block: &IRBlock, name: &str, sub: &IrSubstitution) -> Option<u
         let m = match (sub, &stmt.kind) {
             (IrSubstitution::Oracle { .. }, Stmt::OracleCall { name: n, .. }) => n == name,
             (IrSubstitution::Action { .. }, Stmt::ActionCall { name: n, .. }) => n == name,
-            (IrSubstitution::Rng    { .. }, Stmt::Rng { name: n, .. })        => n == name,
+            (IrSubstitution::Rng { .. }, Stmt::Rng { name: n, .. }) => n == name,
             _ => false,
         };
-        if m { return Some(si); }
+        if m {
+            return Some(si);
+        }
     }
     None
 }
@@ -459,12 +582,18 @@ fn find_eliminated_outputs(
     sub: &IrSubstitution,
 ) -> BTreeMap<u32, usize> {
     let mut out = BTreeMap::new();
-    if matches!(sub, IrSubstitution::Rng { .. }) { return out; }
+    if matches!(sub, IrSubstitution::Rng { .. }) {
+        return out;
+    }
     for (j, stmt) in block.stmts[si + 1..].iter().enumerate() {
         let orig = n_params as u32 + (si + 1 + j) as u32;
         match &stmt.kind {
-            Stmt::OracleOutput { call, idx, .. } if *call == call_vid => { out.insert(orig, *idx); }
-            Stmt::ActionOutput { call, idx, .. } if *call == call_vid => { out.insert(orig, *idx); }
+            Stmt::OracleOutput { call, idx, .. } if *call == call_vid => {
+                out.insert(orig, *idx);
+            }
+            Stmt::ActionOutput { call, idx, .. } if *call == call_vid => {
+                out.insert(orig, *idx);
+            }
             _ => {}
         }
     }
@@ -505,7 +634,9 @@ fn var_type_in_block(block: &IRBlock, vid: IRVarId, _types: &IRTypes) -> TypeId 
         block.params[vid.0 as usize]
     } else {
         let si = vid.0 as usize - n;
-        block.stmts.get(si)
+        block
+            .stmts
+            .get(si)
             .and_then(|s| stmt_output_type(&s.kind))
             .unwrap_or(TypeId(0))
     }
@@ -513,24 +644,34 @@ fn var_type_in_block(block: &IRBlock, vid: IRVarId, _types: &IRTypes) -> TypeId 
 
 fn visit_stmt_vars<F: FnMut(IRVarId)>(stmt: &IRStmt, f: &mut F) {
     match stmt {
-        Stmt::StorageRead  { addr, .. }           => f(*addr),
-        Stmt::StorageWrite { src, addr, .. }       => { f(*src); f(*addr); }
-        Stmt::Const(_, _) | Stmt::Rng { .. }      => {}
+        Stmt::StorageRead { addr, .. } => f(*addr),
+        Stmt::StorageWrite { src, addr, .. } => {
+            f(*src);
+            f(*addr);
+        }
+        Stmt::Const(_, _) | Stmt::Rng { .. } => {}
         Stmt::Transmute { src, .. }
-        | Stmt::Rol { src, .. } | Stmt::Ror { src, .. } | Stmt::Splat { src, .. } => f(*src),
-        Stmt::Merge { parts, .. }                 => parts.iter().for_each(|&v| f(v)),
-        Stmt::Shuffle { result_bits, .. }         => result_bits.iter().for_each(|&(_, v)| f(v)),
-        Stmt::Poly { coeffs, .. }                 => {
+        | Stmt::Rol { src, .. }
+        | Stmt::Ror { src, .. }
+        | Stmt::Splat { src, .. } => f(*src),
+        Stmt::Merge { parts, .. } => parts.iter().for_each(|&v| f(v)),
+        Stmt::Shuffle { result_bits, .. } => result_bits.iter().for_each(|&(_, v)| f(v)),
+        Stmt::Poly { coeffs, .. } => {
             coeffs.keys().for_each(|k| k.iter().for_each(|&v| f(v)));
         }
-        Stmt::OracleCall  { args, .. }            => args.iter().for_each(|&a| f(a)),
-        Stmt::OracleOutput { call, .. }           => f(*call),
-        Stmt::ActionCall  { guard, args, fallbacks, .. } => {
+        Stmt::OracleCall { args, .. } => args.iter().for_each(|&a| f(a)),
+        Stmt::OracleOutput { call, .. } => f(*call),
+        Stmt::ActionCall {
+            guard,
+            args,
+            fallbacks,
+            ..
+        } => {
             f(*guard);
             args.iter().for_each(|&a| f(a));
             fallbacks.iter().for_each(|&a| f(a));
         }
-        Stmt::ActionOutput { call, .. }           => f(*call),
+        Stmt::ActionOutput { call, .. } => f(*call),
         _ => {}
     }
 }
@@ -538,20 +679,32 @@ fn visit_stmt_vars<F: FnMut(IRVarId)>(stmt: &IRStmt, f: &mut F) {
 fn visit_terminator_vars<F: FnMut(IRVarId)>(term: &IRTerminator, f: &mut F) {
     match term {
         IRTerminator::Jmp { target } => {
-            if let IRBlockTargetId::Dyn(v) = &target.dest { f(*v); }
+            if let IRBlockTargetId::Dyn(v) = &target.dest {
+                f(*v);
+            }
             target.args.iter().for_each(|&a| f(a));
         }
-        IRTerminator::JumpCond { condition, then_target, else_target } => {
+        IRTerminator::JumpCond {
+            condition,
+            then_target,
+            else_target,
+        } => {
             f(*condition);
-            if let IRBlockTargetId::Dyn(v) = &then_target.dest { f(*v); }
-            if let IRBlockTargetId::Dyn(v) = &else_target.dest { f(*v); }
+            if let IRBlockTargetId::Dyn(v) = &then_target.dest {
+                f(*v);
+            }
+            if let IRBlockTargetId::Dyn(v) = &else_target.dest {
+                f(*v);
+            }
             then_target.args.iter().for_each(|&a| f(a));
             else_target.args.iter().for_each(|&a| f(a));
         }
         IRTerminator::JumpTable { index, cases } => {
             f(*index);
             cases.values().for_each(|target| {
-                if let IRBlockTargetId::Dyn(v) = &target.dest { f(*v); }
+                if let IRBlockTargetId::Dyn(v) = &target.dest {
+                    f(*v);
+                }
                 target.args.iter().for_each(|&a| f(a));
             });
         }
@@ -572,27 +725,45 @@ fn call_signature(
     let name = sub.name();
     match sub {
         IrSubstitution::Oracle { .. } => {
-            let d = blocks.oracles.iter().rev().find(|d| d.name == name)
+            let d = blocks
+                .oracles
+                .iter()
+                .rev()
+                .find(|d| d.name == name)
                 .or_else(|| repl.oracles.iter().find(|d| d.name == name));
             if let Some(d) = d {
                 let results: Vec<TypeId> = d.results.iter().map(|&t| tr.remap(t)).collect();
                 (d.params.len(), results)
-            } else { (0, vec![TypeId(0)]) }
+            } else {
+                (0, vec![TypeId(0)])
+            }
         }
         IrSubstitution::Action { .. } => {
-            let d = blocks.actions.iter().rev().find(|d| d.name == name)
+            let d = blocks
+                .actions
+                .iter()
+                .rev()
+                .find(|d| d.name == name)
                 .or_else(|| repl.actions.iter().find(|d| d.name == name));
             if let Some(d) = d {
                 let results: Vec<TypeId> = d.results.iter().map(|&t| tr.remap(t)).collect();
                 (d.params.len(), results)
-            } else { (0, vec![TypeId(0)]) }
+            } else {
+                (0, vec![TypeId(0)])
+            }
         }
         IrSubstitution::Rng { .. } => {
-            let d = blocks.rngs.iter().rev().find(|d| d.name == name)
+            let d = blocks
+                .rngs
+                .iter()
+                .rev()
+                .find(|d| d.name == name)
                 .or_else(|| repl.rngs.iter().find(|d| d.name == name));
             if let Some(d) = d {
                 (0, vec![tr.remap(d.ty)])
-            } else { (0, vec![TypeId(0)]) }
+            } else {
+                (0, vec![TypeId(0)])
+            }
         }
     }
 }
@@ -603,8 +774,10 @@ fn call_signature(
 
 fn remap_storage_in_stmt(stmt: &mut IRStmt, map: &BTreeMap<u32, StorageId>) {
     match stmt {
-        Stmt::StorageRead  { storage, .. } | Stmt::StorageWrite { storage, .. } => {
-            if let Some(&new_id) = map.get(&storage.0) { *storage = new_id; }
+        Stmt::StorageRead { storage, .. } | Stmt::StorageWrite { storage, .. } => {
+            if let Some(&new_id) = map.get(&storage.0) {
+                *storage = new_id;
+            }
         }
         _ => {}
     }
@@ -623,7 +796,11 @@ fn remap_block_ids(term: &IRTerminator, offset: usize) -> IRTerminator {
                 reentry: target.reentry.clone(),
             },
         },
-        IRTerminator::JumpCond { condition, then_target, else_target } => IRTerminator::JumpCond {
+        IRTerminator::JumpCond {
+            condition,
+            then_target,
+            else_target,
+        } => IRTerminator::JumpCond {
             condition: *condition,
             then_target: IRBranchTarget {
                 dest: rt(&then_target.dest),
@@ -638,15 +815,23 @@ fn remap_block_ids(term: &IRTerminator, offset: usize) -> IRTerminator {
         },
         IRTerminator::JumpTable { index, cases } => IRTerminator::JumpTable {
             index: *index,
-            cases: cases.iter().map(|(c, target)| {
-                (*c, IRBranchTarget {
-                    dest: rt(&target.dest),
-                    args: target.args.clone(),
-                    reentry: target.reentry.clone(),
+            cases: cases
+                .iter()
+                .map(|(c, target)| {
+                    (
+                        *c,
+                        IRBranchTarget {
+                            dest: rt(&target.dest),
+                            args: target.args.clone(),
+                            reentry: target.reentry.clone(),
+                        },
+                    )
                 })
-            }).collect(),
+                .collect(),
         },
-        _ => panic!("remap_block_ids: unhandled IRTerminator variant — add block-id remapping for this variant"),
+        _ => panic!(
+            "remap_block_ids: unhandled IRTerminator variant — add block-id remapping for this variant"
+        ),
     }
 }
 
@@ -660,14 +845,18 @@ fn scan_max_storage(blocks: &IRBlocks) -> u32 {
         for stmt in &block.stmts {
             match &stmt.kind {
                 Stmt::StorageRead { storage, .. } | Stmt::StorageWrite { storage, .. } => {
-                    if storage.0 > max { max = storage.0; }
+                    if storage.0 > max {
+                        max = storage.0;
+                    }
                 }
                 _ => {}
             }
         }
     }
     for seg in &blocks.pre_init {
-        if seg.storage.0 > max { max = seg.storage.0; }
+        if seg.storage.0 > max {
+            max = seg.storage.0;
+        }
     }
     max
 }
@@ -679,22 +868,30 @@ fn scan_max_storage(blocks: &IRBlocks) -> u32 {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use super::{IrSubstitution, ir_storage_allocator, substitute_ir_blocks};
     use alloc::{string::ToString, vec, vec::Vec};
     use volar_ir::ir::{
-        IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId, IRTypes,
+        IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypes,
+        IRVarId,
     };
-    use volar_ir_common::{
-        Constant, IrType, OracleDecl, RngDecl, Stmt, StorageId, Type, TypeId,
-    };
-    use super::{IrSubstitution, ir_storage_allocator, substitute_ir_blocks};
+    use volar_ir_common::{Constant, IrType, OracleDecl, RngDecl, Stmt, StorageId, Type, TypeId};
 
     fn ret() -> IRTerminator {
-        IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]) }
+        IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
+        }
     }
 
     fn block(stmts: Vec<IRStmt>, terminator: IRTerminator) -> IRBlock {
-        let stmts = stmts.into_iter().map(|s| volar_ir_common::Node::new(s, (), None)).collect();
-        IRBlock { params: vec![], stmts, terminator }
+        let stmts = stmts
+            .into_iter()
+            .map(|s| volar_ir_common::Node::new(s, (), None))
+            .collect();
+        IRBlock {
+            params: vec![],
+            stmts,
+            terminator,
+        }
     }
 
     type IRStmt = volar_ir::ir::IRStmt;
@@ -722,7 +919,11 @@ mod tests {
                 output_tys: vec![u64_ty],
                 result_ty,
             },
-            Stmt::OracleOutput { call: IRVarId(0), idx: 0, ty: u64_ty },
+            Stmt::OracleOutput {
+                call: IRVarId(0),
+                idx: 0,
+                ty: u64_ty,
+            },
         ];
         let mut host = IRBlocks::new(vec![block(host_stmts, ret())]);
         host.oracles.push(OracleDecl {
@@ -752,7 +953,9 @@ mod tests {
                 addr: IRVarId(2),
             },
         ];
-        let repl_term = IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Dyn(cont_var), vec![],) };
+        let repl_term = IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Dyn(cont_var), vec![]),
+        };
         let mut repl = IRBlocks::new(vec![block(repl_stmts, repl_term)]);
         repl.oracles.push(OracleDecl {
             name: "h".to_string(),
@@ -770,7 +973,11 @@ mod tests {
         assert_eq!(count, 1);
 
         // Original 1 block + 1 replacement block + 1 continuation block = 3.
-        assert_eq!(host.blocks.len(), 3, "expected pre-call, replacement, continuation blocks");
+        assert_eq!(
+            host.blocks.len(),
+            3,
+            "expected pre-call, replacement, continuation blocks"
+        );
     }
 
     #[test]
@@ -785,10 +992,18 @@ mod tests {
                 output_tys: vec![u64_ty],
                 result_ty,
             },
-            Stmt::OracleOutput { call: IRVarId(0), idx: 0, ty: u64_ty },
+            Stmt::OracleOutput {
+                call: IRVarId(0),
+                idx: 0,
+                ty: u64_ty,
+            },
         ];
         let mut host = IRBlocks::new(vec![block(host_stmts, ret())]);
-        host.oracles.push(OracleDecl { name: "h".to_string(), params: vec![], results: vec![u64_ty] });
+        host.oracles.push(OracleDecl {
+            name: "h".to_string(),
+            params: vec![],
+            results: vec![u64_ty],
+        });
 
         let repl = make_trivial_oracle_repl(&mut types, u64_ty);
         let subs = [IrSubstitution::Oracle {
@@ -829,7 +1044,11 @@ mod tests {
         };
         let stmts = vec![make_call(), make_call()];
         let mut host = IRBlocks::new(vec![block(stmts, ret())]);
-        host.oracles.push(OracleDecl { name: "h".to_string(), params: vec![], results: vec![u64_ty] });
+        host.oracles.push(OracleDecl {
+            name: "h".to_string(),
+            params: vec![],
+            results: vec![u64_ty],
+        });
 
         let repl = make_trivial_oracle_repl(&mut types, u64_ty);
         let subs = [IrSubstitution::Oracle {
@@ -848,11 +1067,15 @@ mod tests {
     fn rng_site_substituted() {
         let (mut types, u64_ty, _) = types_with_u64();
 
-        let host_stmts = vec![
-            Stmt::Rng { name: "rand".to_string(), ty: u64_ty },
-        ];
+        let host_stmts = vec![Stmt::Rng {
+            name: "rand".to_string(),
+            ty: u64_ty,
+        }];
         let mut host = IRBlocks::new(vec![block(host_stmts, ret())]);
-        host.rngs.push(RngDecl { name: "rand".to_string(), ty: u64_ty });
+        host.rngs.push(RngDecl {
+            name: "rand".to_string(),
+            ty: u64_ty,
+        });
 
         let repl = make_trivial_rng_repl(&mut types, u64_ty);
         let state_storage_guest = StorageId(10);
@@ -881,23 +1104,43 @@ mod tests {
 
         let stmts = vec![
             Stmt::OracleCall {
-                name: "a".to_string(), args: vec![],
-                output_tys: vec![u64_ty], result_ty,
+                name: "a".to_string(),
+                args: vec![],
+                output_tys: vec![u64_ty],
+                result_ty,
             },
             Stmt::OracleCall {
-                name: "b".to_string(), args: vec![],
-                output_tys: vec![u64_ty], result_ty,
+                name: "b".to_string(),
+                args: vec![],
+                output_tys: vec![u64_ty],
+                result_ty,
             },
         ];
         let mut host = IRBlocks::new(vec![block(stmts, ret())]);
-        host.oracles.push(OracleDecl { name: "a".to_string(), params: vec![], results: vec![u64_ty] });
-        host.oracles.push(OracleDecl { name: "b".to_string(), params: vec![], results: vec![u64_ty] });
+        host.oracles.push(OracleDecl {
+            name: "a".to_string(),
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        host.oracles.push(OracleDecl {
+            name: "b".to_string(),
+            params: vec![],
+            results: vec![u64_ty],
+        });
 
         let repl_a = make_trivial_oracle_repl(&mut types, u64_ty);
         let repl_b = make_trivial_oracle_repl(&mut types, u64_ty);
         let subs = [
-            IrSubstitution::Oracle { name: "a".to_string(), replacement: repl_a, types: types.clone() },
-            IrSubstitution::Oracle { name: "b".to_string(), replacement: repl_b, types: types.clone() },
+            IrSubstitution::Oracle {
+                name: "a".to_string(),
+                replacement: repl_a,
+                types: types.clone(),
+            },
+            IrSubstitution::Oracle {
+                name: "b".to_string(),
+                replacement: repl_b,
+                types: types.clone(),
+            },
         ];
         let mut alloc = ir_storage_allocator(&host);
         let count = substitute_ir_blocks(&mut host, &mut types, &subs, &mut alloc);
@@ -915,7 +1158,10 @@ mod tests {
         }
         // Two substitutions → at least two distinct spill storages (plus potentially STACK).
         // Each substitution allocates its own spill, so IDs must differ.
-        assert!(spill_ids.len() >= 2, "each substitution must use a distinct spill storage");
+        assert!(
+            spill_ids.len() >= 2,
+            "each substitution must use a distinct spill storage"
+        );
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
@@ -926,15 +1172,30 @@ mod tests {
 
         // Reads cont from DEFAULT[0], writes const 0 to result slot, exits via Dyn.
         let stmts = vec![
-            Stmt::Const(Constant { hi: 0, lo: 0 }, addr_ty),       // v0: addr 0
-            Stmt::StorageRead { storage: StorageId::DEFAULT, ty: block_ty, addr: IRVarId(0) }, // v1: cont
-            Stmt::Const(Constant { hi: 0, lo: 1 }, addr_ty),       // v2: addr 1
-            Stmt::Const(Constant { hi: 0, lo: 0 }, u64_ty),        // v3: result value
-            Stmt::StorageWrite { storage: StorageId::DEFAULT, src: IRVarId(3), ty: u64_ty, addr: IRVarId(2) },
+            Stmt::Const(Constant { hi: 0, lo: 0 }, addr_ty), // v0: addr 0
+            Stmt::StorageRead {
+                storage: StorageId::DEFAULT,
+                ty: block_ty,
+                addr: IRVarId(0),
+            }, // v1: cont
+            Stmt::Const(Constant { hi: 0, lo: 1 }, addr_ty), // v2: addr 1
+            Stmt::Const(Constant { hi: 0, lo: 0 }, u64_ty),  // v3: result value
+            Stmt::StorageWrite {
+                storage: StorageId::DEFAULT,
+                src: IRVarId(3),
+                ty: u64_ty,
+                addr: IRVarId(2),
+            },
         ];
-        let term = IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(1)), vec![] ) };
+        let term = IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(1)), vec![]),
+        };
         let mut repl = IRBlocks::new(vec![block(stmts, term)]);
-        repl.oracles.push(OracleDecl { name: "h".to_string(), params: vec![], results: vec![u64_ty] });
+        repl.oracles.push(OracleDecl {
+            name: "h".to_string(),
+            params: vec![],
+            results: vec![u64_ty],
+        });
         repl
     }
 
@@ -944,14 +1205,28 @@ mod tests {
 
         let stmts = vec![
             Stmt::Const(Constant { hi: 0, lo: 0 }, addr_ty),
-            Stmt::StorageRead { storage: StorageId::DEFAULT, ty: block_ty, addr: IRVarId(0) },
+            Stmt::StorageRead {
+                storage: StorageId::DEFAULT,
+                ty: block_ty,
+                addr: IRVarId(0),
+            },
             Stmt::Const(Constant { hi: 0, lo: 1 }, addr_ty),
             Stmt::Const(Constant { hi: 0, lo: 0 }, u64_ty),
-            Stmt::StorageWrite { storage: StorageId::DEFAULT, src: IRVarId(3), ty: u64_ty, addr: IRVarId(2) },
+            Stmt::StorageWrite {
+                storage: StorageId::DEFAULT,
+                src: IRVarId(3),
+                ty: u64_ty,
+                addr: IRVarId(2),
+            },
         ];
-        let term = IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(1)), vec![] ) };
+        let term = IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Dyn(IRVarId(1)), vec![]),
+        };
         let mut repl = IRBlocks::new(vec![block(stmts, term)]);
-        repl.rngs.push(RngDecl { name: "rand".to_string(), ty: u64_ty });
+        repl.rngs.push(RngDecl {
+            name: "rand".to_string(),
+            ty: u64_ty,
+        });
         repl
     }
 }

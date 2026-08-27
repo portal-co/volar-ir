@@ -79,7 +79,13 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let entry_block = lex.read_u32()?;
             lex.expect_key("pvals")?;
             let param_vals = lex.read_u32_list_list()?;
-            Ok(LirCall::BeginFunction { name, params, ret, entry_block, param_vals })
+            Ok(LirCall::BeginFunction {
+                name,
+                params,
+                ret,
+                entry_block,
+                param_vals,
+            })
         }
 
         "end_function" => Ok(LirCall::EndFunction),
@@ -117,24 +123,24 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
         }
 
         // ---- Arithmetic -------------------------------------------------------
-        "add"  => parse_binop(lex, |lhs, rhs, out| LirCall::Add  { lhs, rhs, out }),
-        "sub"  => parse_binop(lex, |lhs, rhs, out| LirCall::Sub  { lhs, rhs, out }),
-        "mul"  => parse_binop(lex, |lhs, rhs, out| LirCall::Mul  { lhs, rhs, out }),
+        "add" => parse_binop(lex, |lhs, rhs, out| LirCall::Add { lhs, rhs, out }),
+        "sub" => parse_binop(lex, |lhs, rhs, out| LirCall::Sub { lhs, rhs, out }),
+        "mul" => parse_binop(lex, |lhs, rhs, out| LirCall::Mul { lhs, rhs, out }),
         "udiv" => parse_binop(lex, |lhs, rhs, out| LirCall::Udiv { lhs, rhs, out }),
         "sdiv" => parse_binop(lex, |lhs, rhs, out| LirCall::Sdiv { lhs, rhs, out }),
 
         // ---- Bitwise ----------------------------------------------------------
-        "and"  => parse_binop(lex, |lhs, rhs, out| LirCall::And  { lhs, rhs, out }),
-        "or"   => parse_binop(lex, |lhs, rhs, out| LirCall::Or   { lhs, rhs, out }),
-        "xor"  => parse_binop(lex, |lhs, rhs, out| LirCall::Xor  { lhs, rhs, out }),
-        "not"  => {
+        "and" => parse_binop(lex, |lhs, rhs, out| LirCall::And { lhs, rhs, out }),
+        "or" => parse_binop(lex, |lhs, rhs, out| LirCall::Or { lhs, rhs, out }),
+        "xor" => parse_binop(lex, |lhs, rhs, out| LirCall::Xor { lhs, rhs, out }),
+        "not" => {
             lex.expect_key("val")?;
             let val = lex.read_u32()?;
             lex.expect_key("out")?;
             let out = lex.read_u32()?;
             Ok(LirCall::Not { val, out })
         }
-        "shl"  => parse_shift(lex, |val, shift, out| LirCall::Shl  { val, shift, out }),
+        "shl" => parse_shift(lex, |val, shift, out| LirCall::Shl { val, shift, out }),
         "lshr" => parse_shift(lex, |val, shift, out| LirCall::Lshr { val, shift, out }),
         "ashr" => parse_shift(lex, |val, shift, out| LirCall::Ashr { val, shift, out }),
 
@@ -148,12 +154,17 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let rhs = lex.read_u32()?;
             lex.expect_key("out")?;
             let out = lex.read_u32()?;
-            Ok(LirCall::Icmp { pred, lhs, rhs, out })
+            Ok(LirCall::Icmp {
+                pred,
+                lhs,
+                rhs,
+                out,
+            })
         }
 
         // ---- Conversions ------------------------------------------------------
-        "zext"  => parse_conv(lex, |val, dst_ty, out| LirCall::Zext  { val, dst_ty, out }),
-        "sext"  => parse_conv(lex, |val, dst_ty, out| LirCall::Sext  { val, dst_ty, out }),
+        "zext" => parse_conv(lex, |val, dst_ty, out| LirCall::Zext { val, dst_ty, out }),
+        "sext" => parse_conv(lex, |val, dst_ty, out| LirCall::Sext { val, dst_ty, out }),
         "trunc" => parse_conv(lex, |val, dst_ty, out| LirCall::Trunc { val, dst_ty, out }),
 
         // ---- Select -----------------------------------------------------------
@@ -166,7 +177,12 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let else_val = lex.read_u32()?;
             lex.expect_key("out")?;
             let out = lex.read_u32()?;
-            Ok(LirCall::Select { cond, then_val, else_val, out })
+            Ok(LirCall::Select {
+                cond,
+                then_val,
+                else_val,
+                out,
+            })
         }
 
         // ---- Terminators ------------------------------------------------------
@@ -188,7 +204,13 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let else_block = lex.read_u32()?;
             lex.expect_key("else_args")?;
             let else_args = lex.read_u32_list()?;
-            Ok(LirCall::Branch { cond, then_block, then_args, else_block, else_args })
+            Ok(LirCall::Branch {
+                cond,
+                then_block,
+                then_args,
+                else_block,
+                else_args,
+            })
         }
         "ret" => {
             lex.expect_key("vals")?;
@@ -208,7 +230,13 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let ret_ty = parse_opt_lir_type(lex)?;
             lex.expect_key("outs")?;
             let outs = lex.read_u32_list()?;
-            Ok(LirCall::CallExtern { name, arg_tys, args, ret_ty, outs })
+            Ok(LirCall::CallExtern {
+                name,
+                arg_tys,
+                args,
+                ret_ty,
+                outs,
+            })
         }
 
         // ---- Sibling (intra-module) calls --------------------------------------
@@ -223,7 +251,13 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let ret_ty = parse_opt_lir_type(lex)?;
             lex.expect_key("outs")?;
             let outs = lex.read_u32_list()?;
-            Ok(LirCall::Call { name, arg_tys, args, ret_ty, outs })
+            Ok(LirCall::Call {
+                name,
+                arg_tys,
+                args,
+                ret_ty,
+                outs,
+            })
         }
 
         // ---- Switch / block references / dynamic jumps -------------------------
@@ -236,7 +270,12 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let default_block = lex.read_u32()?;
             lex.expect_key("default_args")?;
             let default_args = lex.read_u32_list()?;
-            Ok(LirCall::Switch { index, cases, default_block, default_args })
+            Ok(LirCall::Switch {
+                index,
+                cases,
+                default_block,
+                default_args,
+            })
         }
         "block_addr" => {
             lex.expect_key("block")?;
@@ -252,7 +291,11 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let destinations = lex.read_u32_list()?;
             lex.expect_key("args")?;
             let args = lex.read_u32_list()?;
-            Ok(LirCall::DynJump { index, destinations, args })
+            Ok(LirCall::DynJump {
+                index,
+                destinations,
+                args,
+            })
         }
 
         // ---- Crypto primitives ------------------------------------------------
@@ -267,7 +310,13 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let ret_tys = parse_lir_type_list(lex)?;
             lex.expect_key("outs")?;
             let outs = lex.read_u32_list()?;
-            Ok(LirCall::Oracle { name, arg_tys, args, ret_tys, outs })
+            Ok(LirCall::Oracle {
+                name,
+                arg_tys,
+                args,
+                ret_tys,
+                outs,
+            })
         }
         "action" => {
             lex.expect_key("name")?;
@@ -284,7 +333,15 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let ret_tys = parse_lir_type_list(lex)?;
             lex.expect_key("outs")?;
             let outs = lex.read_u32_list()?;
-            Ok(LirCall::Action { name, guard, arg_tys, args, fallbacks, ret_tys, outs })
+            Ok(LirCall::Action {
+                name,
+                guard,
+                arg_tys,
+                args,
+                fallbacks,
+                ret_tys,
+                outs,
+            })
         }
         "rng" => {
             lex.expect_key("ty")?;
@@ -302,7 +359,11 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let count = lex.read_usize()?;
             lex.expect_key("out")?;
             let out = lex.read_u32()?;
-            Ok(LirCall::Alloca { elem_ty, count, out })
+            Ok(LirCall::Alloca {
+                elem_ty,
+                count,
+                out,
+            })
         }
         "ptr_load" => {
             lex.expect_key("ptr")?;
@@ -338,7 +399,12 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let pointee_ty = parse_lir_type(lex)?;
             lex.expect_key("outs")?;
             let outs = lex.read_u32_list()?;
-            Ok(LirCall::PtrIndexLoad { ptr, idx, pointee_ty, outs })
+            Ok(LirCall::PtrIndexLoad {
+                ptr,
+                idx,
+                pointee_ty,
+                outs,
+            })
         }
         "ptr_index_store" => {
             lex.expect_key("ptr")?;
@@ -349,7 +415,12 @@ fn parse_lir_call(lex: &mut Lexer<'_>) -> Result<LirCall, ParseError> {
             let vals = lex.read_u32_list()?;
             lex.expect_key("pointee")?;
             let pointee_ty = parse_lir_type(lex)?;
-            Ok(LirCall::PtrIndexStore { ptr, idx, vals, pointee_ty })
+            Ok(LirCall::PtrIndexStore {
+                ptr,
+                idx,
+                vals,
+                pointee_ty,
+            })
         }
 
         // ---- Metadata ---------------------------------------------------------
@@ -412,8 +483,8 @@ where
 fn parse_icmp_pred(lex: &mut Lexer<'_>) -> Result<IcmpPred, ParseError> {
     let tok = lex.read_ident()?;
     match tok {
-        "eq"  => Ok(IcmpPred::Eq),
-        "ne"  => Ok(IcmpPred::Ne),
+        "eq" => Ok(IcmpPred::Eq),
+        "ne" => Ok(IcmpPred::Ne),
         "ult" => Ok(IcmpPred::Ult),
         "ule" => Ok(IcmpPred::Ule),
         "ugt" => Ok(IcmpPred::Ugt),
@@ -423,7 +494,8 @@ fn parse_icmp_pred(lex: &mut Lexer<'_>) -> Result<IcmpPred, ParseError> {
         "sgt" => Ok(IcmpPred::Sgt),
         "sge" => Ok(IcmpPred::Sge),
         other => Err(ParseError::UnexpectedToken {
-            line: lex.pos().line, col: lex.pos().col,
+            line: lex.pos().line,
+            col: lex.pos().col,
             got: alloc::format!("unknown icmp predicate: {:?}", other),
         }),
     }
@@ -435,7 +507,9 @@ fn parse_switch_cases(lex: &mut Lexer<'_>) -> Result<Vec<(i64, u32, Vec<u32>)>, 
     let mut out = Vec::new();
     loop {
         lex.skip();
-        if lex.try_byte(b']') { break; }
+        if lex.try_byte(b']') {
+            break;
+        }
         lex.expect_byte(b'(')?;
         let key = lex.read_i64()?;
         lex.expect_byte(b',')?;
@@ -445,7 +519,9 @@ fn parse_switch_cases(lex: &mut Lexer<'_>) -> Result<Vec<(i64, u32, Vec<u32>)>, 
         lex.expect_byte(b')')?;
         out.push((key, block, args));
         lex.skip();
-        if lex.try_byte(b',') { continue; }
+        if lex.try_byte(b',') {
+            continue;
+        }
         lex.expect_byte(b']')?;
         break;
     }
@@ -457,7 +533,9 @@ fn parse_field_def_list(lex: &mut Lexer<'_>) -> Result<Vec<FieldDef>, ParseError
     let mut out = Vec::new();
     loop {
         lex.skip();
-        if lex.try_byte(b']') { break; }
+        if lex.try_byte(b']') {
+            break;
+        }
         // Each field: `(<lir_type>, <str>)`
         lex.expect_byte(b'(')?;
         let ty = parse_lir_type(lex)?;
@@ -466,7 +544,9 @@ fn parse_field_def_list(lex: &mut Lexer<'_>) -> Result<Vec<FieldDef>, ParseError
         lex.expect_byte(b')')?;
         out.push(FieldDef { name, ty });
         lex.skip();
-        if lex.try_byte(b',') { continue; }
+        if lex.try_byte(b',') {
+            continue;
+        }
         lex.expect_byte(b']')?;
         break;
     }

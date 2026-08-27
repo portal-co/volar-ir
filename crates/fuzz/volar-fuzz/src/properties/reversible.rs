@@ -15,14 +15,16 @@ use volar_ir::boolar::{BIrStmt, LaneId};
 use volar_ir::circuit::BCircuit;
 use volar_ir::ir::IRVarId;
 use volar_ir::rcircuit::StorageState;
-use volar_ir_passes::to_reversible::{to_reversible, translate_watchlist, ValueWatchlist};
-use volar_ir_passes::{lower_to_circuit_fused, movfuscate_biir_with_control_provenance, LoweringMode};
 use volar_ir_common::StorageId;
+use volar_ir_passes::to_reversible::{ValueWatchlist, to_reversible, translate_watchlist};
+use volar_ir_passes::{
+    LoweringMode, lower_to_circuit_fused, movfuscate_biir_with_control_provenance,
+};
 
 use crate::generators::biir::gen_biir_and_inputs;
 use crate::interpreter::biir::eval_biir_with_limit;
 
-use super::biir_passes::{movfuscated_inputs, LOWER_LIMIT};
+use super::biir_passes::{LOWER_LIMIT, movfuscated_inputs};
 
 /// Evaluate a pure-gate fused circuit (Zero/One/And/Or/Xor/Not only) on
 /// parameter bits; returns `None` if it contains any other statement.

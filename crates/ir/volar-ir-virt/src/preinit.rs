@@ -2,11 +2,7 @@
 // @ai: assisted
 //! Canonical virt storage initialization via [`PreInitSegment`].
 
-use alloc::{
-    collections::BTreeMap,
-    vec,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use volar_ir::boolar::{BIrPreInitSegment, LaneId};
 use volar_ir::ir::{IRBlocks, IRTypeId};
@@ -17,7 +13,7 @@ use crate::bytecode::{
 };
 use crate::canon::{BirHandlerKey, HandlerKey, IrHandlerKey};
 use crate::ctx::DedupTable;
-use crate::ir::{compute_slot_values, const_u32, GlobalLayout, RegAlloc};
+use crate::ir::{GlobalLayout, RegAlloc, compute_slot_values, const_u32};
 use crate::layout::AdaptiveSplitPlan;
 
 /// Static commitment lane written into `pre_init` (key params remain runtime).
@@ -204,8 +200,7 @@ pub(crate) fn build_ir_storage_init_adaptive<P: Clone>(
             AppendedRegionKind::SharedCore { .. } => {
                 for pc in region.pc_start..region.pc_end {
                     let pc = pc as usize;
-                    lane_mut(&mut lanes, bytecode_storage, addr_ty, total_rows)[pc] =
-                        const_u32(0);
+                    lane_mut(&mut lanes, bytecode_storage, addr_ty, total_rows)[pc] = const_u32(0);
                     entries.push(BytecodeEntry {
                         handler_idx: 0,
                         consts: Vec::new(),
@@ -277,8 +272,7 @@ fn fill_ir_outer_rows<P: Clone>(
         let slot_ids = &layout.per_handler_slot[h];
         let slot_values = compute_slot_values(block, block_id, schema, reg_alloc, ir_types);
 
-        lane_mut(lanes, bytecode_storage, addr_ty, total_rows)[block_id] =
-            const_u32(*handler_idx);
+        lane_mut(lanes, bytecode_storage, addr_ty, total_rows)[block_id] = const_u32(*handler_idx);
         for (slot_idx, slot) in schema.slots.iter().enumerate() {
             lane_mut(lanes, slot_ids[slot_idx], slot.ty, total_rows)[block_id] =
                 slot_values[slot_idx];
@@ -303,8 +297,11 @@ pub(crate) fn build_bir_storage_init(
     for (pc, (h_idx, imm)) in dedup.per_block.iter().enumerate() {
         for k in 0..handler_bits {
             let bit = (*h_idx as usize >> k) & 1;
-            lane_mut_bool(&mut lanes, StorageId(bytecode_storage.0 + k as u32), total_rows)[pc] =
-                bit == 1;
+            lane_mut_bool(
+                &mut lanes,
+                StorageId(bytecode_storage.0 + k as u32),
+                total_rows,
+            )[pc] = bit == 1;
         }
 
         let slots = &per_handler_slots[*h_idx as usize];
@@ -335,7 +332,9 @@ fn lane_mut_bool<'a>(
     storage: StorageId,
     total_rows: usize,
 ) -> &'a mut Vec<bool> {
-    lanes.entry(storage).or_insert_with(|| vec![false; total_rows])
+    lanes
+        .entry(storage)
+        .or_insert_with(|| vec![false; total_rows])
 }
 
 fn lanes_to_bir_pre_init(lanes: BTreeMap<StorageId, Vec<bool>>) -> Vec<BIrPreInitSegment> {

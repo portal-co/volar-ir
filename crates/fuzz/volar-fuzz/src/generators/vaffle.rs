@@ -19,11 +19,16 @@
 
 use std::collections::BTreeMap;
 
-use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target, Terminator, Value, ValueId};
-use volar_ir_common::{Constant, IrType, Node, OracleDecl, Stmt, StorageId, Type, TypeId, TypeTable};
+use vaffle::{
+    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target, Terminator, Value,
+    ValueId,
+};
+use volar_ir_common::{
+    Constant, IrType, Node, OracleDecl, Stmt, StorageId, Type, TypeId, TypeTable,
+};
 
-use crate::interpreter::ir::primitive_width;
 use crate::generators::ir::{PRIM_TYPES, RawIrStmt, RawTypeIdx};
+use crate::interpreter::ir::primitive_width;
 
 // ============================================================================
 // Public API
@@ -112,7 +117,15 @@ pub fn interpret_vaffle(
             }
 
             let c = mask_const(Constant { lo: c_lo, hi: c_hi }, v0_w);
-            (Stmt::Poly { ty: v0_tid, coeffs, constant: c }, v0_tid, v0_w)
+            (
+                Stmt::Poly {
+                    ty: v0_tid,
+                    coeffs,
+                    constant: c,
+                },
+                v0_tid,
+                v0_w,
+            )
         } else {
             // ── Rol / Ror ────────────────────────────────────────────────────
             let v_idx = (a as usize) % n_vars;
@@ -120,9 +133,17 @@ pub fn interpret_vaffle(
             let n_rot = if v_w > 0 { (b as usize) % v_w } else { 0 };
             let src = ValueId(v_idx);
             let s = if kind % 2 == 0 {
-                Stmt::Rol { src, ty: v_tid, n: n_rot }
+                Stmt::Rol {
+                    src,
+                    ty: v_tid,
+                    n: n_rot,
+                }
             } else {
-                Stmt::Ror { src, ty: v_tid, n: n_rot }
+                Stmt::Ror {
+                    src,
+                    ty: v_tid,
+                    n: n_rot,
+                }
             };
             (s, v_tid, v_w)
         };
@@ -208,11 +229,11 @@ fn build_vaffle_extended_block(
     // oracle declarations for this module (may be empty)
     oracle_decls: &[volar_ir_common::OracleDecl],
 ) -> (
-    Vec<TypeId>,         // param_type_ids
-    Vec<usize>,          // param_widths
+    Vec<TypeId>,                   // param_type_ids
+    Vec<usize>,                    // param_widths
     Vec<(TypeId, usize, ValueId)>, // var_info (all vars including preceding + this block's)
-    Vec<Value>,          // new values (params + stmts for this block)
-    Vec<ValueId>,        // stmt_vids for this block
+    Vec<Value>,                    // new values (params + stmts for this block)
+    Vec<ValueId>,                  // stmt_vids for this block
 ) {
     use volar_ir_common::{Constant, IrType, Type};
     let param_type_ids: Vec<TypeId> = raw_param_type_idxs
@@ -238,7 +259,11 @@ fn build_vaffle_extended_block(
     // Add params to var_info and new_values.
     for (i, (&tid, &w)) in param_type_ids.iter().zip(param_widths.iter()).enumerate() {
         let vid = ValueId(value_offset + new_values.len());
-        new_values.push(Value::Param { block: block_id, ty: tid, idx: i });
+        new_values.push(Value::Param {
+            block: block_id,
+            ty: tid,
+            idx: i,
+        });
         var_info.push((tid, w, vid));
     }
 
@@ -281,7 +306,11 @@ fn build_vaffle_extended_block(
                 }
             }
             let c = mask_const(Constant { lo: c_lo, hi: c_hi }, v0_w);
-            new_values.push(Value::Op(Stmt::Poly { ty: v0_tid, coeffs, constant: c }));
+            new_values.push(Value::Op(Stmt::Poly {
+                ty: v0_tid,
+                coeffs,
+                constant: c,
+            }));
             stmt_vids.push(vid);
             var_info.push((v0_tid, v0_w, vid));
         } else if kind % 7 == 2 {
@@ -289,9 +318,17 @@ fn build_vaffle_extended_block(
             let (v_tid, v_w, v_id) = var_info[v_idx];
             let n_rot = if v_w > 0 { (b as usize) % v_w } else { 0 };
             let s = if kind % 2 == 0 {
-                Stmt::Rol { src: v_id, ty: v_tid, n: n_rot }
+                Stmt::Rol {
+                    src: v_id,
+                    ty: v_tid,
+                    n: n_rot,
+                }
             } else {
-                Stmt::Ror { src: v_id, ty: v_tid, n: n_rot }
+                Stmt::Ror {
+                    src: v_id,
+                    ty: v_tid,
+                    n: n_rot,
+                }
             };
             new_values.push(Value::Op(s));
             stmt_vids.push(vid);
@@ -369,7 +406,13 @@ fn build_vaffle_extended_block(
         }
     }
 
-    (param_type_ids, param_widths, var_info, new_values, stmt_vids)
+    (
+        param_type_ids,
+        param_widths,
+        var_info,
+        new_values,
+        stmt_vids,
+    )
 }
 
 /// Build a small oracle declaration list from a raw seed byte.
@@ -435,7 +478,10 @@ fn interpret_vaffle_extended_inner(
             .collect()
     };
 
-    let sig = SigDecl { params: param_type_ids.clone(), results: sig_results };
+    let sig = SigDecl {
+        params: param_type_ids.clone(),
+        results: sig_results,
+    };
 
     let block = Block {
         params: param_type_ids
@@ -450,7 +496,10 @@ fn interpret_vaffle_extended_inner(
     let body = FuncBody {
         sig: SigId(0),
         blocks: vec![block],
-        values: new_values.into_iter().map(|v| Node::new(v, (), None)).collect(),
+        values: new_values
+            .into_iter()
+            .map(|v| Node::new(v, (), None))
+            .collect(),
         entry: BlockId(0),
     };
 
@@ -510,7 +559,11 @@ pub fn interpret_vaffle_multiblock(
 
     // Block 0 terminator: Jump to Block 1 with no args.
     // Block 1 has no params — it references B0 values via global ValueIds.
-    let b0_term = Terminator::Jump(Target { block: BlockId(1), args: vec![] , reentry: None });
+    let b0_term = Terminator::Jump(Target {
+        block: BlockId(1),
+        args: vec![],
+        reentry: None,
+    });
 
     // --- Block 1 ---
     // var_info carries over all of B0's non-void vars so B1 stmts can reference them.
@@ -527,7 +580,9 @@ pub fn interpret_vaffle_multiblock(
     // Block 1 terminator: Return all values from both blocks.
     let total_values = b0_value_count + b1_values.len();
     let all_vids: Vec<ValueId> = (0..total_values).map(ValueId).collect();
-    let b1_term = Terminator::Return { values: all_vids.clone() };
+    let b1_term = Terminator::Return {
+        values: all_vids.clone(),
+    };
 
     // Merge all values into a single flat array (B0 first, then B1).
     let mut all_values: Vec<Value> = b0_values;
@@ -552,7 +607,10 @@ pub fn interpret_vaffle_multiblock(
         })
         .collect();
 
-    let sig = SigDecl { params: param_type_ids.clone(), results: sig_results };
+    let sig = SigDecl {
+        params: param_type_ids.clone(),
+        results: sig_results,
+    };
 
     let block0 = Block {
         params: param_type_ids
@@ -572,7 +630,10 @@ pub fn interpret_vaffle_multiblock(
     let body = FuncBody {
         sig: SigId(0),
         blocks: vec![block0, block1],
-        values: all_values.into_iter().map(|v| Node::new(v, (), None)).collect(),
+        values: all_values
+            .into_iter()
+            .map(|v| Node::new(v, (), None))
+            .collect(),
         entry: BlockId(0),
     };
 
@@ -648,8 +709,16 @@ pub fn interpret_vaffle_diamond(
     // B0 terminator: IfNonzero on first param (ValueId(0)), then→B1, else→B2.
     let b0_term = Terminator::IfNonzero {
         cond: ValueId(0),
-        then_target: Target { block: BlockId(1), args: vec![] , reentry: None },
-        else_target: Target { block: BlockId(2), args: vec![] , reentry: None },
+        then_target: Target {
+            block: BlockId(1),
+            args: vec![],
+            reentry: None,
+        },
+        else_target: Target {
+            block: BlockId(2),
+            args: vec![],
+            reentry: None,
+        },
     };
 
     // ── Block 1 (true branch) ────────────────────────────────────────────────
@@ -667,7 +736,11 @@ pub fn interpret_vaffle_diamond(
     let b1_value_count = b1_values.len();
 
     // B1 → B3
-    let b1_term = Terminator::Jump(Target { block: BlockId(3), args: vec![] , reentry: None });
+    let b1_term = Terminator::Jump(Target {
+        block: BlockId(3),
+        args: vec![],
+        reentry: None,
+    });
 
     // ── Block 2 (false branch) ───────────────────────────────────────────────
     let b2_value_offset = b0_value_count + b1_value_count;
@@ -684,7 +757,11 @@ pub fn interpret_vaffle_diamond(
     let b2_value_count = b2_values.len();
 
     // B2 → B3
-    let b2_term = Terminator::Jump(Target { block: BlockId(3), args: vec![] , reentry: None });
+    let b2_term = Terminator::Jump(Target {
+        block: BlockId(3),
+        args: vec![],
+        reentry: None,
+    });
 
     // ── Block 3 (merge) ──────────────────────────────────────────────────────
     let b3_value_offset = b0_value_count + b1_value_count + b2_value_count;
@@ -714,7 +791,9 @@ pub fn interpret_vaffle_diamond(
         }
     }
 
-    let b3_term = Terminator::Return { values: ret_vids.clone() };
+    let b3_term = Terminator::Return {
+        values: ret_vids.clone(),
+    };
 
     // Merge all values into a single flat array.
     let mut all_values: Vec<Value> = b0_values;
@@ -734,7 +813,7 @@ pub fn interpret_vaffle_diamond(
         let mut v = var_info_after_b0.clone();
         // Add B3 entries that are new.
         for entry in &var_info_after_b3 {
-            if entry.2 .0 >= b3_value_offset {
+            if entry.2.0 >= b3_value_offset {
                 v.push(*entry);
             }
         }
@@ -756,7 +835,10 @@ pub fn interpret_vaffle_diamond(
         })
         .collect();
 
-    let sig = SigDecl { params: param_type_ids.clone(), results: sig_results };
+    let sig = SigDecl {
+        params: param_type_ids.clone(),
+        results: sig_results,
+    };
 
     let block0 = Block {
         params: param_type_ids
@@ -786,7 +868,10 @@ pub fn interpret_vaffle_diamond(
     let body = FuncBody {
         sig: SigId(0),
         blocks: vec![block0, block1, block2, block3],
-        values: all_values.into_iter().map(|v| Node::new(v, (), None)).collect(),
+        values: all_values
+            .into_iter()
+            .map(|v| Node::new(v, (), None))
+            .collect(),
         entry: BlockId(0),
     };
 
@@ -859,7 +944,10 @@ pub fn interpret_vaffle_two_func(
         })
         .collect();
 
-    let f1_sig = SigDecl { params: f1_param_type_ids.clone(), results: f1_result_tys.clone() };
+    let f1_sig = SigDecl {
+        params: f1_param_type_ids.clone(),
+        results: f1_result_tys.clone(),
+    };
 
     let f1_block = Block {
         params: f1_param_type_ids
@@ -868,13 +956,18 @@ pub fn interpret_vaffle_two_func(
             .map(|(i, &tid)| (ValueId(i), tid))
             .collect(),
         stmts: f1_stmt_vids,
-        terminator: Terminator::Return { values: f1_all_vids },
+        terminator: Terminator::Return {
+            values: f1_all_vids,
+        },
     };
 
     let f1_body = FuncBody {
         sig: SigId(1),
         blocks: vec![f1_block],
-        values: f1_values.into_iter().map(|v| Node::new(v, (), None)).collect(),
+        values: f1_values
+            .into_iter()
+            .map(|v| Node::new(v, (), None))
+            .collect(),
         entry: BlockId(0),
     };
 
@@ -926,7 +1019,10 @@ pub fn interpret_vaffle_two_func(
     let call_vid = ValueId(f0_values.len());
 
     // Now emit the Call value itself.
-    f0_values.push(Value::Call { func: FuncId(1), args: call_args });
+    f0_values.push(Value::Call {
+        func: FuncId(1),
+        args: call_args,
+    });
     f0_stmt_vids.push(call_vid);
 
     // Emit Value::Output for each of func_1's outputs.
@@ -941,7 +1037,10 @@ pub fn interpret_vaffle_two_func(
                 _ => 1,
             })
             .unwrap_or(1);
-        f0_values.push(Value::Output { value: call_vid, idx: out_idx });
+        f0_values.push(Value::Output {
+            value: call_vid,
+            idx: out_idx,
+        });
         f0_stmt_vids.push(out_vid);
         f0_var_info.push((out_tid, w, out_vid));
         output_vids.push(out_vid);
@@ -964,7 +1063,10 @@ pub fn interpret_vaffle_two_func(
         })
         .collect();
 
-    let f0_sig = SigDecl { params: f0_param_type_ids.clone(), results: f0_result_tys };
+    let f0_sig = SigDecl {
+        params: f0_param_type_ids.clone(),
+        results: f0_result_tys,
+    };
 
     let f0_block = Block {
         params: f0_param_type_ids
@@ -973,13 +1075,18 @@ pub fn interpret_vaffle_two_func(
             .map(|(i, &tid)| (ValueId(i), tid))
             .collect(),
         stmts: f0_stmt_vids,
-        terminator: Terminator::Return { values: f0_return_vids },
+        terminator: Terminator::Return {
+            values: f0_return_vids,
+        },
     };
 
     let f0_body = FuncBody {
         sig: SigId(0),
         blocks: vec![f0_block],
-        values: f0_values.into_iter().map(|v| Node::new(v, (), None)).collect(),
+        values: f0_values
+            .into_iter()
+            .map(|v| Node::new(v, (), None))
+            .collect(),
         entry: BlockId(0),
     };
 
@@ -1014,14 +1121,20 @@ fn mask_const(c: Constant, width: usize) -> Constant {
         } else {
             (1u128 << (width - 128)) - 1
         };
-        Constant { lo: c.lo, hi: c.hi & hi_mask }
+        Constant {
+            lo: c.lo,
+            hi: c.hi & hi_mask,
+        }
     } else {
         let lo_mask = if width == 128 {
             u128::MAX
         } else {
             (1u128 << width) - 1
         };
-        Constant { lo: c.lo & lo_mask, hi: 0 }
+        Constant {
+            lo: c.lo & lo_mask,
+            hi: 0,
+        }
     }
 }
 
@@ -1041,104 +1154,93 @@ mod strategies {
     /// Generate a valid single-function VAFFLE module with matching inputs.
     ///
     /// Returns `(module, FuncId(0), inputs)`.
-    pub fn gen_vaffle_and_inputs(
-    ) -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)> {
-        proptest::collection::vec(any::<u8>(), 0usize..=4usize).prop_flat_map(
-            |raw_param_types| {
-                // Compute per-param bit widths to generate matching inputs.
-                let widths: Vec<usize> = raw_param_types
-                    .iter()
-                    .map(|&idx| {
-                        primitive_width(PRIM_TYPES[idx as usize % PRIM_TYPES.len()])
-                    })
-                    .collect();
-                let total_bits: usize = widths.iter().sum();
+    pub fn gen_vaffle_and_inputs() -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)> {
+        proptest::collection::vec(any::<u8>(), 0usize..=4usize).prop_flat_map(|raw_param_types| {
+            // Compute per-param bit widths to generate matching inputs.
+            let widths: Vec<usize> = raw_param_types
+                .iter()
+                .map(|&idx| primitive_width(PRIM_TYPES[idx as usize % PRIM_TYPES.len()]))
+                .collect();
+            let total_bits: usize = widths.iter().sum();
 
-                let raw_stmts = proptest::collection::vec(
-                    (
-                        any::<u8>(),
-                        any::<u32>(),
-                        any::<u32>(),
-                        any::<u128>(),
-                        any::<u128>(),
-                    ),
-                    0usize..=8usize,
-                );
-                let input_bits =
-                    proptest::collection::vec(any::<bool>(), total_bits);
+            let raw_stmts = proptest::collection::vec(
+                (
+                    any::<u8>(),
+                    any::<u32>(),
+                    any::<u32>(),
+                    any::<u128>(),
+                    any::<u128>(),
+                ),
+                0usize..=8usize,
+            );
+            let input_bits = proptest::collection::vec(any::<bool>(), total_bits);
 
-                (raw_stmts, input_bits).prop_map(move |(raw_stmts, input_bits)| {
-                    let (module, func_id, _param_widths) =
-                        interpret_vaffle(&raw_param_types, &raw_stmts);
+            (raw_stmts, input_bits).prop_map(move |(raw_stmts, input_bits)| {
+                let (module, func_id, _param_widths) =
+                    interpret_vaffle(&raw_param_types, &raw_stmts);
 
-                    // Split flat input bits into per-param IrValues.
-                    let inputs: Vec<IrValue> = {
-                        let mut off = 0;
-                        widths
-                            .iter()
-                            .map(|&w| {
-                                let v = input_bits[off..off + w].to_vec();
-                                off += w;
-                                v
-                            })
-                            .collect()
-                    };
+                // Split flat input bits into per-param IrValues.
+                let inputs: Vec<IrValue> = {
+                    let mut off = 0;
+                    widths
+                        .iter()
+                        .map(|&w| {
+                            let v = input_bits[off..off + w].to_vec();
+                            off += w;
+                            v
+                        })
+                        .collect()
+                };
 
-                    (module, func_id, inputs)
-                })
-            },
-        )
+                (module, func_id, inputs)
+            })
+        })
     }
 
     /// Like [`gen_vaffle_and_inputs`] but uses [`interpret_vaffle_extended`] so
     /// the generated module may contain `StorageRead`/`StorageWrite` values.
     ///
     /// Used for property H (`store_forward_vaffle_module` preserves semantics).
-    pub fn gen_vaffle_extended_and_inputs(
-    ) -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)> {
-        proptest::collection::vec(any::<u8>(), 0usize..=4usize).prop_flat_map(
-            |raw_param_types| {
-                let widths: Vec<usize> = raw_param_types
-                    .iter()
-                    .map(|&idx| {
-                        primitive_width(PRIM_TYPES[idx as usize % PRIM_TYPES.len()])
-                    })
-                    .collect();
-                let total_bits: usize = widths.iter().sum();
+    pub fn gen_vaffle_extended_and_inputs() -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)>
+    {
+        proptest::collection::vec(any::<u8>(), 0usize..=4usize).prop_flat_map(|raw_param_types| {
+            let widths: Vec<usize> = raw_param_types
+                .iter()
+                .map(|&idx| primitive_width(PRIM_TYPES[idx as usize % PRIM_TYPES.len()]))
+                .collect();
+            let total_bits: usize = widths.iter().sum();
 
-                let raw_stmts = proptest::collection::vec(
-                    (
-                        any::<u8>(),
-                        any::<u32>(),
-                        any::<u32>(),
-                        any::<u128>(),
-                        any::<u128>(),
-                    ),
-                    0usize..=8usize,
-                );
-                let input_bits =
-                    proptest::collection::vec(any::<bool>(), total_bits);
+            let raw_stmts = proptest::collection::vec(
+                (
+                    any::<u8>(),
+                    any::<u32>(),
+                    any::<u32>(),
+                    any::<u128>(),
+                    any::<u128>(),
+                ),
+                0usize..=8usize,
+            );
+            let input_bits = proptest::collection::vec(any::<bool>(), total_bits);
 
-                (raw_stmts, input_bits).prop_map(move |(raw_stmts, input_bits)| {
-                    let (module, func_id, _param_widths) =
-                        interpret_vaffle_extended(&raw_param_types, &raw_stmts);
+            (raw_stmts, input_bits).prop_map(move |(raw_stmts, input_bits)| {
+                let (module, func_id, _param_widths) =
+                    interpret_vaffle_extended(&raw_param_types, &raw_stmts);
 
-                    let inputs: Vec<IrValue> = {
-                        let mut off = 0;
-                        widths
-                            .iter()
-                            .map(|&w| {
-                                let v = input_bits[off..off + w].to_vec();
-                                off += w;
-                                v
-                            })
-                            .collect()
-                    };
+                let inputs: Vec<IrValue> = {
+                    let mut off = 0;
+                    widths
+                        .iter()
+                        .map(|&w| {
+                            let v = input_bits[off..off + w].to_vec();
+                            off += w;
+                            v
+                        })
+                        .collect()
+                };
 
-                    (module, func_id, inputs)
-                })
-            },
-        )
+                (module, func_id, inputs)
+            })
+        })
     }
 
     /// Two-block VAFFLE module with `StorageRead`/`StorageWrite` across blocks.
@@ -1147,54 +1249,47 @@ mod strategies {
     /// values.  Block 1's stmts may reference Block 0's `ValueId`s directly.
     /// This exercises cross-block store-to-load forwarding in
     /// `store_forward_vaffle_module`.
-    pub fn gen_vaffle_multiblock_and_inputs(
-    ) -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)> {
-        proptest::collection::vec(any::<u8>(), 0usize..=4usize).prop_flat_map(
-            |raw_param_types| {
-                let widths: Vec<usize> = raw_param_types
-                    .iter()
-                    .map(|&idx| {
-                        primitive_width(PRIM_TYPES[idx as usize % PRIM_TYPES.len()])
-                    })
-                    .collect();
-                let total_bits: usize = widths.iter().sum();
+    pub fn gen_vaffle_multiblock_and_inputs()
+    -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)> {
+        proptest::collection::vec(any::<u8>(), 0usize..=4usize).prop_flat_map(|raw_param_types| {
+            let widths: Vec<usize> = raw_param_types
+                .iter()
+                .map(|&idx| primitive_width(PRIM_TYPES[idx as usize % PRIM_TYPES.len()]))
+                .collect();
+            let total_bits: usize = widths.iter().sum();
 
-                let raw_tuple = (
-                    any::<u8>(),
-                    any::<u32>(),
-                    any::<u32>(),
-                    any::<u128>(),
-                    any::<u128>(),
-                );
-                let raw_stmts_b0 = proptest::collection::vec(raw_tuple.clone(), 0usize..=6usize);
-                let raw_stmts_b1 = proptest::collection::vec(raw_tuple, 0usize..=6usize);
-                let input_bits = proptest::collection::vec(any::<bool>(), total_bits);
+            let raw_tuple = (
+                any::<u8>(),
+                any::<u32>(),
+                any::<u32>(),
+                any::<u128>(),
+                any::<u128>(),
+            );
+            let raw_stmts_b0 = proptest::collection::vec(raw_tuple.clone(), 0usize..=6usize);
+            let raw_stmts_b1 = proptest::collection::vec(raw_tuple, 0usize..=6usize);
+            let input_bits = proptest::collection::vec(any::<bool>(), total_bits);
 
-                (raw_stmts_b0, raw_stmts_b1, input_bits).prop_map(
-                    move |(raw_stmts_b0, raw_stmts_b1, input_bits)| {
-                        let (module, func_id, _param_widths) = interpret_vaffle_multiblock(
-                            &raw_param_types,
-                            &raw_stmts_b0,
-                            &raw_stmts_b1,
-                        );
+            (raw_stmts_b0, raw_stmts_b1, input_bits).prop_map(
+                move |(raw_stmts_b0, raw_stmts_b1, input_bits)| {
+                    let (module, func_id, _param_widths) =
+                        interpret_vaffle_multiblock(&raw_param_types, &raw_stmts_b0, &raw_stmts_b1);
 
-                        let inputs: Vec<IrValue> = {
-                            let mut off = 0;
-                            widths
-                                .iter()
-                                .map(|&w| {
-                                    let v = input_bits[off..off + w].to_vec();
-                                    off += w;
-                                    v
-                                })
-                                .collect()
-                        };
+                    let inputs: Vec<IrValue> = {
+                        let mut off = 0;
+                        widths
+                            .iter()
+                            .map(|&w| {
+                                let v = input_bits[off..off + w].to_vec();
+                                off += w;
+                                v
+                            })
+                            .collect()
+                    };
 
-                        (module, func_id, inputs)
-                    },
-                )
-            },
-        )
+                    (module, func_id, inputs)
+                },
+            )
+        })
     }
 
     /// Four-block diamond VAFFLE module with `StorageRead`/`StorageWrite`.
@@ -1202,35 +1297,39 @@ mod strategies {
     /// B0 branches on the first Bit param to B1 (true) or B2 (false).
     /// B1 and B2 both merge into B3.  This exercises multi-predecessor
     /// store-to-load forwarding in `store_forward_vaffle_module`.
-    pub fn gen_vaffle_diamond_and_inputs(
-    ) -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)> {
+    pub fn gen_vaffle_diamond_and_inputs() -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)>
+    {
         // At least 1 param (first forced to Bit for the condition).
-        proptest::collection::vec(any::<u8>(), 1usize..=4usize).prop_flat_map(
-            |raw_param_types| {
-                let mut adjusted = raw_param_types.clone();
-                adjusted[0] = 0; // force Bit
-                let widths: Vec<usize> = adjusted
-                    .iter()
-                    .map(|&idx| {
-                        primitive_width(PRIM_TYPES[idx as usize % PRIM_TYPES.len()])
-                    })
-                    .collect();
-                let total_bits: usize = widths.iter().sum();
+        proptest::collection::vec(any::<u8>(), 1usize..=4usize).prop_flat_map(|raw_param_types| {
+            let mut adjusted = raw_param_types.clone();
+            adjusted[0] = 0; // force Bit
+            let widths: Vec<usize> = adjusted
+                .iter()
+                .map(|&idx| primitive_width(PRIM_TYPES[idx as usize % PRIM_TYPES.len()]))
+                .collect();
+            let total_bits: usize = widths.iter().sum();
 
-                let raw_tuple = (
-                    any::<u8>(),
-                    any::<u32>(),
-                    any::<u32>(),
-                    any::<u128>(),
-                    any::<u128>(),
-                );
-                let raw_stmts_b0 = proptest::collection::vec(raw_tuple.clone(), 0usize..=4usize);
-                let raw_stmts_b1 = proptest::collection::vec(raw_tuple.clone(), 0usize..=4usize);
-                let raw_stmts_b2 = proptest::collection::vec(raw_tuple.clone(), 0usize..=4usize);
-                let raw_stmts_b3 = proptest::collection::vec(raw_tuple, 0usize..=4usize);
-                let input_bits = proptest::collection::vec(any::<bool>(), total_bits);
+            let raw_tuple = (
+                any::<u8>(),
+                any::<u32>(),
+                any::<u32>(),
+                any::<u128>(),
+                any::<u128>(),
+            );
+            let raw_stmts_b0 = proptest::collection::vec(raw_tuple.clone(), 0usize..=4usize);
+            let raw_stmts_b1 = proptest::collection::vec(raw_tuple.clone(), 0usize..=4usize);
+            let raw_stmts_b2 = proptest::collection::vec(raw_tuple.clone(), 0usize..=4usize);
+            let raw_stmts_b3 = proptest::collection::vec(raw_tuple, 0usize..=4usize);
+            let input_bits = proptest::collection::vec(any::<bool>(), total_bits);
 
-                (raw_stmts_b0, raw_stmts_b1, raw_stmts_b2, raw_stmts_b3, input_bits).prop_map(
+            (
+                raw_stmts_b0,
+                raw_stmts_b1,
+                raw_stmts_b2,
+                raw_stmts_b3,
+                input_bits,
+            )
+                .prop_map(
                     move |(raw_stmts_b0, raw_stmts_b1, raw_stmts_b2, raw_stmts_b3, input_bits)| {
                         let (module, func_id, _param_widths) = interpret_vaffle_diamond(
                             &raw_param_types,
@@ -1255,8 +1354,7 @@ mod strategies {
                         (module, func_id, inputs)
                     },
                 )
-            },
-        )
+        })
     }
 
     /// Two-function VAFFLE module (`func_0` calls `func_1` once) with
@@ -1271,8 +1369,8 @@ mod strategies {
     /// one value (to seed provenance for the SP params it threads through),
     /// and a param-less, stmt-less `func_1` would violate that regardless of
     /// whether it ends up inlined.
-    pub fn gen_vaffle_two_func_and_inputs(
-    ) -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)> {
+    pub fn gen_vaffle_two_func_and_inputs() -> impl Strategy<Value = (Module, FuncId, Vec<IrValue>)>
+    {
         (
             proptest::collection::vec(any::<u8>(), 0usize..=3usize),
             proptest::collection::vec(any::<u8>(), 1usize..=3usize),
@@ -1284,7 +1382,13 @@ mod strategies {
                     .collect();
                 let total_bits_f0: usize = widths_f0.iter().sum();
 
-                let raw_tuple = (any::<u8>(), any::<u32>(), any::<u32>(), any::<u128>(), any::<u128>());
+                let raw_tuple = (
+                    any::<u8>(),
+                    any::<u32>(),
+                    any::<u32>(),
+                    any::<u128>(),
+                    any::<u128>(),
+                );
                 let raw_stmts_f0 = proptest::collection::vec(raw_tuple.clone(), 0usize..=6usize);
                 let raw_stmts_f1 = proptest::collection::vec(raw_tuple, 0usize..=6usize);
                 let input_bits = proptest::collection::vec(any::<bool>(), total_bits_f0);

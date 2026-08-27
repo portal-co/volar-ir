@@ -66,7 +66,8 @@ pub type RawBlock = (Vec<RawStmt>, RawTerm);
 pub fn interpret_biir(
     param_counts: Vec<u32>,
     raw_blocks: Vec<RawBlock>,
-    raw_ret_arity: u8) -> BIrBlocks<()> {
+    raw_ret_arity: u8,
+) -> BIrBlocks<()> {
     let n_blocks = param_counts.len();
     assert_eq!(raw_blocks.len(), n_blocks);
     assert!(n_blocks >= 1);
@@ -110,16 +111,19 @@ pub fn interpret_biir(
         .enumerate()
         .map(|(i, ((&n_params, (_, raw_term)), stmts))| {
             let n_vars = n_params + stmts.len() as u32;
-            let terminator =
-                make_term(i, n_blocks, n_vars, &param_counts, raw_term, ret_arity);
+            let terminator = make_term(i, n_blocks, n_vars, &param_counts, raw_term, ret_arity);
             BIrBlock {
                 params: n_params,
                 stmts: stmts.into_iter().map(|s| Node::new(s, (), None)).collect(),
-                terminator }
+                terminator,
+            }
         })
         .collect();
 
-    BIrBlocks { blocks, pre_init: vec![] }
+    BIrBlocks {
+        blocks,
+        pre_init: vec![],
+    }
 }
 
 // ============================================================================
@@ -143,7 +147,8 @@ fn make_stmt(kind: u8, a: u32, b: u32, n_avail: u32) -> BIrStmt {
             2 => BIrStmt::And(IRVarId(av), IRVarId(bv)),
             3 => BIrStmt::Or(IRVarId(av), IRVarId(bv)),
             4 => BIrStmt::Xor(IRVarId(av), IRVarId(bv)),
-            _ => BIrStmt::Not(IRVarId(av)) }
+            _ => BIrStmt::Not(IRVarId(av)),
+        }
     }
 }
 
@@ -153,21 +158,35 @@ fn make_term(
     n_vars: u32,
     param_counts: &[u32],
     raw_term: &RawTerm,
-    ret_arity: u32) -> BIrTerminator {
+    ret_arity: u32,
+) -> BIrTerminator {
     let (kind, cond, then_raw, else_raw) = raw_term;
-    let then_target =
-        make_target(block_idx, n_blocks, n_vars, param_counts, then_raw, ret_arity);
+    let then_target = make_target(
+        block_idx,
+        n_blocks,
+        n_vars,
+        param_counts,
+        then_raw,
+        ret_arity,
+    );
 
     // CondJmp requires at least one var for the condition wire.
     if n_vars == 0 || kind % 2 == 0 {
         BIrTerminator::Jmp(then_target)
     } else {
-        let else_target =
-            make_target(block_idx, n_blocks, n_vars, param_counts, else_raw, ret_arity);
+        let else_target = make_target(
+            block_idx,
+            n_blocks,
+            n_vars,
+            param_counts,
+            else_raw,
+            ret_arity,
+        );
         BIrTerminator::CondJmp {
             val: IRVarId(cond % n_vars),
             then_target,
-            else_target }
+            else_target,
+        }
     }
 }
 
@@ -177,14 +196,18 @@ fn make_target(
     n_vars: u32,
     param_counts: &[u32],
     raw: &RawTarget,
-    ret_arity: u32) -> BIrTarget {
+    ret_arity: u32,
+) -> BIrTarget {
     let (choice, raw_args) = raw;
 
     // If no vars are available we cannot supply args to any target that needs
     // them.  Since ret_arity == 0 is guaranteed when min_vars == 0 (and thus
     // n_vars == 0), Return is always safe here.
     if n_vars == 0 {
-        return BIrTarget { block: IRBlockTargetId::Return, args: vec![] };
+        return BIrTarget {
+            block: IRBlockTargetId::Return,
+            args: vec![],
+        };
     }
 
     // Valid choices: 0 = Return, 1..=n_forward = forward block indices.
@@ -207,7 +230,8 @@ fn make_target(
         };
         BIrTarget {
             block: IRBlockTargetId::Return,
-            args }
+            args,
+        }
     } else {
         // Forward block: choice_idx-1 forward slots after block_idx.
         let target_block = block_idx + choice_idx;
@@ -221,7 +245,8 @@ fn make_target(
             .collect();
         BIrTarget {
             block: IRBlockTargetId::Block(IRBlockId(target_block as u32)),
-            args }
+            args,
+        }
     }
 }
 
@@ -247,7 +272,8 @@ fn make_stmt_extended(
     a: u32,
     b: u32,
     n_avail: u32,
-    oracle_calls: &[(u32, usize)]) -> (BIrStmt, bool) {
+    oracle_calls: &[(u32, usize)],
+) -> (BIrStmt, bool) {
     if n_avail == 0 {
         if kind & 1 == 0 {
             (BIrStmt::Zero, false)
@@ -267,29 +293,41 @@ fn make_stmt_extended(
             6 => {
                 // StorageWrite: store src=av at addr=bv, single-bit lane
                 let store_id = StorageId(a % 4);
-                (BIrStmt::StorageWrite {
-                    storage: store_id,
-                    lane: LaneId(0),
-                    src: IRVarId(av),
-                    addr: vec![IRVarId(bv)] }, true) // void
+                (
+                    BIrStmt::StorageWrite {
+                        storage: store_id,
+                        lane: LaneId(0),
+                        src: IRVarId(av),
+                        addr: vec![IRVarId(bv)],
+                    },
+                    true,
+                ) // void
             }
             7 => {
                 // StorageRead: read one bit from addr=av, single-bit lane
                 let store_id = StorageId(a % 4);
-                (BIrStmt::StorageRead {
-                    storage: store_id,
-                    lane: LaneId(0),
-                    addr: vec![IRVarId(av)] }, false)
+                (
+                    BIrStmt::StorageRead {
+                        storage: store_id,
+                        lane: LaneId(0),
+                        addr: vec![IRVarId(av)],
+                    },
+                    false,
+                )
             }
             8 => {
                 // OracleCall: one input bit, produces `num_bits` output bits.
                 // The result is an aggregate sentinel; OracleBit extracts bits.
                 let num_bits = (b as usize % 4) + 1;
                 let oracle_name = format!("o{}", a % 4);
-                (BIrStmt::OracleCall {
-                    name: oracle_name,
-                    args: vec![IRVarId(av)],
-                    num_bits }, true) // OracleCall is void; bits extracted by OracleBit
+                (
+                    BIrStmt::OracleCall {
+                        name: oracle_name,
+                        args: vec![IRVarId(av)],
+                        num_bits,
+                    },
+                    true,
+                ) // OracleCall is void; bits extracted by OracleBit
             }
             _ => {
                 // OracleBit: extract one bit from a prior OracleCall.
@@ -300,7 +338,13 @@ fn make_stmt_extended(
                     let call_entry = oracle_calls[(a as usize) % oracle_calls.len()];
                     let call_var = IRVarId(call_entry.0);
                     let bit_idx = (b as usize) % call_entry.1.max(1);
-                    (BIrStmt::OracleBit { call: call_var, bit: bit_idx }, false)
+                    (
+                        BIrStmt::OracleProjectedBit {
+                            call: call_var,
+                            bit: bit_idx,
+                        },
+                        false,
+                    )
                 }
             }
         }
@@ -316,9 +360,7 @@ fn make_stmt_extended(
 /// `OracleCall`/`OracleBit` stmts.
 ///
 /// Produces a single-block program that returns all vars.
-pub fn interpret_biir_extended(
-    n_params: u32,
-    raw_stmts: &[RawStmt]) -> BIrBlocks<()> {
+pub fn interpret_biir_extended(n_params: u32, raw_stmts: &[RawStmt]) -> BIrBlocks<()> {
     let mut stmts: Vec<BIrStmt> = Vec::with_capacity(raw_stmts.len());
     // Track indices of usable (non-void) vars.  Params 0..n_params are all
     // usable.  StorageWrite and OracleCall results are void and excluded.
@@ -332,7 +374,10 @@ pub fn interpret_biir_extended(
         let (mapped_a, mapped_b) = if n_avail == 0 {
             (0u32, 0u32)
         } else {
-            (usable[(a as usize) % usable.len()], usable[(b as usize) % usable.len()])
+            (
+                usable[(a as usize) % usable.len()],
+                usable[(b as usize) % usable.len()],
+            )
         };
         let var_id = n_params + stmts.len() as u32;
         let (stmt, is_void) = make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls);
@@ -353,9 +398,16 @@ pub fn interpret_biir_extended(
     let block = BIrBlock {
         params: n_params,
         stmts: stmts.into_iter().map(|s| Node::new(s, (), None)).collect(),
-        terminator: BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Return, args: ret_args }) };
+        terminator: BIrTerminator::Jmp(BIrTarget {
+            block: IRBlockTargetId::Return,
+            args: ret_args,
+        }),
+    };
 
-    BIrBlocks { blocks: vec![block], pre_init: vec![] }
+    BIrBlocks {
+        blocks: vec![block],
+        pre_init: vec![],
+    }
 }
 
 // ============================================================================
@@ -376,7 +428,8 @@ pub fn interpret_biir_extended(
 pub fn interpret_biir_multiblock(
     n_params: u32,
     raw_stmts_b0: &[RawStmt],
-    raw_stmts_b1: &[RawStmt]) -> BIrBlocks<()> {
+    raw_stmts_b1: &[RawStmt],
+) -> BIrBlocks<()> {
     // ── Block 0 ──────────────────────────────────────────────────────────────
     let mut stmts_b0: Vec<BIrStmt> = Vec::with_capacity(raw_stmts_b0.len());
     let mut usable_b0: Vec<u32> = (0..n_params).collect();
@@ -387,10 +440,14 @@ pub fn interpret_biir_multiblock(
         let (mapped_a, mapped_b) = if n_avail == 0 {
             (0u32, 0u32)
         } else {
-            (usable_b0[(a as usize) % usable_b0.len()], usable_b0[(b as usize) % usable_b0.len()])
+            (
+                usable_b0[(a as usize) % usable_b0.len()],
+                usable_b0[(b as usize) % usable_b0.len()],
+            )
         };
         let var_id = n_params + stmts_b0.len() as u32;
-        let (stmt, is_void) = make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b0);
+        let (stmt, is_void) =
+            make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b0);
         if let BIrStmt::OracleCall { num_bits, .. } = &stmt {
             oracle_calls_b0.push((var_id, *num_bits));
         }
@@ -403,7 +460,10 @@ pub fn interpret_biir_multiblock(
     let total_b0 = n_params + stmts_b0.len() as u32;
     // B0 terminator: jump to Block(1), passing ALL vars (including void).
     let b0_args: Vec<IRVarId> = (0..total_b0).map(IRVarId).collect();
-    let b0_term = BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Block(IRBlockId(1)), args: b0_args });
+    let b0_term = BIrTerminator::Jmp(BIrTarget {
+        block: IRBlockTargetId::Block(IRBlockId(1)),
+        args: b0_args,
+    });
 
     // ── Block 1 ──────────────────────────────────────────────────────────────
     // B1 params = total_b0 (all B0 vars passed as args).
@@ -417,7 +477,9 @@ pub fn interpret_biir_multiblock(
     // `i` is usable iff B0's var `i` was usable.  We build the B1 usable set
     // accordingly.
     let b0_usable_set: std::collections::BTreeSet<u32> = usable_b0.iter().copied().collect();
-    let mut usable_b1: Vec<u32> = (0..total_b0).filter(|i| b0_usable_set.contains(i)).collect();
+    let mut usable_b1: Vec<u32> = (0..total_b0)
+        .filter(|i| b0_usable_set.contains(i))
+        .collect();
     let mut oracle_calls_b1: Vec<(u32, usize)> = Vec::new();
 
     for &(kind, a, b) in raw_stmts_b1 {
@@ -425,10 +487,14 @@ pub fn interpret_biir_multiblock(
         let (mapped_a, mapped_b) = if n_avail == 0 {
             (0u32, 0u32)
         } else {
-            (usable_b1[(a as usize) % usable_b1.len()], usable_b1[(b as usize) % usable_b1.len()])
+            (
+                usable_b1[(a as usize) % usable_b1.len()],
+                usable_b1[(b as usize) % usable_b1.len()],
+            )
         };
         let var_id = n_b1_params + stmts_b1.len() as u32;
-        let (stmt, is_void) = make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b1);
+        let (stmt, is_void) =
+            make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b1);
         if let BIrStmt::OracleCall { num_bits, .. } = &stmt {
             oracle_calls_b1.push((var_id, *num_bits));
         }
@@ -440,18 +506,32 @@ pub fn interpret_biir_multiblock(
 
     let total_b1 = n_b1_params + stmts_b1.len() as u32;
     let b1_ret_args: Vec<IRVarId> = (0..total_b1).map(IRVarId).collect();
-    let b1_term = BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Return, args: b1_ret_args });
+    let b1_term = BIrTerminator::Jmp(BIrTarget {
+        block: IRBlockTargetId::Return,
+        args: b1_ret_args,
+    });
 
     let block0 = BIrBlock {
         params: n_params,
-        stmts: stmts_b0.into_iter().map(|s| Node::new(s, (), None)).collect(),
-        terminator: b0_term };
+        stmts: stmts_b0
+            .into_iter()
+            .map(|s| Node::new(s, (), None))
+            .collect(),
+        terminator: b0_term,
+    };
     let block1 = BIrBlock {
         params: n_b1_params,
-        stmts: stmts_b1.into_iter().map(|s| Node::new(s, (), None)).collect(),
-        terminator: b1_term };
+        stmts: stmts_b1
+            .into_iter()
+            .map(|s| Node::new(s, (), None))
+            .collect(),
+        terminator: b1_term,
+    };
 
-    BIrBlocks { blocks: vec![block0, block1], pre_init: vec![] }
+    BIrBlocks {
+        blocks: vec![block0, block1],
+        pre_init: vec![],
+    }
 }
 
 // ============================================================================
@@ -481,7 +561,8 @@ pub fn interpret_biir_diamond(
     raw_stmts_b0: &[RawStmt],
     raw_stmts_b1: &[RawStmt],
     raw_stmts_b2: &[RawStmt],
-    raw_stmts_b3: &[RawStmt]) -> BIrBlocks<()> {
+    raw_stmts_b3: &[RawStmt],
+) -> BIrBlocks<()> {
     let n_params = n_params.max(1); // need at least 1 for the condition
 
     // ── Block 0 ──────────────────────────────────────────────────────────────
@@ -494,11 +575,17 @@ pub fn interpret_biir_diamond(
         let (mapped_a, mapped_b) = if n_avail == 0 {
             (0u32, 0u32)
         } else {
-            (usable_b0[(a as usize) % usable_b0.len()], usable_b0[(b as usize) % usable_b0.len()])
+            (
+                usable_b0[(a as usize) % usable_b0.len()],
+                usable_b0[(b as usize) % usable_b0.len()],
+            )
         };
         let var_id = n_params + stmts_b0.len() as u32;
-        let (stmt, is_void) = make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b0);
-        if let BIrStmt::OracleCall { num_bits, .. } = &stmt { oracle_calls_b0.push((var_id, *num_bits)); }
+        let (stmt, is_void) =
+            make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b0);
+        if let BIrStmt::OracleCall { num_bits, .. } = &stmt {
+            oracle_calls_b0.push((var_id, *num_bits));
+        }
         stmts_b0.push(stmt);
         if !is_void {
             usable_b0.push(var_id);
@@ -509,13 +596,22 @@ pub fn interpret_biir_diamond(
     let b0_all_args: Vec<IRVarId> = (0..total_b0).map(IRVarId).collect();
     let b0_term = BIrTerminator::CondJmp {
         val: IRVarId(0),
-        then_target: BIrTarget { block: IRBlockTargetId::Block(IRBlockId(1)), args: b0_all_args.clone() },
-        else_target: BIrTarget { block: IRBlockTargetId::Block(IRBlockId(2)), args: b0_all_args } };
+        then_target: BIrTarget {
+            block: IRBlockTargetId::Block(IRBlockId(1)),
+            args: b0_all_args.clone(),
+        },
+        else_target: BIrTarget {
+            block: IRBlockTargetId::Block(IRBlockId(2)),
+            args: b0_all_args,
+        },
+    };
 
     // ── Block 1 (true branch) ────────────────────────────────────────────────
     let n_b1_params = total_b0;
     let b0_usable_set: std::collections::BTreeSet<u32> = usable_b0.iter().copied().collect();
-    let mut usable_b1: Vec<u32> = (0..total_b0).filter(|i| b0_usable_set.contains(i)).collect();
+    let mut usable_b1: Vec<u32> = (0..total_b0)
+        .filter(|i| b0_usable_set.contains(i))
+        .collect();
     let mut stmts_b1: Vec<BIrStmt> = Vec::new();
     let mut oracle_calls_b1: Vec<(u32, usize)> = Vec::new();
 
@@ -524,11 +620,17 @@ pub fn interpret_biir_diamond(
         let (mapped_a, mapped_b) = if n_avail == 0 {
             (0u32, 0u32)
         } else {
-            (usable_b1[(a as usize) % usable_b1.len()], usable_b1[(b as usize) % usable_b1.len()])
+            (
+                usable_b1[(a as usize) % usable_b1.len()],
+                usable_b1[(b as usize) % usable_b1.len()],
+            )
         };
         let var_id = n_b1_params + stmts_b1.len() as u32;
-        let (stmt, is_void) = make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b1);
-        if let BIrStmt::OracleCall { num_bits, .. } = &stmt { oracle_calls_b1.push((var_id, *num_bits)); }
+        let (stmt, is_void) =
+            make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b1);
+        if let BIrStmt::OracleCall { num_bits, .. } = &stmt {
+            oracle_calls_b1.push((var_id, *num_bits));
+        }
         stmts_b1.push(stmt);
         if !is_void {
             usable_b1.push(var_id);
@@ -536,11 +638,16 @@ pub fn interpret_biir_diamond(
     }
 
     let b1_to_b3_args: Vec<IRVarId> = (0..n_b1_params).map(IRVarId).collect();
-    let b1_term = BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Block(IRBlockId(3)), args: b1_to_b3_args });
+    let b1_term = BIrTerminator::Jmp(BIrTarget {
+        block: IRBlockTargetId::Block(IRBlockId(3)),
+        args: b1_to_b3_args,
+    });
 
     // ── Block 2 (false branch) ───────────────────────────────────────────────
     let n_b2_params = total_b0;
-    let mut usable_b2: Vec<u32> = (0..total_b0).filter(|i| b0_usable_set.contains(i)).collect();
+    let mut usable_b2: Vec<u32> = (0..total_b0)
+        .filter(|i| b0_usable_set.contains(i))
+        .collect();
     let mut stmts_b2: Vec<BIrStmt> = Vec::new();
     let mut oracle_calls_b2: Vec<(u32, usize)> = Vec::new();
 
@@ -549,11 +656,17 @@ pub fn interpret_biir_diamond(
         let (mapped_a, mapped_b) = if n_avail == 0 {
             (0u32, 0u32)
         } else {
-            (usable_b2[(a as usize) % usable_b2.len()], usable_b2[(b as usize) % usable_b2.len()])
+            (
+                usable_b2[(a as usize) % usable_b2.len()],
+                usable_b2[(b as usize) % usable_b2.len()],
+            )
         };
         let var_id = n_b2_params + stmts_b2.len() as u32;
-        let (stmt, is_void) = make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b2);
-        if let BIrStmt::OracleCall { num_bits, .. } = &stmt { oracle_calls_b2.push((var_id, *num_bits)); }
+        let (stmt, is_void) =
+            make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b2);
+        if let BIrStmt::OracleCall { num_bits, .. } = &stmt {
+            oracle_calls_b2.push((var_id, *num_bits));
+        }
         stmts_b2.push(stmt);
         if !is_void {
             usable_b2.push(var_id);
@@ -561,11 +674,16 @@ pub fn interpret_biir_diamond(
     }
 
     let b2_to_b3_args: Vec<IRVarId> = (0..n_b2_params).map(IRVarId).collect();
-    let b2_term = BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Block(IRBlockId(3)), args: b2_to_b3_args });
+    let b2_term = BIrTerminator::Jmp(BIrTarget {
+        block: IRBlockTargetId::Block(IRBlockId(3)),
+        args: b2_to_b3_args,
+    });
 
     // ── Block 3 (merge) ──────────────────────────────────────────────────────
     let n_b3_params = total_b0;
-    let mut usable_b3: Vec<u32> = (0..total_b0).filter(|i| b0_usable_set.contains(i)).collect();
+    let mut usable_b3: Vec<u32> = (0..total_b0)
+        .filter(|i| b0_usable_set.contains(i))
+        .collect();
     let mut stmts_b3: Vec<BIrStmt> = Vec::new();
     let mut oracle_calls_b3: Vec<(u32, usize)> = Vec::new();
 
@@ -574,11 +692,17 @@ pub fn interpret_biir_diamond(
         let (mapped_a, mapped_b) = if n_avail == 0 {
             (0u32, 0u32)
         } else {
-            (usable_b3[(a as usize) % usable_b3.len()], usable_b3[(b as usize) % usable_b3.len()])
+            (
+                usable_b3[(a as usize) % usable_b3.len()],
+                usable_b3[(b as usize) % usable_b3.len()],
+            )
         };
         let var_id = n_b3_params + stmts_b3.len() as u32;
-        let (stmt, is_void) = make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b3);
-        if let BIrStmt::OracleCall { num_bits, .. } = &stmt { oracle_calls_b3.push((var_id, *num_bits)); }
+        let (stmt, is_void) =
+            make_stmt_extended(kind, mapped_a, mapped_b, n_avail, &oracle_calls_b3);
+        if let BIrStmt::OracleCall { num_bits, .. } = &stmt {
+            oracle_calls_b3.push((var_id, *num_bits));
+        }
         stmts_b3.push(stmt);
         if !is_void {
             usable_b3.push(var_id);
@@ -587,18 +711,40 @@ pub fn interpret_biir_diamond(
 
     let total_b3 = n_b3_params + stmts_b3.len() as u32;
     let b3_ret_args: Vec<IRVarId> = (0..total_b3).map(IRVarId).collect();
-    let b3_term = BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Return, args: b3_ret_args });
+    let b3_term = BIrTerminator::Jmp(BIrTarget {
+        block: IRBlockTargetId::Return,
+        args: b3_ret_args,
+    });
 
     let wrap = |stmts: Vec<BIrStmt>| -> Vec<Node<BIrStmt, ()>> {
         stmts.into_iter().map(|s| Node::new(s, (), None)).collect()
     };
 
-    BIrBlocks { blocks: vec![
-        BIrBlock { params: n_params, stmts: wrap(stmts_b0), terminator: b0_term },
-        BIrBlock { params: n_b1_params, stmts: wrap(stmts_b1), terminator: b1_term },
-        BIrBlock { params: n_b2_params, stmts: wrap(stmts_b2), terminator: b2_term },
-        BIrBlock { params: n_b3_params, stmts: wrap(stmts_b3), terminator: b3_term },
-    ], pre_init: vec![] }
+    BIrBlocks {
+        blocks: vec![
+            BIrBlock {
+                params: n_params,
+                stmts: wrap(stmts_b0),
+                terminator: b0_term,
+            },
+            BIrBlock {
+                params: n_b1_params,
+                stmts: wrap(stmts_b1),
+                terminator: b1_term,
+            },
+            BIrBlock {
+                params: n_b2_params,
+                stmts: wrap(stmts_b2),
+                terminator: b2_term,
+            },
+            BIrBlock {
+                params: n_b3_params,
+                stmts: wrap(stmts_b3),
+                terminator: b3_term,
+            },
+        ],
+        pre_init: vec![],
+    }
 }
 
 // ============================================================================
@@ -623,23 +769,24 @@ mod strategies {
         // Step 1: choose the number of blocks.
         (1usize..=3usize).prop_flat_map(|n_blocks| {
             // Step 2: choose param counts for all blocks.
-            proptest::collection::vec(0u32..=4u32, n_blocks).prop_flat_map(
-                move |param_counts| {
-                    let pc = param_counts.clone();
-                    let n_entry_params = param_counts[0] as usize;
+            proptest::collection::vec(0u32..=4u32, n_blocks).prop_flat_map(move |param_counts| {
+                let pc = param_counts.clone();
+                let n_entry_params = param_counts[0] as usize;
 
-                    // Step 3: generate raw block data + ret_arity + entry inputs.
-                    let raw_blocks_strat =
-                        proptest::collection::vec(gen_raw_block(), n_blocks);
-                    let inputs_strat =
-                        proptest::collection::vec(any::<bool>(), n_entry_params);
-                    let ret_arity_strat = any::<u8>();
+                // Step 3: generate raw block data + ret_arity + entry inputs.
+                let raw_blocks_strat = proptest::collection::vec(gen_raw_block(), n_blocks);
+                let inputs_strat = proptest::collection::vec(any::<bool>(), n_entry_params);
+                let ret_arity_strat = any::<u8>();
 
-                    (raw_blocks_strat, inputs_strat, ret_arity_strat).prop_map(
-                        move |(raw_blocks, inputs, raw_ret_arity)| {
-                            (interpret_biir(pc.clone(), raw_blocks, raw_ret_arity), inputs)
-                        })
-                })
+                (raw_blocks_strat, inputs_strat, ret_arity_strat).prop_map(
+                    move |(raw_blocks, inputs, raw_ret_arity)| {
+                        (
+                            interpret_biir(pc.clone(), raw_blocks, raw_ret_arity),
+                            inputs,
+                        )
+                    },
+                )
+            })
         })
     }
 
@@ -649,7 +796,8 @@ mod strategies {
         (0u32..=4u32).prop_flat_map(|n_params| {
             let raw_stmts = proptest::collection::vec(
                 (any::<u8>(), any::<u32>(), any::<u32>()),
-                0usize..=8usize);
+                0usize..=8usize,
+            );
             let inputs = proptest::collection::vec(any::<bool>(), n_params as usize);
 
             (raw_stmts, inputs).prop_map(move |(raw_stmts, inputs)| {
@@ -669,8 +817,12 @@ mod strategies {
 
             (raw_stmts_b0, raw_stmts_b1, inputs).prop_map(
                 move |(raw_stmts_b0, raw_stmts_b1, inputs)| {
-                    (interpret_biir_multiblock(n_params, &raw_stmts_b0, &raw_stmts_b1), inputs)
-                })
+                    (
+                        interpret_biir_multiblock(n_params, &raw_stmts_b0, &raw_stmts_b1),
+                        inputs,
+                    )
+                },
+            )
         })
     }
 
@@ -688,17 +840,33 @@ mod strategies {
             let raw_stmts_b3 = proptest::collection::vec(raw_tuple, 0usize..=4usize);
             let inputs = proptest::collection::vec(any::<bool>(), n_params as usize);
 
-            (raw_stmts_b0, raw_stmts_b1, raw_stmts_b2, raw_stmts_b3, inputs).prop_map(
-                move |(raw_stmts_b0, raw_stmts_b1, raw_stmts_b2, raw_stmts_b3, inputs)| {
-                    (interpret_biir_diamond(n_params, &raw_stmts_b0, &raw_stmts_b1, &raw_stmts_b2, &raw_stmts_b3), inputs)
-                })
+            (
+                raw_stmts_b0,
+                raw_stmts_b1,
+                raw_stmts_b2,
+                raw_stmts_b3,
+                inputs,
+            )
+                .prop_map(
+                    move |(raw_stmts_b0, raw_stmts_b1, raw_stmts_b2, raw_stmts_b3, inputs)| {
+                        (
+                            interpret_biir_diamond(
+                                n_params,
+                                &raw_stmts_b0,
+                                &raw_stmts_b1,
+                                &raw_stmts_b2,
+                                &raw_stmts_b3,
+                            ),
+                            inputs,
+                        )
+                    },
+                )
         })
     }
 
     fn gen_raw_block() -> impl Strategy<Value = RawBlock> {
-        let raw_stmts = proptest::collection::vec(
-            (any::<u8>(), any::<u32>(), any::<u32>()),
-            0usize..=8usize);
+        let raw_stmts =
+            proptest::collection::vec((any::<u8>(), any::<u32>(), any::<u32>()), 0usize..=8usize);
         let raw_term = gen_raw_term();
         (raw_stmts, raw_term)
     }
@@ -708,12 +876,14 @@ mod strategies {
             any::<u8>(),
             any::<u32>(),
             gen_raw_target(),
-            gen_raw_target())
+            gen_raw_target(),
+        )
     }
 
     fn gen_raw_target() -> impl Strategy<Value = RawTarget> {
         (
             any::<u8>(),
-            proptest::collection::vec(any::<u32>(), 0usize..=4usize))
+            proptest::collection::vec(any::<u32>(), 0usize..=4usize),
+        )
     }
 }

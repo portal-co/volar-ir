@@ -15,7 +15,7 @@
 //! story for v1 and is exercised below.
 
 use proptest::prelude::*;
-use volar_ir_virt::{virtualize_bir, virtualize_ir, DispatchMode, VirtualizeConfig};
+use volar_ir_virt::{DispatchMode, VirtualizeConfig, virtualize_bir, virtualize_ir};
 
 use crate::generators::ir::gen_ir_and_inputs;
 use crate::interpreter::biir::eval_biir;
@@ -157,4 +157,6 @@ proptest! {
 
 // Suppress an unused-import warning when the generator module changes.
 #[allow(dead_code)]
-fn _keep_irblocks_alive() -> Option<IRBlocks<()>> { None }
+fn _keep_irblocks_alive() -> Option<IRBlocks<()>> {
+    None
+}

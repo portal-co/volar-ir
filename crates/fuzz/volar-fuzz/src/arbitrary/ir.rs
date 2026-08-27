@@ -4,7 +4,9 @@ use arbitrary::{Arbitrary, Result, Unstructured};
 use volar_ir::ir::IRBlocks;
 use volar_ir_common::TypeTable;
 
-use crate::generators::ir::{interpret_ir, interpret_ir_extended, interpret_ir_multiblock, PRIM_TYPES};
+use crate::generators::ir::{
+    PRIM_TYPES, interpret_ir, interpret_ir_extended, interpret_ir_multiblock,
+};
 use crate::interpreter::ir::{IrValue, primitive_width};
 
 /// A newtype wrapper that implements [`Arbitrary`] for use in cargo-fuzz targets.
@@ -47,7 +49,11 @@ impl<'a> Arbitrary<'a> for ArbitraryIr {
             })
             .collect::<Result<_>>()?;
 
-        Ok(ArbitraryIr { blocks, types, inputs })
+        Ok(ArbitraryIr {
+            blocks,
+            types,
+            inputs,
+        })
     }
 }
 
@@ -91,7 +97,11 @@ impl<'a> Arbitrary<'a> for ArbitraryIrExtended {
             })
             .collect::<Result<_>>()?;
 
-        Ok(ArbitraryIrExtended { blocks, types, inputs })
+        Ok(ArbitraryIrExtended {
+            blocks,
+            types,
+            inputs,
+        })
     }
 }
 
@@ -112,12 +122,28 @@ impl<'a> Arbitrary<'a> for ArbitraryIrMultiblock {
 
         let n_stmts_b0 = u.int_in_range(0usize..=6)?;
         let raw_stmts_b0: Vec<(u8, u32, u32, u128, u128)> = (0..n_stmts_b0)
-            .map(|_| Ok((u8::arbitrary(u)?, u32::arbitrary(u)?, u32::arbitrary(u)?, u128::arbitrary(u)?, u128::arbitrary(u)?)))
+            .map(|_| {
+                Ok((
+                    u8::arbitrary(u)?,
+                    u32::arbitrary(u)?,
+                    u32::arbitrary(u)?,
+                    u128::arbitrary(u)?,
+                    u128::arbitrary(u)?,
+                ))
+            })
             .collect::<Result<_>>()?;
 
         let n_stmts_b1 = u.int_in_range(0usize..=6)?;
         let raw_stmts_b1: Vec<(u8, u32, u32, u128, u128)> = (0..n_stmts_b1)
-            .map(|_| Ok((u8::arbitrary(u)?, u32::arbitrary(u)?, u32::arbitrary(u)?, u128::arbitrary(u)?, u128::arbitrary(u)?)))
+            .map(|_| {
+                Ok((
+                    u8::arbitrary(u)?,
+                    u32::arbitrary(u)?,
+                    u32::arbitrary(u)?,
+                    u128::arbitrary(u)?,
+                    u128::arbitrary(u)?,
+                ))
+            })
             .collect::<Result<_>>()?;
 
         let (blocks, types, param_widths) =
@@ -132,6 +158,10 @@ impl<'a> Arbitrary<'a> for ArbitraryIrMultiblock {
             })
             .collect::<Result<_>>()?;
 
-        Ok(ArbitraryIrMultiblock { blocks, types, inputs })
+        Ok(ArbitraryIrMultiblock {
+            blocks,
+            types,
+            inputs,
+        })
     }
 }

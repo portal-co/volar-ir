@@ -18,17 +18,18 @@ use volar_ir_common::{
     ActionDecl, Constant, IrType, Node, OracleDecl, Stmt, StorageId, Type, TypeId, TypeTable,
 };
 use volar_lir::{
+    BitCircuitBuilder, BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt,
+    StructDef, StructId,
     circuits::{
-        bc_abs, bc_add, bc_and_vec, bc_ashr, bc_eq, bc_lshr, bc_mul, bc_ne, bc_neg,
-        bc_not_vec, bc_or_vec, bc_sdiv, bc_select_vec, bc_shl, bc_sle, bc_slt,
-        bc_sub, bc_udiv, bc_ule, bc_ult, bc_xor_vec, StorageEmitter,
+        StorageEmitter, bc_abs, bc_add, bc_and_vec, bc_ashr, bc_eq, bc_lshr, bc_mul, bc_ne, bc_neg,
+        bc_not_vec, bc_or_vec, bc_sdiv, bc_select_vec, bc_shl, bc_sle, bc_slt, bc_sub, bc_udiv,
+        bc_ule, bc_ult, bc_xor_vec,
     },
-    BitCircuitBuilder, BranchTarget, IcmpPred, LirTarget, LirType, LirAbi, StackAllocExt, StructDef, StructId,
 };
 
 use vaffle::{
-    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId,
-    Target, Terminator, Value, ValueId,
+    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target, Terminator, Value,
+    ValueId,
 };
 
 // ============================================================================
@@ -89,7 +90,11 @@ impl FuncBuilder {
         FuncBuilder {
             name,
             sig_id,
-            blocks: vec![BlockBuilder { params: vec![], stmts: vec![], terminator: None }],
+            blocks: vec![BlockBuilder {
+                params: vec![],
+                stmts: vec![],
+                terminator: None,
+            }],
             current: 0,
             all_values: vec![],
             bit_tid,
@@ -112,7 +117,15 @@ impl FuncBuilder {
     fn emit_block_param(&mut self, block_idx: usize, ty: TypeId) -> ValueId {
         let idx = self.blocks[block_idx].params.len();
         let id = self.next_value_id();
-        self.all_values.push(Node::new(Value::Param { block: BlockId(block_idx), ty, idx }, (), self.current_side));
+        self.all_values.push(Node::new(
+            Value::Param {
+                block: BlockId(block_idx),
+                ty,
+                idx,
+            },
+            (),
+            self.current_side,
+        ));
         self.blocks[block_idx].params.push((id, ty));
         id
     }
@@ -197,7 +210,9 @@ impl VaffleTarget {
         self.optimized_abi = enabled;
     }
 
-    pub(crate) fn bit_tid(&mut self) -> TypeId { self.module.types.bit() }
+    pub(crate) fn bit_tid(&mut self) -> TypeId {
+        self.module.types.bit()
+    }
 
     /// Intern (or retrieve) the byte type `Vec(8, Bit)` used for memory storage cells.
     pub(crate) fn byte_tid(&mut self) -> TypeId {
@@ -205,14 +220,18 @@ impl VaffleTarget {
         self.intern_type(IrType::Vec(8, bit))
     }
 
-    fn intern_type(&mut self, ty: IrType) -> TypeId { self.module.types.intern(ty) }
+    fn intern_type(&mut self, ty: IrType) -> TypeId {
+        self.module.types.intern(ty)
+    }
 
     fn bits_for(&self, ty: &LirType) -> usize {
         bits_for_lir_type(ty, &self.struct_widths)
     }
 
     pub(crate) fn fb(&mut self) -> &mut FuncBuilder {
-        self.func.as_mut().expect("VaffleTarget: no function in progress")
+        self.func
+            .as_mut()
+            .expect("VaffleTarget: no function in progress")
     }
 
     fn emit_const(&mut self, val: u128, ty: TypeId) -> ValueId {
@@ -277,7 +296,11 @@ impl VaffleTarget {
             coeffs,
             constant: Constant { hi: 0, lo: 0 },
         }));
-        Some((0..width as u8).map(|i| self.extract_bit(result_wide, i)).collect())
+        Some(
+            (0..width as u8)
+                .map(|i| self.extract_bit(result_wide, i))
+                .collect(),
+        )
     }
 
     /// `NOT` on a `width`-bit operand as one wide `Stmt::Poly` -- see
@@ -300,13 +323,24 @@ impl VaffleTarget {
         let result_wide = self.fb().emit_value(Value::Op(Stmt::Poly {
             ty: wide_ty,
             coeffs,
-            constant: Constant { hi: 0, lo: all_ones },
+            constant: Constant {
+                hi: 0,
+                lo: all_ones,
+            },
         }));
-        Some((0..width as u8).map(|i| self.extract_bit(result_wide, i)).collect())
+        Some(
+            (0..width as u8)
+                .map(|i| self.extract_bit(result_wide, i))
+                .collect(),
+        )
     }
 
-    pub fn register_oracle(&mut self, decl: OracleDecl) { self.module.oracles.push(decl); }
-    pub fn register_action(&mut self, decl: ActionDecl) { self.module.actions.push(decl); }
+    pub fn register_oracle(&mut self, decl: OracleDecl) {
+        self.module.oracles.push(decl);
+    }
+    pub fn register_action(&mut self, decl: ActionDecl) {
+        self.module.actions.push(decl);
+    }
 
     /// Emit an action call: calls `action_{name}`, then muxes each result with
     /// its fallback — `guard_bit=1` uses the result, `guard_bit=0` uses the fallback.
@@ -318,11 +352,7 @@ impl VaffleTarget {
         fallbacks: &[VaffleValue],
         ret_tys: &[LirType],
     ) -> Vec<VaffleValue> {
-        let results = self.call_extern_multi(
-            &alloc::format!("action_{name}"),
-            args,
-            ret_tys,
-        );
+        let results = self.call_extern_multi(&alloc::format!("action_{name}"), args, ret_tys);
         results
             .into_iter()
             .zip(fallbacks.iter())
@@ -338,7 +368,7 @@ impl VaffleTarget {
     pub(crate) fn lir_type_to_tid(&mut self, ty: &LirType) -> TypeId {
         match ty {
             LirType::Bool => self.bit_tid(),
-            LirType::I8 | LirType::U8  => self.intern_type(IrType::Primitive(Type::_8)),
+            LirType::I8 | LirType::U8 => self.intern_type(IrType::Primitive(Type::_8)),
             LirType::I16 | LirType::U16 => self.intern_type(IrType::Primitive(Type::_16)),
             LirType::I32 | LirType::U32 => self.intern_type(IrType::Primitive(Type::_32)),
             LirType::I64 | LirType::U64 => self.intern_type(IrType::Primitive(Type::_64)),
@@ -377,7 +407,10 @@ impl VaffleTarget {
         }
         let fid = FuncId(self.module.funcs.len());
         let sig_id = SigId(self.module.sigs.len());
-        self.module.sigs.push(SigDecl { params: vec![], results: vec![] });
+        self.module.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![],
+        });
         self.module.funcs.push(FuncDecl::Import {
             module: "self".to_string(),
             name: name.to_string(),
@@ -392,7 +425,12 @@ impl VaffleTarget {
     /// `StorageId::STACK` under the optimized ABI, exactly like
     /// `call_extern` already did before this was factored out), emit
     /// `Value::Call`, and project the flat return bits via `Value::Output`.
-    fn emit_call(&mut self, func_id: FuncId, args: &[VaffleValue], ret_ty: Option<LirType>) -> Vec<VaffleValue> {
+    fn emit_call(
+        &mut self,
+        func_id: FuncId,
+        args: &[VaffleValue],
+        ret_ty: Option<LirType>,
+    ) -> Vec<VaffleValue> {
         let threshold = self.abi().aggregate_byval_limit;
 
         let mut flat_args: Vec<ValueId> = Vec::new();
@@ -423,13 +461,21 @@ impl VaffleTarget {
             }
         }
 
-        let call_id = self.fb().emit_value(Value::Call { func: func_id, args: flat_args });
+        let call_id = self.fb().emit_value(Value::Call {
+            func: func_id,
+            args: flat_args,
+        });
         match ret_ty {
             None => vec![],
             Some(ty) => {
                 let n = bits_for_lir_type(&ty, &self.struct_widths);
                 let bits: Vec<ValueId> = (0..n)
-                    .map(|i| self.fb().emit_value(Value::Output { value: call_id, idx: i }))
+                    .map(|i| {
+                        self.fb().emit_value(Value::Output {
+                            value: call_id,
+                            idx: i,
+                        })
+                    })
                     .collect();
                 vec![VaffleValue { bits, ty }]
             }
@@ -439,11 +485,17 @@ impl VaffleTarget {
 
 /// Bits needed to represent every integer in `0..=v` (at least 1).
 fn bits_for_max_value(v: usize) -> usize {
-    if v == 0 { 1 } else { (usize::BITS - v.leading_zeros()) as usize }
+    if v == 0 {
+        1
+    } else {
+        (usize::BITS - v.leading_zeros()) as usize
+    }
 }
 
 impl Default for VaffleTarget {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ============================================================================
@@ -463,43 +515,62 @@ impl BitCircuitBuilder for VaffleTarget {
         let v = Value::Op(Stmt::Poly {
             ty: bit_tid,
             coeffs,
-            constant: Constant { hi: 0, lo: constant },
+            constant: Constant {
+                hi: 0,
+                lo: constant,
+            },
         });
         self.fb().emit_value(v)
     }
 
     // Optimized single-bit ops matching VolarIrTarget's helpers.
     fn bc_xor(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        if a == b { return self.bc_const(false); }
+        if a == b {
+            return self.bc_const(false);
+        }
         let mut c = BTreeMap::new();
         c.insert(vec![a], 1u8);
         c.insert(vec![b], 1u8);
         self.bc_poly(c, 0)
     }
     fn bc_and(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        if a == b { return a; }
-        let mut key = vec![a, b]; key.sort();
-        let mut c = BTreeMap::new(); c.insert(key, 1u8);
+        if a == b {
+            return a;
+        }
+        let mut key = vec![a, b];
+        key.sort();
+        let mut c = BTreeMap::new();
+        c.insert(key, 1u8);
         self.bc_poly(c, 0)
     }
     fn bc_not(&mut self, a: ValueId) -> ValueId {
-        let mut c = BTreeMap::new(); c.insert(vec![a], 1u8);
+        let mut c = BTreeMap::new();
+        c.insert(vec![a], 1u8);
         self.bc_poly(c, 1)
     }
     fn bc_or(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        let na = self.bc_not(a); let nb = self.bc_not(b);
-        let nand = self.bc_and(na, nb); self.bc_not(nand)
+        let na = self.bc_not(a);
+        let nb = self.bc_not(b);
+        let nand = self.bc_and(na, nb);
+        self.bc_not(nand)
     }
     fn bc_select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId {
-        let xab = self.bc_xor(a, b); let sel = self.bc_and(cond, xab); self.bc_xor(sel, b)
+        let xab = self.bc_xor(a, b);
+        let sel = self.bc_and(cond, xab);
+        self.bc_xor(sel, b)
     }
     /// Majority via single degree-2 Poly (identical to VolarIrTarget::carry_bit).
     fn bc_carry3(&mut self, a: ValueId, b: ValueId, c: ValueId) -> ValueId {
-        let mut ab = vec![a, b]; ab.sort();
-        let mut ac = vec![a, c]; ac.sort();
-        let mut bc_ = vec![b, c]; bc_.sort();
+        let mut ab = vec![a, b];
+        ab.sort();
+        let mut ac = vec![a, c];
+        ac.sort();
+        let mut bc_ = vec![b, c];
+        bc_.sort();
         let mut coeffs = BTreeMap::new();
-        coeffs.insert(ab, 1u8); coeffs.insert(ac, 1u8); coeffs.insert(bc_, 1u8);
+        coeffs.insert(ab, 1u8);
+        coeffs.insert(ac, 1u8);
+        coeffs.insert(bc_, 1u8);
         self.bc_poly(coeffs, 0)
     }
 }
@@ -512,25 +583,47 @@ impl StorageEmitter for VaffleTarget {
         let n = bits.len();
         let bit_tid = self.bit_tid();
         let vec_ty = self.intern_type(IrType::Vec(n, bit_tid));
-        let v = Value::Op(Stmt::Merge { parts: bits.to_vec(), ty: vec_ty });
+        let v = Value::Op(Stmt::Merge {
+            parts: bits.to_vec(),
+            ty: vec_ty,
+        });
         self.fb().emit_value(v)
     }
 
     fn extract_bit(&mut self, word: ValueId, idx: u8) -> ValueId {
         let bit_tid = self.bit_tid();
-        let v = Value::Op(Stmt::Shuffle { result_bits: vec![(idx, word)], ty: bit_tid });
+        let v = Value::Op(Stmt::Shuffle {
+            result_bits: vec![(idx, word)],
+            ty: bit_tid,
+        });
         self.fb().emit_value(v)
     }
 
-    fn emit_read(&mut self, storage: volar_ir_common::StorageId, ty: volar_ir_common::TypeId, addr_bits: &[ValueId]) -> ValueId {
+    fn emit_read(
+        &mut self,
+        storage: volar_ir_common::StorageId,
+        ty: volar_ir_common::TypeId,
+        addr_bits: &[ValueId],
+    ) -> ValueId {
         let addr = self.compose_address(addr_bits);
         let v = Value::Op(Stmt::StorageRead { storage, ty, addr });
         self.fb().emit_value(v)
     }
 
-    fn emit_write(&mut self, storage: volar_ir_common::StorageId, src: ValueId, ty: volar_ir_common::TypeId, addr_bits: &[ValueId]) {
+    fn emit_write(
+        &mut self,
+        storage: volar_ir_common::StorageId,
+        src: ValueId,
+        ty: volar_ir_common::TypeId,
+        addr_bits: &[ValueId],
+    ) {
         let addr = self.compose_address(addr_bits);
-        let v = Value::Op(Stmt::StorageWrite { storage, src, ty, addr });
+        let v = Value::Op(Stmt::StorageWrite {
+            storage,
+            src,
+            ty,
+            addr,
+        });
         self.fb().emit_value(v);
     }
 }
@@ -549,8 +642,11 @@ impl LirTarget for VaffleTarget {
 
     fn define_struct(&mut self, def: StructDef) -> StructId {
         let id = self.struct_widths.len() as StructId;
-        let total: usize = def.fields.iter()
-            .map(|f| bits_for_lir_type(&f.ty, &self.struct_widths)).sum();
+        let total: usize = def
+            .fields
+            .iter()
+            .map(|f| bits_for_lir_type(&f.ty, &self.struct_widths))
+            .sum();
         self.struct_widths.push(total);
         id
     }
@@ -565,7 +661,8 @@ impl LirTarget for VaffleTarget {
         let threshold = self.abi().aggregate_byval_limit;
 
         // Decide per-param: direct (N block params) or ptr (PTR_BITS block params).
-        let param_infos: Vec<(usize, bool)> = params.iter()
+        let param_infos: Vec<(usize, bool)> = params
+            .iter()
             .map(|ty| {
                 let n = bits_for_lir_type(ty, &self.struct_widths);
                 (n, self.optimized_abi && n > threshold)
@@ -574,7 +671,8 @@ impl LirTarget for VaffleTarget {
 
         // Build signature: direct params contribute N Bit slots,
         // ptr params contribute PTR_BITS Bit slots.
-        let sig_params: Vec<TypeId> = param_infos.iter()
+        let sig_params: Vec<TypeId> = param_infos
+            .iter()
             .map(|&(n, is_ptr)| if is_ptr { PTR_BITS } else { n })
             .flat_map(|count| (0..count).map(|_| bit_tid))
             .collect();
@@ -588,14 +686,18 @@ impl LirTarget for VaffleTarget {
         // out-pointer ABI (mirroring `is_ptr` params above) aren't handled
         // -- not needed by any real caller yet; only direct scalar/small
         // returns are covered.
-        let sig_results: Vec<TypeId> = ret.iter()
+        let sig_results: Vec<TypeId> = ret
+            .iter()
             .flat_map(|ty| {
                 let n = bits_for_lir_type(ty, &self.struct_widths);
                 (0..n).map(|_| bit_tid)
             })
             .collect();
         let sig_id = SigId(self.module.sigs.len());
-        self.module.sigs.push(SigDecl { params: sig_params, results: sig_results });
+        self.module.sigs.push(SigDecl {
+            params: sig_params,
+            results: sig_results,
+        });
 
         let mut fb = FuncBuilder::new(name.to_string(), sig_id, bit_tid);
         let mut groups: Vec<Vec<VaffleValue>> = Vec::new();
@@ -611,10 +713,11 @@ impl LirTarget for VaffleTarget {
                 deferred.push((pi, bits, ty.clone(), n));
                 groups.push(vec![]); // placeholder — filled after loads
             } else {
-                let bits: Vec<ValueId> = (0..n)
-                    .map(|_| fb.emit_block_param(0, bit_tid))
-                    .collect();
-                groups.push(vec![VaffleValue { bits, ty: ty.clone() }]);
+                let bits: Vec<ValueId> = (0..n).map(|_| fb.emit_block_param(0, bit_tid)).collect();
+                groups.push(vec![VaffleValue {
+                    bits,
+                    ty: ty.clone(),
+                }]);
             }
         }
         self.func = Some(fb);
@@ -642,13 +745,27 @@ impl LirTarget for VaffleTarget {
     }
 
     fn end_function(&mut self) {
-        let fb = self.func.take().expect("VaffleTarget: no function in progress");
-        let blocks: Vec<Block> = fb.blocks.into_iter().map(|bb| Block {
-            params: bb.params,
-            stmts: bb.stmts,
-            terminator: bb.terminator.unwrap_or(Terminator::Return { values: vec![] }),
-        }).collect();
-        let body = FuncBody { sig: fb.sig_id, blocks, values: fb.all_values, entry: BlockId(0) };
+        let fb = self
+            .func
+            .take()
+            .expect("VaffleTarget: no function in progress");
+        let blocks: Vec<Block> = fb
+            .blocks
+            .into_iter()
+            .map(|bb| Block {
+                params: bb.params,
+                stmts: bb.stmts,
+                terminator: bb
+                    .terminator
+                    .unwrap_or(Terminator::Return { values: vec![] }),
+            })
+            .collect();
+        let body = FuncBody {
+            sig: fb.sig_id,
+            blocks,
+            values: fb.all_values,
+            entry: BlockId(0),
+        };
         // If a sibling `call` already reserved a `FuncId` for this function
         // (a forward reference), patch that slot in place instead of
         // pushing a second, disconnected entry.
@@ -666,7 +783,11 @@ impl LirTarget for VaffleTarget {
     fn create_block(&mut self) -> VaffleBlock {
         let fb = self.fb();
         let idx = fb.blocks.len();
-        fb.blocks.push(BlockBuilder { params: vec![], stmts: vec![], terminator: None });
+        fb.blocks.push(BlockBuilder {
+            params: vec![],
+            stmts: vec![],
+            terminator: None,
+        });
         VaffleBlock(idx)
     }
 
@@ -683,7 +804,11 @@ impl LirTarget for VaffleTarget {
     fn add_block_param(&mut self, block: VaffleBlock, ty: LirType) -> VaffleValue {
         let n = bits_for_lir_type(&ty, &self.struct_widths);
         let bit_tid = self.bit_tid();
-        let param_tid = if n <= 1 { bit_tid } else { self.intern_type(IrType::Vec(n, bit_tid)) };
+        let param_tid = if n <= 1 {
+            bit_tid
+        } else {
+            self.intern_type(IrType::Vec(n, bit_tid))
+        };
         let packed = self.fb().emit_block_param(block.0, param_tid);
         let prior_block = self.fb().current;
         self.fb().current = block.0;
@@ -696,7 +821,9 @@ impl LirTarget for VaffleTarget {
         VaffleValue { bits, ty }
     }
 
-    fn switch_to_block(&mut self, block: VaffleBlock) { self.fb().current = block.0; }
+    fn switch_to_block(&mut self, block: VaffleBlock) {
+        self.fb().current = block.0;
+    }
 
     fn iconst(&mut self, ty: LirType, val: i64) -> VaffleValue {
         if let LirType::Native(t) = &ty {
@@ -715,23 +842,38 @@ impl LirTarget for VaffleTarget {
     // ---- Arithmetic --------------------------------------------------------
     fn add(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        VaffleValue { bits: bc_add(self, &lhs.bits, &rhs.bits, false), ty }
+        VaffleValue {
+            bits: bc_add(self, &lhs.bits, &rhs.bits, false),
+            ty,
+        }
     }
     fn sub(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        VaffleValue { bits: bc_sub(self, &lhs.bits, &rhs.bits), ty }
+        VaffleValue {
+            bits: bc_sub(self, &lhs.bits, &rhs.bits),
+            ty,
+        }
     }
     fn mul(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        VaffleValue { bits: bc_mul(self, &lhs.bits, &rhs.bits), ty }
+        VaffleValue {
+            bits: bc_mul(self, &lhs.bits, &rhs.bits),
+            ty,
+        }
     }
     fn udiv(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        VaffleValue { bits: bc_udiv(self, &lhs.bits, &rhs.bits), ty }
+        VaffleValue {
+            bits: bc_udiv(self, &lhs.bits, &rhs.bits),
+            ty,
+        }
     }
     fn sdiv(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        VaffleValue { bits: bc_sdiv(self, &lhs.bits, &rhs.bits), ty }
+        VaffleValue {
+            bits: bc_sdiv(self, &lhs.bits, &rhs.bits),
+            ty,
+        }
     }
     fn and(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
@@ -739,7 +881,10 @@ impl LirTarget for VaffleTarget {
         if let Some(bits) = self.emit_wide_binop_poly(&lhs.bits, &rhs.bits, WideBinOp::And, width) {
             return VaffleValue { bits, ty };
         }
-        VaffleValue { bits: bc_and_vec(self, &lhs.bits, &rhs.bits), ty }
+        VaffleValue {
+            bits: bc_and_vec(self, &lhs.bits, &rhs.bits),
+            ty,
+        }
     }
     fn or(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
@@ -747,7 +892,10 @@ impl LirTarget for VaffleTarget {
         if let Some(bits) = self.emit_wide_binop_poly(&lhs.bits, &rhs.bits, WideBinOp::Or, width) {
             return VaffleValue { bits, ty };
         }
-        VaffleValue { bits: bc_or_vec(self, &lhs.bits, &rhs.bits), ty }
+        VaffleValue {
+            bits: bc_or_vec(self, &lhs.bits, &rhs.bits),
+            ty,
+        }
     }
     fn xor(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
@@ -755,7 +903,10 @@ impl LirTarget for VaffleTarget {
         if let Some(bits) = self.emit_wide_binop_poly(&lhs.bits, &rhs.bits, WideBinOp::Xor, width) {
             return VaffleValue { bits, ty };
         }
-        VaffleValue { bits: bc_xor_vec(self, &lhs.bits, &rhs.bits), ty }
+        VaffleValue {
+            bits: bc_xor_vec(self, &lhs.bits, &rhs.bits),
+            ty,
+        }
     }
     fn not(&mut self, val: VaffleValue) -> VaffleValue {
         let ty = val.ty.clone();
@@ -763,26 +914,38 @@ impl LirTarget for VaffleTarget {
         if let Some(bits) = self.emit_wide_not_poly(&val.bits, width) {
             return VaffleValue { bits, ty };
         }
-        VaffleValue { bits: bc_not_vec(self, &val.bits), ty }
+        VaffleValue {
+            bits: bc_not_vec(self, &val.bits),
+            ty,
+        }
     }
     fn shl(&mut self, val: VaffleValue, shift: VaffleValue) -> VaffleValue {
         let ty = val.ty.clone();
-        VaffleValue { bits: bc_shl(self, &val.bits, &shift.bits), ty }
+        VaffleValue {
+            bits: bc_shl(self, &val.bits, &shift.bits),
+            ty,
+        }
     }
     fn lshr(&mut self, val: VaffleValue, shift: VaffleValue) -> VaffleValue {
         let ty = val.ty.clone();
-        VaffleValue { bits: bc_lshr(self, &val.bits, &shift.bits), ty }
+        VaffleValue {
+            bits: bc_lshr(self, &val.bits, &shift.bits),
+            ty,
+        }
     }
     fn ashr(&mut self, val: VaffleValue, shift: VaffleValue) -> VaffleValue {
         let ty = val.ty.clone();
-        VaffleValue { bits: bc_ashr(self, &val.bits, &shift.bits), ty }
+        VaffleValue {
+            bits: bc_ashr(self, &val.bits, &shift.bits),
+            ty,
+        }
     }
 
     // ---- Comparisons -------------------------------------------------------
     fn icmp(&mut self, pred: IcmpPred, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let bit = match pred {
-            IcmpPred::Eq  => bc_eq(self,  &lhs.bits, &rhs.bits),
-            IcmpPred::Ne  => bc_ne(self,  &lhs.bits, &rhs.bits),
+            IcmpPred::Eq => bc_eq(self, &lhs.bits, &rhs.bits),
+            IcmpPred::Ne => bc_ne(self, &lhs.bits, &rhs.bits),
             IcmpPred::Ult => bc_ult(self, &lhs.bits, &rhs.bits),
             IcmpPred::Ule => bc_ule(self, &lhs.bits, &rhs.bits),
             IcmpPred::Ugt => bc_ult(self, &rhs.bits, &lhs.bits),
@@ -792,14 +955,19 @@ impl LirTarget for VaffleTarget {
             IcmpPred::Sgt => bc_slt(self, &rhs.bits, &lhs.bits),
             IcmpPred::Sge => bc_sle(self, &rhs.bits, &lhs.bits),
         };
-        VaffleValue { bits: vec![bit], ty: LirType::Bool }
+        VaffleValue {
+            bits: vec![bit],
+            ty: LirType::Bool,
+        }
     }
 
     // ---- Conversions -------------------------------------------------------
     fn zext(&mut self, val: VaffleValue, dst_ty: LirType) -> VaffleValue {
         let dst_n = bits_for_lir_type(&dst_ty, &self.struct_widths);
         let mut bits = val.bits;
-        while bits.len() < dst_n { bits.push(self.bc_const(false)); }
+        while bits.len() < dst_n {
+            bits.push(self.bc_const(false));
+        }
         VaffleValue { bits, ty: dst_ty }
     }
     fn sext(&mut self, val: VaffleValue, dst_ty: LirType) -> VaffleValue {
@@ -811,17 +979,27 @@ impl LirTarget for VaffleTarget {
     }
     fn trunc(&mut self, val: VaffleValue, dst_ty: LirType) -> VaffleValue {
         let dst_n = bits_for_lir_type(&dst_ty, &self.struct_widths);
-        VaffleValue { bits: val.bits[..dst_n].to_vec(), ty: dst_ty }
+        VaffleValue {
+            bits: val.bits[..dst_n].to_vec(),
+            ty: dst_ty,
+        }
     }
 
-    fn select(&mut self, cond: VaffleValue, then_val: VaffleValue, else_val: VaffleValue) -> VaffleValue {
+    fn select(
+        &mut self,
+        cond: VaffleValue,
+        then_val: VaffleValue,
+        else_val: VaffleValue,
+    ) -> VaffleValue {
         let ty = then_val.ty.clone();
         let cond_bit = cond.bits[0];
         let bits = bc_select_vec(self, cond_bit, &then_val.bits, &else_val.bits);
         VaffleValue { bits, ty }
     }
 
-    fn value_scalar_type(&self, val: &VaffleValue) -> LirType { val.ty.clone() }
+    fn value_scalar_type(&self, val: &VaffleValue) -> LirType {
+        val.ty.clone()
+    }
 
     // ---- Extern calls ------------------------------------------------------
     fn call_extern(
@@ -836,7 +1014,10 @@ impl LirTarget for VaffleTarget {
         } else {
             let fid = FuncId(self.module.funcs.len());
             let sig_id = SigId(self.module.sigs.len());
-            self.module.sigs.push(SigDecl { params: vec![], results: vec![] });
+            self.module.sigs.push(SigDecl {
+                params: vec![],
+                results: vec![],
+            });
             self.module.funcs.push(FuncDecl::Import {
                 module: "env".to_string(),
                 name: name.to_string(),
@@ -860,25 +1041,57 @@ impl LirTarget for VaffleTarget {
     }
 
     // ---- External access primitives ----------------------------------------
-    fn oracle(&mut self, name: &str, arg_tys: &[LirType], args: &[VaffleValue], ret_tys: &[LirType]) -> Vec<VaffleValue> {
-        self.call_extern(&alloc::format!("oracle_{name}"), arg_tys, args, ret_tys.first().cloned())
+    fn oracle(
+        &mut self,
+        name: &str,
+        arg_tys: &[LirType],
+        args: &[VaffleValue],
+        ret_tys: &[LirType],
+    ) -> Vec<VaffleValue> {
+        self.call_extern(
+            &alloc::format!("oracle_{name}"),
+            arg_tys,
+            args,
+            ret_tys.first().cloned(),
+        )
     }
 
-    fn action(&mut self, name: &str, guard: VaffleValue, arg_tys: &[LirType], args: &[VaffleValue], fallbacks: &[VaffleValue], ret_tys: &[LirType]) -> Vec<VaffleValue> {
+    fn action(
+        &mut self,
+        name: &str,
+        guard: VaffleValue,
+        arg_tys: &[LirType],
+        args: &[VaffleValue],
+        fallbacks: &[VaffleValue],
+        ret_tys: &[LirType],
+    ) -> Vec<VaffleValue> {
         let ret_ty = ret_tys.first().cloned();
-        let results = self.call_extern(&alloc::format!("action_{name}"), arg_tys, args, ret_ty.clone());
+        let results = self.call_extern(
+            &alloc::format!("action_{name}"),
+            arg_tys,
+            args,
+            ret_ty.clone(),
+        );
         let guard_bit = guard.bits[0];
-        results.into_iter().zip(fallbacks.iter()).map(|(r, fb)| {
-            let ty = r.ty.clone();
-            let bits = bc_select_vec(self, guard_bit, &r.bits, &fb.bits);
-            VaffleValue { bits, ty }
-        }).collect()
+        results
+            .into_iter()
+            .zip(fallbacks.iter())
+            .map(|(r, fb)| {
+                let ty = r.ty.clone();
+                let bits = bc_select_vec(self, guard_bit, &r.bits, &fb.bits);
+                VaffleValue { bits, ty }
+            })
+            .collect()
     }
 
     fn rng(&mut self, ty: LirType) -> VaffleValue {
         self.call_extern("volar_rng", &[], &[], Some(ty))
-            .into_iter().next()
-            .unwrap_or(VaffleValue { bits: vec![], ty: LirType::Bool })
+            .into_iter()
+            .next()
+            .unwrap_or(VaffleValue {
+                bits: vec![],
+                ty: LirType::Bool,
+            })
     }
 
     // ---- Terminators -------------------------------------------------------
@@ -887,7 +1100,9 @@ impl LirTarget for VaffleTarget {
     // `add_block_param`'s one-param-per-value contract, not flattened into
     // `n` individual bit ids. See `add_block_param`'s doc.
     fn jump(&mut self, target: VaffleBlock, branch: BranchTarget<VaffleValue>) {
-        let flat: Vec<ValueId> = branch.args.iter()
+        let flat: Vec<ValueId> = branch
+            .args
+            .iter()
             .filter(|v| !v.bits.is_empty())
             .map(|v| self.compose_address(&v.bits))
             .collect();
@@ -909,11 +1124,15 @@ impl LirTarget for VaffleTarget {
         else_branch: BranchTarget<VaffleValue>,
     ) {
         let cond_bit = cond.bits[0];
-        let flat_then: Vec<ValueId> = then_branch.args.iter()
+        let flat_then: Vec<ValueId> = then_branch
+            .args
+            .iter()
             .filter(|v| !v.bits.is_empty())
             .map(|v| self.compose_address(&v.bits))
             .collect();
-        let flat_else: Vec<ValueId> = else_branch.args.iter()
+        let flat_else: Vec<ValueId> = else_branch
+            .args
+            .iter()
             .filter(|v| !v.bits.is_empty())
             .map(|v| self.compose_address(&v.bits))
             .collect();
@@ -963,15 +1182,17 @@ impl LirTarget for VaffleTarget {
         let sel_width = bits_for_max_value(n);
         let index_width = index.bits.len();
 
-        let mut selector: Vec<ValueId> =
-            (0..sel_width).map(|b| self.bc_const((n >> b) & 1 != 0)).collect();
+        let mut selector: Vec<ValueId> = (0..sel_width)
+            .map(|b| self.bc_const((n >> b) & 1 != 0))
+            .collect();
         for (i, (key, _, _)) in cases.iter().enumerate().rev() {
             let key_bits: Vec<ValueId> = (0..index_width)
                 .map(|b| self.bc_const((*key as u64 >> b) & 1 != 0))
                 .collect();
             let matched = bc_eq(self, &index.bits, &key_bits);
-            let case_idx_bits: Vec<ValueId> =
-                (0..sel_width).map(|b| self.bc_const((i >> b) & 1 != 0)).collect();
+            let case_idx_bits: Vec<ValueId> = (0..sel_width)
+                .map(|b| self.bc_const((i >> b) & 1 != 0))
+                .collect();
             selector = bc_select_vec(self, matched, &case_idx_bits, &selector);
         }
         let selector_val = self.compose_address(&selector);
@@ -979,23 +1200,38 @@ impl LirTarget for VaffleTarget {
         let targets: Vec<Target> = cases
             .iter()
             .map(|(_, block, branch)| {
-                let flat: Vec<ValueId> = branch.args.iter()
+                let flat: Vec<ValueId> = branch
+                    .args
+                    .iter()
                     .filter(|v| !v.bits.is_empty())
                     .map(|v| self.compose_address(&v.bits))
                     .collect();
-                Target { block: BlockId(block.0), args: flat, reentry: branch.reentry.clone() }
+                Target {
+                    block: BlockId(block.0),
+                    args: flat,
+                    reentry: branch.reentry.clone(),
+                }
             })
             .collect();
-        let default_flat: Vec<ValueId> = default_branch.args.iter()
+        let default_flat: Vec<ValueId> = default_branch
+            .args
+            .iter()
             .filter(|v| !v.bits.is_empty())
             .map(|v| self.compose_address(&v.bits))
             .collect();
-        let default_target =
-            Target { block: BlockId(default_block.0), args: default_flat, reentry: default_branch.reentry.clone() };
+        let default_target = Target {
+            block: BlockId(default_block.0),
+            args: default_flat,
+            reentry: default_branch.reentry.clone(),
+        };
 
         let fb = self.fb();
         let cur = fb.current;
-        fb.blocks[cur].terminator = Some(Terminator::Table { index: selector_val, targets, default_target });
+        fb.blocks[cur].terminator = Some(Terminator::Table {
+            index: selector_val,
+            targets,
+            default_target,
+        });
     }
 
     /// `VaffleBlock`'s own dense per-function index is already the exact
@@ -1044,7 +1280,10 @@ impl VaffleTarget {
         } else {
             let fid = FuncId(self.module.funcs.len());
             let sig_id = SigId(self.module.sigs.len());
-            self.module.sigs.push(SigDecl { params: vec![], results: vec![] });
+            self.module.sigs.push(SigDecl {
+                params: vec![],
+                results: vec![],
+            });
             self.module.funcs.push(FuncDecl::Import {
                 module: "env".to_string(),
                 name: name.to_string(),
@@ -1055,7 +1294,10 @@ impl VaffleTarget {
         let flat: Vec<ValueId> = args.iter().flat_map(|v| v.bits.iter().copied()).collect();
         let fb = self.fb();
         let cur = fb.current;
-        fb.blocks[cur].terminator = Some(Terminator::ReturnCall { func: func_id, args: flat });
+        fb.blocks[cur].terminator = Some(Terminator::ReturnCall {
+            func: func_id,
+            args: flat,
+        });
     }
 
     /// Emit a call with multiple return types and return all results as separate
@@ -1077,7 +1319,10 @@ impl VaffleTarget {
         } else {
             let fid = FuncId(self.module.funcs.len());
             let sig_id = SigId(self.module.sigs.len());
-            self.module.sigs.push(SigDecl { params: vec![], results: vec![] });
+            self.module.sigs.push(SigDecl {
+                params: vec![],
+                results: vec![],
+            });
             self.module.funcs.push(FuncDecl::Import {
                 module: "env".to_string(),
                 name: name.to_string(),
@@ -1087,16 +1332,27 @@ impl VaffleTarget {
         };
 
         let flat_args: Vec<ValueId> = args.iter().flat_map(|v| v.bits.iter().copied()).collect();
-        let call_id = self.fb().emit_value(Value::Call { func: func_id, args: flat_args });
+        let call_id = self.fb().emit_value(Value::Call {
+            func: func_id,
+            args: flat_args,
+        });
 
         let mut results = Vec::with_capacity(ret_tys.len());
         let mut bit_offset = 0usize;
         for ty in ret_tys {
             let n = bits_for_lir_type(ty, &self.struct_widths);
             let bits: Vec<ValueId> = (bit_offset..bit_offset + n)
-                .map(|i| self.fb().emit_value(Value::Output { value: call_id, idx: i }))
+                .map(|i| {
+                    self.fb().emit_value(Value::Output {
+                        value: call_id,
+                        idx: i,
+                    })
+                })
                 .collect();
-            results.push(VaffleValue { bits, ty: ty.clone() });
+            results.push(VaffleValue {
+                bits,
+                ty: ty.clone(),
+            });
             bit_offset += n;
         }
         results
@@ -1289,7 +1545,10 @@ mod tests {
             vaffle::FuncDecl::Body(b) => b,
             _ => panic!("expected function body"),
         };
-        let has_stack_alloc = body.values.iter().any(|v| matches!(&v.kind, Value::StackAlloc { .. }));
+        let has_stack_alloc = body
+            .values
+            .iter()
+            .any(|v| matches!(&v.kind, Value::StackAlloc { .. }));
         assert!(has_stack_alloc, "VAFFLE should contain a StackAlloc value");
     }
 
@@ -1325,8 +1584,14 @@ mod tests {
         let has_stack_read = body.values.iter().any(|v| matches!(
             &v.kind, Value::Op(Stmt::StorageRead { storage, .. }) if *storage == StorageId::STACK
         ));
-        assert!(has_stack_write, "ptr_store should emit StorageWrite to STACK");
-        assert!(has_stack_read, "ptr_load should emit StorageRead from STACK");
+        assert!(
+            has_stack_write,
+            "ptr_store should emit StorageWrite to STACK"
+        );
+        assert!(
+            has_stack_read,
+            "ptr_load should emit StorageRead from STACK"
+        );
     }
 
     #[test]
@@ -1352,8 +1617,14 @@ mod tests {
             vaffle::FuncDecl::Body(b) => b,
             _ => panic!("expected function body"),
         };
-        let has_ptr_offset = body.values.iter().any(|v| matches!(&v.kind, Value::PtrOffset { elem_bits: 32, .. }));
-        assert!(has_ptr_offset, "VAFFLE should contain a PtrOffset with elem_bits=32");
+        let has_ptr_offset = body
+            .values
+            .iter()
+            .any(|v| matches!(&v.kind, Value::PtrOffset { elem_bits: 32, .. }));
+        assert!(
+            has_ptr_offset,
+            "VAFFLE should contain a PtrOffset with elem_bits=32"
+        );
     }
 
     #[test]
@@ -1363,7 +1634,7 @@ mod tests {
         t.switch_to_block(entry);
 
         let ptr1 = t.alloca(LirType::U32, 2); // 64 slots
-        let ptr2 = t.alloca(LirType::U8, 4);  // 32 slots
+        let ptr2 = t.alloca(LirType::U8, 4); // 32 slots
 
         t.ret(&[]);
         t.end_function();
@@ -1373,10 +1644,16 @@ mod tests {
             vaffle::FuncDecl::Body(b) => b,
             _ => panic!("expected function body"),
         };
-        let allocs: std::vec::Vec<_> = body.values.iter().filter_map(|v| match &v.kind {
-            Value::StackAlloc { base_slot, count, .. } => Some((*base_slot, *count)),
-            _ => None,
-        }).collect();
+        let allocs: std::vec::Vec<_> = body
+            .values
+            .iter()
+            .filter_map(|v| match &v.kind {
+                Value::StackAlloc {
+                    base_slot, count, ..
+                } => Some((*base_slot, *count)),
+                _ => None,
+            })
+            .collect();
         assert_eq!(allocs.len(), 2);
         // First alloc at slot 0, size = 32*2 = 64 slots.
         assert_eq!(allocs[0].0, 0);
@@ -1386,7 +1663,10 @@ mod tests {
 
     #[test]
     fn test_bits_for_lir_type_ptr() {
-        assert_eq!(bits_for_lir_type(&LirType::Ptr(alloc::boxed::Box::new(LirType::U32)), &[]), PTR_BITS);
+        assert_eq!(
+            bits_for_lir_type(&LirType::Ptr(alloc::boxed::Box::new(LirType::U32)), &[]),
+            PTR_BITS
+        );
     }
 
     #[test]
@@ -1460,7 +1740,10 @@ mod tests {
         let has_stack_read = body.all_values.iter().any(|v| matches!(
             &v.kind, Value::Op(Stmt::StorageRead { storage, .. }) if *storage == StorageId::STACK
         ));
-        assert!(has_stack_read, "optimized ABI should emit StorageReads from STACK");
+        assert!(
+            has_stack_read,
+            "optimized ABI should emit StorageReads from STACK"
+        );
 
         t.ret(&[]);
         t.end_function();
@@ -1496,7 +1779,10 @@ mod tests {
         for i in 0..128 {
             bits.push(t.bc_const(i % 2 != 0));
         }
-        let arg = VaffleValue { bits, ty: arr_ty.clone() };
+        let arg = VaffleValue {
+            bits,
+            ty: arr_ty.clone(),
+        };
 
         // Call with the large arg.
         t.call_extern("callee", &[arr_ty], &[arg], None);
@@ -1506,7 +1792,10 @@ mod tests {
         let has_stack_write = body.all_values.iter().any(|v| matches!(
             &v.kind, Value::Op(Stmt::StorageWrite { storage, .. }) if *storage == StorageId::STACK
         ));
-        assert!(has_stack_write, "optimized call_extern should write large args to STACK");
+        assert!(
+            has_stack_write,
+            "optimized call_extern should write large args to STACK"
+        );
 
         // The Call node's arg count should be PTR_BITS (the address),
         // NOT 128 (the raw bits).
@@ -1514,7 +1803,11 @@ mod tests {
             Value::Call { args, .. } => Some(args.len()),
             _ => None,
         });
-        assert_eq!(call_arg_count, Some(PTR_BITS), "call should pass PTR_BITS address bits");
+        assert_eq!(
+            call_arg_count,
+            Some(PTR_BITS),
+            "call should pass PTR_BITS address bits"
+        );
 
         t.ret(&[]);
         t.end_function();
@@ -1563,12 +1856,18 @@ mod tests {
 
         // Terminator must be ReturnCall.
         assert!(
-            matches!(body.blocks[0].terminator, vaffle::Terminator::ReturnCall { .. }),
+            matches!(
+                body.blocks[0].terminator,
+                vaffle::Terminator::ReturnCall { .. }
+            ),
             "ret_call must produce ReturnCall terminator"
         );
 
         // No Value::Call node should be present (tail call, not a regular call).
-        let has_call_node = body.values.iter().any(|v| matches!(&v.kind, Value::Call { .. }));
+        let has_call_node = body
+            .values
+            .iter()
+            .any(|v| matches!(&v.kind, Value::Call { .. }));
         assert!(!has_call_node, "ret_call must not emit a Value::Call node");
     }
 
@@ -1599,7 +1898,8 @@ mod tests {
     #[test]
     fn test_wide_bitwise_ops_emit_correct_wide_poly() {
         let mut t = VaffleTarget::new();
-        let (entry, params) = t.begin_function("f", &[LirType::U32, LirType::U32], Some(LirType::U32));
+        let (entry, params) =
+            t.begin_function("f", &[LirType::U32, LirType::U32], Some(LirType::U32));
         t.switch_to_block(entry);
         let a = params[0][0].clone();
         let b = params[1][0].clone();
@@ -1628,13 +1928,25 @@ mod tests {
             let mut types = t.module.types.clone();
             types.intern(IrType::Vec(width, bit_tid))
         };
-        let wide_polys: Vec<(&std::collections::BTreeMap<Vec<ValueId>, u8>, Constant)> = body.values.iter()
+        let wide_polys: Vec<(&std::collections::BTreeMap<Vec<ValueId>, u8>, Constant)> = body
+            .values
+            .iter()
             .filter_map(|v| match &v.kind {
-                Value::Op(Stmt::Poly { ty, coeffs, constant }) if *ty == wide_ty => Some((coeffs, *constant)),
+                Value::Op(Stmt::Poly {
+                    ty,
+                    coeffs,
+                    constant,
+                }) if *ty == wide_ty => Some((coeffs, *constant)),
                 _ => None,
             })
             .collect();
-        assert_eq!(wide_polys.len(), 4, "and/or/xor/not should each emit exactly one wide Poly -- got {}: {:?}", wide_polys.len(), wide_polys.iter().map(|(c, _)| c.len()).collect::<Vec<_>>());
+        assert_eq!(
+            wide_polys.len(),
+            4,
+            "and/or/xor/not should each emit exactly one wide Poly -- got {}: {:?}",
+            wide_polys.len(),
+            wide_polys.iter().map(|(c, _)| c.len()).collect::<Vec<_>>()
+        );
 
         // `and`/`or`/`xor`/`not` are called on freshly-cloned `VaffleValue`s
         // but `emit_wide_binop_poly`/`emit_wide_not_poly` cache nothing --
@@ -1657,8 +1969,11 @@ mod tests {
         // fresh Merge, not AND's -- emit_wide_binop_poly caches nothing).
         let (or_coeffs, or_const) = wide_polys[1];
         assert_eq!(or_coeffs.len(), 3);
-        let or_ab: Vec<ValueId> = or_coeffs.keys().find(|m| m.len() == 2)
-            .expect("OR must have exactly one degree-2 monomial").clone();
+        let or_ab: Vec<ValueId> = or_coeffs
+            .keys()
+            .find(|m| m.len() == 2)
+            .expect("OR must have exactly one degree-2 monomial")
+            .clone();
         assert_eq!(or_ab.len(), 2);
         let (or_a, or_b) = (or_ab[0], or_ab[1]);
         assert_eq!(or_coeffs.get(&vec![or_a]), Some(&1u8));
@@ -1669,8 +1984,13 @@ mod tests {
         // xor: {[a]:1, [b]:1}, constant 0.
         let (xor_coeffs, xor_const) = wide_polys[2];
         assert_eq!(xor_coeffs.len(), 2);
-        let xor_vars: alloc::collections::BTreeSet<ValueId> = xor_coeffs.keys().flatten().copied().collect();
-        assert_eq!(xor_vars.len(), 2, "XOR must reference exactly 2 distinct degree-1 operands");
+        let xor_vars: alloc::collections::BTreeSet<ValueId> =
+            xor_coeffs.keys().flatten().copied().collect();
+        assert_eq!(
+            xor_vars.len(),
+            2,
+            "XOR must reference exactly 2 distinct degree-1 operands"
+        );
         for mono in xor_coeffs.keys() {
             assert_eq!(mono.len(), 1, "XOR's own monomials must all be degree 1");
         }
@@ -1685,7 +2005,13 @@ mod tests {
         let not_mono = not_coeffs.keys().next().unwrap();
         assert_eq!(not_mono.len(), 1, "NOT must be one degree-1 monomial (a)");
         assert_eq!(not_coeffs[not_mono], 1u8);
-        assert_eq!(not_const, Constant { hi: 0, lo: (1u128 << 32) - 1 });
+        assert_eq!(
+            not_const,
+            Constant {
+                hi: 0,
+                lo: (1u128 << 32) - 1
+            }
+        );
     }
 
     /// `width <= 1` (e.g. `Bool`) must fall back to the per-bit path --
@@ -1694,7 +2020,8 @@ mod tests {
     #[test]
     fn test_narrow_bitwise_ops_skip_wide_poly() {
         let mut t = VaffleTarget::new();
-        let (entry, params) = t.begin_function("f", &[LirType::Bool, LirType::Bool], Some(LirType::Bool));
+        let (entry, params) =
+            t.begin_function("f", &[LirType::Bool, LirType::Bool], Some(LirType::Bool));
         t.switch_to_block(entry);
         let a = params[0][0].clone();
         let b = params[1][0].clone();
@@ -1707,8 +2034,14 @@ mod tests {
             vaffle::FuncDecl::Body(b) => b,
             _ => panic!("expected body"),
         };
-        let has_wide_merge = body.values.iter().any(|v| matches!(&v.kind, Value::Op(Stmt::Merge { .. })));
-        assert!(!has_wide_merge, "width<=1 and() should skip the wide-Poly path entirely, no Merge expected");
+        let has_wide_merge = body
+            .values
+            .iter()
+            .any(|v| matches!(&v.kind, Value::Op(Stmt::Merge { .. })));
+        assert!(
+            !has_wide_merge,
+            "width<=1 and() should skip the wide-Poly path entirely, no Merge expected"
+        );
     }
 
     // ============================================================================
@@ -1737,9 +2070,16 @@ mod tests {
         t.ret(&result2);
         t.end_function();
 
-        assert_eq!(t.module.funcs.len(), 2, "no orphaned stub — exactly the two real functions");
+        assert_eq!(
+            t.module.funcs.len(),
+            2,
+            "no orphaned stub — exactly the two real functions"
+        );
         assert!(
-            t.module.funcs.iter().all(|f| matches!(f, vaffle::FuncDecl::Body(_))),
+            t.module
+                .funcs
+                .iter()
+                .all(|f| matches!(f, vaffle::FuncDecl::Body(_))),
             "every func slot should be a real body, not a leftover Import placeholder"
         );
 
@@ -1751,7 +2091,10 @@ mod tests {
             panic!("expected is_even to have a body");
         };
         assert!(
-            is_even_body.values.iter().any(|v| matches!(&v.kind, Value::Call { func, .. } if *func == is_odd_id)),
+            is_even_body
+                .values
+                .iter()
+                .any(|v| matches!(&v.kind, Value::Call { func, .. } if *func == is_odd_id)),
             "is_even's Value::Call must reference is_odd's real (not orphaned) FuncId"
         );
 
@@ -1759,7 +2102,10 @@ mod tests {
             panic!("expected is_odd to have a body");
         };
         assert!(
-            is_odd_body.values.iter().any(|v| matches!(&v.kind, Value::Call { func, .. } if *func == is_even_id)),
+            is_odd_body
+                .values
+                .iter()
+                .any(|v| matches!(&v.kind, Value::Call { func, .. } if *func == is_even_id)),
             "is_odd's Value::Call must reference is_even's real FuncId"
         );
     }
@@ -1809,7 +2155,11 @@ mod tests {
         };
         let entry_block = &body.blocks[0];
         match &entry_block.terminator {
-            Terminator::Table { targets, default_target, .. } => {
+            Terminator::Table {
+                targets,
+                default_target,
+                ..
+            } => {
                 assert_eq!(targets.len(), 2, "one Target per switch case");
                 assert_eq!(targets[0].block, BlockId(one_block.0));
                 assert_eq!(targets[1].block, BlockId(two_block.0));
@@ -1826,8 +2176,11 @@ mod tests {
     #[test]
     fn block_addr_dyn_jump_default_lowers_to_table() {
         let mut t = VaffleTarget::new();
-        let (entry, params) =
-            t.begin_function("dispatch", &[LirType::Bool, LirType::U32], Some(LirType::U32));
+        let (entry, params) = t.begin_function(
+            "dispatch",
+            &[LirType::Bool, LirType::U32],
+            Some(LirType::U32),
+        );
         let cond = params[0][0].clone();
         let n = params[1][0].clone();
 
@@ -1838,7 +2191,11 @@ mod tests {
 
         t.switch_to_block(entry);
         let addr_a = t.block_addr(block_a);
-        assert_eq!(addr_a.bits.len(), 32, "block_addr's default should be a real 32-bit value");
+        assert_eq!(
+            addr_a.bits.len(),
+            32,
+            "block_addr's default should be a real 32-bit value"
+        );
         let addr_b = t.block_addr(block_b);
         let chosen = t.select(cond, addr_a, addr_b);
         t.dyn_jump(chosen, &[block_a, block_b], BranchTarget::args(vec![n]));
@@ -1860,13 +2217,21 @@ mod tests {
             _ => panic!("expected body"),
         };
         match &body.blocks[0].terminator {
-            Terminator::Table { targets, default_target, .. } => {
+            Terminator::Table {
+                targets,
+                default_target,
+                ..
+            } => {
                 // dyn_jump's default builds `switch` cases from
                 // `destinations[1..]` and uses `destinations[0]` as the
                 // `switch` default — so block_a (destinations[0]) lands in
                 // `default_target`, and block_b (destinations[1]) is the
                 // one explicit case.
-                assert_eq!(targets.len(), 1, "dyn_jump's switch: one explicit case + one default");
+                assert_eq!(
+                    targets.len(),
+                    1,
+                    "dyn_jump's switch: one explicit case + one default"
+                );
                 assert_eq!(targets[0].block, BlockId(block_b.0));
                 assert_eq!(default_target.block, BlockId(block_a.0));
             }

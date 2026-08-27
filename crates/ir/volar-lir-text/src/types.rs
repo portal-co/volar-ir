@@ -5,8 +5,8 @@
 
 use crate::WriteText;
 use core::fmt;
-use volar_lir::{FieldDef, IcmpPred, LirType, StructDef};
 use volar_ir_common::Type as NativeType;
+use volar_lir::{FieldDef, IcmpPred, LirType, StructDef};
 
 // ============================================================================
 // LirType
@@ -15,17 +15,17 @@ use volar_ir_common::Type as NativeType;
 impl WriteText for LirType {
     fn write_text(&self, w: &mut dyn fmt::Write) -> fmt::Result {
         match self {
-            LirType::Bool    => w.write_str("bool"),
-            LirType::I8      => w.write_str("i8"),
-            LirType::U8      => w.write_str("u8"),
-            LirType::I16     => w.write_str("i16"),
-            LirType::U16     => w.write_str("u16"),
-            LirType::I32     => w.write_str("i32"),
-            LirType::U32     => w.write_str("u32"),
-            LirType::I64     => w.write_str("i64"),
-            LirType::U64     => w.write_str("u64"),
-            LirType::I128    => w.write_str("i128"),
-            LirType::U128    => w.write_str("u128"),
+            LirType::Bool => w.write_str("bool"),
+            LirType::I8 => w.write_str("i8"),
+            LirType::U8 => w.write_str("u8"),
+            LirType::I16 => w.write_str("i16"),
+            LirType::U16 => w.write_str("u16"),
+            LirType::I32 => w.write_str("i32"),
+            LirType::U32 => w.write_str("u32"),
+            LirType::I64 => w.write_str("i64"),
+            LirType::U64 => w.write_str("u64"),
+            LirType::I128 => w.write_str("i128"),
+            LirType::U128 => w.write_str("u128"),
             LirType::Arr(elem, len) => {
                 w.write_str("arr[")?;
                 elem.write_text(w)?;
@@ -48,14 +48,14 @@ impl WriteText for LirType {
 
 fn write_native_type(nt: &NativeType, w: &mut dyn fmt::Write) -> fmt::Result {
     match nt {
-        NativeType::Bit      => w.write_str("bit"),
-        NativeType::_8       => w.write_str("u8"),
-        NativeType::_16      => w.write_str("u16"),
-        NativeType::_32      => w.write_str("u32"),
-        NativeType::_64      => w.write_str("u64"),
-        NativeType::_128     => w.write_str("u128"),
-        NativeType::_256     => w.write_str("u256"),
-        NativeType::AES8     => w.write_str("aes8"),
+        NativeType::Bit => w.write_str("bit"),
+        NativeType::_8 => w.write_str("u8"),
+        NativeType::_16 => w.write_str("u16"),
+        NativeType::_32 => w.write_str("u32"),
+        NativeType::_64 => w.write_str("u64"),
+        NativeType::_128 => w.write_str("u128"),
+        NativeType::_256 => w.write_str("u256"),
+        NativeType::AES8 => w.write_str("aes8"),
         NativeType::Galois64 => w.write_str("galois64"),
         // Catch-all for any future variants added under #[non_exhaustive]
         _ => w.write_str("native:unknown"),
@@ -104,8 +104,8 @@ impl WriteText for StructDef {
 impl WriteText for IcmpPred {
     fn write_text(&self, w: &mut dyn fmt::Write) -> fmt::Result {
         match self {
-            IcmpPred::Eq  => w.write_str("eq"),
-            IcmpPred::Ne  => w.write_str("ne"),
+            IcmpPred::Eq => w.write_str("eq"),
+            IcmpPred::Ne => w.write_str("ne"),
             IcmpPred::Ult => w.write_str("ult"),
             IcmpPred::Ule => w.write_str("ule"),
             IcmpPred::Ugt => w.write_str("ugt"),
@@ -127,11 +127,11 @@ pub(crate) fn write_quoted_str(s: &str, w: &mut dyn fmt::Write) -> fmt::Result {
     for ch in s.chars() {
         match ch {
             '\\' => w.write_str("\\\\")?,
-            '"'  => w.write_str("\\\"")?,
+            '"' => w.write_str("\\\"")?,
             '\n' => w.write_str("\\n")?,
             '\t' => w.write_str("\\t")?,
             '\r' => w.write_str("\\r")?,
-            c    => w.write_char(c)?,
+            c => w.write_char(c)?,
         }
     }
     w.write_char('"')
@@ -140,7 +140,7 @@ pub(crate) fn write_quoted_str(s: &str, w: &mut dyn fmt::Write) -> fmt::Result {
 /// Write an optional `LirType`, using the literal `none` for `None`.
 pub(crate) fn write_opt_lir_type(opt: &Option<LirType>, w: &mut dyn fmt::Write) -> fmt::Result {
     match opt {
-        None    => w.write_str("none"),
+        None => w.write_str("none"),
         Some(t) => t.write_text(w),
     }
 }
@@ -149,17 +149,24 @@ pub(crate) fn write_opt_lir_type(opt: &Option<LirType>, w: &mut dyn fmt::Write) 
 pub(crate) fn write_u32_list(list: &[u32], w: &mut dyn fmt::Write) -> fmt::Result {
     w.write_char('[')?;
     for (i, v) in list.iter().enumerate() {
-        if i > 0 { w.write_str(", ")?; }
+        if i > 0 {
+            w.write_str(", ")?;
+        }
         write!(w, "{}", v)?;
     }
     w.write_char(']')
 }
 
 /// Write a `Vec<Vec<u32>>` list as `[[a, b], [c], ...]`.
-pub(crate) fn write_u32_list_list(ll: &[alloc::vec::Vec<u32>], w: &mut dyn fmt::Write) -> fmt::Result {
+pub(crate) fn write_u32_list_list(
+    ll: &[alloc::vec::Vec<u32>],
+    w: &mut dyn fmt::Write,
+) -> fmt::Result {
     w.write_char('[')?;
     for (i, inner) in ll.iter().enumerate() {
-        if i > 0 { w.write_str(", ")?; }
+        if i > 0 {
+            w.write_str(", ")?;
+        }
         write_u32_list(inner, w)?;
     }
     w.write_char(']')
@@ -169,7 +176,9 @@ pub(crate) fn write_u32_list_list(ll: &[alloc::vec::Vec<u32>], w: &mut dyn fmt::
 pub(crate) fn write_lir_type_list(tys: &[LirType], w: &mut dyn fmt::Write) -> fmt::Result {
     w.write_char('[')?;
     for (i, t) in tys.iter().enumerate() {
-        if i > 0 { w.write_str(", ")?; }
+        if i > 0 {
+            w.write_str(", ")?;
+        }
         t.write_text(w)?;
     }
     w.write_char(']')
@@ -182,7 +191,9 @@ pub(crate) fn write_switch_cases(
 ) -> fmt::Result {
     w.write_char('[')?;
     for (i, (key, block, args)) in cases.iter().enumerate() {
-        if i > 0 { w.write_str(", ")?; }
+        if i > 0 {
+            w.write_str(", ")?;
+        }
         write!(w, "({}, {}, ", key, block)?;
         write_u32_list(args, w)?;
         w.write_char(')')?;

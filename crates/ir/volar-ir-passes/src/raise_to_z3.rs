@@ -53,10 +53,7 @@ use volar_ir_common::{Constant, IrType, Stmt, Type as PrimType};
 /// # Panics
 /// Panics if any Bit-typed polynomial has more than 20 distinct variables
 /// (unreachable in practice — see module documentation).
-pub fn raise_bits_to_z3<P: Clone>(
-    blocks: &IRBlocks<P>,
-    types: &mut IRTypes,
-) -> IRBlocks<P> {
+pub fn raise_bits_to_z3<P: Clone>(blocks: &IRBlocks<P>, types: &mut IRTypes) -> IRBlocks<P> {
     let z3_ty_id = types.intern(IrType::Primitive(PrimType::Z3));
     let bit_ty_id = types.intern(IrType::Primitive(PrimType::Bit));
 
@@ -77,15 +74,13 @@ pub fn raise_bits_to_z3<P: Clone>(
 // Block lifting
 // ============================================================================
 
-fn lift_block<P: Clone>(
-    block: &IRBlock<P>,
-    bit_ty: IRTypeId,
-    z3_ty: IRTypeId,
-) -> IRBlock<P> {
+fn lift_block<P: Clone>(block: &IRBlock<P>, bit_ty: IRTypeId, z3_ty: IRTypeId) -> IRBlock<P> {
     let new_stmts = block
         .stmts
         .iter()
-        .map(|s| volar_ir_common::Node::new(lift_stmt(&s.kind, bit_ty, z3_ty), s.prov.clone(), s.side))
+        .map(|s| {
+            volar_ir_common::Node::new(lift_stmt(&s.kind, bit_ty, z3_ty), s.prov.clone(), s.side)
+        })
         .collect();
     IRBlock {
         params: block.params.clone(),
@@ -96,7 +91,11 @@ fn lift_block<P: Clone>(
 
 fn lift_stmt(stmt: &IRStmt, bit_ty: IRTypeId, z3_ty: IRTypeId) -> IRStmt {
     match stmt {
-        Stmt::Poly { ty, coeffs, constant } if *ty == bit_ty => {
+        Stmt::Poly {
+            ty,
+            coeffs,
+            constant,
+        } if *ty == bit_ty => {
             let (new_coeffs, new_const) = mobius_lift(coeffs, *constant);
             Stmt::Poly {
                 ty: z3_ty,
@@ -183,7 +182,11 @@ fn mobius_lift(
         let mut t = s;
         loop {
             let t_size = t.count_ones() as usize;
-            let sign = if (s_size - t_size) % 2 == 0 { 1i32 } else { -1i32 };
+            let sign = if (s_size - t_size) % 2 == 0 {
+                1i32
+            } else {
+                -1i32
+            };
             a_vals[s] += sign * f_val[t] as i32;
             if t == 0 {
                 break;
@@ -195,7 +198,10 @@ fn mobius_lift(
 
     // --- Build output polynomial ----------------------------------------
     // a_vals[0] is the degree-0 (constant) term.
-    let new_const = Constant { hi: 0, lo: a_vals[0] as u128 };
+    let new_const = Constant {
+        hi: 0,
+        lo: a_vals[0] as u128,
+    };
 
     let mut new_coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
     for s in 1..num_subsets {
@@ -237,10 +243,20 @@ mod tests {
         point: &[(IRVarId, u8)],
     ) -> u8 {
         let lookup = |v: &IRVarId| -> u8 {
-            point.iter().find(|(u, _)| u == v).map(|(_, x)| *x).unwrap_or(0)
+            point
+                .iter()
+                .find(|(u, _)| u == v)
+                .map(|(_, x)| *x)
+                .unwrap_or(0)
         };
-        let add3 = |a: u8, b: u8| -> u8 { let s = a + b; if s >= 3 { s - 3 } else { s } };
-        let mul3 = |a: u8, b: u8| -> u8 { let p = a * b; if p >= 3 { p - 3 } else { p } };
+        let add3 = |a: u8, b: u8| -> u8 {
+            let s = a + b;
+            if s >= 3 { s - 3 } else { s }
+        };
+        let mul3 = |a: u8, b: u8| -> u8 {
+            let p = a * b;
+            if p >= 3 { p - 3 } else { p }
+        };
         let mulmod3 = |coeff: u8, prod: u8| -> u8 {
             // coeff * prod mod 3
             let mut r = 0u8;
@@ -268,11 +284,17 @@ mod tests {
         point: &[(IRVarId, u8)],
     ) -> u8 {
         let lookup = |v: &IRVarId| -> u8 {
-            point.iter().find(|(u, _)| u == v).map(|(_, x)| *x & 1).unwrap_or(0)
+            point
+                .iter()
+                .find(|(u, _)| u == v)
+                .map(|(_, x)| *x & 1)
+                .unwrap_or(0)
         };
         let mut result = (constant.lo & 1) as u8;
         for (mono, &coeff) in coeffs {
-            if coeff & 1 == 0 { continue; }
+            if coeff & 1 == 0 {
+                continue;
+            }
             let prod = mono.iter().fold(1u8, |acc, v| acc & lookup(v));
             result ^= prod;
         }
@@ -289,9 +311,11 @@ mod tests {
         // Check agreement on {0,1}
         for xval in 0u8..2 {
             let point = &[(var(0), xval)];
-            assert_eq!(eval_gf2(&coeffs, constant, point),
-                       eval_gf3(&g_coeffs, g_const, point),
-                       "identity lift mismatch at x={xval}");
+            assert_eq!(
+                eval_gf2(&coeffs, constant, point),
+                eval_gf3(&g_coeffs, g_const, point),
+                "identity lift mismatch at x={xval}"
+            );
         }
     }
 
@@ -304,9 +328,11 @@ mod tests {
         let (g_coeffs, g_const) = mobius_lift(&coeffs, constant);
         for xval in 0u8..2 {
             let pt = &[(var(0), xval)];
-            assert_eq!(eval_gf2(&coeffs, constant, pt),
-                       eval_gf3(&g_coeffs, g_const, pt),
-                       "NOT lift mismatch at x={xval}");
+            assert_eq!(
+                eval_gf2(&coeffs, constant, pt),
+                eval_gf3(&g_coeffs, g_const, pt),
+                "NOT lift mismatch at x={xval}"
+            );
         }
     }
 
@@ -318,12 +344,16 @@ mod tests {
         coeffs.insert(vec![var(1)], 1u8);
         let constant = Constant { hi: 0, lo: 0 };
         let (g_coeffs, g_const) = mobius_lift(&coeffs, constant);
-        for xval in 0u8..2 { for yval in 0u8..2 {
-            let pt = &[(var(0), xval), (var(1), yval)];
-            assert_eq!(eval_gf2(&coeffs, constant, pt),
-                       eval_gf3(&g_coeffs, g_const, pt),
-                       "XOR lift mismatch at x={xval} y={yval}");
-        }}
+        for xval in 0u8..2 {
+            for yval in 0u8..2 {
+                let pt = &[(var(0), xval), (var(1), yval)];
+                assert_eq!(
+                    eval_gf2(&coeffs, constant, pt),
+                    eval_gf3(&g_coeffs, g_const, pt),
+                    "XOR lift mismatch at x={xval} y={yval}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -333,12 +363,16 @@ mod tests {
         coeffs.insert(vec![var(0), var(1)], 1u8);
         let constant = Constant { hi: 0, lo: 0 };
         let (g_coeffs, g_const) = mobius_lift(&coeffs, constant);
-        for xval in 0u8..2 { for yval in 0u8..2 {
-            let pt = &[(var(0), xval), (var(1), yval)];
-            assert_eq!(eval_gf2(&coeffs, constant, pt),
-                       eval_gf3(&g_coeffs, g_const, pt),
-                       "AND lift mismatch at x={xval} y={yval}");
-        }}
+        for xval in 0u8..2 {
+            for yval in 0u8..2 {
+                let pt = &[(var(0), xval), (var(1), yval)];
+                assert_eq!(
+                    eval_gf2(&coeffs, constant, pt),
+                    eval_gf3(&g_coeffs, g_const, pt),
+                    "AND lift mismatch at x={xval} y={yval}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -350,12 +384,16 @@ mod tests {
         coeffs.insert(vec![var(0), var(1)], 1u8);
         let constant = Constant { hi: 0, lo: 0 };
         let (g_coeffs, g_const) = mobius_lift(&coeffs, constant);
-        for xval in 0u8..2 { for yval in 0u8..2 {
-            let pt = &[(var(0), xval), (var(1), yval)];
-            assert_eq!(eval_gf2(&coeffs, constant, pt),
-                       eval_gf3(&g_coeffs, g_const, pt),
-                       "OR lift mismatch at x={xval} y={yval}");
-        }}
+        for xval in 0u8..2 {
+            for yval in 0u8..2 {
+                let pt = &[(var(0), xval), (var(1), yval)];
+                assert_eq!(
+                    eval_gf2(&coeffs, constant, pt),
+                    eval_gf3(&g_coeffs, g_const, pt),
+                    "OR lift mismatch at x={xval} y={yval}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -376,8 +414,13 @@ mod tests {
         };
         let block = IRBlock {
             params: vec![bit_id],
-            stmts: vec![poly_stmt].into_iter().map(|s| Node::new(s, (), None)).collect(),
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(1)],) },
+            stmts: vec![poly_stmt]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(1)]),
+            },
         };
         let blocks: IRBlocks<()> = IRBlocks::new(vec![block]);
         let lifted = raise_bits_to_z3(&blocks, &mut types);

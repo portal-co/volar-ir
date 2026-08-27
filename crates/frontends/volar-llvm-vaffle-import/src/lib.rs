@@ -48,7 +48,10 @@ use inkwell::values::{
     InstructionOpcode, InstructionValue, IntValue, PhiValue, PointerValue,
 };
 
-use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target, Terminator, Value, ValueId};
+use vaffle::{
+    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target, Terminator, Value,
+    ValueId,
+};
 use volar_ir_common::{Constant, Node, Stmt, StorageAllocator, StorageId, Type, TypeId, TypeTable};
 use volar_lir::circuits::{self, BitCircuitBuilder};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
@@ -164,7 +167,11 @@ impl<'ctx> Importer<'ctx> {
         // body (or import declaration) is known. Reserving up front lets
         // mutually/self-recursive call sites resolve a stable FuncId before
         // the callee itself has been walked.
-        let params: Vec<TypeId> = f.get_params().iter().map(|p| self.llvm_type_id(p.get_type())).collect();
+        let params: Vec<TypeId> = f
+            .get_params()
+            .iter()
+            .map(|p| self.llvm_type_id(p.get_type()))
+            .collect();
         let results: Vec<TypeId> = match f.get_type().get_return_type() {
             Some(t) => vec![self.llvm_type_id(t)],
             None => vec![],
@@ -172,7 +179,11 @@ impl<'ctx> Importer<'ctx> {
         let sig = SigId(self.sigs.len());
         self.sigs.push(SigDecl { params, results });
         let name = f.get_name().to_string_lossy().into_owned();
-        self.funcs.push(FuncDecl::Import { module: "llvm".into(), name: name.clone(), sig });
+        self.funcs.push(FuncDecl::Import {
+            module: "llvm".into(),
+            name: name.clone(),
+            sig,
+        });
         self.func_ids.insert(key, id);
         self.exports.entry(name).or_insert(id);
         id
@@ -180,7 +191,9 @@ impl<'ctx> Importer<'ctx> {
 
     fn llvm_type_id<T: TryInto<inkwell::types::BasicTypeEnum<'ctx>>>(&mut self, ty: T) -> TypeId {
         use inkwell::types::BasicTypeEnum;
-        let ty = ty.try_into().unwrap_or_else(|_| panic!("expected a basic type"));
+        let ty = ty
+            .try_into()
+            .unwrap_or_else(|_| panic!("expected a basic type"));
         match ty {
             BasicTypeEnum::IntType(i) => {
                 let t = match i.get_bit_width() {
@@ -249,7 +262,14 @@ impl<'ctx> Importer<'ctx> {
             let width = llvm_bit_width(param.get_type());
             let mut bits = Vec::with_capacity(width);
             for _ in 0..width {
-                let vid = fctx.emit(entry_block, Value::Param { block: entry_block, ty: self.bit_tid, idx: next_bit_idx });
+                let vid = fctx.emit(
+                    entry_block,
+                    Value::Param {
+                        block: entry_block,
+                        ty: self.bit_tid,
+                        idx: next_bit_idx,
+                    },
+                );
                 fctx.params[entry_block.0].push((vid, self.bit_tid));
                 bits.push(vid);
                 next_bit_idx += 1;
@@ -267,7 +287,14 @@ impl<'ctx> Importer<'ctx> {
                 let width = llvm_bit_width(phi.as_instruction().get_type());
                 let mut bits = Vec::with_capacity(width);
                 for _ in 0..width {
-                    let vid = fctx.emit(vb, Value::Param { block: vb, ty: self.bit_tid, idx });
+                    let vid = fctx.emit(
+                        vb,
+                        Value::Param {
+                            block: vb,
+                            ty: self.bit_tid,
+                            idx,
+                        },
+                    );
                     fctx.params[vb.0].push((vid, self.bit_tid));
                     bits.push(vid);
                     idx += 1;
@@ -343,11 +370,22 @@ impl<'ctx> Importer<'ctx> {
         }
         let width = i.get_type().get_bit_width() as usize;
         let val = i.get_sign_extended_constant().unwrap_or(0) as u64;
-        Ok((0..width).map(|b| self.bc_const_at(fctx, fctx.current, (val >> b) & 1 != 0)).collect())
+        Ok((0..width)
+            .map(|b| self.bc_const_at(fctx, fctx.current, (val >> b) & 1 != 0))
+            .collect())
     }
 
     fn bc_const_at(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, val: bool) -> ValueId {
-        fctx.emit(block, Value::Op(Stmt::Const(Constant { hi: 0, lo: val as u128 }, self.bit_tid)))
+        fctx.emit(
+            block,
+            Value::Op(Stmt::Const(
+                Constant {
+                    hi: 0,
+                    lo: val as u128,
+                },
+                self.bit_tid,
+            )),
+        )
     }
 
     fn translate_instruction(
@@ -372,54 +410,147 @@ impl<'ctx> Importer<'ctx> {
         let result_bits: Option<Bits> = match opcode {
             InstructionOpcode::Add => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_add(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b, false))
+                Some(circuits::bc_add(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                    false,
+                ))
             }
             InstructionOpcode::Sub => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_sub(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b))
+                Some(circuits::bc_sub(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                ))
             }
             InstructionOpcode::Mul => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_mul(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b))
+                Some(circuits::bc_mul(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                ))
             }
             InstructionOpcode::UDiv => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_udiv(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b))
+                Some(circuits::bc_udiv(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                ))
             }
             InstructionOpcode::SDiv => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_sdiv(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b))
+                Some(circuits::bc_sdiv(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                ))
             }
             InstructionOpcode::And => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_and_vec(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b))
+                Some(circuits::bc_and_vec(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                ))
             }
             InstructionOpcode::Or => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_or_vec(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b))
+                Some(circuits::bc_or_vec(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                ))
             }
             InstructionOpcode::Xor => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_xor_vec(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b))
+                Some(circuits::bc_xor_vec(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                ))
             }
             InstructionOpcode::Shl => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_shl(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b))
+                Some(circuits::bc_shl(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                ))
             }
             InstructionOpcode::LShr => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_lshr(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b))
+                Some(circuits::bc_lshr(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                ))
             }
             InstructionOpcode::AShr => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_ashr(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, &a, &b))
+                Some(circuits::bc_ashr(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    &a,
+                    &b,
+                ))
             }
             InstructionOpcode::ICmp => {
                 let pred = instr
                     .get_icmp_predicate()
                     .ok_or_else(|| ImportError::Unsupported("icmp without predicate".into()))?;
                 let (a, b) = (op!(0), op!(1));
-                let mut c = Ctx { fctx, bit_tid: self.bit_tid, block: cur };
+                let mut c = Ctx {
+                    fctx,
+                    bit_tid: self.bit_tid,
+                    block: cur,
+                };
                 let bit = match pred {
                     IntPredicate::EQ => circuits::bc_eq(&mut c, &a, &b),
                     IntPredicate::NE => circuits::bc_ne(&mut c, &a, &b),
@@ -437,7 +568,16 @@ impl<'ctx> Importer<'ctx> {
             InstructionOpcode::Select => {
                 let cond = op!(0)[0];
                 let (t, e) = (op!(1), op!(2));
-                Some(circuits::bc_select_vec(&mut Ctx { fctx, bit_tid: self.bit_tid, block: cur }, cond, &t, &e))
+                Some(circuits::bc_select_vec(
+                    &mut Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block: cur,
+                    },
+                    cond,
+                    &t,
+                    &e,
+                ))
             }
             InstructionOpcode::Trunc => {
                 let src = op!(0);
@@ -455,7 +595,9 @@ impl<'ctx> Importer<'ctx> {
             InstructionOpcode::SExt => {
                 let mut src = op!(0);
                 let dst_n = int_result_width(instr)?;
-                let sign = *src.last().ok_or_else(|| ImportError::Unsupported("sext of empty value".into()))?;
+                let sign = *src
+                    .last()
+                    .ok_or_else(|| ImportError::Unsupported("sext of empty value".into()))?;
                 while src.len() < dst_n {
                     src.push(sign);
                 }
@@ -497,14 +639,26 @@ impl<'ctx> Importer<'ctx> {
                     let v = instr
                         .get_operand(i)
                         .and_then(|o| o.value())
-                        .ok_or_else(|| ImportError::Unsupported("call argument must be a value".into()))?;
+                        .ok_or_else(|| {
+                            ImportError::Unsupported("call argument must be a value".into())
+                        })?;
                     args.extend(self.value_bits(fctx, v)?);
                 }
-                let vid = fctx.emit(cur, Value::Call { func: callee_id, args });
+                let vid = fctx.emit(
+                    cur,
+                    Value::Call {
+                        func: callee_id,
+                        args,
+                    },
+                );
                 match instr.get_type().try_into() {
                     Ok(inkwell::types::BasicTypeEnum::IntType(t)) => {
                         let n = t.get_bit_width() as usize;
-                        Some((0..n).map(|i| fctx.emit(cur, Value::Output { value: vid, idx: i })).collect())
+                        Some(
+                            (0..n)
+                                .map(|i| fctx.emit(cur, Value::Output { value: vid, idx: i }))
+                                .collect(),
+                        )
                     }
                     _ => None,
                 }
@@ -520,31 +674,89 @@ impl<'ctx> Importer<'ctx> {
         Ok(called)
     }
 
-    fn mem_load(&mut self, fctx: &mut FuncCtx<'ctx>, ptr: PointerValue<'ctx>, n_bytes: usize) -> IResult<Bits> {
+    fn mem_load(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        ptr: PointerValue<'ctx>,
+        n_bytes: usize,
+    ) -> IResult<Bits> {
         let storage = self.storage_for(ptr)?;
         let cur = fctx.current;
         let mut all_bits = Vec::with_capacity(n_bytes * 8);
         for byte_i in 0..n_bytes {
-            let addr = fctx.emit(cur, Value::Op(Stmt::Const(Constant { hi: 0, lo: byte_i as u128 }, self.byte_tid)));
-            let byte_var = fctx.emit(cur, Value::Op(Stmt::StorageRead { storage, ty: self.byte_tid, addr }));
+            let addr = fctx.emit(
+                cur,
+                Value::Op(Stmt::Const(
+                    Constant {
+                        hi: 0,
+                        lo: byte_i as u128,
+                    },
+                    self.byte_tid,
+                )),
+            );
+            let byte_var = fctx.emit(
+                cur,
+                Value::Op(Stmt::StorageRead {
+                    storage,
+                    ty: self.byte_tid,
+                    addr,
+                }),
+            );
             for bit_j in 0..8u8 {
-                let bit = fctx.emit(cur, Value::Op(Stmt::Shuffle { result_bits: vec![(bit_j, byte_var)], ty: self.bit_tid }));
+                let bit = fctx.emit(
+                    cur,
+                    Value::Op(Stmt::Shuffle {
+                        result_bits: vec![(bit_j, byte_var)],
+                        ty: self.bit_tid,
+                    }),
+                );
                 all_bits.push(bit);
             }
         }
         Ok(all_bits)
     }
 
-    fn mem_store(&mut self, fctx: &mut FuncCtx<'ctx>, ptr: PointerValue<'ctx>, val: &Bits, n_bytes: usize) -> IResult<()> {
+    fn mem_store(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        ptr: PointerValue<'ctx>,
+        val: &Bits,
+        n_bytes: usize,
+    ) -> IResult<()> {
         let storage = self.storage_for(ptr)?;
         let cur = fctx.current;
         for byte_i in 0..n_bytes {
-            let addr = fctx.emit(cur, Value::Op(Stmt::Const(Constant { hi: 0, lo: byte_i as u128 }, self.byte_tid)));
+            let addr = fctx.emit(
+                cur,
+                Value::Op(Stmt::Const(
+                    Constant {
+                        hi: 0,
+                        lo: byte_i as u128,
+                    },
+                    self.byte_tid,
+                )),
+            );
             let base = byte_i * 8;
             let zero = self.bc_const_at(fctx, cur, false);
-            let bits: Vec<ValueId> = (0..8).map(|j| *val.get(base + j).unwrap_or(&zero)).collect();
-            let byte_var = fctx.emit(cur, Value::Op(Stmt::Merge { parts: bits, ty: self.byte_tid }));
-            fctx.emit(cur, Value::Op(Stmt::StorageWrite { storage, src: byte_var, ty: self.byte_tid, addr }));
+            let bits: Vec<ValueId> = (0..8)
+                .map(|j| *val.get(base + j).unwrap_or(&zero))
+                .collect();
+            let byte_var = fctx.emit(
+                cur,
+                Value::Op(Stmt::Merge {
+                    parts: bits,
+                    ty: self.byte_tid,
+                }),
+            );
+            fctx.emit(
+                cur,
+                Value::Op(Stmt::StorageWrite {
+                    storage,
+                    src: byte_var,
+                    ty: self.byte_tid,
+                    addr,
+                }),
+            );
         }
         Ok(())
     }
@@ -560,7 +772,9 @@ impl<'ctx> Importer<'ctx> {
             InstructionOpcode::Return => {
                 let values = match instr.get_operand(0) {
                     Some(op) => {
-                        let v = op.value().ok_or_else(|| ImportError::Unsupported("ret operand must be a value".into()))?;
+                        let v = op.value().ok_or_else(|| {
+                            ImportError::Unsupported("ret operand must be a value".into())
+                        })?;
                         self.value_bits(fctx, v)?
                     }
                     None => vec![],
@@ -575,7 +789,9 @@ impl<'ctx> Importer<'ctx> {
                     let cond = instr
                         .get_operand(0)
                         .and_then(|o| o.value())
-                        .ok_or_else(|| ImportError::Unsupported("br condition must be a value".into()))?;
+                        .ok_or_else(|| {
+                            ImportError::Unsupported("br condition must be a value".into())
+                        })?;
                     let cond_bit = self.value_bits(fctx, cond)?[0];
                     // LLVM's low-level operand list stores the false
                     // successor before the true successor (operand 1 = else,
@@ -584,7 +800,11 @@ impl<'ctx> Importer<'ctx> {
                     // against volar-llvm-import-core's own `branch` handling.
                     let then_target = self.successor_target(fctx, bb, 2, instr)?;
                     let else_target = self.successor_target(fctx, bb, 1, instr)?;
-                    Terminator::IfNonzero { cond: cond_bit, then_target, else_target }
+                    Terminator::IfNonzero {
+                        cond: cond_bit,
+                        then_target,
+                        else_target,
+                    }
                 }
             }
             other => {
@@ -612,7 +832,10 @@ impl<'ctx> Importer<'ctx> {
             .get_operand(succ_idx)
             .and_then(|o| o.block())
             .ok_or_else(|| ImportError::Unsupported("branch successor must be a block".into()))?;
-        let succ_vb = *fctx.block_of.get(&succ_bb).ok_or_else(|| ImportError::Unsupported("branch to unknown block".into()))?;
+        let succ_vb = *fctx
+            .block_of
+            .get(&succ_bb)
+            .ok_or_else(|| ImportError::Unsupported("branch to unknown block".into()))?;
         let phis = fctx.phi_order[succ_vb.0].clone();
         let mut args = Vec::new();
         for phi in phis {
@@ -621,10 +844,18 @@ impl<'ctx> Importer<'ctx> {
                     let (v, from) = phi.get_incoming(i)?;
                     (from == bb).then_some(v)
                 })
-                .ok_or_else(|| ImportError::Unsupported("phi missing incoming value for this predecessor".into()))?;
+                .ok_or_else(|| {
+                    ImportError::Unsupported(
+                        "phi missing incoming value for this predecessor".into(),
+                    )
+                })?;
             args.extend(self.value_bits(fctx, incoming)?);
         }
-        Ok(Target { block: succ_vb, args, reentry: None })
+        Ok(Target {
+            block: succ_vb,
+            args,
+            reentry: None,
+        })
     }
 }
 
@@ -646,7 +877,9 @@ fn phis_of<'ctx>(bb: &LlvmBlock<'ctx>) -> Vec<PhiValue<'ctx>> {
 fn int_result_width(instr: InstructionValue<'_>) -> IResult<usize> {
     match instr.get_type().try_into() {
         Ok(inkwell::types::BasicTypeEnum::IntType(t)) => Ok(t.get_bit_width() as usize),
-        _ => Err(ImportError::Unsupported("expected an integer-typed instruction result".into())),
+        _ => Err(ImportError::Unsupported(
+            "expected an integer-typed instruction result".into(),
+        )),
     }
 }
 
@@ -661,10 +894,15 @@ fn llvm_bit_width<'ctx, T: TryInto<inkwell::types::BasicTypeEnum<'ctx>>>(ty: T) 
     }
 }
 
-fn load_store_pointer<'ctx>(instr: InstructionValue<'ctx>, operand: u32) -> IResult<PointerValue<'ctx>> {
+fn load_store_pointer<'ctx>(
+    instr: InstructionValue<'ctx>,
+    operand: u32,
+) -> IResult<PointerValue<'ctx>> {
     match instr.get_operand(operand).and_then(|o| o.value()) {
         Some(BasicValueEnum::PointerValue(p)) => Ok(p),
-        _ => Err(ImportError::Unsupported("expected a pointer operand".into())),
+        _ => Err(ImportError::Unsupported(
+            "expected a pointer operand".into(),
+        )),
     }
 }
 
@@ -726,11 +964,34 @@ impl<'a, 'ctx> BitCircuitBuilder for Ctx<'a, 'ctx> {
     type Bit = ValueId;
 
     fn bc_const(&mut self, val: bool) -> ValueId {
-        self.fctx.emit(self.block, Value::Op(Stmt::Const(Constant { hi: 0, lo: val as u128 }, self.bit_tid)))
+        self.fctx.emit(
+            self.block,
+            Value::Op(Stmt::Const(
+                Constant {
+                    hi: 0,
+                    lo: val as u128,
+                },
+                self.bit_tid,
+            )),
+        )
     }
 
-    fn bc_poly(&mut self, coeffs: std::collections::BTreeMap<Vec<ValueId>, u8>, constant: u128) -> ValueId {
+    fn bc_poly(
+        &mut self,
+        coeffs: std::collections::BTreeMap<Vec<ValueId>, u8>,
+        constant: u128,
+    ) -> ValueId {
         let ty = self.bit_tid;
-        self.fctx.emit(self.block, Value::Op(Stmt::Poly { ty, coeffs, constant: Constant { hi: 0, lo: constant } }))
+        self.fctx.emit(
+            self.block,
+            Value::Op(Stmt::Poly {
+                ty,
+                coeffs,
+                constant: Constant {
+                    hi: 0,
+                    lo: constant,
+                },
+            }),
+        )
     }
 }

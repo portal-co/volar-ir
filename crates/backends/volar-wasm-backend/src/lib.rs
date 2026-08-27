@@ -23,20 +23,14 @@
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
 
-use alloc::{
-    borrow::Cow,
-    collections::BTreeMap,
-    string::String,
-    vec,
-    vec::Vec,
-};
+use alloc::{borrow::Cow, collections::BTreeMap, string::String, vec, vec::Vec};
 use volar_ir_common::Type as NativeType;
 use volar_lir::{
     BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, NameConfig, StructDef, StructId,
 };
 use wasm_encoder::{
-    CodeSection, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
-    Instruction, Module, TypeSection, ValType,
+    CodeSection, ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction,
+    Module, TypeSection, ValType,
 };
 use wax_core::build::InstructionSink;
 
@@ -199,10 +193,7 @@ impl FunctionState {
         let local = self.next_local;
         self.next_local += 1;
         let id = self.values.len() as u32;
-        self.values.push(ValueInfo {
-            local,
-            ty,
-        });
+        self.values.push(ValueInfo { local, ty });
         WasmValue(id)
     }
 
@@ -322,6 +313,14 @@ impl WasmBackend {
 
     pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.name_config.prefix = prefix.into();
+        self
+    }
+
+    /// Set the module from which external primitive symbols are imported.
+    /// Together with [`Self::with_name_config`], this selects both sides of
+    /// the WASM external ABI without changing the source circuit.
+    pub fn with_import_module(mut self, module: impl Into<String>) -> Self {
+        self.import_module = module.into();
         self
     }
 
@@ -654,7 +653,12 @@ fn local_ty_lookup(state: &FunctionState, local: u32) -> LirType {
     panic!("WasmBackend: unknown local {local}");
 }
 
-fn emit_op(func: &mut Function, state: &FunctionState, op: &Op, sibling_idx: &BTreeMap<String, u32>) {
+fn emit_op(
+    func: &mut Function,
+    state: &FunctionState,
+    op: &Op,
+    sibling_idx: &BTreeMap<String, u32>,
+) {
     match op {
         Op::Iconst { dest, ty, val } => {
             emit_const(func, ty, *val);
@@ -799,9 +803,9 @@ fn emit_op(func: &mut Function, state: &FunctionState, op: &Op, sibling_idx: &BT
             }
         }
         Op::CallSibling { dests, name, args } => {
-            let func_idx = *sibling_idx
-                .get(name)
-                .unwrap_or_else(|| panic!("WasmBackend: sibling call to undefined function `{name}`"));
+            let func_idx = *sibling_idx.get(name).unwrap_or_else(|| {
+                panic!("WasmBackend: sibling call to undefined function `{name}`")
+            });
             for &a in args {
                 emit(func, Instruction::LocalGet(a));
             }
@@ -816,12 +820,7 @@ fn emit_op(func: &mut Function, state: &FunctionState, op: &Op, sibling_idx: &BT
     }
 }
 
-fn emit_assign_block_params(
-    func: &mut Function,
-    state: &FunctionState,
-    target: u32,
-    args: &[u32],
-) {
+fn emit_assign_block_params(func: &mut Function, state: &FunctionState, target: u32, args: &[u32]) {
     let params = &state.blocks[target as usize].param_locals;
     assert_eq!(
         params.len(),
@@ -836,12 +835,7 @@ fn emit_assign_block_params(
     }
 }
 
-fn emit_terminator(
-    func: &mut Function,
-    state: &FunctionState,
-    op: &Op,
-    dispatch_depth: u32,
-) {
+fn emit_terminator(func: &mut Function, state: &FunctionState, op: &Op, dispatch_depth: u32) {
     match op {
         Op::Ret { vals } => {
             for &v in vals {
@@ -926,7 +920,10 @@ fn lower_function(state: &FunctionState, sibling_idx: &BTreeMap<String, u32>) ->
     if !multi {
         let block = &state.blocks[0];
         for op in &block.ops {
-            if matches!(op, Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. } | Op::Table { .. }) {
+            if matches!(
+                op,
+                Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. } | Op::Table { .. }
+            ) {
                 match op {
                     Op::Ret { vals } => {
                         for &v in vals {
@@ -956,10 +953,7 @@ fn lower_function(state: &FunctionState, sibling_idx: &BTreeMap<String, u32>) ->
     //     ...
     //   end ;; default → unreachable
     // end ;; dispatch
-    emit(
-        &mut func,
-        Instruction::Loop(wasm_encoder::BlockType::Empty),
-    ); // $dispatch
+    emit(&mut func, Instruction::Loop(wasm_encoder::BlockType::Empty)); // $dispatch
     emit(
         &mut func,
         Instruction::Block(wasm_encoder::BlockType::Empty),
@@ -983,7 +977,10 @@ fn lower_function(state: &FunctionState, sibling_idx: &BTreeMap<String, u32>) ->
         emit(&mut func, Instruction::End);
         let block = &state.blocks[bid as usize];
         for op in &block.ops {
-            if matches!(op, Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. } | Op::Table { .. }) {
+            if matches!(
+                op,
+                Op::Jump { .. } | Op::Branch { .. } | Op::Ret { .. } | Op::Table { .. }
+            ) {
                 // Depth to $dispatch: remaining b_* wrappers + $default.
                 let dispatch_depth = nblocks - bid;
                 emit_terminator(&mut func, state, op, dispatch_depth);
@@ -1251,12 +1248,7 @@ impl LirTarget for WasmBackend {
         dest
     }
 
-    fn select(
-        &mut self,
-        cond: WasmValue,
-        then_val: WasmValue,
-        else_val: WasmValue,
-    ) -> WasmValue {
+    fn select(&mut self, cond: WasmValue, then_val: WasmValue, else_val: WasmValue) -> WasmValue {
         let ty = self.state().ty_of(then_val).clone();
         let dest = self.state().alloc_value(ty);
         let dest_l = self.state().local_of(dest);
@@ -1343,7 +1335,11 @@ impl LirTarget for WasmBackend {
             .iter()
             .flat_map(|ty| self.flatten_scalar_tys(ty))
             .collect();
-        assert_eq!(flat_arg_tys.len(), args.len(), "call: flat arg count mismatch");
+        assert_eq!(
+            flat_arg_tys.len(),
+            args.len(),
+            "call: flat arg count mismatch"
+        );
         let flat_rets = ret_ty
             .as_ref()
             .map(|ty| self.flatten_scalar_tys(ty))
@@ -1428,7 +1424,11 @@ impl LirTarget for WasmBackend {
         let cases: Vec<(i64, u32, Vec<u32>)> = cases
             .iter()
             .map(|(key, block, branch)| {
-                let args: Vec<u32> = branch.args.iter().map(|a| self.state().local_of(*a)).collect();
+                let args: Vec<u32> = branch
+                    .args
+                    .iter()
+                    .map(|a| self.state().local_of(*a))
+                    .collect();
                 (*key, block.0, args)
             })
             .collect();
@@ -1495,4 +1495,94 @@ impl LirTarget for WasmBackend {
     }
 
     // StackAllocExt intentionally unsupported for now.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::collections::BTreeMap;
+    use volar_ir::{
+        boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId},
+        ir::{IRBlockTargetId, IRVarId},
+    };
+    use volar_ir_common::{Node, StorageId};
+    use volar_ir_passes::lower_lir::lower_biir;
+
+    fn external_bit_fixture() -> BIrBlocks {
+        BIrBlocks {
+            blocks: vec![BIrBlock {
+                params: 4,
+                stmts: vec![
+                    Node::new(
+                        BIrStmt::OracleBit {
+                            name: "lookup".into(),
+                            args: vec![IRVarId(1)],
+                            bit: 2,
+                            occurrence: 7,
+                        },
+                        (),
+                        None,
+                    ),
+                    Node::new(
+                        BIrStmt::RngBit {
+                            name: "nonce".into(),
+                            bit: 3,
+                            occurrence: 8,
+                        },
+                        (),
+                        None,
+                    ),
+                    Node::new(
+                        BIrStmt::ActionStoreBit {
+                            name: "commit".into(),
+                            guard: IRVarId(0),
+                            args: vec![IRVarId(4), IRVarId(5)],
+                            fallback: IRVarId(3),
+                            storage: StorageId(9),
+                            lane: LaneId(4),
+                            addr: vec![IRVarId(2)],
+                            bit: 1,
+                            occurrence: 9,
+                        },
+                        (),
+                        None,
+                    ),
+                ],
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: vec![IRVarId(4), IRVarId(5)],
+                }),
+            }],
+            pre_init: vec![],
+        }
+    }
+
+    #[test]
+    fn lowers_direct_external_bits_to_configured_wasm_imports() {
+        let mut remap = BTreeMap::new();
+        remap.insert("oracle_lookup".into(), "host_lookup_bit".into());
+        remap.insert("rng_nonce".into(), "host_nonce_bit".into());
+        remap.insert("action_commit".into(), "host_commit_bit".into());
+        let mut backend = WasmBackend::new()
+            .with_import_module("volar-host")
+            .with_name_config(NameConfig {
+                prefix: String::new(),
+                remap,
+            });
+        lower_biir(&external_bit_fixture(), "run", &mut backend);
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, backend.finish()).unwrap();
+        let imports: Vec<_> = module
+            .imports()
+            .map(|import| (import.module().to_string(), import.name().to_string()))
+            .collect();
+        assert_eq!(
+            imports,
+            vec![
+                ("volar-host".into(), "host_lookup_bit".into()),
+                ("volar-host".into(), "host_nonce_bit".into()),
+                ("volar-host".into(), "host_commit_bit".into()),
+            ]
+        );
+    }
 }

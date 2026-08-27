@@ -7,7 +7,10 @@
 
 use std::collections::BTreeMap;
 
-use vaffle::{BlockId, FuncDecl, FuncId, FuncBody, Block, Module, SigDecl, SigId, Target as VTarget, Terminator, Value, ValueId};
+use vaffle::{
+    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target as VTarget,
+    Terminator, Value, ValueId,
+};
 use volar_ir_common::{Constant, Node, Stmt, Type, TypeTable};
 use volar_ssa_lir_replay::lower_vaffle_module;
 
@@ -16,7 +19,11 @@ fn node(kind: Value) -> Node<Value, ()> {
 }
 
 fn target(block: BlockId, args: Vec<ValueId>) -> VTarget<ValueId> {
-    VTarget { block, args, reentry: None }
+    VTarget {
+        block,
+        args,
+        reentry: None,
+    }
 }
 
 // ============================================================================
@@ -30,8 +37,14 @@ fn build_sibling_module() -> Module<()> {
     let u8_ty = types.primitive(Type::_8);
 
     let sigs = vec![
-        SigDecl { params: vec![u8_ty], results: vec![u8_ty] }, // 0: main
-        SigDecl { params: vec![u8_ty], results: vec![u8_ty] }, // 1: helper
+        SigDecl {
+            params: vec![u8_ty],
+            results: vec![u8_ty],
+        }, // 0: main
+        SigDecl {
+            params: vec![u8_ty],
+            results: vec![u8_ty],
+        }, // 1: helper
     ];
 
     // main(x): return helper(x)
@@ -41,12 +54,24 @@ fn build_sibling_module() -> Module<()> {
         blocks: vec![Block {
             params: vec![(ValueId(0), u8_ty)],
             stmts: vec![ValueId(1), ValueId(2)],
-            terminator: Terminator::Return { values: vec![ValueId(2)] },
+            terminator: Terminator::Return {
+                values: vec![ValueId(2)],
+            },
         }],
         values: vec![
-            node(Value::Param { block: BlockId(0), ty: u8_ty, idx: 0 }),
-            node(Value::Call { func: FuncId(1), args: vec![ValueId(0)] }),
-            node(Value::Output { value: ValueId(1), idx: 0 }),
+            node(Value::Param {
+                block: BlockId(0),
+                ty: u8_ty,
+                idx: 0,
+            }),
+            node(Value::Call {
+                func: FuncId(1),
+                args: vec![ValueId(0)],
+            }),
+            node(Value::Output {
+                value: ValueId(1),
+                idx: 0,
+            }),
         ],
     };
 
@@ -57,10 +82,16 @@ fn build_sibling_module() -> Module<()> {
         blocks: vec![Block {
             params: vec![(ValueId(0), u8_ty)],
             stmts: vec![ValueId(1)],
-            terminator: Terminator::Return { values: vec![ValueId(1)] },
+            terminator: Terminator::Return {
+                values: vec![ValueId(1)],
+            },
         }],
         values: vec![
-            node(Value::Param { block: BlockId(0), ty: u8_ty, idx: 0 }),
+            node(Value::Param {
+                block: BlockId(0),
+                ty: u8_ty,
+                idx: 0,
+            }),
             node(Value::Op(Stmt::Const(Constant { hi: 0, lo: 99 }, u8_ty))),
         ],
     };
@@ -103,7 +134,10 @@ fn build_switch_module() -> Module<()> {
     let mut types = TypeTable::new();
     let u8_ty = types.primitive(Type::_8);
 
-    let sigs = vec![SigDecl { params: vec![u8_ty], results: vec![u8_ty] }];
+    let sigs = vec![SigDecl {
+        params: vec![u8_ty],
+        results: vec![u8_ty],
+    }];
 
     // `values` is a per-*function* arena (not per-block), so each block's
     // own `Const` gets a distinct `ValueId`: 1 (block1), 2 (block2), 3 (block3).
@@ -123,21 +157,31 @@ fn build_switch_module() -> Module<()> {
             Block {
                 params: vec![],
                 stmts: vec![ValueId(1)],
-                terminator: Terminator::Return { values: vec![ValueId(1)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(1)],
+                },
             },
             Block {
                 params: vec![],
                 stmts: vec![ValueId(2)],
-                terminator: Terminator::Return { values: vec![ValueId(2)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(2)],
+                },
             },
             Block {
                 params: vec![],
                 stmts: vec![ValueId(3)],
-                terminator: Terminator::Return { values: vec![ValueId(3)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(3)],
+                },
             },
         ],
         values: vec![
-            node(Value::Param { block: BlockId(0), ty: u8_ty, idx: 0 }),
+            node(Value::Param {
+                block: BlockId(0),
+                ty: u8_ty,
+                idx: 0,
+            }),
             node(Value::Op(Stmt::Const(Constant { hi: 0, lo: 10 }, u8_ty))),
             node(Value::Op(Stmt::Const(Constant { hi: 0, lo: 20 }, u8_ty))),
             node(Value::Op(Stmt::Const(Constant { hi: 0, lo: 30 }, u8_ty))),
@@ -187,7 +231,10 @@ fn build_dyn_jump_module() -> Module<()> {
     let mut types = TypeTable::new();
     let u8_ty = types.primitive(Type::_8);
 
-    let sigs = vec![SigDecl { params: vec![], results: vec![u8_ty] }];
+    let sigs = vec![SigDecl {
+        params: vec![],
+        results: vec![u8_ty],
+    }];
 
     let body = FuncBody {
         sig: SigId(0),
@@ -205,12 +252,16 @@ fn build_dyn_jump_module() -> Module<()> {
             Block {
                 params: vec![],
                 stmts: vec![ValueId(1)],
-                terminator: Terminator::Return { values: vec![ValueId(1)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(1)],
+                },
             },
             Block {
                 params: vec![],
                 stmts: vec![ValueId(2)],
-                terminator: Terminator::Return { values: vec![ValueId(2)] },
+                terminator: Terminator::Return {
+                    values: vec![ValueId(2)],
+                },
             },
         ],
         values: vec![
@@ -250,9 +301,11 @@ fn dyn_jump_c_backend_synthetic_dispatch() {
 
 #[test]
 fn dyn_jump_llvm_backend_native_indirectbr() {
-    use inkwell::context::Context;
-    use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine};
     use inkwell::OptimizationLevel;
+    use inkwell::context::Context;
+    use inkwell::targets::{
+        CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine,
+    };
     use std::{fs, process::Command};
     use tempfile::TempDir;
     use volar_llvm_backend::LlvmBackend;
@@ -260,7 +313,8 @@ fn dyn_jump_llvm_backend_native_indirectbr() {
     fn init_target() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            LlvmTarget::initialize_native(&InitializationConfig::default()).expect("init native target");
+            LlvmTarget::initialize_native(&InitializationConfig::default())
+                .expect("init native target");
         });
     }
 
@@ -273,8 +327,14 @@ fn dyn_jump_llvm_backend_native_indirectbr() {
     let llvm_module = b.finish();
     llvm_module.verify().expect("LLVM module verify failed");
     let ir_text = llvm_module.print_to_string().to_string();
-    assert!(ir_text.contains("blockaddress("), "expected native blockaddress constant:\n{ir_text}");
-    assert!(ir_text.contains("indirectbr "), "expected native indirectbr terminator:\n{ir_text}");
+    assert!(
+        ir_text.contains("blockaddress("),
+        "expected native blockaddress constant:\n{ir_text}"
+    );
+    assert!(
+        ir_text.contains("indirectbr "),
+        "expected native indirectbr terminator:\n{ir_text}"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     let obj_path = dir.path().join("test.o");
@@ -284,17 +344,34 @@ fn dyn_jump_llvm_backend_native_indirectbr() {
     let triple = TargetMachine::get_default_triple();
     let machine = LlvmTarget::from_triple(&triple)
         .expect("target from triple")
-        .create_target_machine(&triple, "generic", "", OptimizationLevel::None, RelocMode::Default, CodeModel::Default)
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::None,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
         .expect("create target machine");
-    machine.write_to_file(&llvm_module, FileType::Object, &obj_path).expect("write object file");
+    machine
+        .write_to_file(&llvm_module, FileType::Object, &obj_path)
+        .expect("write object file");
 
     let c_src = "#include <stdio.h>\n#include <stdint.h>\nuint8_t dispatch(void);\nint main(void) { printf(\"%d\\n\", dispatch()); return 0; }\n";
     fs::write(&c_path, c_src).expect("write C main");
 
-    let status = Command::new("cc").arg("-o").arg(&exe_path).arg(&obj_path).arg(&c_path).status().expect("cc not found");
+    let status = Command::new("cc")
+        .arg("-o")
+        .arg(&exe_path)
+        .arg(&obj_path)
+        .arg(&c_path)
+        .status()
+        .expect("cc not found");
     assert!(status.success(), "linking failed");
 
-    let output = Command::new(&exe_path).output().expect("failed to run compiled program");
+    let output = Command::new(&exe_path)
+        .output()
+        .expect("failed to run compiled program");
     let stdout = String::from_utf8(output.stdout).expect("non-UTF8 output");
     assert_eq!(stdout.trim(), "20");
 }

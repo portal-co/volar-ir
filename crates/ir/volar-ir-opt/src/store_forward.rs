@@ -12,17 +12,17 @@
 //! clears **all** cached reads for that `(S, T)` pair, regardless of address.
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
+use vaffle::{FuncBody, FuncDecl, Module, Value, ValueId};
 use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId};
 use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId};
 use volar_ir_common::{Constant, Node, StorageId, TypeId, TypeTable};
-use vaffle::{FuncBody, FuncDecl, Module, Value, ValueId};
 
+use crate::biir::apply_aliases_to_biir_terminator;
 use crate::common::{
     canon_alias, constant_and, constant_is_zero, constant_or, constant_rol, constant_ror,
     constant_shl, constant_xor, mask_constant, stmt_output_type, type_bit_width,
 };
 use crate::ir::apply_aliases_to_ir_terminator;
-use crate::biir::apply_aliases_to_biir_terminator;
 
 // ============================================================================
 // Address disambiguation
@@ -31,7 +31,10 @@ use crate::biir::apply_aliases_to_biir_terminator;
 /// Max distinct addresses tracked per (StorageId, TypeId/bit_width) slot.
 const MAX_CONCURRENT_STORES: usize = 16;
 
-const ALL_ONES: Constant = Constant { hi: u128::MAX, lo: u128::MAX };
+const ALL_ONES: Constant = Constant {
+    hi: u128::MAX,
+    lo: u128::MAX,
+};
 
 /// Per-bit abstract value: `known` marks which bit positions we know,
 /// `value` holds their values (only meaningful where `known` has a 1-bit).
@@ -47,14 +50,20 @@ struct KnownBits {
 
 impl Default for KnownBits {
     fn default() -> Self {
-        KnownBits { known: Constant { hi: 0, lo: 0 }, value: Constant { hi: 0, lo: 0 } }
+        KnownBits {
+            known: Constant { hi: 0, lo: 0 },
+            value: Constant { hi: 0, lo: 0 },
+        }
     }
 }
 
 impl KnownBits {
     fn from_const(c: Constant, width: usize) -> Self {
         let m = mask_constant(ALL_ONES, width);
-        KnownBits { known: m, value: constant_and(c, m) }
+        KnownBits {
+            known: m,
+            value: constant_and(c, m),
+        }
     }
     /// True if any bit position is definitely 1 in the XOR of `self` and `other`.
     fn xor_has_one_bit(self, other: KnownBits) -> bool {
@@ -66,15 +75,22 @@ impl KnownBits {
 
 /// Set bit `bit` (0-indexed) in a 256-bit `Constant`.
 fn set_bit_in_constant(mut c: Constant, bit: usize) -> Constant {
-    if bit < 128 { c.lo |= 1u128 << bit; }
-    else if bit < 256 { c.hi |= 1u128 << (bit - 128); }
+    if bit < 128 {
+        c.lo |= 1u128 << bit;
+    } else if bit < 256 {
+        c.hi |= 1u128 << (bit - 128);
+    }
     c
 }
 
 fn get_bit_of_constant(c: Constant, b: usize) -> bool {
-    if b < 128 { (c.lo >> b) & 1 != 0 }
-    else if b < 256 { (c.hi >> (b - 128)) & 1 != 0 }
-    else { false }
+    if b < 128 {
+        (c.lo >> b) & 1 != 0
+    } else if b < 256 {
+        (c.hi >> (b - 128)) & 1 != 0
+    } else {
+        false
+    }
 }
 
 /// Compute known-bits for a GF(2) polynomial over a bit-vector type.
@@ -99,7 +115,9 @@ fn poly_known_bits<Var: Ord>(
 
         if b < 8 {
             'monomials: for (key, &coeff) in coeffs {
-                if (coeff >> b) & 1 == 0 { continue; }
+                if (coeff >> b) & 1 == 0 {
+                    continue;
+                }
                 // Evaluate AND(vars in key)[b] with short-circuit.
                 let mut mono_val: Option<bool> = Some(true);
                 for v in key {
@@ -118,18 +136,26 @@ fn poly_known_bits<Var: Ord>(
                 }
                 match mono_val {
                     Some(v) => result_val ^= v,
-                    None => { result_known = false; break 'monomials; }
+                    None => {
+                        result_known = false;
+                        break 'monomials;
+                    }
                 }
             }
         }
 
         if result_known {
             out_known = set_bit_in_constant(out_known, b);
-            if result_val { out_value = set_bit_in_constant(out_value, b); }
+            if result_val {
+                out_value = set_bit_in_constant(out_value, b);
+            }
         }
     }
 
-    KnownBits { known: out_known, value: out_value }
+    KnownBits {
+        known: out_known,
+        value: out_value,
+    }
 }
 
 /// GF(2) polynomial representation of an address: `(monomials, constant)`.
@@ -183,8 +209,12 @@ fn ir_addrs_provably_different(
     poly_map: &BTreeMap<IRVarId, IrPolyRepr>,
     known_bits_map: &BTreeMap<IRVarId, KnownBits>,
 ) -> bool {
-    if a == b { return false; }
-    if ir_polys_xor_nonzero_const(a, b, const_map, poly_map) { return true; }
+    if a == b {
+        return false;
+    }
+    if ir_polys_xor_nonzero_const(a, b, const_map, poly_map) {
+        return true;
+    }
     let kb_a = known_bits_map.get(&a).copied().unwrap_or_default();
     let kb_b = known_bits_map.get(&b).copied().unwrap_or_default();
     kb_a.xor_has_one_bit(kb_b)
@@ -207,7 +237,11 @@ fn ir_stmt_known_bits(
             let w = get_w(*ty);
             (KnownBits::from_const(*c, w), Some(w))
         }
-        Stmt::Poly { coeffs, constant, ty } => {
+        Stmt::Poly {
+            coeffs,
+            constant,
+            ty,
+        } => {
             let w = get_w(*ty);
             let kb = poly_known_bits(w, coeffs, constant, |v| get_kb(v));
             (kb, Some(w))
@@ -215,7 +249,13 @@ fn ir_stmt_known_bits(
         Stmt::Transmute { src, dst_ty, .. } => {
             let w = get_w(*dst_ty);
             let kb = get_kb(src);
-            (KnownBits { known: mask_constant(kb.known, w), value: mask_constant(kb.value, w) }, Some(w))
+            (
+                KnownBits {
+                    known: mask_constant(kb.known, w),
+                    value: mask_constant(kb.value, w),
+                },
+                Some(w),
+            )
         }
         Stmt::Merge { parts, ty } => {
             let total_w = get_w(*ty);
@@ -224,33 +264,56 @@ fn ir_stmt_known_bits(
             let mut offset = 0usize;
             for part in parts {
                 let part_w = get_pw(part);
-                if part_w == 0 { break; }
+                if part_w == 0 {
+                    break;
+                }
                 let kb = get_kb(part);
                 let sk = constant_shl(mask_constant(kb.known, part_w), offset);
                 let sv = constant_shl(mask_constant(kb.value, part_w), offset);
                 known = constant_or(known, sk);
                 value = constant_or(value, sv);
                 offset += part_w;
-                if offset >= total_w { break; }
+                if offset >= total_w {
+                    break;
+                }
             }
             (KnownBits { known, value }, Some(total_w))
         }
         Stmt::Rol { src, ty, n } => {
             let w = get_w(*ty);
             let kb = get_kb(src);
-            (KnownBits { known: constant_rol(kb.known, w, *n), value: constant_rol(kb.value, w, *n) }, Some(w))
+            (
+                KnownBits {
+                    known: constant_rol(kb.known, w, *n),
+                    value: constant_rol(kb.value, w, *n),
+                },
+                Some(w),
+            )
         }
         Stmt::Ror { src, ty, n } => {
             let w = get_w(*ty);
             let kb = get_kb(src);
-            (KnownBits { known: constant_ror(kb.known, w, *n), value: constant_ror(kb.value, w, *n) }, Some(w))
+            (
+                KnownBits {
+                    known: constant_ror(kb.known, w, *n),
+                    value: constant_ror(kb.value, w, *n),
+                },
+                Some(w),
+            )
         }
         Stmt::Splat { src, ty } => {
             let w = get_w(*ty);
             let kb = get_kb(src);
             let kb_out = if kb.known.lo & 1 != 0 {
-                let fill = if kb.value.lo & 1 != 0 { ALL_ONES } else { Constant { hi: 0, lo: 0 } };
-                KnownBits { known: mask_constant(ALL_ONES, w), value: mask_constant(fill, w) }
+                let fill = if kb.value.lo & 1 != 0 {
+                    ALL_ONES
+                } else {
+                    Constant { hi: 0, lo: 0 }
+                };
+                KnownBits {
+                    known: mask_constant(ALL_ONES, w),
+                    value: mask_constant(fill, w),
+                }
             } else {
                 KnownBits::default()
             };
@@ -261,19 +324,26 @@ fn ir_stmt_known_bits(
             let mut known = Constant { hi: 0, lo: 0 };
             let mut value = Constant { hi: 0, lo: 0 };
             for (out_bit, (src_bit, src_var)) in result_bits.iter().enumerate() {
-                if out_bit >= 256 { break; }
+                if out_bit >= 256 {
+                    break;
+                }
                 let kb = get_kb(src_var);
                 let sb = *src_bit as usize;
                 let (ka, va) = if sb < 128 {
                     ((kb.known.lo >> sb) & 1, (kb.value.lo >> sb) & 1)
                 } else if sb < 256 {
-                    ((kb.known.hi >> (sb - 128)) & 1, (kb.value.hi >> (sb - 128)) & 1)
+                    (
+                        (kb.known.hi >> (sb - 128)) & 1,
+                        (kb.value.hi >> (sb - 128)) & 1,
+                    )
                 } else {
                     (0, 0)
                 };
                 if ka != 0 {
                     known = set_bit_in_constant(known, out_bit);
-                    if va != 0 { value = set_bit_in_constant(value, out_bit); }
+                    if va != 0 {
+                        value = set_bit_in_constant(value, out_bit);
+                    }
                 }
             }
             (KnownBits { known, value }, Some(w))
@@ -302,10 +372,7 @@ type IrStoreCache = BTreeMap<(StorageId, TypeId, IRVarId), IRVarId>;
 /// param injections to carry source values not already in their param list.
 ///
 /// Returns `true` if any block was modified.
-pub fn store_forward_ir_blocks<P: Clone>(
-    blocks: &mut IRBlocks<P>,
-    types: &TypeTable,
-) -> bool {
+pub fn store_forward_ir_blocks<P: Clone>(blocks: &mut IRBlocks<P>, types: &TypeTable) -> bool {
     let n = blocks.blocks.len();
     if n == 0 {
         return false;
@@ -345,15 +412,17 @@ pub fn store_forward_ir_blocks<P: Clone>(
             match &outgoing_caches[pi] {
                 None => BTreeMap::new(),
                 Some(pred_cache) => {
-                    translate_ir_cache_with_injection(
-                        pred_cache, pi, bi, blocks, &mut any_changed,
-                    )
+                    translate_ir_cache_with_injection(pred_cache, pi, bi, blocks, &mut any_changed)
                 }
             }
         } else {
             // Multiple predecessors: merge with param injection.
             merge_ir_caches_with_injection(
-                &preds[bi], &outgoing_caches, blocks, bi, &mut any_changed,
+                &preds[bi],
+                &outgoing_caches,
+                blocks,
+                bi,
+                &mut any_changed,
             )
         };
 
@@ -396,8 +465,12 @@ fn store_forward_ir_block_with_cache<P: Clone>(
         use volar_ir_common::Stmt;
         // Track constants and polynomials for GF(2) disambiguation.
         match &stmt {
-            Stmt::Const(c, _) => { const_map.insert(rv, *c); }
-            Stmt::Poly { coeffs, constant, .. } => {
+            Stmt::Const(c, _) => {
+                const_map.insert(rv, *c);
+            }
+            Stmt::Poly {
+                coeffs, constant, ..
+            } => {
                 addr_poly_map.insert(rv, (coeffs.clone(), *constant));
             }
             _ => {}
@@ -405,22 +478,36 @@ fn store_forward_ir_block_with_cache<P: Clone>(
         // Track bitwise known bits for the complementary bitwise check.
         let (kb, w) = ir_stmt_known_bits(&stmt, &known_bits_map, &width_map, types);
         known_bits_map.insert(rv, kb);
-        if let Some(w) = w { width_map.insert(rv, w); }
+        if let Some(w) = w {
+            width_map.insert(rv, w);
+        }
 
         match &stmt {
-            Stmt::StorageWrite { storage, src, ty, addr } => {
+            Stmt::StorageWrite {
+                storage,
+                src,
+                ty,
+                addr,
+            } => {
                 let src = canon_alias(&alias_map, *src);
                 let addr = canon_alias(&alias_map, *addr);
-                let slot_count = cache.keys()
+                let slot_count = cache
+                    .keys()
                     .filter(|(s, t, _)| s == storage && t == ty)
                     .count();
                 if slot_count >= MAX_CONCURRENT_STORES {
                     cache.retain(|(s, t, _), _| !(s == storage && t == ty));
                 } else {
                     cache.retain(|(s, t, cached_addr), _| {
-                        if s != storage || t != ty { return true; }
+                        if s != storage || t != ty {
+                            return true;
+                        }
                         ir_addrs_provably_different(
-                            addr, *cached_addr, &const_map, &addr_poly_map, &known_bits_map,
+                            addr,
+                            *cached_addr,
+                            &const_map,
+                            &addr_poly_map,
+                            &known_bits_map,
                         )
                     });
                 }
@@ -458,7 +545,11 @@ fn ir_terminator_succ_blocks(term: &IRTerminator) -> Vec<usize> {
     };
     match term {
         IRTerminator::Jmp { target } => push_block(&mut out, &target.dest),
-        IRTerminator::JumpCond { then_target, else_target, .. } => {
+        IRTerminator::JumpCond {
+            then_target,
+            else_target,
+            ..
+        } => {
             push_block(&mut out, &then_target.dest);
             push_block(&mut out, &else_target.dest);
         }
@@ -488,9 +579,11 @@ fn ir_edge_args(term: &IRTerminator, target_block: usize) -> Option<Vec<IRVarId>
     };
     match term {
         IRTerminator::Jmp { target } => from_target(target),
-        IRTerminator::JumpCond { then_target, else_target, .. } => {
-            from_target(then_target).or_else(|| from_target(else_target))
-        }
+        IRTerminator::JumpCond {
+            then_target,
+            else_target,
+            ..
+        } => from_target(then_target).or_else(|| from_target(else_target)),
         IRTerminator::JumpTable { cases, .. } => {
             for target in cases.values() {
                 if let Some(args) = from_target(target) {
@@ -514,7 +607,11 @@ fn add_ir_args_to_edges(term: &mut IRTerminator, target_block: usize, extra_args
     };
     match term {
         IRTerminator::Jmp { target } => extend_target(target),
-        IRTerminator::JumpCond { then_target, else_target, .. } => {
+        IRTerminator::JumpCond {
+            then_target,
+            else_target,
+            ..
+        } => {
             extend_target(then_target);
             extend_target(else_target);
         }
@@ -604,13 +701,36 @@ pub(crate) fn shift_ir_stmt_vars(
         Stmt::OracleOutput { call, .. } | Stmt::ActionOutput { call, .. } => {
             shift_var(call, old_base, n_stmts, shift);
         }
-        Stmt::ActionCall { guard, args, fallbacks, .. } => {
+        Stmt::ActionCall {
+            guard,
+            args,
+            fallbacks,
+            ..
+        } => {
             shift_var(guard, old_base, n_stmts, shift);
             for a in args.iter_mut() {
                 shift_var(a, old_base, n_stmts, shift);
             }
             for f in fallbacks.iter_mut() {
                 shift_var(f, old_base, n_stmts, shift);
+            }
+        }
+        Stmt::ActionStore {
+            guard,
+            args,
+            fallbacks,
+            targets,
+            ..
+        } => {
+            shift_var(guard, old_base, n_stmts, shift);
+            for a in args.iter_mut() {
+                shift_var(a, old_base, n_stmts, shift);
+            }
+            for f in fallbacks.iter_mut() {
+                shift_var(f, old_base, n_stmts, shift);
+            }
+            for target in targets.iter_mut() {
+                shift_var(&mut target.addr, old_base, n_stmts, shift);
             }
         }
         _ => {}
@@ -662,12 +782,7 @@ pub(crate) fn shift_ir_terminator_vars(
 }
 
 /// Shift all `IRVarId` references in a `BIrStmt`.
-fn shift_biir_stmt_vars(
-    stmt: &mut BIrStmt,
-    old_base: u32,
-    n_stmts: u32,
-    shift: u32,
-) {
+fn shift_biir_stmt_vars(stmt: &mut BIrStmt, old_base: u32, n_stmts: u32, shift: u32) {
     match stmt {
         BIrStmt::And(a, b) | BIrStmt::Or(a, b) | BIrStmt::Xor(a, b) => {
             shift_var(a, old_base, n_stmts, shift);
@@ -692,10 +807,20 @@ fn shift_biir_stmt_vars(
                 shift_var(a, old_base, n_stmts, shift);
             }
         }
-        BIrStmt::OracleBit { call, .. } | BIrStmt::ActionBit { call, .. } => {
+        BIrStmt::OracleBit { args, .. } => {
+            for a in args.iter_mut() {
+                shift_var(a, old_base, n_stmts, shift);
+            }
+        }
+        BIrStmt::OracleProjectedBit { call, .. } | BIrStmt::ActionBit { call, .. } => {
             shift_var(call, old_base, n_stmts, shift);
         }
-        BIrStmt::ActionCall { guard, args, fallback, .. } => {
+        BIrStmt::ActionCall {
+            guard,
+            args,
+            fallback,
+            ..
+        } => {
             shift_var(guard, old_base, n_stmts, shift);
             for a in args.iter_mut() {
                 shift_var(a, old_base, n_stmts, shift);
@@ -704,18 +829,29 @@ fn shift_biir_stmt_vars(
                 shift_var(f, old_base, n_stmts, shift);
             }
         }
+        BIrStmt::ActionStoreBit {
+            guard,
+            args,
+            fallback,
+            addr,
+            ..
+        } => {
+            shift_var(guard, old_base, n_stmts, shift);
+            for a in args.iter_mut() {
+                shift_var(a, old_base, n_stmts, shift);
+            }
+            shift_var(fallback, old_base, n_stmts, shift);
+            for a in addr.iter_mut() {
+                shift_var(a, old_base, n_stmts, shift);
+            }
+        }
         // Zero, One, Rng: no var references.
         _ => {}
     }
 }
 
 /// Shift all `IRVarId` references in a `BIrTarget`.
-fn shift_biir_target_vars(
-    target: &mut BIrTarget,
-    old_base: u32,
-    n_stmts: u32,
-    shift: u32,
-) {
+fn shift_biir_target_vars(target: &mut BIrTarget, old_base: u32, n_stmts: u32, shift: u32) {
     for v in target.args.iter_mut() {
         shift_var(v, old_base, n_stmts, shift);
     }
@@ -725,17 +861,16 @@ fn shift_biir_target_vars(
 }
 
 /// Shift all `IRVarId` references in a `BIrTerminator`.
-fn shift_biir_terminator_vars(
-    term: &mut BIrTerminator,
-    old_base: u32,
-    n_stmts: u32,
-    shift: u32,
-) {
+fn shift_biir_terminator_vars(term: &mut BIrTerminator, old_base: u32, n_stmts: u32, shift: u32) {
     match term {
         BIrTerminator::Jmp(target) => {
             shift_biir_target_vars(target, old_base, n_stmts, shift);
         }
-        BIrTerminator::CondJmp { val, then_target, else_target } => {
+        BIrTerminator::CondJmp {
+            val,
+            then_target,
+            else_target,
+        } => {
             shift_var(val, old_base, n_stmts, shift);
             shift_biir_target_vars(then_target, old_base, n_stmts, shift);
             shift_biir_target_vars(else_target, old_base, n_stmts, shift);
@@ -801,7 +936,12 @@ fn translate_ir_cache_with_injection<P: Clone>(
         for stmt in blocks.blocks[target_idx].stmts.iter_mut() {
             shift_ir_stmt_vars(&mut stmt.kind, old_n_params, n_stmts_u32, shift);
         }
-        shift_ir_terminator_vars(&mut blocks.blocks[target_idx].terminator, old_n_params, n_stmts_u32, shift);
+        shift_ir_terminator_vars(
+            &mut blocks.blocks[target_idx].terminator,
+            old_n_params,
+            n_stmts_u32,
+            shift,
+        );
 
         // Add provenance entries for new params (stmts provs are separate;
         // params don't need provenance, but stmt_provs length must still
@@ -809,7 +949,11 @@ fn translate_ir_cache_with_injection<P: Clone>(
 
         // Add source vars as extra args to every edge from predecessor to target.
         let extra_args: Vec<IRVarId> = injections.iter().map(|&(v, _)| v).collect();
-        add_ir_args_to_edges(&mut blocks.blocks[pred_idx].terminator, target_idx, &extra_args);
+        add_ir_args_to_edges(
+            &mut blocks.blocks[pred_idx].terminator,
+            target_idx,
+            &extra_args,
+        );
 
         *changed = true;
     }
@@ -950,15 +1094,8 @@ fn merge_ir_caches_with_injection<P: Clone>(
 
         // Extend each predecessor's edges with the injected source vars.
         for (pp, &pi) in pred_indices.iter().enumerate() {
-            let extra_args: Vec<IRVarId> = injections
-                .iter()
-                .map(|(_, srcs)| srcs[pp])
-                .collect();
-            add_ir_args_to_edges(
-                &mut blocks.blocks[pi].terminator,
-                target_idx,
-                &extra_args,
-            );
+            let extra_args: Vec<IRVarId> = injections.iter().map(|(_, srcs)| srcs[pp]).collect();
+            add_ir_args_to_edges(&mut blocks.blocks[pi].terminator, target_idx, &extra_args);
         }
 
         *changed = true;
@@ -1015,21 +1152,26 @@ pub fn store_forward_biir_blocks<P: Clone>(blocks: &mut BIrBlocks<P>) -> bool {
             let pi = preds[bi][0];
             match &outgoing_caches[pi] {
                 None => BTreeMap::new(),
-                Some(pred_cache) => {
-                    translate_biir_cache_with_injection(
-                        pred_cache, pi, bi, blocks, &mut any_changed,
-                    )
-                }
+                Some(pred_cache) => translate_biir_cache_with_injection(
+                    pred_cache,
+                    pi,
+                    bi,
+                    blocks,
+                    &mut any_changed,
+                ),
             }
         } else {
             // Multiple predecessors: merge with param injection.
             merge_biir_caches_with_injection(
-                &preds[bi], &outgoing_caches, blocks, bi, &mut any_changed,
+                &preds[bi],
+                &outgoing_caches,
+                blocks,
+                bi,
+                &mut any_changed,
             )
         };
 
-        let (changed, out) =
-            store_forward_biir_block_with_cache(&mut blocks.blocks[bi], incoming);
+        let (changed, out) = store_forward_biir_block_with_cache(&mut blocks.blocks[bi], incoming);
         any_changed |= changed;
         outgoing_caches[bi] = Some(out);
     }
@@ -1049,10 +1191,15 @@ fn biir_addrs_provably_different(
         return true;
     }
     for (a_bit, b_bit) in addr_a.iter().zip(addr_b.iter()) {
-        if a_bit == b_bit { continue; }
+        if a_bit == b_bit {
+            continue;
+        }
         let ka = known_map.get(a_bit).copied().flatten();
         let kb = known_map.get(b_bit).copied().flatten();
-        if matches!((ka, kb), (Some(true), Some(false)) | (Some(false), Some(true))) {
+        if matches!(
+            (ka, kb),
+            (Some(true), Some(false)) | (Some(false), Some(true))
+        ) {
             return true;
         }
     }
@@ -1082,13 +1229,21 @@ fn store_forward_biir_block_with_cache<P: Clone>(
         // Update known-bits map for this value.
         let known: Option<bool> = match &stmt {
             BIrStmt::Zero => Some(false),
-            BIrStmt::One  => Some(true),
-            BIrStmt::Not(a) => {
-                known_map.get(&canon_alias(&alias_map, *a)).copied().flatten().map(|b| !b)
-            }
+            BIrStmt::One => Some(true),
+            BIrStmt::Not(a) => known_map
+                .get(&canon_alias(&alias_map, *a))
+                .copied()
+                .flatten()
+                .map(|b| !b),
             BIrStmt::And(a, b) => {
-                let ka = known_map.get(&canon_alias(&alias_map, *a)).copied().flatten();
-                let kb = known_map.get(&canon_alias(&alias_map, *b)).copied().flatten();
+                let ka = known_map
+                    .get(&canon_alias(&alias_map, *a))
+                    .copied()
+                    .flatten();
+                let kb = known_map
+                    .get(&canon_alias(&alias_map, *b))
+                    .copied()
+                    .flatten();
                 match (ka, kb) {
                     (Some(false), _) | (_, Some(false)) => Some(false),
                     (Some(true), Some(true)) => Some(true),
@@ -1096,8 +1251,14 @@ fn store_forward_biir_block_with_cache<P: Clone>(
                 }
             }
             BIrStmt::Or(a, b) => {
-                let ka = known_map.get(&canon_alias(&alias_map, *a)).copied().flatten();
-                let kb = known_map.get(&canon_alias(&alias_map, *b)).copied().flatten();
+                let ka = known_map
+                    .get(&canon_alias(&alias_map, *a))
+                    .copied()
+                    .flatten();
+                let kb = known_map
+                    .get(&canon_alias(&alias_map, *b))
+                    .copied()
+                    .flatten();
                 match (ka, kb) {
                     (Some(true), _) | (_, Some(true)) => Some(true),
                     (Some(false), Some(false)) => Some(false),
@@ -1105,8 +1266,14 @@ fn store_forward_biir_block_with_cache<P: Clone>(
                 }
             }
             BIrStmt::Xor(a, b) => {
-                let ka = known_map.get(&canon_alias(&alias_map, *a)).copied().flatten();
-                let kb = known_map.get(&canon_alias(&alias_map, *b)).copied().flatten();
+                let ka = known_map
+                    .get(&canon_alias(&alias_map, *a))
+                    .copied()
+                    .flatten();
+                let kb = known_map
+                    .get(&canon_alias(&alias_map, *b))
+                    .copied()
+                    .flatten();
                 ka.and_then(|a| kb.map(|b| a ^ b))
             }
             _ => None,
@@ -1114,23 +1281,35 @@ fn store_forward_biir_block_with_cache<P: Clone>(
         known_map.insert(rv, known);
 
         match &stmt {
-            BIrStmt::StorageWrite { storage, lane, src, addr } => {
+            BIrStmt::StorageWrite {
+                storage,
+                lane,
+                src,
+                addr,
+            } => {
                 let src = canon_alias(&alias_map, *src);
                 let addr: Vec<IRVarId> = addr.iter().map(|v| canon_alias(&alias_map, *v)).collect();
-                let slot_count = cache.keys()
+                let slot_count = cache
+                    .keys()
                     .filter(|(s, l, _)| s == storage && l == lane)
                     .count();
                 if slot_count >= MAX_CONCURRENT_STORES {
                     cache.retain(|(s, l, _), _| !(s == storage && l == lane));
                 } else {
                     cache.retain(|(s, l, cached_addr), _| {
-                        if s != storage || l != lane { return true; }
+                        if s != storage || l != lane {
+                            return true;
+                        }
                         biir_addrs_provably_different(&addr, cached_addr, &known_map)
                     });
                 }
                 cache.insert((*storage, *lane, addr), src);
             }
-            BIrStmt::StorageRead { storage, lane, addr } => {
+            BIrStmt::StorageRead {
+                storage,
+                lane,
+                addr,
+            } => {
                 let addr: Vec<IRVarId> = addr.iter().map(|v| canon_alias(&alias_map, *v)).collect();
                 let key = (*storage, *lane, addr);
                 if let Some(&src) = cache.get(&key) {
@@ -1158,7 +1337,11 @@ fn biir_terminator_succ_blocks(term: &BIrTerminator) -> Vec<usize> {
                 out.push(b.0 as usize);
             }
         }
-        BIrTerminator::CondJmp { then_target, else_target, .. } => {
+        BIrTerminator::CondJmp {
+            then_target,
+            else_target,
+            ..
+        } => {
             if let IRBlockTargetId::Block(b) = &then_target.block {
                 out.push(b.0 as usize);
             }
@@ -1185,7 +1368,11 @@ fn biir_edge_args(term: &BIrTerminator, target_block: usize) -> Option<Vec<IRVar
             }
             None
         }
-        BIrTerminator::CondJmp { then_target, else_target, .. } => {
+        BIrTerminator::CondJmp {
+            then_target,
+            else_target,
+            ..
+        } => {
             if let IRBlockTargetId::Block(b) = &then_target.block {
                 if b.0 as usize == target_block {
                     return Some(then_target.args.clone());
@@ -1203,11 +1390,7 @@ fn biir_edge_args(term: &BIrTerminator, target_block: usize) -> Option<Vec<IRVar
 }
 
 /// Append `extra_args` to every edge in `term` that targets `target_block`.
-fn add_biir_args_to_edges(
-    term: &mut BIrTerminator,
-    target_block: usize,
-    extra_args: &[IRVarId],
-) {
+fn add_biir_args_to_edges(term: &mut BIrTerminator, target_block: usize, extra_args: &[IRVarId]) {
     match term {
         BIrTerminator::Jmp(target) => {
             if let IRBlockTargetId::Block(b) = &target.block {
@@ -1216,7 +1399,11 @@ fn add_biir_args_to_edges(
                 }
             }
         }
-        BIrTerminator::CondJmp { then_target, else_target, .. } => {
+        BIrTerminator::CondJmp {
+            then_target,
+            else_target,
+            ..
+        } => {
             if let IRBlockTargetId::Block(b) = &then_target.block {
                 if b.0 as usize == target_block {
                     then_target.args.extend_from_slice(extra_args);
@@ -1259,7 +1446,11 @@ fn translate_biir_cache_with_injection<P: Clone>(
 
     for ((s, w, addr_p), &src_p) in pred_cache {
         // Translate each bit of the address vec; skip entry if any bit is untranslatable.
-        let addr_b: Vec<IRVarId> = match addr_p.iter().map(|v| trans.get(v).copied()).collect::<Option<Vec<_>>>() {
+        let addr_b: Vec<IRVarId> = match addr_p
+            .iter()
+            .map(|v| trans.get(v).copied())
+            .collect::<Option<Vec<_>>>()
+        {
             Some(a) => a,
             None => continue,
         };
@@ -1286,7 +1477,12 @@ fn translate_biir_cache_with_injection<P: Clone>(
         for stmt in blocks.blocks[target_idx].stmts.iter_mut() {
             shift_biir_stmt_vars(&mut stmt.kind, old_n_params, n_stmts_u32, shift);
         }
-        shift_biir_terminator_vars(&mut blocks.blocks[target_idx].terminator, old_n_params, n_stmts_u32, shift);
+        shift_biir_terminator_vars(
+            &mut blocks.blocks[target_idx].terminator,
+            old_n_params,
+            n_stmts_u32,
+            shift,
+        );
 
         // Add source vars as extra args to predecessor edges.
         add_biir_args_to_edges(
@@ -1335,7 +1531,10 @@ fn merge_biir_caches_with_injection<P: Clone>(
         let entries: BTreeMap<_, _> = pred_cache
             .iter()
             .filter_map(|((s, w, addr_p), &src_p)| {
-                let addr_t: Vec<IRVarId> = addr_p.iter().map(|v| trans.get(v).copied()).collect::<Option<Vec<_>>>()?;
+                let addr_t: Vec<IRVarId> = addr_p
+                    .iter()
+                    .map(|v| trans.get(v).copied())
+                    .collect::<Option<Vec<_>>>()?;
                 Some(((*s, *w, addr_t), src_p))
             })
             .collect();
@@ -1365,9 +1564,7 @@ fn merge_biir_caches_with_injection<P: Clone>(
 
     for (s, w, addr_t) in common_keys {
         let key = (s, w, addr_t);
-        let src_per_pred: Vec<IRVarId> = (0..n_preds)
-            .map(|pp| translated[pp][&key])
-            .collect();
+        let src_per_pred: Vec<IRVarId> = (0..n_preds).map(|pp| translated[pp][&key]).collect();
 
         let translated_srcs: Vec<Option<IRVarId>> = src_per_pred
             .iter()
@@ -1399,19 +1596,17 @@ fn merge_biir_caches_with_injection<P: Clone>(
         for stmt in blocks.blocks[target_idx].stmts.iter_mut() {
             shift_biir_stmt_vars(&mut stmt.kind, old_n_params, n_stmts_u32, shift);
         }
-        shift_biir_terminator_vars(&mut blocks.blocks[target_idx].terminator, old_n_params, n_stmts_u32, shift);
+        shift_biir_terminator_vars(
+            &mut blocks.blocks[target_idx].terminator,
+            old_n_params,
+            n_stmts_u32,
+            shift,
+        );
 
         // Extend each predecessor's edges.
         for (pp, &pi) in pred_indices.iter().enumerate() {
-            let extra_args: Vec<IRVarId> = injections
-                .iter()
-                .map(|srcs| srcs[pp])
-                .collect();
-            add_biir_args_to_edges(
-                &mut blocks.blocks[pi].terminator,
-                target_idx,
-                &extra_args,
-            );
+            let extra_args: Vec<IRVarId> = injections.iter().map(|srcs| srcs[pp]).collect();
+            add_biir_args_to_edges(&mut blocks.blocks[pi].terminator, target_idx, &extra_args);
         }
 
         *changed = true;
@@ -1425,14 +1620,13 @@ fn merge_biir_caches_with_injection<P: Clone>(
 // ============================================================================
 
 /// Extract the GF(2) polynomial representation of a VAFFLE address value.
-fn vaffle_addr_poly(
-    values: &[Node<Value>],
-    v: ValueId,
-) -> (BTreeMap<Vec<ValueId>, u8>, Constant) {
+fn vaffle_addr_poly(values: &[Node<Value>], v: ValueId) -> (BTreeMap<Vec<ValueId>, u8>, Constant) {
     use volar_ir_common::Stmt;
     match &values[v.0].kind {
         Value::Op(Stmt::Const(c, _)) => (BTreeMap::new(), *c),
-        Value::Op(Stmt::Poly { coeffs, constant, .. }) => (coeffs.clone(), *constant),
+        Value::Op(Stmt::Poly {
+            coeffs, constant, ..
+        }) => (coeffs.clone(), *constant),
         _ => {
             let mut m = BTreeMap::new();
             m.insert(alloc::vec![v], 1u8);
@@ -1472,7 +1666,11 @@ fn vaffle_value_known_bits(
             let w = get_w(*ty);
             (KnownBits::from_const(*c, w), w)
         }
-        Value::Op(Stmt::Poly { coeffs, constant, ty }) => {
+        Value::Op(Stmt::Poly {
+            coeffs,
+            constant,
+            ty,
+        }) => {
             let w = get_w(*ty);
             let kb = poly_known_bits(w, coeffs, constant, |v| get_kb(*v));
             (kb, w)
@@ -1480,7 +1678,13 @@ fn vaffle_value_known_bits(
         Value::Op(Stmt::Transmute { src, dst_ty, .. }) => {
             let w = get_w(*dst_ty);
             let kb = get_kb(*src);
-            (KnownBits { known: mask_constant(kb.known, w), value: mask_constant(kb.value, w) }, w)
+            (
+                KnownBits {
+                    known: mask_constant(kb.known, w),
+                    value: mask_constant(kb.value, w),
+                },
+                w,
+            )
         }
         Value::Op(Stmt::Merge { parts, ty }) => {
             let total_w = get_w(*ty);
@@ -1489,33 +1693,56 @@ fn vaffle_value_known_bits(
             let mut offset = 0usize;
             for &part in parts {
                 let part_w = get_pw(part);
-                if part_w == 0 { break; }
+                if part_w == 0 {
+                    break;
+                }
                 let kb = get_kb(part);
                 let sk = constant_shl(mask_constant(kb.known, part_w), offset);
                 let sv = constant_shl(mask_constant(kb.value, part_w), offset);
                 known = constant_or(known, sk);
                 value = constant_or(value, sv);
                 offset += part_w;
-                if offset >= total_w { break; }
+                if offset >= total_w {
+                    break;
+                }
             }
             (KnownBits { known, value }, total_w)
         }
         Value::Op(Stmt::Rol { src, ty, n }) => {
             let w = get_w(*ty);
             let kb = get_kb(*src);
-            (KnownBits { known: constant_rol(kb.known, w, *n), value: constant_rol(kb.value, w, *n) }, w)
+            (
+                KnownBits {
+                    known: constant_rol(kb.known, w, *n),
+                    value: constant_rol(kb.value, w, *n),
+                },
+                w,
+            )
         }
         Value::Op(Stmt::Ror { src, ty, n }) => {
             let w = get_w(*ty);
             let kb = get_kb(*src);
-            (KnownBits { known: constant_ror(kb.known, w, *n), value: constant_ror(kb.value, w, *n) }, w)
+            (
+                KnownBits {
+                    known: constant_ror(kb.known, w, *n),
+                    value: constant_ror(kb.value, w, *n),
+                },
+                w,
+            )
         }
         Value::Op(Stmt::Splat { src, ty }) => {
             let w = get_w(*ty);
             let kb = get_kb(*src);
             let kb_out = if kb.known.lo & 1 != 0 {
-                let fill = if kb.value.lo & 1 != 0 { ALL_ONES } else { Constant { hi: 0, lo: 0 } };
-                KnownBits { known: mask_constant(ALL_ONES, w), value: mask_constant(fill, w) }
+                let fill = if kb.value.lo & 1 != 0 {
+                    ALL_ONES
+                } else {
+                    Constant { hi: 0, lo: 0 }
+                };
+                KnownBits {
+                    known: mask_constant(ALL_ONES, w),
+                    value: mask_constant(fill, w),
+                }
             } else {
                 KnownBits::default()
             };
@@ -1526,19 +1753,26 @@ fn vaffle_value_known_bits(
             let mut known = Constant { hi: 0, lo: 0 };
             let mut value = Constant { hi: 0, lo: 0 };
             for (out_bit, (src_bit, src_var)) in result_bits.iter().enumerate() {
-                if out_bit >= 256 { break; }
+                if out_bit >= 256 {
+                    break;
+                }
                 let kb = get_kb(*src_var);
                 let sb = *src_bit as usize;
                 let (ka, va) = if sb < 128 {
                     ((kb.known.lo >> sb) & 1, (kb.value.lo >> sb) & 1)
                 } else if sb < 256 {
-                    ((kb.known.hi >> (sb - 128)) & 1, (kb.value.hi >> (sb - 128)) & 1)
+                    (
+                        (kb.known.hi >> (sb - 128)) & 1,
+                        (kb.value.hi >> (sb - 128)) & 1,
+                    )
                 } else {
                     (0, 0)
                 };
                 if ka != 0 {
                     known = set_bit_in_constant(known, out_bit);
-                    if va != 0 { value = set_bit_in_constant(value, out_bit); }
+                    if va != 0 {
+                        value = set_bit_in_constant(value, out_bit);
+                    }
                 }
             }
             (KnownBits { known, value }, w)
@@ -1571,8 +1805,12 @@ fn vaffle_addrs_provably_different(
     a: ValueId,
     b: ValueId,
 ) -> bool {
-    if a == b { return false; }
-    if vaffle_polys_xor_nonzero_const(values, a, b) { return true; }
+    if a == b {
+        return false;
+    }
+    if vaffle_polys_xor_nonzero_const(values, a, b) {
+        return true;
+    }
     let kb_a = kb_vec.get(a.0).copied().unwrap_or_default();
     let kb_b = kb_vec.get(b.0).copied().unwrap_or_default();
     kb_a.xor_has_one_bit(kb_b)
@@ -1611,8 +1849,7 @@ fn store_forward_vaffle_body(body: &mut FuncBody, types: &TypeTable) -> bool {
 
     if n == 1 {
         // Fast path: no CFG needed.
-        let (changed, _) =
-            store_forward_vaffle_block_with_cache(body, &kb_vec, 0, BTreeMap::new());
+        let (changed, _) = store_forward_vaffle_block_with_cache(body, &kb_vec, 0, BTreeMap::new());
         return changed;
     }
 
@@ -1660,12 +1897,7 @@ fn compute_rpo(n: usize, entry: usize, succs: &[Vec<usize>]) -> Vec<usize> {
     post_order
 }
 
-fn dfs_post(
-    node: usize,
-    succs: &[Vec<usize>],
-    visited: &mut Vec<bool>,
-    post: &mut Vec<usize>,
-) {
+fn dfs_post(node: usize, succs: &[Vec<usize>], visited: &mut Vec<bool>, post: &mut Vec<usize>) {
     if visited[node] {
         return;
     }
@@ -1682,10 +1914,18 @@ fn vaffle_block_succs(term: &vaffle::Terminator) -> Vec<usize> {
     match term {
         Terminator::Return { .. } | Terminator::ReturnCall { .. } => Vec::new(),
         Terminator::Jump(t) => alloc::vec![t.block.0],
-        Terminator::IfNonzero { then_target, else_target, .. } => {
+        Terminator::IfNonzero {
+            then_target,
+            else_target,
+            ..
+        } => {
             alloc::vec![then_target.block.0, else_target.block.0]
         }
-        Terminator::Table { targets, default_target, .. } => {
+        Terminator::Table {
+            targets,
+            default_target,
+            ..
+        } => {
             let mut v: Vec<usize> = targets.iter().map(|t| t.block.0).collect();
             v.push(default_target.block.0);
             v
@@ -1723,8 +1963,17 @@ fn intersect_vaffle_caches(
 
 /// Extracted, `Copy`-only fields from a VAFFLE `StorageWrite` or `StorageRead`.
 enum VaffleStoreAction {
-    Write { storage: StorageId, src: ValueId, ty: TypeId, addr: ValueId },
-    Read  { storage: StorageId, ty: TypeId, addr: ValueId },
+    Write {
+        storage: StorageId,
+        src: ValueId,
+        ty: TypeId,
+        addr: ValueId,
+    },
+    Read {
+        storage: StorageId,
+        ty: TypeId,
+        addr: ValueId,
+    },
 }
 
 /// Forward stores in a single block starting from `incoming` cache.
@@ -1753,29 +2002,36 @@ fn store_forward_vaffle_block_with_cache(
         // Extract only the Copy fields we need — Value doesn't implement Clone.
         use volar_ir_common::Stmt;
         let action: Option<VaffleStoreAction> = match &body.values[vid.0].kind {
-            Value::Op(Stmt::StorageWrite { storage, src, ty, addr }) => {
-                Some(VaffleStoreAction::Write {
-                    storage: *storage,
-                    src: *src,
-                    ty: *ty,
-                    addr: *addr,
-                })
-            }
-            Value::Op(Stmt::StorageRead { storage, ty, addr }) => {
-                Some(VaffleStoreAction::Read {
-                    storage: *storage,
-                    ty: *ty,
-                    addr: *addr,
-                })
-            }
+            Value::Op(Stmt::StorageWrite {
+                storage,
+                src,
+                ty,
+                addr,
+            }) => Some(VaffleStoreAction::Write {
+                storage: *storage,
+                src: *src,
+                ty: *ty,
+                addr: *addr,
+            }),
+            Value::Op(Stmt::StorageRead { storage, ty, addr }) => Some(VaffleStoreAction::Read {
+                storage: *storage,
+                ty: *ty,
+                addr: *addr,
+            }),
             _ => None,
         };
 
         match action {
-            Some(VaffleStoreAction::Write { storage, src, ty, addr }) => {
+            Some(VaffleStoreAction::Write {
+                storage,
+                src,
+                ty,
+                addr,
+            }) => {
                 let src = canon_alias(&alias_map, src);
                 let addr = canon_alias(&alias_map, addr);
-                let slot_count = cache.keys()
+                let slot_count = cache
+                    .keys()
                     .filter(|(s, t, _)| *s == storage && *t == ty)
                     .count();
                 if slot_count >= MAX_CONCURRENT_STORES {
@@ -1783,7 +2039,9 @@ fn store_forward_vaffle_block_with_cache(
                 } else {
                     let vals = &body.values;
                     cache.retain(|(s, t, cached_addr), _| {
-                        if *s != storage || *t != ty { return true; }
+                        if *s != storage || *t != ty {
+                            return true;
+                        }
                         vaffle_addrs_provably_different(vals, kb_vec, addr, *cached_addr)
                     });
                 }
@@ -1807,10 +2065,8 @@ fn store_forward_vaffle_block_with_cache(
 
     // Rewrite the block terminator through alias_map.
     if !alias_map.is_empty() {
-        changed |= apply_aliases_to_vaffle_terminator(
-            &mut body.blocks[block_idx].terminator,
-            &alias_map,
-        );
+        changed |=
+            apply_aliases_to_vaffle_terminator(&mut body.blocks[block_idx].terminator, &alias_map);
     }
 
     (changed, cache)
@@ -1855,13 +2111,22 @@ fn apply_aliases_to_vaffle_stmt(
     match stmt {
         Stmt::StorageRead { addr, .. } => {
             let c = canon_alias(alias_map, *addr);
-            if c != *addr { *addr = c; changed = true; }
+            if c != *addr {
+                *addr = c;
+                changed = true;
+            }
         }
         Stmt::StorageWrite { src, addr, .. } => {
             let cs = canon_alias(alias_map, *src);
-            if cs != *src { *src = cs; changed = true; }
+            if cs != *src {
+                *src = cs;
+                changed = true;
+            }
             let ca = canon_alias(alias_map, *addr);
-            if ca != *addr { *addr = ca; changed = true; }
+            if ca != *addr {
+                *addr = ca;
+                changed = true;
+            }
         }
         Stmt::Poly { coeffs, .. } => {
             let old = core::mem::take(coeffs);
@@ -1874,7 +2139,9 @@ fn apply_aliases_to_vaffle_stmt(
                     .iter()
                     .map(|&v| {
                         let w = canon_alias(alias_map, v);
-                        if w != v { changed = true; }
+                        if w != v {
+                            changed = true;
+                        }
                         w
                     })
                     .collect();
@@ -1887,45 +2154,77 @@ fn apply_aliases_to_vaffle_stmt(
         | Stmt::Ror { src, .. }
         | Stmt::Splat { src, .. } => {
             let c = canon_alias(alias_map, *src);
-            if c != *src { *src = c; changed = true; }
+            if c != *src {
+                *src = c;
+                changed = true;
+            }
         }
         Stmt::Merge { parts, .. } => {
             for p in parts.iter_mut() {
                 let c = canon_alias(alias_map, *p);
-                if c != *p { *p = c; changed = true; }
+                if c != *p {
+                    *p = c;
+                    changed = true;
+                }
             }
         }
         Stmt::Shuffle { result_bits, .. } => {
             for (_, v) in result_bits.iter_mut() {
                 let c = canon_alias(alias_map, *v);
-                if c != *v { *v = c; changed = true; }
+                if c != *v {
+                    *v = c;
+                    changed = true;
+                }
             }
         }
         Stmt::OracleCall { args, .. } => {
             for a in args.iter_mut() {
                 let c = canon_alias(alias_map, *a);
-                if c != *a { *a = c; changed = true; }
+                if c != *a {
+                    *a = c;
+                    changed = true;
+                }
             }
         }
         Stmt::OracleOutput { call, .. } => {
             let c = canon_alias(alias_map, *call);
-            if c != *call { *call = c; changed = true; }
+            if c != *call {
+                *call = c;
+                changed = true;
+            }
         }
-        Stmt::ActionCall { guard, args, fallbacks, .. } => {
+        Stmt::ActionCall {
+            guard,
+            args,
+            fallbacks,
+            ..
+        } => {
             let cg = canon_alias(alias_map, *guard);
-            if cg != *guard { *guard = cg; changed = true; }
+            if cg != *guard {
+                *guard = cg;
+                changed = true;
+            }
             for a in args.iter_mut() {
                 let c = canon_alias(alias_map, *a);
-                if c != *a { *a = c; changed = true; }
+                if c != *a {
+                    *a = c;
+                    changed = true;
+                }
             }
             for f in fallbacks.iter_mut() {
                 let c = canon_alias(alias_map, *f);
-                if c != *f { *f = c; changed = true; }
+                if c != *f {
+                    *f = c;
+                    changed = true;
+                }
             }
         }
         Stmt::ActionOutput { call, .. } => {
             let c = canon_alias(alias_map, *call);
-            if c != *call { *call = c; changed = true; }
+            if c != *call {
+                *call = c;
+                changed = true;
+            }
         }
         Stmt::Const(_, _) | Stmt::Rng { .. } => {}
         _ => {}
@@ -1943,21 +2242,38 @@ fn apply_aliases_to_vaffle_terminator(
         Terminator::Return { values } => {
             for v in values.iter_mut() {
                 let c = canon_alias(alias_map, *v);
-                if c != *v { *v = c; changed = true; }
+                if c != *v {
+                    *v = c;
+                    changed = true;
+                }
             }
         }
         Terminator::Jump(target) => {
             changed |= apply_aliases_to_vaffle_target(target, alias_map);
         }
-        Terminator::IfNonzero { cond, then_target, else_target } => {
+        Terminator::IfNonzero {
+            cond,
+            then_target,
+            else_target,
+        } => {
             let c = canon_alias(alias_map, *cond);
-            if c != *cond { *cond = c; changed = true; }
+            if c != *cond {
+                *cond = c;
+                changed = true;
+            }
             changed |= apply_aliases_to_vaffle_target(then_target, alias_map);
             changed |= apply_aliases_to_vaffle_target(else_target, alias_map);
         }
-        Terminator::Table { index, targets, default_target } => {
+        Terminator::Table {
+            index,
+            targets,
+            default_target,
+        } => {
             let c = canon_alias(alias_map, *index);
-            if c != *index { *index = c; changed = true; }
+            if c != *index {
+                *index = c;
+                changed = true;
+            }
             for t in targets.iter_mut() {
                 changed |= apply_aliases_to_vaffle_target(t, alias_map);
             }
@@ -1975,7 +2291,10 @@ fn apply_aliases_to_vaffle_target(
     let mut changed = false;
     for v in target.args.iter_mut() {
         let c = canon_alias(alias_map, *v);
-        if c != *v { *v = c; changed = true; }
+        if c != *v {
+            *v = c;
+            changed = true;
+        }
     }
     changed
 }
@@ -1992,12 +2311,21 @@ mod tests {
     use volar_ir_common::{Constant, Stmt, StorageId, TypeId};
 
     fn jmp_self() -> IRTerminator {
-        IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(0)), vec![],) }
+        IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(0)), vec![]),
+        }
     }
 
     fn make_block(params: Vec<TypeId>, stmts: Vec<Stmt<IRVarId, IRVarId>>) -> IRBlock<()> {
-        let stmts = stmts.into_iter().map(|s| volar_ir_common::Node::new(s, (), None)).collect();
-        IRBlock { params, stmts, terminator: jmp_self() }
+        let stmts = stmts
+            .into_iter()
+            .map(|s| volar_ir_common::Node::new(s, (), None))
+            .collect();
+        IRBlock {
+            params,
+            stmts,
+            terminator: jmp_self(),
+        }
     }
 
     fn const_addr(lo: u128) -> Stmt<IRVarId, IRVarId> {
@@ -2018,14 +2346,32 @@ mod tests {
         let st = StorageId(0);
         let ty = TypeId(0);
         let stmts = vec![
-            const_addr(0),                                                             // v0
-            const_addr(1),                                                             // v1
-            Stmt::Const(Constant { hi: 0, lo: 42 }, TypeId(0)),                       // v2
-            Stmt::Const(Constant { hi: 0, lo: 99 }, TypeId(0)),                       // v3
-            Stmt::StorageWrite { storage: st, src: IRVarId(2), ty, addr: IRVarId(0) }, // v4
-            Stmt::StorageWrite { storage: st, src: IRVarId(3), ty, addr: IRVarId(1) }, // v5
-            Stmt::StorageRead { storage: st, ty, addr: IRVarId(0) },                   // v6 → alias v2
-            Stmt::StorageRead { storage: st, ty, addr: IRVarId(1) },                   // v7 → alias v3
+            const_addr(0),                                      // v0
+            const_addr(1),                                      // v1
+            Stmt::Const(Constant { hi: 0, lo: 42 }, TypeId(0)), // v2
+            Stmt::Const(Constant { hi: 0, lo: 99 }, TypeId(0)), // v3
+            Stmt::StorageWrite {
+                storage: st,
+                src: IRVarId(2),
+                ty,
+                addr: IRVarId(0),
+            }, // v4
+            Stmt::StorageWrite {
+                storage: st,
+                src: IRVarId(3),
+                ty,
+                addr: IRVarId(1),
+            }, // v5
+            Stmt::StorageRead {
+                storage: st,
+                ty,
+                addr: IRVarId(0),
+            }, // v6 → alias v2
+            Stmt::StorageRead {
+                storage: st,
+                ty,
+                addr: IRVarId(1),
+            }, // v7 → alias v3
         ];
         let mut blocks = IRBlocks::new(vec![make_block(vec![], stmts)]);
         let types = volar_ir_common::TypeTable::new();
@@ -2044,11 +2390,25 @@ mod tests {
         let st = StorageId(0);
         let ty = TypeId(0);
         let stmts = vec![
-            Stmt::Const(Constant { hi: 0, lo: 0 }, TypeId(0)),                        // v1
-            Stmt::Const(Constant { hi: 0, lo: 42 }, TypeId(0)),                       // v2
-            Stmt::StorageWrite { storage: st, src: IRVarId(2), ty, addr: IRVarId(1) }, // v3
-            Stmt::StorageWrite { storage: st, src: IRVarId(2), ty, addr: IRVarId(0) }, // v4 (opaque)
-            Stmt::StorageRead { storage: st, ty, addr: IRVarId(1) },                   // v5 — not forwarded
+            Stmt::Const(Constant { hi: 0, lo: 0 }, TypeId(0)), // v1
+            Stmt::Const(Constant { hi: 0, lo: 42 }, TypeId(0)), // v2
+            Stmt::StorageWrite {
+                storage: st,
+                src: IRVarId(2),
+                ty,
+                addr: IRVarId(1),
+            }, // v3
+            Stmt::StorageWrite {
+                storage: st,
+                src: IRVarId(2),
+                ty,
+                addr: IRVarId(0),
+            }, // v4 (opaque)
+            Stmt::StorageRead {
+                storage: st,
+                ty,
+                addr: IRVarId(1),
+            }, // v5 — not forwarded
         ];
         let mut blocks = IRBlocks::new(vec![make_block(vec![TypeId(0)], stmts)]);
         let types = volar_ir_common::TypeTable::new();

@@ -92,7 +92,9 @@ impl CorpusCase {
             "{decls}  printf(\"{fmt}\\n\", {cast}{call});",
             fmt = self.c_ret_fmt,
             cast = self.c_ret_cast,
-            call = self.c_call_template ) }
+            call = self.c_call_template
+        )
+    }
 }
 
 // ============================================================================
@@ -143,85 +145,134 @@ use volar_ir::ir::{
 };
 use volar_ir_common::{Constant, IrType as CommonIrType, Type};
 
-fn node<T>(kind: T) -> volar_ir_common::Node<T, ()> { volar_ir_common::Node::new(kind, (), None) }
+fn node<T>(kind: T) -> volar_ir_common::Node<T, ()> {
+    volar_ir_common::Node::new(kind, (), None)
+}
 
 /// 1-bit identity: return the input.
 pub fn make_biir_identity() -> BIrBlocks {
-    BIrBlocks { blocks: vec![BIrBlock {
-        params: 1,
-        stmts: vec![],
-        terminator: BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Return, args: vec![IRVarId(0)]}),
-    }], pre_init: vec![] }
+    BIrBlocks {
+        blocks: vec![BIrBlock {
+            params: 1,
+            stmts: vec![],
+            terminator: BIrTerminator::Jmp(BIrTarget {
+                block: IRBlockTargetId::Return,
+                args: vec![IRVarId(0)],
+            }),
+        }],
+        pre_init: vec![],
+    }
 }
 
 /// 1-bit NOT.
 pub fn make_biir_not() -> BIrBlocks {
-    BIrBlocks { blocks: vec![BIrBlock {
-        params: 1,
-        stmts: vec![node(BIrStmt::Not(IRVarId(0)))],
-        terminator: BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Return, args: vec![IRVarId(1)]}),
-    }], pre_init: vec![] }
+    BIrBlocks {
+        blocks: vec![BIrBlock {
+            params: 1,
+            stmts: vec![node(BIrStmt::Not(IRVarId(0)))],
+            terminator: BIrTerminator::Jmp(BIrTarget {
+                block: IRBlockTargetId::Return,
+                args: vec![IRVarId(1)],
+            }),
+        }],
+        pre_init: vec![],
+    }
 }
 
 /// 2-bit AND.
 pub fn make_biir_and() -> BIrBlocks {
-    BIrBlocks { blocks: vec![BIrBlock {
-        params: 2,
-        stmts: vec![node(BIrStmt::And(IRVarId(0), IRVarId(1)))],
-        terminator: BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Return, args: vec![IRVarId(2)]}),
-    }], pre_init: vec![] }
+    BIrBlocks {
+        blocks: vec![BIrBlock {
+            params: 2,
+            stmts: vec![node(BIrStmt::And(IRVarId(0), IRVarId(1)))],
+            terminator: BIrTerminator::Jmp(BIrTarget {
+                block: IRBlockTargetId::Return,
+                args: vec![IRVarId(2)],
+            }),
+        }],
+        pre_init: vec![],
+    }
 }
 
 /// 2-bit XOR.
 pub fn make_biir_xor() -> BIrBlocks {
-    BIrBlocks { blocks: vec![BIrBlock {
-        params: 2,
-        stmts: vec![node(BIrStmt::Xor(IRVarId(0), IRVarId(1)))],
-        terminator: BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Return, args: vec![IRVarId(2)]}),
-    }], pre_init: vec![] }
+    BIrBlocks {
+        blocks: vec![BIrBlock {
+            params: 2,
+            stmts: vec![node(BIrStmt::Xor(IRVarId(0), IRVarId(1)))],
+            terminator: BIrTerminator::Jmp(BIrTarget {
+                block: IRBlockTargetId::Return,
+                args: vec![IRVarId(2)],
+            }),
+        }],
+        pre_init: vec![],
+    }
 }
 
 /// Half adder: 2 inputs → (sum=XOR, carry=AND) packed as 2-bit output.
 pub fn make_biir_half_adder() -> BIrBlocks {
-    BIrBlocks { blocks: vec![BIrBlock {
-        params: 2,
-        stmts: vec![
-            node(BIrStmt::Xor(IRVarId(0), IRVarId(1))), // var 2 = sum
-            node(BIrStmt::And(IRVarId(0), IRVarId(1))), // var 3 = carry
-        ],
-        terminator: BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Return, args: vec![IRVarId(2), IRVarId(3)], // [sum, carry] packed LSB-first
-        }),
-    }], pre_init: vec![] }
+    BIrBlocks {
+        blocks: vec![BIrBlock {
+            params: 2,
+            stmts: vec![
+                node(BIrStmt::Xor(IRVarId(0), IRVarId(1))), // var 2 = sum
+                node(BIrStmt::And(IRVarId(0), IRVarId(1))), // var 3 = carry
+            ],
+            terminator: BIrTerminator::Jmp(BIrTarget {
+                block: IRBlockTargetId::Return,
+                args: vec![IRVarId(2), IRVarId(3)], // [sum, carry] packed LSB-first
+            }),
+        }],
+        pre_init: vec![],
+    }
 }
 
 /// Two-block NOT: block 0 → block 1 → return NOT(input).
 pub fn make_biir_two_block_not() -> BIrBlocks {
-    BIrBlocks { blocks: vec![
-        BIrBlock {
-            params: 1,
-            stmts: vec![],
-            terminator: BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Block(IRBlockId(1)), args: vec![IRVarId(0)]}),
-        },
-        BIrBlock {
-            params: 1,
-            stmts: vec![node(BIrStmt::Not(IRVarId(0)))],
-            terminator: BIrTerminator::Jmp(BIrTarget { block: IRBlockTargetId::Return, args: vec![IRVarId(1)]}),
-        },
-    ], pre_init: vec![] }
+    BIrBlocks {
+        blocks: vec![
+            BIrBlock {
+                params: 1,
+                stmts: vec![],
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Block(IRBlockId(1)),
+                    args: vec![IRVarId(0)],
+                }),
+            },
+            BIrBlock {
+                params: 1,
+                stmts: vec![node(BIrStmt::Not(IRVarId(0)))],
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: vec![IRVarId(1)],
+                }),
+            },
+        ],
+        pre_init: vec![],
+    }
 }
 
 /// Self-loop: if input=1 return input, else loop with constant 1.
 /// Output is always 1 (terminates in ≤1 iteration).
 pub fn make_biir_self_loop() -> BIrBlocks {
-    BIrBlocks { blocks: vec![BIrBlock {
-        params: 1,
-        stmts: vec![node(BIrStmt::One)], // var 1 = constant 1
-        terminator: BIrTerminator::CondJmp {
-            val: IRVarId(0),
-            then_target: BIrTarget { block: IRBlockTargetId::Return, args: vec![IRVarId(0)]},
-            else_target: BIrTarget { block: IRBlockTargetId::Block(IRBlockId(0)), args: vec![IRVarId(1)]},
-        },
-    }], pre_init: vec![] }
+    BIrBlocks {
+        blocks: vec![BIrBlock {
+            params: 1,
+            stmts: vec![node(BIrStmt::One)], // var 1 = constant 1
+            terminator: BIrTerminator::CondJmp {
+                val: IRVarId(0),
+                then_target: BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: vec![IRVarId(0)],
+                },
+                else_target: BIrTarget {
+                    block: IRBlockTargetId::Block(IRBlockId(0)),
+                    args: vec![IRVarId(1)],
+                },
+            },
+        }],
+        pre_init: vec![],
+    }
 }
 
 // ============================================================================
@@ -251,7 +302,9 @@ pub fn make_ir_xor() -> (IRBlocks, IRTypes) {
             coeffs,
             constant: Constant { hi: 0, lo: 0 },
         })],
-        terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(2)] ) },
+        terminator: IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(2)]),
+        },
     }]);
     (blocks, types)
 }
@@ -270,7 +323,9 @@ pub fn make_ir_and() -> (IRBlocks, IRTypes) {
             coeffs,
             constant: Constant { hi: 0, lo: 0 },
         })],
-        terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(2)] ) },
+        terminator: IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(2)]),
+        },
     }]);
     (blocks, types)
 }
@@ -287,7 +342,9 @@ pub fn make_ir_not() -> (IRBlocks, IRTypes) {
             coeffs,
             constant: Constant { hi: 0, lo: 1 },
         })],
-        terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(1)] ) },
+        terminator: IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(1)]),
+        },
     }]);
     (blocks, types)
 }

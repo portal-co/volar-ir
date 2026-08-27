@@ -5,7 +5,9 @@
 use proptest::prelude::*;
 use volar_ir_opt::inline_vaffle::InlineBudget;
 use volar_ir_passes::lower_ir_to_boolar;
-use volar_vaffle_target::{lower_vaffle_to_ir_with_control_provenance, lower_vaffle_to_ir_with_inlining};
+use volar_vaffle_target::{
+    lower_vaffle_to_ir_with_control_provenance, lower_vaffle_to_ir_with_inlining,
+};
 
 use crate::generators::ir::{gen_ir_and_inputs, gen_ir_extended_and_inputs};
 use crate::generators::vaffle::{gen_vaffle_and_inputs, gen_vaffle_two_func_and_inputs};
@@ -175,7 +177,10 @@ proptest! {
 // ============================================================================
 
 fn generous_inline_budget() -> InlineBudget {
-    InlineBudget { max_callee_values: 1000, total_budget: 10_000 }
+    InlineBudget {
+        max_callee_values: 1000,
+        total_budget: 10_000,
+    }
 }
 
 /// `interpret_vaffle_two_func` (unlike the plain, non-extended
@@ -190,11 +195,16 @@ fn generous_inline_budget() -> InlineBudget {
 /// narrows its own generator's shape to what `lower_vaffle_to_ir` supports.
 fn module_has_storage_ops(module: &vaffle::Module) -> bool {
     module.funcs.iter().any(|f| {
-        let vaffle::FuncDecl::Body(body) = f else { return false };
+        let vaffle::FuncDecl::Body(body) = f else {
+            return false;
+        };
         body.values.iter().any(|n| {
             matches!(
                 &n.kind,
-                vaffle::Value::Op(volar_ir_common::Stmt::StorageRead { .. } | volar_ir_common::Stmt::StorageWrite { .. })
+                vaffle::Value::Op(
+                    volar_ir_common::Stmt::StorageRead { .. }
+                        | volar_ir_common::Stmt::StorageWrite { .. }
+                )
             )
         })
     })
@@ -256,11 +266,16 @@ proptest! {
 // would show up as a semantic mismatch here, not just a structural one.
 // ============================================================================
 
-use volar_ir::ir::{IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRTypeId, IRTypes, IRVarId};
+use volar_ir::ir::{
+    IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRTypeId,
+    IRTypes, IRVarId,
+};
 use volar_ir_common::{Constant, IrType, Node, Type};
-use volar_ir_passes::{lower_to_circuit_ir, LoweringMode};
+use volar_ir_passes::{LoweringMode, lower_to_circuit_ir};
 
-use crate::interpreter::ir::{apply_pre_init, eval_ir_circuit_step, eval_ir_with_storage, IrValue, StorageMap};
+use crate::interpreter::ir::{
+    IrValue, StorageMap, apply_pre_init, eval_ir_circuit_step, eval_ir_with_storage,
+};
 
 /// Movfuscate `blocks`, lower to a single-step-per-call circuit, and drive it
 /// via `eval_ir_circuit_step` (one call = one raw movfuscated step) until its
@@ -281,7 +296,11 @@ fn run_movfuscated(
     let mut mut_types = types.clone();
     let watch: Vec<(usize, u32)> = (0..orig_inputs.len() as u32).map(|v| (0usize, v)).collect();
     let (movfuscated, _boundary, _accum_info, watch_results) =
-        volar_ir_passes::movfuscate::movfuscate_ir_with_boundary_and_watch(blocks, &mut mut_types, &watch);
+        volar_ir_passes::movfuscate::movfuscate_ir_with_boundary_and_watch(
+            blocks,
+            &mut mut_types,
+            &watch,
+        );
 
     if !movfuscated.is_movfuscated() {
         // Single-block input (n <= 1): movfuscate_ir_with_boundary_and_watch
@@ -289,13 +308,18 @@ fn run_movfuscated(
         return None;
     }
 
-    let bit_ty = mut_types.0.iter().position(|t| matches!(t, IrType::Primitive(Type::Bit)))
+    let bit_ty = mut_types
+        .0
+        .iter()
+        .position(|t| matches!(t, IrType::Primitive(Type::Bit)))
         .map(|i| IRTypeId(i as u32))
         .expect("Bit type must already be interned by movfuscate_ir");
 
     let circuit = lower_to_circuit_ir(&movfuscated, &bit_ty, 1, LoweringMode::WithTerminationFlag);
 
-    let param_widths: Vec<usize> = circuit.blocks[0].params.iter()
+    let param_widths: Vec<usize> = circuit.blocks[0]
+        .params
+        .iter()
         .map(|&tid| bit_width(tid, &mut_types))
         .collect();
 
@@ -314,7 +338,13 @@ fn run_movfuscated(
     let mut step = 0usize;
     let mut outputs: Vec<IrValue> = Vec::new();
     while !done && step < MAX_STEPS {
-        outputs = eval_ir_circuit_step(&circuit.blocks[0], &mut_types, &circuit.oracles, &state, &mut storage);
+        outputs = eval_ir_circuit_step(
+            &circuit.blocks[0],
+            &mut_types,
+            &circuit.oracles,
+            &state,
+            &mut storage,
+        );
         done = outputs[0].iter().any(|&b| b);
         state = outputs[1..1 + param_widths.len()].to_vec();
         step += 1;
@@ -375,7 +405,10 @@ fn shapes_match(a: &[IrValue], b: &[IrValue]) -> bool {
 /// result. Expected output (independent of movfuscation entirely): `a XOR
 /// consts[0] XOR consts[1] XOR ... XOR consts[n-2]` (block `n-1` computes no
 /// further XOR, it just holds the final chain value and returns it).
-fn build_xor_chain(n: usize, consts: &[u8]) -> (IRBlocks<()>, volar_ir_common::TypeTable, IRTypeId) {
+fn build_xor_chain(
+    n: usize,
+    consts: &[u8],
+) -> (IRBlocks<()>, volar_ir_common::TypeTable, IRTypeId) {
     use volar_ir_common::TypeTable;
     let types = TypeTable(vec![IrType::Primitive(Type::AES8)]);
     let g8 = IRTypeId(0);
@@ -395,16 +428,30 @@ fn build_xor_chain(n: usize, consts: &[u8]) -> (IRBlocks<()>, volar_ir_common::T
             let stmt = IRStmt::Poly {
                 ty: g8.clone(),
                 coeffs,
-                constant: Constant { hi: 0, lo: consts[i] as u128 },
+                constant: Constant {
+                    hi: 0,
+                    lo: consts[i] as u128,
+                },
             };
             (wrap(vec![stmt]), IRVarId(1))
         };
         let terminator = if is_last {
-            IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![jump_var]) }
+            IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![jump_var]),
+            }
         } else {
-            IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId((i + 1) as u32)), vec![jump_var]) }
+            IRTerminator::Jmp {
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Block(IRBlockId((i + 1) as u32)),
+                    vec![jump_var],
+                ),
+            }
         };
-        blocks.push(IRBlock { params: vec![g8.clone()], stmts, terminator });
+        blocks.push(IRBlock {
+            params: vec![g8.clone()],
+            stmts,
+            terminator,
+        });
     }
 
     (IRBlocks::new(blocks), types, g8)
@@ -490,7 +537,11 @@ fn test_movfuscate_sequential_unrelated_same_slot_no_aliasing() {
         // a bare pass-through]. Jmp(Block 2, [b]).
         IRBlock {
             params: vec![g8.clone()],
-            stmts: wrap(vec![IRStmt::Poly { ty: g8.clone(), coeffs, constant: Constant { hi: 0, lo: 0 } }]),
+            stmts: wrap(vec![IRStmt::Poly {
+                ty: g8.clone(),
+                coeffs,
+                constant: Constant { hi: 0, lo: 0 },
+            }]),
             terminator: IRTerminator::Jmp {
                 target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(2)), vec![IRVarId(1)]),
             },
@@ -499,7 +550,10 @@ fn test_movfuscate_sequential_unrelated_same_slot_no_aliasing() {
         // constant in_b = 0xBB, unrelated to merged_a. Jmp(Block 3, [in_b]).
         IRBlock {
             params: vec![g8.clone()],
-            stmts: wrap(vec![IRStmt::Const(Constant { hi: 0, lo: 0xBB }, g8.clone())]),
+            stmts: wrap(vec![IRStmt::Const(
+                Constant { hi: 0, lo: 0xBB },
+                g8.clone(),
+            )]),
             terminator: IRTerminator::Jmp {
                 target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(3)), vec![IRVarId(1)]),
             },
@@ -524,7 +578,12 @@ fn test_movfuscate_sequential_unrelated_same_slot_no_aliasing() {
     ]);
 
     let u8_to_bits = |v: u8| -> IrValue { (0..8).map(|i| (v >> i) & 1 == 1).collect() };
-    let bits_to_u8 = |v: &IrValue| -> u8 { v.iter().enumerate().map(|(i, &b)| (b as u8) << i).fold(0u8, |a, b| a | b) };
+    let bits_to_u8 = |v: &IrValue| -> u8 {
+        v.iter()
+            .enumerate()
+            .map(|(i, &b)| (b as u8) << i)
+            .fold(0u8, |a, b| a | b)
+    };
 
     for a in [0x11u8, 0x00u8, 0xFFu8] {
         let inputs = vec![u8_to_bits(a)];
@@ -533,14 +592,19 @@ fn test_movfuscate_sequential_unrelated_same_slot_no_aliasing() {
         // CFG interpreter -- must be 0xBB regardless of `a`.
         let (ref_out, _) = eval_ir_with_storage(&blocks, &types, &inputs);
         let ref_out = ref_out.expect("plain interpreter must halt");
-        assert_eq!(bits_to_u8(&ref_out[0]), 0xBB, "reference interpreter: expected 0xBB regardless of a={a:#x}");
+        assert_eq!(
+            bits_to_u8(&ref_out[0]),
+            0xBB,
+            "reference interpreter: expected 0xBB regardless of a={a:#x}"
+        );
 
         // The real check: the movfuscated circuit, where every block above
         // shares ONE physical slot, must agree.
         let actual_out = run_movfuscated(&blocks, &types, &inputs)
             .expect("movfuscated circuit must halt and produce output");
         assert_eq!(
-            bits_to_u8(&actual_out[0]), 0xBB,
+            bits_to_u8(&actual_out[0]),
+            0xBB,
             "movfuscated circuit with shared slot: expected 0xBB regardless of a={a:#x} -- \
              a value other than 0xBB here means Block 3/4 aliased a stale value from a's \
              own earlier occupancy of the shared slot instead of Block 2's fresh write",
@@ -603,14 +667,25 @@ fn test_movfuscate_propagates_multiple_oracle_declarations() {
     use volar_ir_common::{OracleDecl, TypeTable};
     let t128 = IRTypeId(0);
     let t8 = IRTypeId(1);
-    let types = TypeTable(vec![IrType::Primitive(Type::_128), IrType::Primitive(Type::_8)]);
+    let types = TypeTable(vec![
+        IrType::Primitive(Type::_128),
+        IrType::Primitive(Type::_8),
+    ]);
 
     // Two distinct oracles at different declared indices -- if oracle
     // lookup ever silently falls back to index 0, block 1's own call to
     // "o1" (index 1) would incorrectly compute "o0"'s (index 0) hash
     // instead, and the two branches' own results would collide.
-    let o0 = OracleDecl { name: "o0".to_string(), params: vec![t128.clone()], results: vec![t8.clone()] };
-    let o1 = OracleDecl { name: "o1".to_string(), params: vec![t128.clone()], results: vec![t8.clone()] };
+    let o0 = OracleDecl {
+        name: "o0".to_string(),
+        params: vec![t128.clone()],
+        results: vec![t8.clone()],
+    };
+    let o1 = OracleDecl {
+        name: "o1".to_string(),
+        params: vec![t128.clone()],
+        results: vec![t8.clone()],
+    };
 
     let blocks: IRBlocks<()> = {
         let mut b = IRBlocks::new(vec![
@@ -621,25 +696,72 @@ fn test_movfuscate_propagates_multiple_oracle_declarations() {
             IRBlock {
                 params: vec![t128.clone()],
                 stmts: vec![
-                    Node::new(IRStmt::OracleCall { name: "o0".to_string(), args: vec![IRVarId(0)], output_tys: vec![t8.clone()], result_ty: t8.clone() }, (), None),
-                    Node::new(IRStmt::OracleOutput { call: IRVarId(1), idx: 0, ty: t8.clone() }, (), None),
-                    Node::new(IRStmt::OracleCall { name: "o1".to_string(), args: vec![IRVarId(0)], output_tys: vec![t8.clone()], result_ty: t8.clone() }, (), None),
-                    Node::new(IRStmt::OracleOutput { call: IRVarId(3), idx: 0, ty: t8.clone() }, (), None),
+                    Node::new(
+                        IRStmt::OracleCall {
+                            name: "o0".to_string(),
+                            args: vec![IRVarId(0)],
+                            output_tys: vec![t8.clone()],
+                            result_ty: t8.clone(),
+                        },
+                        (),
+                        None,
+                    ),
+                    Node::new(
+                        IRStmt::OracleOutput {
+                            call: IRVarId(1),
+                            idx: 0,
+                            ty: t8.clone(),
+                        },
+                        (),
+                        None,
+                    ),
+                    Node::new(
+                        IRStmt::OracleCall {
+                            name: "o1".to_string(),
+                            args: vec![IRVarId(0)],
+                            output_tys: vec![t8.clone()],
+                            result_ty: t8.clone(),
+                        },
+                        (),
+                        None,
+                    ),
+                    Node::new(
+                        IRStmt::OracleOutput {
+                            call: IRVarId(3),
+                            idx: 0,
+                            ty: t8.clone(),
+                        },
+                        (),
+                        None,
+                    ),
                 ],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(2), IRVarId(4)]) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Return,
+                        vec![IRVarId(2), IRVarId(4)],
+                    ),
+                },
             },
         ]);
         b.oracles = vec![o0, o1];
         b
     };
 
-    let bits_to_u8 = |v: &IrValue| -> u8 { v.iter().enumerate().map(|(i, &b)| (b as u8) << i).fold(0u8, |acc, b| acc | b) };
+    let bits_to_u8 = |v: &IrValue| -> u8 {
+        v.iter()
+            .enumerate()
+            .map(|(i, &b)| (b as u8) << i)
+            .fold(0u8, |acc, b| acc | b)
+    };
     let inputs = vec![vec![true; 128]];
 
     let (ref_out, _) = eval_ir_with_storage(&blocks, &types, &inputs);
     let ref_out = ref_out.expect("plain interpreter must halt");
     let (o0_ref, o1_ref) = (bits_to_u8(&ref_out[0]), bits_to_u8(&ref_out[1]));
-    assert_ne!(o0_ref, o1_ref, "test construction sanity: o0 and o1 must hash to different values for this input");
+    assert_ne!(
+        o0_ref, o1_ref,
+        "test construction sanity: o0 and o1 must hash to different values for this input"
+    );
 
     // `movfuscate_ir` is single-block (n=1) here, which short-circuits to a
     // plain clone (oracles already correct by construction) -- wrap in a
@@ -651,15 +773,26 @@ fn test_movfuscate_propagates_multiple_oracle_declarations() {
             IRBlock {
                 params: vec![t8.clone(), t8.clone()],
                 stmts: vec![],
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0), IRVarId(1)]) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Return,
+                        vec![IRVarId(0), IRVarId(1)],
+                    ),
+                },
             },
         ]);
-        b2.blocks[0].terminator = IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), vec![IRVarId(2), IRVarId(4)]) };
+        b2.blocks[0].terminator = IRTerminator::Jmp {
+            target: IRBranchTarget::new(
+                IRBlockTargetId::Block(IRBlockId(1)),
+                vec![IRVarId(2), IRVarId(4)],
+            ),
+        };
         b2.oracles = blocks.oracles;
         b2
     };
 
-    let actual_out = run_movfuscated(&blocks, &types, &inputs).expect("movfuscated circuit must halt");
+    let actual_out =
+        run_movfuscated(&blocks, &types, &inputs).expect("movfuscated circuit must halt");
     let (o0_actual, o1_actual) = (bits_to_u8(&actual_out[0]), bits_to_u8(&actual_out[1]));
 
     assert_eq!(o0_actual, o0_ref, "o0 (index 0) mismatched");

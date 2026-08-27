@@ -61,12 +61,20 @@ fn sibling_call_mutual_recursion() {
     b.switch_to_block(else_block2);
     let one2 = b.iconst(LirType::U32, 1);
     let n2_minus_1 = b.sub(n2, one2);
-    let result2 = b.call("is_even", &[LirType::U32], &[n2_minus_1], Some(LirType::Bool));
+    let result2 = b.call(
+        "is_even",
+        &[LirType::U32],
+        &[n2_minus_1],
+        Some(LirType::Bool),
+    );
     b.ret(&result2);
     b.end_function();
 
     let c_src = b.finish();
-    let output = compile_and_run(&c_src, r#"  printf("%d %d %d\n", is_even(4), is_even(5), is_odd(7));"#);
+    let output = compile_and_run(
+        &c_src,
+        r#"  printf("%d %d %d\n", is_even(4), is_even(5), is_odd(7));"#,
+    );
     assert_eq!(output.trim(), "1 0 1");
 }
 
@@ -130,7 +138,11 @@ fn switch_heterogeneous_args() {
 fn block_addr_dyn_jump() {
     let mut b = CBackend::new();
 
-    let (entry, params) = b.begin_function("dispatch", &[LirType::Bool, LirType::U32], Some(LirType::U32));
+    let (entry, params) = b.begin_function(
+        "dispatch",
+        &[LirType::Bool, LirType::U32],
+        Some(LirType::U32),
+    );
     b.switch_to_block(entry);
     let cond = params[0][0];
     let n = params[1][0];

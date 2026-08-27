@@ -35,7 +35,10 @@ pub struct WaffleImportConfig {
 
 impl WaffleImportConfig {
     pub fn new() -> Self {
-        Self { imports: BTreeMap::new(), memory_address_bits: None }
+        Self {
+            imports: BTreeMap::new(),
+            memory_address_bits: None,
+        }
     }
 
     pub fn with_oracle(
@@ -45,7 +48,10 @@ impl WaffleImportConfig {
     ) -> Self {
         self.imports.insert(
             waffle_name.into(),
-            WaffleImportKind::Oracle { name: oracle_name.into(), side: None },
+            WaffleImportKind::Oracle {
+                name: oracle_name.into(),
+                side: None,
+            },
         );
         self
     }
@@ -58,7 +64,11 @@ impl WaffleImportConfig {
     ) -> Self {
         self.imports.insert(
             waffle_name.into(),
-            WaffleImportKind::Action { name: action_name.into(), n_args, side: None },
+            WaffleImportKind::Action {
+                name: action_name.into(),
+                n_args,
+                side: None,
+            },
         );
         self
     }
@@ -73,7 +83,10 @@ impl WaffleImportConfig {
     ) -> Self {
         self.imports.insert(
             waffle_name.into(),
-            WaffleImportKind::Oracle { name: oracle_name.into(), side: Some(side) },
+            WaffleImportKind::Oracle {
+                name: oracle_name.into(),
+                side: Some(side),
+            },
         );
         self
     }
@@ -89,7 +102,11 @@ impl WaffleImportConfig {
     ) -> Self {
         self.imports.insert(
             waffle_name.into(),
-            WaffleImportKind::Action { name: action_name.into(), n_args, side: Some(side) },
+            WaffleImportKind::Action {
+                name: action_name.into(),
+                n_args,
+                side: Some(side),
+            },
         );
         self
     }
@@ -103,9 +120,13 @@ impl WaffleImportConfig {
         self
     }
 
-    pub fn memory_address_bits(&self) -> Option<usize> { self.memory_address_bits }
+    pub fn memory_address_bits(&self) -> Option<usize> {
+        self.memory_address_bits
+    }
 }
 
 impl Default for WaffleImportConfig {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

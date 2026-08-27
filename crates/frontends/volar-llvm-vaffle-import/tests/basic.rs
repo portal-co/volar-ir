@@ -30,7 +30,10 @@ entry:
 "#;
     let context = Context::create();
     let module = context
-        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(source.as_bytes(), "test.ll"))
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
         .expect("valid LLVM IR fixture");
 
     let out = import_module(&module, &["add"]).expect("import succeeds");
@@ -42,7 +45,9 @@ entry:
     // Two i32 params, bit-decomposed: 32 Bit-typed params each.
     assert_eq!(body.blocks[0].params.len(), 64);
     match &body.blocks[0].terminator {
-        Terminator::Return { values } => assert_eq!(values.len(), 32, "i32 result should be 32 bits"),
+        Terminator::Return { values } => {
+            assert_eq!(values.len(), 32, "i32 result should be 32 bits")
+        }
         other => panic!("expected Return terminator, got {other:?}"),
     }
     let _ = context;
@@ -65,7 +70,10 @@ entry:
 "#;
     let context = Context::create();
     let module = context
-        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(source.as_bytes(), "test.ll"))
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
         .expect("valid LLVM IR fixture");
 
     let out = import_module(&module, &["caller"]).expect("import succeeds");
@@ -80,7 +88,10 @@ entry:
         .values
         .iter()
         .any(|v| matches!(&v.kind, Value::Call { .. }));
-    assert!(has_call, "caller's body should retain a Value::Call, not be inlined");
+    assert!(
+        has_call,
+        "caller's body should retain a Value::Call, not be inlined"
+    );
 
     let callee_id = *out.exports.get("callee").expect("callee exported");
     assert!(
@@ -108,7 +119,10 @@ merge:
 "#;
     let context = Context::create();
     let module = context
-        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(source.as_bytes(), "test.ll"))
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
         .expect("valid LLVM IR fixture");
 
     let out = import_module(&module, &["max"]).expect("import succeeds");
@@ -153,21 +167,28 @@ entry:
 "#;
     let context = Context::create();
     let module = context
-        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(source.as_bytes(), "test.ll"))
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
         .expect("valid LLVM IR fixture");
 
     let out = import_module(&module, &["bump"]).expect("import succeeds");
     let FuncDecl::Body(body) = &out.funcs[0] else {
         panic!("expected a function body");
     };
-    let has_read = body
-        .values
-        .iter()
-        .any(|v| matches!(&v.kind, Value::Op(volar_ir_common::Stmt::StorageRead { .. })));
-    let has_write = body
-        .values
-        .iter()
-        .any(|v| matches!(&v.kind, Value::Op(volar_ir_common::Stmt::StorageWrite { .. })));
+    let has_read = body.values.iter().any(|v| {
+        matches!(
+            &v.kind,
+            Value::Op(volar_ir_common::Stmt::StorageRead { .. })
+        )
+    });
+    let has_write = body.values.iter().any(|v| {
+        matches!(
+            &v.kind,
+            Value::Op(volar_ir_common::Stmt::StorageWrite { .. })
+        )
+    });
     assert!(has_read, "expected a StorageRead for the global load");
     assert!(has_write, "expected a StorageWrite for the global store");
     let _ = context;

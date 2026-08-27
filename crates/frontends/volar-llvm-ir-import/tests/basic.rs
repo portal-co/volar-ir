@@ -6,7 +6,7 @@
 
 use inkwell::context::Context;
 use volar_ir::ir::{IRBlockTargetId, IRTerminator};
-use volar_llvm_ir_import::{import, LoweringLimits, ModuleInput};
+use volar_llvm_ir_import::{LoweringLimits, ModuleInput, import};
 
 #[test]
 fn simple_add() {
@@ -68,7 +68,10 @@ entry:
     // Only caller's own %x is a free input; callee's parameter is bound to
     // caller's argument during inlining, not a second set of free bits.
     assert_eq!(block.params.len(), 32);
-    assert!(!block.stmts.is_empty(), "callee's body should have been executed inline");
+    assert!(
+        !block.stmts.is_empty(),
+        "callee's body should have been executed inline"
+    );
 }
 
 #[test]
@@ -134,7 +137,10 @@ entry:
     match &block.terminator {
         IRTerminator::Jmp { target } => {
             assert_eq!(target.dest, IRBlockTargetId::Return);
-            assert!(target.args.is_empty(), "void return should have no output bits");
+            assert!(
+                target.args.is_empty(),
+                "void return should have no output bits"
+            );
         }
         other => panic!("expected a Jmp{{dest: Return}} terminator, got {other:?}"),
     }

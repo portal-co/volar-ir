@@ -55,7 +55,10 @@ use alloc::vec::Vec;
 /// Carries no semantics of its own — meaning is assigned entirely by a
 /// [`SideHandler`], parallel to how `IRVarId`/`StorageId` are opaque indices.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "rkyv", rkyv(attr(derive(PartialEq, Eq, PartialOrd, Ord))))]
 pub struct SideId(pub u32);
 
@@ -130,7 +133,10 @@ pub struct TableProtection<T: Clone> {
 impl<T: Clone> TableProtection<T> {
     /// Create a table whose unassigned/unknown sides resolve to `default`.
     pub fn new(default: T) -> Self {
-        Self { table: BTreeMap::new(), default }
+        Self {
+            table: BTreeMap::new(),
+            default,
+        }
     }
 
     /// Assign `protection` to `side`, returning `self` for chaining.
@@ -149,7 +155,8 @@ impl<T: Clone> SideHandler for TableProtection<T> {
     type Protection = T;
     #[inline]
     fn protection(&self, side: Option<SideId>) -> T {
-        side.and_then(|s| self.table.get(&s).cloned()).unwrap_or_else(|| self.default.clone())
+        side.and_then(|s| self.table.get(&s).cloned())
+            .unwrap_or_else(|| self.default.clone())
     }
 }
 
@@ -263,12 +270,18 @@ mod tests {
 
     #[test]
     fn propagate_agreeing_sides_propagate() {
-        assert_eq!(propagate(&[Some(SideId(2)), Some(SideId(2)), Some(SideId(2))]), Some(SideId(2)));
+        assert_eq!(
+            propagate(&[Some(SideId(2)), Some(SideId(2)), Some(SideId(2))]),
+            Some(SideId(2))
+        );
     }
 
     #[test]
     fn propagate_mixed_none_and_agreeing_side_propagates() {
-        assert_eq!(propagate(&[None, Some(SideId(2)), None, Some(SideId(2))]), Some(SideId(2)));
+        assert_eq!(
+            propagate(&[None, Some(SideId(2)), None, Some(SideId(2))]),
+            Some(SideId(2))
+        );
     }
 
     #[test]

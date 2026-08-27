@@ -8,7 +8,10 @@ use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 /// Attached to a branch target: measures that MUST decrease on re-entry via this edge.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "rkyv", rkyv(serialize_bounds(
     __S: rkyv::ser::Writer + rkyv::ser::Allocator,
     __S::Error: rkyv::rancor::Source,
@@ -25,7 +28,10 @@ pub struct ReentryHint {
 
 /// Portable reference to a compiler struct (module path + name).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct StructRef {
     pub module_path: Vec<String>,
     pub name: String,
@@ -33,7 +39,10 @@ pub struct StructRef {
 
 /// Recursive well-founded measure over target-block params.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 #[cfg_attr(feature = "rkyv", rkyv(serialize_bounds(
     __S: rkyv::ser::Writer + rkyv::ser::Allocator,
@@ -82,8 +91,14 @@ impl ReentryHint {
     pub fn bounded_loop_ascending() -> Self {
         ReentryHint {
             measures: vec![MeasureSpec::Diff {
-                minuend: Box::new(MeasureSpec::Strict { param: 1, signed: false }),
-                subtrahend: Box::new(MeasureSpec::Strict { param: 0, signed: false }),
+                minuend: Box::new(MeasureSpec::Strict {
+                    param: 1,
+                    signed: false,
+                }),
+                subtrahend: Box::new(MeasureSpec::Strict {
+                    param: 0,
+                    signed: false,
+                }),
                 signed: false,
             }],
         }
@@ -100,9 +115,25 @@ mod tests {
         let h = ReentryHint::bounded_loop_ascending();
         assert_eq!(h.measures.len(), 1);
         match &h.measures[0] {
-            MeasureSpec::Diff { minuend, subtrahend, signed: false } => {
-                assert!(matches!(**minuend, MeasureSpec::Strict { param: 1, signed: false }));
-                assert!(matches!(**subtrahend, MeasureSpec::Strict { param: 0, signed: false }));
+            MeasureSpec::Diff {
+                minuend,
+                subtrahend,
+                signed: false,
+            } => {
+                assert!(matches!(
+                    **minuend,
+                    MeasureSpec::Strict {
+                        param: 1,
+                        signed: false
+                    }
+                ));
+                assert!(matches!(
+                    **subtrahend,
+                    MeasureSpec::Strict {
+                        param: 0,
+                        signed: false
+                    }
+                ));
             }
             _ => panic!("expected Diff"),
         }
@@ -113,7 +144,10 @@ mod tests {
         let spec = MeasureSpec::Digits {
             params: vec![0, 1],
             elements: vec![
-                MeasureSpec::Strict { param: 0, signed: false },
+                MeasureSpec::Strict {
+                    param: 0,
+                    signed: false,
+                },
                 MeasureSpec::BitToZero { param: 1 },
             ],
         };

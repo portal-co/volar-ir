@@ -12,8 +12,8 @@
 //! - `Transmute` from a public source is public.
 //! - Everything else is treated as encrypted unless explicitly marked.
 
-use alloc::collections::BTreeSet;
 use crate::ir::IRVarId;
+use alloc::collections::BTreeSet;
 
 /// Tracks which SSA variables carry cleartext (public) values.
 ///

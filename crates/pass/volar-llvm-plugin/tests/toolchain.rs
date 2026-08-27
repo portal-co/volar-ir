@@ -28,10 +28,18 @@ struct Tools {
 
 impl Tools {
     fn discover() -> Option<Self> {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).ancestors().nth(3)?.to_path_buf();
-        let llvm_bin =
-            env::var_os("VOLAR_LLVM_CONFIG").map(PathBuf::from).and_then(|path| path.parent().map(Path::to_path_buf));
-        let clang = find_llvm_tool("clang", llvm_bin.as_deref(), &["clang-22", "clang", "/opt/homebrew/opt/llvm@22/bin/clang"])?;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)?
+            .to_path_buf();
+        let llvm_bin = env::var_os("VOLAR_LLVM_CONFIG")
+            .map(PathBuf::from)
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        let clang = find_llvm_tool(
+            "clang",
+            llvm_bin.as_deref(),
+            &["clang-22", "clang", "/opt/homebrew/opt/llvm@22/bin/clang"],
+        )?;
         let opt = find_llvm_tool(
             "opt",
             llvm_bin.as_deref().or_else(|| clang.parent()),
@@ -42,17 +50,26 @@ impl Tools {
         // `cargo test` only guarantees an rlib for this package. Build the
         // cdylib explicitly so the plugin loaded below exactly matches the
         // source under test instead of a stale developer artifact.
-        run(Command::new(env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")))
-            .current_dir(&root)
-            .arg("build")
-            .arg("--quiet")
-            .arg("-p")
-            .arg("volar-llvm-plugin"));
-        let plugin = target.join("debug").join(dynamic_library_name("volar_llvm_plugin"));
+        run(
+            Command::new(env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")))
+                .current_dir(&root)
+                .arg("build")
+                .arg("--quiet")
+                .arg("-p")
+                .arg("volar-llvm-plugin"),
+        );
+        let plugin = target
+            .join("debug")
+            .join(dynamic_library_name("volar_llvm_plugin"));
         if !plugin.is_file() {
             return None;
         }
-        Some(Tools { clang, opt, plugin, root })
+        Some(Tools {
+            clang,
+            opt,
+            plugin,
+            root,
+        })
     }
 
     fn header_dir(&self) -> PathBuf {
@@ -60,7 +77,8 @@ impl Tools {
     }
 
     fn fixtures_dir(&self) -> PathBuf {
-        self.root.join("crates/pass/volar-llvm-plugin/tests/fixtures")
+        self.root
+            .join("crates/pass/volar-llvm-plugin/tests/fixtures")
     }
 }
 
@@ -111,20 +129,45 @@ fn clang_and_opt_load_the_plugin_and_execute_the_reimport() {
         .arg("-o")
         .arg(&opt_ir));
     let opt_text = fs::read_to_string(&opt_ir).expect("read opt output");
-    assert!(!opt_text.contains("call void @__volar_entry"), "marker call must be erased:\n{opt_text}");
-    assert!(!opt_text.contains("declare void @__volar_entry"), "marker declaration must be erased:\n{opt_text}");
-    assert!(opt_text.contains("@xor3"), "the reimported function must take over the `xor3` name:\n{opt_text}");
-    assert!(opt_text.contains(".volar_orig"), "the original body must survive, renamed out of the way:\n{opt_text}");
+    assert!(
+        !opt_text.contains("call void @__volar_entry"),
+        "marker call must be erased:\n{opt_text}"
+    );
+    assert!(
+        !opt_text.contains("declare void @__volar_entry"),
+        "marker declaration must be erased:\n{opt_text}"
+    );
+    assert!(
+        opt_text.contains("@xor3"),
+        "the reimported function must take over the `xor3` name:\n{opt_text}"
+    );
+    assert!(
+        opt_text.contains(".volar_orig"),
+        "the original body must survive, renamed out of the way:\n{opt_text}"
+    );
 
     // The `opt`-transformed IR must still compile and run correctly too --
     // not just contain the right names.
     let opt_object = output.join("xor3.opt.o");
-    run(Command::new(&tools.clang).arg("-c").arg(&opt_ir).arg("-o").arg(&opt_object));
+    run(Command::new(&tools.clang)
+        .arg("-c")
+        .arg(&opt_ir)
+        .arg("-o")
+        .arg(&opt_object));
     let opt_exe = output.join("xor3.opt");
-    run(Command::new(&tools.clang).arg(&opt_object).arg("-o").arg(&opt_exe));
+    run(Command::new(&tools.clang)
+        .arg(&opt_object)
+        .arg("-o")
+        .arg(&opt_exe));
     let opt_run_output = command_output(&mut Command::new(&opt_exe));
-    assert!(opt_run_output.status.success(), "opt-transformed xor3 binary exited non-zero");
-    assert_eq!(String::from_utf8_lossy(&opt_run_output.stdout).trim(), "0 1 0 1");
+    assert!(
+        opt_run_output.status.success(),
+        "opt-transformed xor3 binary exited non-zero"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&opt_run_output.stdout).trim(),
+        "0 1 0 1"
+    );
 }
 
 fn cargo_target_dir(root: &Path) -> PathBuf {
@@ -158,7 +201,11 @@ fn command_text(program: &Path, arguments: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    Some(format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
+    Some(format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
 }
 
 fn run(command: &mut Command) {
@@ -173,5 +220,7 @@ fn run(command: &mut Command) {
 }
 
 fn command_output(command: &mut Command) -> Output {
-    command.output().unwrap_or_else(|error| panic!("run {command:?}: {error}"))
+    command
+        .output()
+        .unwrap_or_else(|error| panic!("run {command:?}: {error}"))
 }

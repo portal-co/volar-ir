@@ -433,6 +433,21 @@ fn statement_inputs(statement: &BIrStmt) -> Vec<IRVarId> {
             inputs.extend_from_slice(addr);
             inputs
         }
+        BIrStmt::OracleBit { args, .. } => args.clone(),
+        BIrStmt::ActionStoreBit {
+            guard,
+            args,
+            fallback,
+            addr,
+            ..
+        } => {
+            let mut inputs = Vec::with_capacity(args.len().saturating_add(addr.len() + 2));
+            inputs.push(*guard);
+            inputs.extend_from_slice(args);
+            inputs.push(*fallback);
+            inputs.extend_from_slice(addr);
+            inputs
+        }
         _ => Vec::new(),
     }
 }

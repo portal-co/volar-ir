@@ -68,14 +68,23 @@ fn sibling_call_mutual_recursion() {
     b.switch_to_block(else_block2);
     let one2 = b.iconst(LirType::U32, 1);
     let n2_minus_1 = b.sub(n2, one2);
-    let result2 = b.call("is_even", &[LirType::U32], &[n2_minus_1], Some(LirType::Bool));
+    let result2 = b.call(
+        "is_even",
+        &[LirType::U32],
+        &[n2_minus_1],
+        Some(LirType::Bool),
+    );
     b.ret(&result2);
     b.end_function();
 
     let bytes = b.finish();
     let (mut store, instance) = instantiate(&bytes);
-    let is_even = instance.get_typed_func::<i32, i32>(&mut store, "is_even").unwrap();
-    let is_odd = instance.get_typed_func::<i32, i32>(&mut store, "is_odd").unwrap();
+    let is_even = instance
+        .get_typed_func::<i32, i32>(&mut store, "is_even")
+        .unwrap();
+    let is_odd = instance
+        .get_typed_func::<i32, i32>(&mut store, "is_odd")
+        .unwrap();
     assert_eq!(is_even.call(&mut store, 4).unwrap(), 1);
     assert_eq!(is_even.call(&mut store, 5).unwrap(), 0);
     assert_eq!(is_odd.call(&mut store, 7).unwrap(), 1);
@@ -124,7 +133,9 @@ fn switch_heterogeneous_args() {
 
     let bytes = b.finish();
     let (mut store, instance) = instantiate(&bytes);
-    let classify = instance.get_typed_func::<i32, i32>(&mut store, "classify").unwrap();
+    let classify = instance
+        .get_typed_func::<i32, i32>(&mut store, "classify")
+        .unwrap();
     assert_eq!(classify.call(&mut store, 1).unwrap(), 100);
     assert_eq!(classify.call(&mut store, 2).unwrap(), 200);
     assert_eq!(classify.call(&mut store, 9).unwrap(), -1);
@@ -138,8 +149,11 @@ fn switch_heterogeneous_args() {
 fn block_addr_dyn_jump() {
     let mut b = WasmBackend::new();
 
-    let (entry, params) =
-        b.begin_function("dispatch", &[LirType::Bool, LirType::U32], Some(LirType::U32));
+    let (entry, params) = b.begin_function(
+        "dispatch",
+        &[LirType::Bool, LirType::U32],
+        Some(LirType::U32),
+    );
     let cond = params[0][0];
     let n = params[1][0];
 

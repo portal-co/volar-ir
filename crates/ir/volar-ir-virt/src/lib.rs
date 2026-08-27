@@ -37,20 +37,21 @@
 
 extern crate alloc;
 
-pub mod adaptive_emit;
 pub mod adaptive_cfg;
+pub mod adaptive_emit;
 pub mod bir;
 pub mod bytecode;
 pub mod canon;
+pub mod cfg_hints;
 pub mod ctx;
 pub mod hash;
 pub mod ir;
 pub mod layout;
 pub mod preinit;
-pub mod cfg_hints;
 pub mod split;
 
 pub use adaptive_cfg::AdaptiveSplitConfig;
+pub use bir::virtualize_bir;
 pub use bytecode::{
     AppendedRegionKind, AppendedRegionMeta, BytecodeEntry, BytecodeRowKind, HandlerImmSchema,
     OperandMode, TripCount, VirtBytecode,
@@ -59,7 +60,6 @@ pub use canon::{BirHandlerKey, BlockImmediates, HandlerKey, ImmediateKind, IrHan
 pub use ctx::VirtOutput;
 pub use hash::{CommitmentConfig, IrEmitter, IrHashAlgorithm, SipHash48, XorFoldHash32};
 pub use ir::{virtualize_ir, virtualize_ir_committed};
-pub use bir::virtualize_bir;
 pub use split::plan_adaptive_split;
 
 use volar_ir_common::StorageId;

@@ -2,21 +2,17 @@
 // @ai: assisted
 //! Adaptive split planners: cross-block SharedCore and intra-block RerollLoop.
 
-use alloc::{
-    collections::BTreeMap,
-    vec,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use volar_ir::ir::{IRBlock, IRBlocks, IRStmt};
 
+use crate::AdaptiveSplitConfig;
 use crate::bytecode::{AppendedRegionKind, OperandMode, TripCount};
-use crate::canon::{canonicalize_stmt_slice, StmtSliceKey};
+use crate::canon::{StmtSliceKey, canonicalize_stmt_slice};
 use crate::layout::{
     AdaptiveSplitPlan, BlockCompositePlan, RerollLoopSpec, SegmentInvoke, SharedCoreSpec,
     UnifiedBytecodeLayout,
 };
-use crate::AdaptiveSplitConfig;
 
 #[derive(Clone, Debug)]
 struct WindowOccurrence {
@@ -146,7 +142,9 @@ fn segment_stmt_range(
 }
 
 fn overlaps(ranges: &[core::ops::Range<usize>], range: &core::ops::Range<usize>) -> bool {
-    ranges.iter().any(|r| r.start < range.end && range.start < r.end)
+    ranges
+        .iter()
+        .any(|r| r.start < range.end && range.start < r.end)
 }
 
 fn plan_cross_block<P: Clone>(
@@ -200,13 +198,17 @@ fn plan_cross_block<P: Clone>(
             body_len,
         );
         let region_index = shared_cores.len();
-        shared_cores.push(SharedCoreSpec { members: members.clone() });
+        shared_cores.push(SharedCoreSpec {
+            members: members.clone(),
+        });
         for (block_id, range) in members {
             used_ranges[block_id].push(range);
-            block_plans[block_id].segments.push(SegmentInvoke::SharedCore {
-                region_index,
-                entry_offset: 0,
-            });
+            block_plans[block_id]
+                .segments
+                .push(SegmentInvoke::SharedCore {
+                    region_index,
+                    entry_offset: 0,
+                });
         }
         let _ = key;
     }
@@ -252,7 +254,9 @@ fn plan_reroll_loops<P: Clone>(
                 covered_range: 0..(body_len * iterations),
             });
             used_ranges[block_id].push(body_range);
-            block_plans[block_id].segments.push(SegmentInvoke::RerollLoop { region_index });
+            block_plans[block_id]
+                .segments
+                .push(SegmentInvoke::RerollLoop { region_index });
         }
     }
 }
@@ -305,13 +309,10 @@ fn index_windows<P: Clone>(
     for start in 0..=(n - min_len) {
         for end in (start + min_len)..=n {
             let (key, _) = canonicalize_stmt_slice(&kinds[start..end]);
-            window_map
-                .entry(key)
-                .or_default()
-                .push(WindowOccurrence {
-                    block_id,
-                    range: start..end,
-                });
+            window_map.entry(key).or_default().push(WindowOccurrence {
+                block_id,
+                range: start..end,
+            });
         }
     }
 }
@@ -320,7 +321,8 @@ fn index_windows<P: Clone>(
 mod tests {
     use super::*;
     use volar_ir::ir::{
-        IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRType, IRTypes, IRVarId, PrimType,
+        IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRType, IRTypes, IRVarId,
+        PrimType,
     };
     use volar_ir_common::{Constant, Node, Stmt};
 
@@ -345,7 +347,9 @@ mod tests {
             IRBlock {
                 params: vec![ty],
                 stmts: stmts.into_iter().map(|s| Node::new(s, (), None)).collect(),
-                terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(5)],) },
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(5)]),
+                },
             }
         };
         let blocks = IRBlocks::new(vec![mk_block(10, 20), mk_block(11, 21)]);
@@ -357,10 +361,12 @@ mod tests {
         };
         let plan = plan_adaptive_split(&blocks, &cfg);
         assert_eq!(plan.shared_cores.len(), 1);
-        assert!(plan.block_plans[0]
-            .segments
-            .iter()
-            .any(|s| matches!(s, SegmentInvoke::SharedCore { .. })));
+        assert!(
+            plan.block_plans[0]
+                .segments
+                .iter()
+                .any(|s| matches!(s, SegmentInvoke::SharedCore { .. }))
+        );
     }
 
     #[test]
@@ -369,14 +375,28 @@ mod tests {
         let ty = u32_ty(&mut types);
         let mut stmts = Vec::new();
         for k in 0..3u128 {
-            stmts.push(Stmt::Const(Constant { hi: 0, lo: k * 10 + 1 }, ty));
-            stmts.push(Stmt::Const(Constant { hi: 0, lo: k * 10 + 2 }, ty));
+            stmts.push(Stmt::Const(
+                Constant {
+                    hi: 0,
+                    lo: k * 10 + 1,
+                },
+                ty,
+            ));
+            stmts.push(Stmt::Const(
+                Constant {
+                    hi: 0,
+                    lo: k * 10 + 2,
+                },
+                ty,
+            ));
         }
         let n_stmts = stmts.len();
         let block = IRBlock {
             params: vec![ty],
             stmts: stmts.into_iter().map(|s| Node::new(s, (), None)).collect(),
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(n_stmts as u32)],) },
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(n_stmts as u32)]),
+            },
         };
         let blocks = IRBlocks::new(vec![block]);
         let cfg = AdaptiveSplitConfig {
@@ -401,8 +421,13 @@ mod tests {
         let ty = u32_ty(&mut types);
         let block = IRBlock {
             params: vec![ty],
-            stmts: vec![Stmt::Const(Constant { hi: 0, lo: 5 }, ty)].into_iter().map(|s| Node::new(s, (), None)).collect(),
-            terminator: IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(1)],) },
+            stmts: vec![Stmt::Const(Constant { hi: 0, lo: 5 }, ty)]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(1)]),
+            },
         };
         let blocks = IRBlocks::new(vec![block]);
         let plan = plan_adaptive_split(&blocks, &AdaptiveSplitConfig::default());

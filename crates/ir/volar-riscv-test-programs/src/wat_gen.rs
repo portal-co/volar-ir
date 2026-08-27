@@ -161,7 +161,10 @@ pub fn interpreter_wat(code_bytes: &[u8], data_bytes: &[u8]) -> String {
 }
 
 pub fn test_program_wat() -> String {
-    interpreter_wat(&crate::interp::program_bytes(), &crate::interp::initial_data_bytes())
+    interpreter_wat(
+        &crate::interp::program_bytes(),
+        &crate::interp::initial_data_bytes(),
+    )
 }
 
 #[allow(dead_code)]
@@ -187,18 +190,27 @@ mod tests {
             .get_typed_func::<(), i32>(&mut store, "run")
             .expect("run export must be callable");
 
-        let actual_sum = run.call(&mut store, ()).expect("bounded RISC program should halt");
-        let memory = instance.get_memory(&mut store, "data").expect("data memory export");
+        let actual_sum = run
+            .call(&mut store, ())
+            .expect("bounded RISC program should halt");
+        let memory = instance
+            .get_memory(&mut store, "data")
+            .expect("data memory export");
         let mut actual_bytes = [0; 4];
         memory
-            .read(&store, crate::interp::RESULT_ADDR as usize, &mut actual_bytes)
+            .read(
+                &store,
+                crate::interp::RESULT_ADDR as usize,
+                &mut actual_bytes,
+            )
             .expect("stored sum should be in bounds");
 
         let program = crate::interp::assemble_program();
         let mut expected_memory = crate::interp::initial_data_bytes();
         let expected_sum = crate::interp::native_reference(&program, &mut expected_memory);
         let expected_stored = i32::from_le_bytes(
-            expected_memory[crate::interp::RESULT_ADDR as usize..crate::interp::RESULT_ADDR as usize + 4]
+            expected_memory
+                [crate::interp::RESULT_ADDR as usize..crate::interp::RESULT_ADDR as usize + 4]
                 .try_into()
                 .expect("result word"),
         );

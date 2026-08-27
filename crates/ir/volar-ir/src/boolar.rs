@@ -14,7 +14,10 @@ use volar_side::SideId;
 /// allocates lanes by dense first-use renumbering of the source type table
 /// and emits a total `LaneId → TypeId` side table from the same pass run.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct LaneId(pub u32);
 
 /// A bit-granular pre-initialised storage segment.
@@ -23,7 +26,10 @@ pub struct LaneId(pub u32);
 /// `(storage, lane)` space, using the appended-address layout produced by
 /// lowering (`base + (bit_index << addr_width)`).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct BIrPreInitSegment {
     /// Which storage space to initialise.
     pub storage: StorageId,
@@ -40,7 +46,10 @@ pub struct BIrPreInitSegment {
 /// The type parameter `P` is an optional per-statement provenance annotation.
 /// Use `P = ()` (the default) when provenance is not needed.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct BIrBlocks<P: Clone = ()> {
     /// The blocks of the circuit, in order. Block 0 is the entry.
     pub blocks: Vec<BIrBlock<P>>,
@@ -73,7 +82,10 @@ impl<P: Clone> BIrBlocks<P> {
 /// together on the [`Node`] wrapping each statement, so they can never drift
 /// out of sync with `stmts` the way two parallel `Vec`s could.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct BIrBlock<P: Clone = ()> {
     pub params: u32,
     pub stmts: Vec<Node<BIrStmt, P>>,
@@ -93,10 +105,17 @@ impl<P: Clone> BIrBlock<P> {
 
     /// Map provenance annotations using a [`ProvenanceHandler`]. `side` is
     /// untouched — provenance and side are independent axes.
-    pub fn map_prov_with_handler<H: volar_provenance::ProvenanceHandler<P>>(self, handler: &H) -> BIrBlock<H::Output> {
+    pub fn map_prov_with_handler<H: volar_provenance::ProvenanceHandler<P>>(
+        self,
+        handler: &H,
+    ) -> BIrBlock<H::Output> {
         BIrBlock {
             params: self.params,
-            stmts: self.stmts.into_iter().map(|n| n.map_prov(|p| handler.map(&p))).collect(),
+            stmts: self
+                .stmts
+                .into_iter()
+                .map(|n| n.map_prov(|p| handler.map(&p)))
+                .collect(),
             terminator: self.terminator,
         }
     }
@@ -104,16 +123,26 @@ impl<P: Clone> BIrBlock<P> {
 
 impl<P: Clone> BIrBlocks<P> {
     /// Map provenance annotations using a [`ProvenanceHandler`].
-    pub fn map_prov_with_handler<H: volar_provenance::ProvenanceHandler<P>>(self, handler: &H) -> BIrBlocks<H::Output> {
+    pub fn map_prov_with_handler<H: volar_provenance::ProvenanceHandler<P>>(
+        self,
+        handler: &H,
+    ) -> BIrBlocks<H::Output> {
         BIrBlocks {
-            blocks: self.blocks.into_iter().map(|b| b.map_prov_with_handler(handler)).collect(),
+            blocks: self
+                .blocks
+                .into_iter()
+                .map(|b| b.map_prov_with_handler(handler))
+                .collect(),
             pre_init: self.pre_init,
         }
     }
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 pub enum BIrStmt<Var = IRVarId, Stor = StorageId> {
     // ---- Boolean primitives ------------------------------------------------
@@ -125,7 +154,6 @@ pub enum BIrStmt<Var = IRVarId, Stor = StorageId> {
     Not(Var),
 
     // ---- External primitives -----------------------------------------------
-
     /// Invoke a named pure oracle.  Produces a call-handle var; individual
     /// output bits are projected with [`OracleBit`].
     ///
@@ -137,8 +165,23 @@ pub enum BIrStmt<Var = IRVarId, Stor = StorageId> {
         num_bits: usize,
     },
 
-    /// Project bit `bit` from an [`OracleCall`] call-handle var.
+    /// Invoke one output bit of a named oracle directly.
+    ///
+    /// `occurrence` is the stable call-site identity used by replayable
+    /// evaluators and reversible lowering.  `bit` is the flattened result-bit
+    /// index in declaration-result order.
     OracleBit {
+        name: alloc::string::String,
+        args: alloc::vec::Vec<Var>,
+        bit: usize,
+        occurrence: u64,
+    },
+
+    /// Legacy projection from an opaque [`OracleCall`] handle.
+    ///
+    /// New lowering never emits this variant; it remains so previously
+    /// serialized Boolar programs continue to decode.
+    OracleProjectedBit {
         call: Var,
         bit: usize,
     },
@@ -163,6 +206,21 @@ pub enum BIrStmt<Var = IRVarId, Stor = StorageId> {
         bit: usize,
     },
 
+    /// Invoke one bit of an action and store it directly at the supplied
+    /// Boolar storage cell.  The source owns the conditional behavior and
+    /// must write `fallback` when `guard` is false.
+    ActionStoreBit {
+        name: alloc::string::String,
+        guard: Var,
+        args: alloc::vec::Vec<Var>,
+        fallback: Var,
+        storage: Stor,
+        lane: LaneId,
+        addr: Vec<Var>,
+        bit: usize,
+        occurrence: u64,
+    },
+
     /// Fresh independent random bit from the named RNG source.
     ///
     /// `name` matches an [`RngDecl`] in the enclosing circuit.  Each
@@ -170,6 +228,13 @@ pub enum BIrStmt<Var = IRVarId, Stor = StorageId> {
     /// reorder `Rng` stmts.
     Rng {
         name: alloc::string::String,
+    },
+
+    /// Fresh random bit from a named source, with stable replay identity.
+    RngBit {
+        name: alloc::string::String,
+        bit: usize,
+        occurrence: u64,
     },
 
     /// Read one bit from a storage space, addressed by a bit-vector.
@@ -214,31 +279,121 @@ impl<Var, Stor> BIrStmt<Var, Stor> {
             BIrStmt::Or(a, b) => BIrStmt::Or(var_fn(ctx, a)?, var_fn(ctx, b)?),
             BIrStmt::Xor(a, b) => BIrStmt::Xor(var_fn(ctx, a)?, var_fn(ctx, b)?),
             BIrStmt::Not(v) => BIrStmt::Not(var_fn(ctx, v)?),
-            BIrStmt::OracleCall { name, args, num_bits } => BIrStmt::OracleCall {
+            BIrStmt::OracleCall {
                 name,
-                args: args.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<_, E>>()?,
+                args,
+                num_bits,
+            } => BIrStmt::OracleCall {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<_, E>>()?,
                 num_bits,
             },
-            BIrStmt::OracleBit { call, bit } => BIrStmt::OracleBit { call: var_fn(ctx, call)?, bit },
-            BIrStmt::ActionCall { name, guard, args, fallback, num_bits } => BIrStmt::ActionCall {
+            BIrStmt::OracleBit {
+                name,
+                args,
+                bit,
+                occurrence,
+            } => BIrStmt::OracleBit {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<_, E>>()?,
+                bit,
+                occurrence,
+            },
+            BIrStmt::OracleProjectedBit { call, bit } => BIrStmt::OracleProjectedBit {
+                call: var_fn(ctx, call)?,
+                bit,
+            },
+            BIrStmt::ActionCall {
+                name,
+                guard,
+                args,
+                fallback,
+                num_bits,
+            } => BIrStmt::ActionCall {
                 name,
                 guard: var_fn(ctx, guard)?,
-                args: args.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<_, E>>()?,
-                fallback: fallback.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<_, E>>()?,
+                args: args
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<_, E>>()?,
+                fallback: fallback
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<_, E>>()?,
                 num_bits,
             },
-            BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit { call: var_fn(ctx, call)?, bit },
-            BIrStmt::Rng { name } => BIrStmt::Rng { name },
-            BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
+            BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit {
+                call: var_fn(ctx, call)?,
+                bit,
+            },
+            BIrStmt::ActionStoreBit {
+                name,
+                guard,
+                args,
+                fallback,
+                storage,
+                lane,
+                addr,
+                bit,
+                occurrence,
+            } => BIrStmt::ActionStoreBit {
+                name,
+                guard: var_fn(ctx, guard)?,
+                args: args
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<_, E>>()?,
+                fallback: var_fn(ctx, fallback)?,
                 storage: stor_fn(ctx, storage)?,
                 lane,
-                addr: addr.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<_, E>>()?,
+                addr: addr
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<_, E>>()?,
+                bit,
+                occurrence,
             },
-            BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
+            BIrStmt::Rng { name } => BIrStmt::Rng { name },
+            BIrStmt::RngBit {
+                name,
+                bit,
+                occurrence,
+            } => BIrStmt::RngBit {
+                name,
+                bit,
+                occurrence,
+            },
+            BIrStmt::StorageRead {
+                storage,
+                lane,
+                addr,
+            } => BIrStmt::StorageRead {
+                storage: stor_fn(ctx, storage)?,
+                lane,
+                addr: addr
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<_, E>>()?,
+            },
+            BIrStmt::StorageWrite {
+                storage,
+                lane,
+                src,
+                addr,
+            } => BIrStmt::StorageWrite {
                 storage: stor_fn(ctx, storage)?,
                 lane,
                 src: var_fn(ctx, src)?,
-                addr: addr.into_iter().map(|v| var_fn(ctx, v)).collect::<Result<_, E>>()?,
+                addr: addr
+                    .into_iter()
+                    .map(|v| var_fn(ctx, v))
+                    .collect::<Result<_, E>>()?,
             },
         })
     }
@@ -255,13 +410,36 @@ impl<Var, Stor> BIrStmt<Var, Stor> {
             BIrStmt::Or(a, b) => BIrStmt::Or(a, b),
             BIrStmt::Xor(a, b) => BIrStmt::Xor(a, b),
             BIrStmt::Not(v) => BIrStmt::Not(v),
-            BIrStmt::OracleCall { name, args, num_bits } => BIrStmt::OracleCall {
+            BIrStmt::OracleCall {
+                name,
+                args,
+                num_bits,
+            } => BIrStmt::OracleCall {
                 name: name.clone(),
                 args: args.iter().collect(),
                 num_bits: *num_bits,
             },
-            BIrStmt::OracleBit { call, bit } => BIrStmt::OracleBit { call, bit: *bit },
-            BIrStmt::ActionCall { name, guard, args, fallback, num_bits } => BIrStmt::ActionCall {
+            BIrStmt::OracleBit {
+                name,
+                args,
+                bit,
+                occurrence,
+            } => BIrStmt::OracleBit {
+                name: name.clone(),
+                args: args.iter().collect(),
+                bit: *bit,
+                occurrence: *occurrence,
+            },
+            BIrStmt::OracleProjectedBit { call, bit } => {
+                BIrStmt::OracleProjectedBit { call, bit: *bit }
+            }
+            BIrStmt::ActionCall {
+                name,
+                guard,
+                args,
+                fallback,
+                num_bits,
+            } => BIrStmt::ActionCall {
                 name: name.clone(),
                 guard,
                 args: args.iter().collect(),
@@ -269,13 +447,52 @@ impl<Var, Stor> BIrStmt<Var, Stor> {
                 num_bits: *num_bits,
             },
             BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit { call, bit: *bit },
+            BIrStmt::ActionStoreBit {
+                name,
+                guard,
+                args,
+                fallback,
+                storage,
+                lane,
+                addr,
+                bit,
+                occurrence,
+            } => BIrStmt::ActionStoreBit {
+                name: name.clone(),
+                guard,
+                args: args.iter().collect(),
+                fallback,
+                storage,
+                lane: *lane,
+                addr: addr.iter().collect(),
+                bit: *bit,
+                occurrence: *occurrence,
+            },
             BIrStmt::Rng { name } => BIrStmt::Rng { name: name.clone() },
-            BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
+            BIrStmt::RngBit {
+                name,
+                bit,
+                occurrence,
+            } => BIrStmt::RngBit {
+                name: name.clone(),
+                bit: *bit,
+                occurrence: *occurrence,
+            },
+            BIrStmt::StorageRead {
+                storage,
+                lane,
+                addr,
+            } => BIrStmt::StorageRead {
                 storage,
                 lane: *lane,
                 addr: addr.iter().collect(),
             },
-            BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
+            BIrStmt::StorageWrite {
+                storage,
+                lane,
+                src,
+                addr,
+            } => BIrStmt::StorageWrite {
                 storage,
                 lane: *lane,
                 src,
@@ -295,13 +512,36 @@ impl<Var, Stor> BIrStmt<Var, Stor> {
             BIrStmt::Or(a, b) => BIrStmt::Or(a, b),
             BIrStmt::Xor(a, b) => BIrStmt::Xor(a, b),
             BIrStmt::Not(v) => BIrStmt::Not(v),
-            BIrStmt::OracleCall { name, args, num_bits } => BIrStmt::OracleCall {
+            BIrStmt::OracleCall {
+                name,
+                args,
+                num_bits,
+            } => BIrStmt::OracleCall {
                 name: name.clone(),
                 args: args.iter_mut().collect(),
                 num_bits: *num_bits,
             },
-            BIrStmt::OracleBit { call, bit } => BIrStmt::OracleBit { call, bit: *bit },
-            BIrStmt::ActionCall { name, guard, args, fallback, num_bits } => BIrStmt::ActionCall {
+            BIrStmt::OracleBit {
+                name,
+                args,
+                bit,
+                occurrence,
+            } => BIrStmt::OracleBit {
+                name: name.clone(),
+                args: args.iter_mut().collect(),
+                bit: *bit,
+                occurrence: *occurrence,
+            },
+            BIrStmt::OracleProjectedBit { call, bit } => {
+                BIrStmt::OracleProjectedBit { call, bit: *bit }
+            }
+            BIrStmt::ActionCall {
+                name,
+                guard,
+                args,
+                fallback,
+                num_bits,
+            } => BIrStmt::ActionCall {
                 name: name.clone(),
                 guard,
                 args: args.iter_mut().collect(),
@@ -309,13 +549,52 @@ impl<Var, Stor> BIrStmt<Var, Stor> {
                 num_bits: *num_bits,
             },
             BIrStmt::ActionBit { call, bit } => BIrStmt::ActionBit { call, bit: *bit },
+            BIrStmt::ActionStoreBit {
+                name,
+                guard,
+                args,
+                fallback,
+                storage,
+                lane,
+                addr,
+                bit,
+                occurrence,
+            } => BIrStmt::ActionStoreBit {
+                name: name.clone(),
+                guard,
+                args: args.iter_mut().collect(),
+                fallback,
+                storage,
+                lane: *lane,
+                addr: addr.iter_mut().collect(),
+                bit: *bit,
+                occurrence: *occurrence,
+            },
             BIrStmt::Rng { name } => BIrStmt::Rng { name: name.clone() },
-            BIrStmt::StorageRead { storage, lane, addr } => BIrStmt::StorageRead {
+            BIrStmt::RngBit {
+                name,
+                bit,
+                occurrence,
+            } => BIrStmt::RngBit {
+                name: name.clone(),
+                bit: *bit,
+                occurrence: *occurrence,
+            },
+            BIrStmt::StorageRead {
+                storage,
+                lane,
+                addr,
+            } => BIrStmt::StorageRead {
                 storage,
                 lane: *lane,
                 addr: addr.iter_mut().collect(),
             },
-            BIrStmt::StorageWrite { storage, lane, src, addr } => BIrStmt::StorageWrite {
+            BIrStmt::StorageWrite {
+                storage,
+                lane,
+                src,
+                addr,
+            } => BIrStmt::StorageWrite {
                 storage,
                 lane: *lane,
                 src,
@@ -326,7 +605,10 @@ impl<Var, Stor> BIrStmt<Var, Stor> {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 pub enum BIrTerminator<Var = IRVarId> {
     Jmp(BIrTarget<Var>),
@@ -345,7 +627,11 @@ impl<Var> BIrTerminator<Var> {
     ) -> Result<BIrTerminator<NV>, E> {
         Ok(match self {
             BIrTerminator::Jmp(t) => BIrTerminator::Jmp(t.map(ctx, &mut go)?),
-            BIrTerminator::CondJmp { val, then_target, else_target } => BIrTerminator::CondJmp {
+            BIrTerminator::CondJmp {
+                val,
+                then_target,
+                else_target,
+            } => BIrTerminator::CondJmp {
                 val: go(ctx, val)?,
                 then_target: then_target.map(ctx, &mut go)?,
                 else_target: else_target.map(ctx, &mut go)?,
@@ -356,7 +642,11 @@ impl<Var> BIrTerminator<Var> {
     pub fn as_ref(&self) -> BIrTerminator<&Var> {
         match self {
             BIrTerminator::Jmp(t) => BIrTerminator::Jmp(t.as_ref()),
-            BIrTerminator::CondJmp { val, then_target, else_target } => BIrTerminator::CondJmp {
+            BIrTerminator::CondJmp {
+                val,
+                then_target,
+                else_target,
+            } => BIrTerminator::CondJmp {
                 val,
                 then_target: then_target.as_ref(),
                 else_target: else_target.as_ref(),
@@ -367,7 +657,11 @@ impl<Var> BIrTerminator<Var> {
     pub fn as_mut(&mut self) -> BIrTerminator<&mut Var> {
         match self {
             BIrTerminator::Jmp(t) => BIrTerminator::Jmp(t.as_mut()),
-            BIrTerminator::CondJmp { val, then_target, else_target } => BIrTerminator::CondJmp {
+            BIrTerminator::CondJmp {
+                val,
+                then_target,
+                else_target,
+            } => BIrTerminator::CondJmp {
                 val,
                 then_target: then_target.as_mut(),
                 else_target: else_target.as_mut(),
@@ -377,7 +671,10 @@ impl<Var> BIrTerminator<Var> {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct BIrTarget<Var = IRVarId> {
     pub block: IRBlockTargetId<Var>,
     pub args: Vec<Var>,
@@ -391,15 +688,25 @@ impl<Var> BIrTarget<Var> {
     ) -> Result<BIrTarget<NV>, E> {
         Ok(BIrTarget {
             block: self.block.map(ctx, go)?,
-            args: self.args.into_iter().map(|v| go(ctx, v)).collect::<Result<Vec<NV>, E>>()?,
+            args: self
+                .args
+                .into_iter()
+                .map(|v| go(ctx, v))
+                .collect::<Result<Vec<NV>, E>>()?,
         })
     }
 
     pub fn as_ref(&self) -> BIrTarget<&Var> {
-        BIrTarget { block: self.block.as_ref(), args: self.args.iter().collect() }
+        BIrTarget {
+            block: self.block.as_ref(),
+            args: self.args.iter().collect(),
+        }
     }
 
     pub fn as_mut(&mut self) -> BIrTarget<&mut Var> {
-        BIrTarget { block: self.block.as_mut(), args: self.args.iter_mut().collect() }
+        BIrTarget {
+            block: self.block.as_mut(),
+            args: self.args.iter_mut().collect(),
+        }
     }
 }

@@ -14,10 +14,10 @@
 
 use std::collections::BTreeMap;
 
-use volar_ir::ir::{
-    IRBlockId, IRBlockTargetId, IRBlocks, IRStmt, IRTerminator, IRTypes, IRVarId,
+use volar_ir::ir::{IRBlockId, IRBlockTargetId, IRBlocks, IRStmt, IRTerminator, IRTypes, IRVarId};
+use volar_ir_common::{
+    Constant, IrType, OracleDecl, PreInitSegment, Stmt, StorageId, Type, TypeId,
 };
-use volar_ir_common::{Constant, IrType, OracleDecl, PreInitSegment, Stmt, StorageId, Type, TypeId};
 
 use crate::generators::oracle::hash_oracle;
 
@@ -44,11 +44,7 @@ pub type StorageMap = BTreeMap<(StorageId, TypeId, u64), Vec<bool>>;
 ///
 /// Returns the output values (the args of the first `Jmp(Return)` reached),
 /// or `None` if the iteration guard is exceeded.
-pub fn eval_ir(
-    blocks: &IRBlocks<()>,
-    types: &IRTypes,
-    inputs: &[IrValue],
-) -> Option<Vec<IrValue>> {
+pub fn eval_ir(blocks: &IRBlocks<()>, types: &IRTypes, inputs: &[IrValue]) -> Option<Vec<IrValue>> {
     eval_ir_with_storage(blocks, types, inputs).0
 }
 
@@ -81,7 +77,14 @@ pub fn eval_ir_with_storage(
         }
 
         let block = &blocks.blocks[current_block];
-        let (result, _watch) = eval_ir_block(block, types, &blocks.oracles, &current_inputs, &mut storage, &[]);
+        let (result, _watch) = eval_ir_block(
+            block,
+            types,
+            &blocks.oracles,
+            &current_inputs,
+            &mut storage,
+            &[],
+        );
         let result = match result {
             Some(r) => r,
             None => return (None, storage),
@@ -109,7 +112,12 @@ pub fn eval_ir_with_trace(
     types: &IRTypes,
     inputs: &[IrValue],
     watch: &[(usize, u32)],
-) -> (Option<Vec<IrValue>>, StorageMap, Vec<usize>, Vec<(usize, u32, IrValue)>) {
+) -> (
+    Option<Vec<IrValue>>,
+    StorageMap,
+    Vec<usize>,
+    Vec<(usize, u32, IrValue)>,
+) {
     let mut loop_count = 0usize;
     let mut current_block: usize = 0;
     let mut current_inputs: Vec<IrValue> = inputs.to_vec();
@@ -128,8 +136,19 @@ pub fn eval_ir_with_trace(
         }
 
         let block = &blocks.blocks[current_block];
-        let block_watch: Vec<u32> = watch.iter().filter(|&&(b, _)| b == current_block).map(|&(_, v)| v).collect();
-        let (result, watch_vals) = eval_ir_block(block, types, &blocks.oracles, &current_inputs, &mut storage, &block_watch);
+        let block_watch: Vec<u32> = watch
+            .iter()
+            .filter(|&&(b, _)| b == current_block)
+            .map(|&(_, v)| v)
+            .collect();
+        let (result, watch_vals) = eval_ir_block(
+            block,
+            types,
+            &blocks.oracles,
+            &current_inputs,
+            &mut storage,
+            &block_watch,
+        );
         for (v, val) in watch_vals {
             watched_out.push((current_block, v, val));
         }
@@ -195,7 +214,9 @@ pub fn eval_ir_circuit_step_with_watch(
     let vals = match result {
         Some(IrBlockResult::Return(vals)) => vals,
         Some(IrBlockResult::Jump { .. }) => {
-            panic!("eval_ir_circuit_step_with_watch: block did not end in Jmp(Return) -- not a circuit?")
+            panic!(
+                "eval_ir_circuit_step_with_watch: block did not end in Jmp(Return) -- not a circuit?"
+            )
         }
         None => panic!("eval_ir_circuit_step_with_watch: evaluation failed"),
     };
@@ -207,11 +228,7 @@ pub fn eval_ir_circuit_step_with_watch(
 // ============================================================================
 
 /// Seed `storage` from module-level [`PreInitSegment`] entries.
-pub fn apply_pre_init(
-    storage: &mut StorageMap,
-    pre_init: &[PreInitSegment],
-    types: &IRTypes,
-) {
+pub fn apply_pre_init(storage: &mut StorageMap, pre_init: &[PreInitSegment], types: &IRTypes) {
     for seg in pre_init {
         let w = bit_width(seg.ty, types);
         for (i, c) in seg.data.iter().enumerate() {
@@ -260,17 +277,21 @@ fn eval_ir_block(
     let base = block.params.len() as u32;
     for (i, node) in block.stmts.iter().enumerate() {
         let id = base + i as u32;
-        let val = eval_ir_stmt(&node.kind, id, types, oracles, &vars, &mut oracle_agg, storage);
+        let val = eval_ir_stmt(
+            &node.kind,
+            id,
+            types,
+            oracles,
+            &vars,
+            &mut oracle_agg,
+            storage,
+        );
         vars.insert(id, val);
     }
 
     let result = match &block.terminator {
         IRTerminator::Jmp { target } => {
-            let arg_vals: Vec<IrValue> = target
-                .args
-                .iter()
-                .map(|id| get_ir(&vars, id))
-                .collect();
+            let arg_vals: Vec<IrValue> = target.args.iter().map(|id| get_ir(&vars, id)).collect();
             resolve_ir_target(&target.dest, &arg_vals, &vars)
         }
         IRTerminator::JumpCond {
@@ -284,11 +305,7 @@ fn eval_ir_block(
             } else {
                 else_target
             };
-            let arg_vals: Vec<IrValue> = branch
-                .args
-                .iter()
-                .map(|id| get_ir(&vars, id))
-                .collect();
+            let arg_vals: Vec<IrValue> = branch.args.iter().map(|id| get_ir(&vars, id)).collect();
             resolve_ir_target(&branch.dest, &arg_vals, &vars)
         }
         IRTerminator::JumpTable { index, cases } => {
@@ -310,17 +327,14 @@ fn eval_ir_block(
             let branch = cases
                 .get(&key)
                 .expect("eval_ir: JumpTable case missing for index value");
-            let arg_vals: Vec<IrValue> = branch
-                .args
-                .iter()
-                .map(|id| get_ir(&vars, id))
-                .collect();
+            let arg_vals: Vec<IrValue> = branch.args.iter().map(|id| get_ir(&vars, id)).collect();
             resolve_ir_target(&branch.dest, &arg_vals, &vars)
         }
         _ => panic!("eval_ir: unhandled IRTerminator variant — add evaluation for this variant"),
     };
 
-    let watched: Vec<(u32, IrValue)> = watch.iter()
+    let watched: Vec<(u32, IrValue)> = watch
+        .iter()
         .filter_map(|&id| vars.get(&id).map(|v| (id, v.clone())))
         .collect();
     (Some(result), watched)
@@ -349,7 +363,9 @@ fn resolve_ir_target(
                 args: arg_vals.to_vec(),
             }
         }
-        _ => panic!("resolve_ir_target: unhandled IRBlockTargetId variant — add evaluation for this variant"),
+        _ => panic!(
+            "resolve_ir_target: unhandled IRBlockTargetId variant — add evaluation for this variant"
+        ),
     }
 }
 
@@ -375,7 +391,11 @@ fn eval_ir_stmt(
             let dst_w = bit_width(*dst_ty, types);
             transmute_bits(&src_val, dst_w)
         }
-        Stmt::Poly { ty, coeffs, constant } => {
+        Stmt::Poly {
+            ty,
+            coeffs,
+            constant,
+        } => {
             // Width comes from the statement's own declared type (matching
             // every other variant here, and matching the weaver's
             // `cir_type_width(ty)`) -- NOT inferred by peeking at an
@@ -428,7 +448,12 @@ fn eval_ir_stmt(
             }
             result
         }
-        Stmt::OracleCall { name, args, output_tys, .. } => {
+        Stmt::OracleCall {
+            name,
+            args,
+            output_tys,
+            ..
+        } => {
             // Find oracle index by name for the hash seed.
             // Seed the FNV hash oracle from the *name bytes* — the same
             // derivation `eval_biir` uses on lowered Boolar output, where no
@@ -438,10 +463,7 @@ fn eval_ir_stmt(
                 .bytes()
                 .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
             // Flatten all input args into a single bit vector.
-            let flat_inputs: Vec<bool> = args
-                .iter()
-                .flat_map(|v| get_ir(vars, v))
-                .collect();
+            let flat_inputs: Vec<bool> = args.iter().flat_map(|v| get_ir(vars, v)).collect();
             // Compute total output width.
             let output_widths: Vec<usize> =
                 output_tys.iter().map(|&ty| bit_width(ty, types)).collect();
@@ -470,7 +492,11 @@ fn eval_ir_stmt(
         Stmt::ActionCall { .. } => panic!("eval_ir: ActionCall not supported"),
         Stmt::ActionOutput { .. } => panic!("eval_ir: ActionOutput not supported"),
         Stmt::Rng { .. } => panic!("eval_ir: Rng not supported"),
-        Stmt::StorageRead { storage: store_id, ty, addr } => {
+        Stmt::StorageRead {
+            storage: store_id,
+            ty,
+            addr,
+        } => {
             let w = bit_width(*ty, types);
             let addr_val = get_ir(vars, addr);
             let addr_u64 = bits_to_u64(&addr_val);
@@ -479,7 +505,12 @@ fn eval_ir_stmt(
                 .cloned()
                 .unwrap_or_else(|| vec![false; w])
         }
-        Stmt::StorageWrite { storage: store_id, src, ty, addr } => {
+        Stmt::StorageWrite {
+            storage: store_id,
+            src,
+            ty,
+            addr,
+        } => {
             let src_val = get_ir(vars, src);
             let addr_val = get_ir(vars, addr);
             let addr_u64 = bits_to_u64(&addr_val);
@@ -510,7 +541,9 @@ pub fn bit_width(ty_id: TypeId, types: &IRTypes) -> usize {
         IrType::Tuple(elems) => elems.iter().map(|&e| bit_width(e, types)).sum(),
         IrType::Block { .. } => 32,
         IrType::Func { .. } => 32,
-        _ => panic!("bit_width: unhandled IrType variant — add bit-width calculation for this variant"),
+        _ => panic!(
+            "bit_width: unhandled IrType variant — add bit-width calculation for this variant"
+        ),
     }
 }
 
@@ -615,7 +648,11 @@ pub fn eval_poly(
             // at every lane past its own single bit.
             let product = monomial.iter().all(|var| {
                 let v = get_ir(vars, var);
-                if v.len() == 1 { v[0] } else { v.get(k).copied().unwrap_or(false) }
+                if v.len() == 1 {
+                    v[0]
+                } else {
+                    v.get(k).copied().unwrap_or(false)
+                }
             });
             acc ^= product;
         }
@@ -673,7 +710,9 @@ pub fn bit_unflatten(bits: &[bool], widths: &[usize]) -> Vec<IrValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use volar_ir::ir::{IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId};
+    use volar_ir::ir::{
+        IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId,
+    };
     use volar_ir_common::{Constant, IrType, Node, Stmt, Type, TypeId, TypeTable};
 
     fn zero_const() -> Constant {
@@ -703,7 +742,9 @@ mod tests {
         IRBlocks::new(vec![simple_block(
             params,
             stmts,
-            IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, ret_args,) },
+            IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, ret_args),
+            },
         )])
     }
 
@@ -870,9 +911,18 @@ mod tests {
 
     #[test]
     fn rotate_operations() {
-        assert_eq!(rotate_left(&[true, false, false, false], 4, 1), vec![false, true, false, false]);
-        assert_eq!(rotate_right(&[true, false, false, false], 4, 1), vec![false, false, false, true]);
-        assert_eq!(rotate_left(&[true, false, false, false], 4, 4), vec![true, false, false, false]);
+        assert_eq!(
+            rotate_left(&[true, false, false, false], 4, 1),
+            vec![false, true, false, false]
+        );
+        assert_eq!(
+            rotate_right(&[true, false, false, false], 4, 1),
+            vec![false, false, false, true]
+        );
+        assert_eq!(
+            rotate_left(&[true, false, false, false], 4, 4),
+            vec![true, false, false, false]
+        );
     }
 
     #[test]

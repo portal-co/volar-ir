@@ -5,10 +5,10 @@
 // Pure data structure definitions; no cryptographic claims.
 use super::*;
 
-pub use volar_ir_common::{Constant, StorageId, Type as PrimType};
 /// Re-export the shared `Stmt` enum so downstream crates can pattern-match
 /// on `IRStmt` variants without depending on `volar-ir-common` directly.
 pub use volar_ir_common::Stmt;
+pub use volar_ir_common::{Constant, StorageId, Type as PrimType};
 
 // ============================================================================
 // Type system — unified with VAFFLE via volar_ir_common
@@ -29,14 +29,20 @@ pub use volar_ir_common::IrType as IRType;
 pub use volar_ir_common::TypeTable as IRTypes;
 
 /// Re-export oracle/action/rng declaration types so callers only need `volar_ir`.
-pub use volar_ir_common::{ActionDecl, MeasureSpec, OracleDecl, PreInitSegment, ReentryHint, RngDecl, StructRef};
+pub use volar_ir_common::{
+    ActionDecl, ActionTarget, MeasureSpec, OracleDecl, PreInitSegment, ReentryHint, RngDecl,
+    StructRef,
+};
 
 // ============================================================================
 // Blocks and control flow
 // ============================================================================
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct IRBlockId(pub u32);
 
 /// A complete Volar IR circuit module — a set of blocks with their
@@ -46,7 +52,10 @@ pub struct IRBlockId(pub u32);
 /// statement in each block carries a `P` value recording where it originated.
 /// Use `P = ()` (the default) when provenance is not needed.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct IRBlocks<P: Clone = ()> {
     /// Oracles declared for this circuit (resolved by the execution environment).
     pub oracles: Vec<OracleDecl>,
@@ -97,7 +106,10 @@ impl<P: Clone> IRBlocks<P> {
 /// the [`Node`](volar_ir_common::Node) wrapping each statement, so they can
 /// never drift out of sync with `stmts` the way two parallel `Vec`s could.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct IRBlock<P: Clone = ()> {
     pub params: Vec<IRTypeId>,
     pub stmts: Vec<volar_ir_common::Node<IRStmt, P>>,
@@ -113,20 +125,33 @@ impl<P: Clone> IRBlock<P> {
 
     /// Append a statement with an explicit provenance annotation and side.
     /// Returns the [`IRVarId`] for this statement (= index in the block's var space).
-    pub fn push_stmt_with_side(&mut self, stmt: IRStmt, prov: P, side: Option<volar_side::SideId>) -> IRVarId {
+    pub fn push_stmt_with_side(
+        &mut self,
+        stmt: IRStmt,
+        prov: P,
+        side: Option<volar_side::SideId>,
+    ) -> IRVarId {
         let id = IRVarId(self.params.len() as u32 + self.stmts.len() as u32);
         #[cfg(feature = "log-trace")]
         log::trace!(target: "volar::ir", "push_stmt id={}", id.0);
-        self.stmts.push(volar_ir_common::Node::new(stmt, prov, side));
+        self.stmts
+            .push(volar_ir_common::Node::new(stmt, prov, side));
         id
     }
 
     /// Map provenance annotations using a [`ProvenanceHandler`]. `side` is
     /// untouched — provenance and side are independent axes.
-    pub fn map_prov_with_handler<H: volar_provenance::ProvenanceHandler<P>>(self, handler: &H) -> IRBlock<H::Output> {
+    pub fn map_prov_with_handler<H: volar_provenance::ProvenanceHandler<P>>(
+        self,
+        handler: &H,
+    ) -> IRBlock<H::Output> {
         IRBlock {
             params: self.params,
-            stmts: self.stmts.into_iter().map(|n| n.map_prov(|p| handler.map(&p))).collect(),
+            stmts: self
+                .stmts
+                .into_iter()
+                .map(|n| n.map_prov(|p| handler.map(&p)))
+                .collect(),
             terminator: self.terminator,
         }
     }
@@ -134,12 +159,19 @@ impl<P: Clone> IRBlock<P> {
 
 impl<P: Clone> IRBlocks<P> {
     /// Map provenance annotations using a [`ProvenanceHandler`].
-    pub fn map_prov_with_handler<H: volar_provenance::ProvenanceHandler<P>>(self, handler: &H) -> IRBlocks<H::Output> {
+    pub fn map_prov_with_handler<H: volar_provenance::ProvenanceHandler<P>>(
+        self,
+        handler: &H,
+    ) -> IRBlocks<H::Output> {
         IRBlocks {
             oracles: self.oracles,
             actions: self.actions,
             rngs: self.rngs,
-            blocks: self.blocks.into_iter().map(|b| b.map_prov_with_handler(handler)).collect(),
+            blocks: self
+                .blocks
+                .into_iter()
+                .map(|b| b.map_prov_with_handler(handler))
+                .collect(),
             pre_init: self.pre_init,
         }
     }
@@ -150,7 +182,10 @@ impl<P: Clone> IRBlocks<P> {
 // ============================================================================
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct IRVarId(pub u32);
 
 // ============================================================================
@@ -174,7 +209,10 @@ pub type IRStmt<Var = IRVarId, Addr = Var, Ty = IRTypeId, Stor = volar_ir_common
 
 /// A jump/branch destination with optional reentry complexity hint.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct IRBranchTarget<Var = IRVarId> {
     pub dest: IRBlockTargetId<Var>,
     pub args: Vec<Var>,
@@ -183,7 +221,11 @@ pub struct IRBranchTarget<Var = IRVarId> {
 
 impl<Var> IRBranchTarget<Var> {
     pub fn new(dest: IRBlockTargetId<Var>, args: Vec<Var>) -> Self {
-        IRBranchTarget { dest, args, reentry: None }
+        IRBranchTarget {
+            dest,
+            args,
+            reentry: None,
+        }
     }
 
     pub fn map<Ctx, NV, E>(
@@ -233,7 +275,10 @@ impl<Var> IRBranchTarget<Var> {
 // ============================================================================
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 pub enum IRTerminator<Var = IRVarId> {
     Jmp {
@@ -347,7 +392,10 @@ impl<Var> IRTerminator<Var> {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 pub enum IRBlockTargetId<Var = IRVarId> {
     Block(IRBlockId),

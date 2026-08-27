@@ -206,7 +206,10 @@ enum Action {
 // Alias application for Boolar stmts and terminators
 // ============================================================================
 
-pub(crate) fn apply_aliases_to_biir_stmt(stmt: &mut BIrStmt, alias_map: &BTreeMap<IRVarId, IRVarId>) -> bool {
+pub(crate) fn apply_aliases_to_biir_stmt(
+    stmt: &mut BIrStmt,
+    alias_map: &BTreeMap<IRVarId, IRVarId>,
+) -> bool {
     if alias_map.is_empty() {
         return false;
     }
@@ -216,51 +219,125 @@ pub(crate) fn apply_aliases_to_biir_stmt(stmt: &mut BIrStmt, alias_map: &BTreeMa
         BIrStmt::And(a, b) | BIrStmt::Or(a, b) | BIrStmt::Xor(a, b) => {
             let ca = canon_alias(alias_map, *a);
             let cb = canon_alias(alias_map, *b);
-            if ca != *a { *a = ca; changed = true; }
-            if cb != *b { *b = cb; changed = true; }
+            if ca != *a {
+                *a = ca;
+                changed = true;
+            }
+            if cb != *b {
+                *b = cb;
+                changed = true;
+            }
         }
         BIrStmt::Not(a) => {
             let ca = canon_alias(alias_map, *a);
-            if ca != *a { *a = ca; changed = true; }
+            if ca != *a {
+                *a = ca;
+                changed = true;
+            }
         }
         BIrStmt::OracleCall { args, .. } => {
             for v in args.iter_mut() {
                 let c = canon_alias(alias_map, *v);
-                if c != *v { *v = c; changed = true; }
+                if c != *v {
+                    *v = c;
+                    changed = true;
+                }
             }
         }
-        BIrStmt::OracleBit { call, .. } => {
-            let c = canon_alias(alias_map, *call);
-            if c != *call { *call = c; changed = true; }
-        }
-        BIrStmt::ActionCall { guard, args, fallback, .. } => {
-            let cg = canon_alias(alias_map, *guard);
-            if cg != *guard { *guard = cg; changed = true; }
+        BIrStmt::OracleBit { args, .. } => {
             for v in args.iter_mut() {
                 let c = canon_alias(alias_map, *v);
-                if c != *v { *v = c; changed = true; }
+                if c != *v {
+                    *v = c;
+                    changed = true;
+                }
+            }
+        }
+        BIrStmt::OracleProjectedBit { call, .. } => {
+            let c = canon_alias(alias_map, *call);
+            if c != *call {
+                *call = c;
+                changed = true;
+            }
+        }
+        BIrStmt::ActionCall {
+            guard,
+            args,
+            fallback,
+            ..
+        } => {
+            let cg = canon_alias(alias_map, *guard);
+            if cg != *guard {
+                *guard = cg;
+                changed = true;
+            }
+            for v in args.iter_mut() {
+                let c = canon_alias(alias_map, *v);
+                if c != *v {
+                    *v = c;
+                    changed = true;
+                }
             }
             for v in fallback.iter_mut() {
                 let c = canon_alias(alias_map, *v);
-                if c != *v { *v = c; changed = true; }
+                if c != *v {
+                    *v = c;
+                    changed = true;
+                }
             }
         }
         BIrStmt::ActionBit { call, .. } => {
             let c = canon_alias(alias_map, *call);
-            if c != *call { *call = c; changed = true; }
+            if c != *call {
+                *call = c;
+                changed = true;
+            }
+        }
+        BIrStmt::ActionStoreBit {
+            guard,
+            args,
+            fallback,
+            addr,
+            ..
+        } => {
+            let c = canon_alias(alias_map, *guard);
+            if c != *guard {
+                *guard = c;
+                changed = true;
+            }
+            for v in args
+                .iter_mut()
+                .chain(core::iter::once(fallback))
+                .chain(addr.iter_mut())
+            {
+                let c = canon_alias(alias_map, *v);
+                if c != *v {
+                    *v = c;
+                    changed = true;
+                }
+            }
         }
         BIrStmt::StorageRead { addr, .. } => {
             for v in addr.iter_mut() {
                 let c = canon_alias(alias_map, *v);
-                if c != *v { *v = c; changed = true; }
+                if c != *v {
+                    *v = c;
+                    changed = true;
+                }
             }
         }
         BIrStmt::StorageWrite { src, addr, .. } => {
             let cs = canon_alias(alias_map, *src);
-            if cs != *src { *src = cs; changed = true; }
+            if cs != *src {
+                *src = cs;
+                changed = true;
+            }
             for v in addr.iter_mut() {
                 let c = canon_alias(alias_map, *v);
-                if c != *v { *v = c; changed = true; }
+                if c != *v {
+                    *v = c;
+                    changed = true;
+                }
             }
         }
         // Zero, One, Rng: no var references.
@@ -277,11 +354,17 @@ pub(crate) fn apply_aliases_to_biir_target(
     let mut changed = false;
     for v in target.args.iter_mut() {
         let c = canon_alias(alias_map, *v);
-        if c != *v { *v = c; changed = true; }
+        if c != *v {
+            *v = c;
+            changed = true;
+        }
     }
     if let IRBlockTargetId::Dyn(v) = &mut target.block {
         let c = canon_alias(alias_map, *v);
-        if c != *v { *v = c; changed = true; }
+        if c != *v {
+            *v = c;
+            changed = true;
+        }
     }
     changed
 }
@@ -298,9 +381,16 @@ pub(crate) fn apply_aliases_to_biir_terminator(
         BIrTerminator::Jmp(target) => {
             changed |= apply_aliases_to_biir_target(target, alias_map);
         }
-        BIrTerminator::CondJmp { val, then_target, else_target } => {
+        BIrTerminator::CondJmp {
+            val,
+            then_target,
+            else_target,
+        } => {
             let c = canon_alias(alias_map, *val);
-            if c != *val { *val = c; changed = true; }
+            if c != *val {
+                *val = c;
+                changed = true;
+            }
             changed |= apply_aliases_to_biir_target(then_target, alias_map);
             changed |= apply_aliases_to_biir_target(else_target, alias_map);
         }
@@ -319,9 +409,18 @@ fn fold_biir_terminator_dead_branch(
     term: &mut BIrTerminator,
     bool_map: &BTreeMap<IRVarId, bool>,
 ) -> bool {
-    if let BIrTerminator::CondJmp { val, then_target, else_target } = term {
+    if let BIrTerminator::CondJmp {
+        val,
+        then_target,
+        else_target,
+    } = term
+    {
         if let Some(&v) = bool_map.get(val) {
-            let tgt = if v { then_target.clone() } else { else_target.clone() };
+            let tgt = if v {
+                then_target.clone()
+            } else {
+                else_target.clone()
+            };
             *term = BIrTerminator::Jmp(tgt);
             return true;
         }

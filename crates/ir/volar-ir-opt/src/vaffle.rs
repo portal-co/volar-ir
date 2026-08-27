@@ -17,8 +17,8 @@ use vaffle::{FuncBody, FuncDecl, Module, Terminator, Value, ValueId};
 use volar_ir_common::{Constant, Stmt, TypeId, TypeTable};
 
 use crate::common::{
-    constant_or, constant_rol, constant_ror, constant_shl, fold_poly_in_place,
-    mask_constant, merge_poly_into, stmt_output_type, type_bit_width,
+    constant_or, constant_rol, constant_ror, constant_shl, fold_poly_in_place, mask_constant,
+    merge_poly_into, stmt_output_type, type_bit_width,
 };
 
 // ============================================================================
@@ -40,10 +40,7 @@ pub fn fold_vaffle_module(module: &mut Module) -> bool {
 // Internal helpers
 // ============================================================================
 
-fn fold_vaffle_module_inner(
-    types: &TypeTable,
-    funcs: &mut alloc::vec::Vec<FuncDecl>,
-) -> bool {
+fn fold_vaffle_module_inner(types: &TypeTable, funcs: &mut alloc::vec::Vec<FuncDecl>) -> bool {
     let mut any_changed = false;
     for func in funcs.iter_mut() {
         if let FuncDecl::Body(body) = func {
@@ -101,7 +98,11 @@ fn fold_vaffle_body_once(body: &mut FuncBody, types: &TypeTable) -> bool {
             }
 
             // ── Polynomial: attempt in-place folding + merging. ────────────
-            Stmt::Poly { ty, coeffs, constant } => {
+            Stmt::Poly {
+                ty,
+                coeffs,
+                constant,
+            } => {
                 let has_foldable = coeffs
                     .iter()
                     .any(|(k, _)| k.iter().any(|v| const_map.contains_key(v)));
@@ -184,8 +185,11 @@ fn fold_vaffle_body_once(body: &mut FuncBody, types: &TypeTable) -> bool {
                         changed = true;
                     } else {
                         // Record surviving Poly for downstream merging.
-                        if let Value::Op(Stmt::Poly { coeffs: c, constant: k, ty: t }) =
-                            &body.values[i].kind
+                        if let Value::Op(Stmt::Poly {
+                            coeffs: c,
+                            constant: k,
+                            ty: t,
+                        }) = &body.values[i].kind
                         {
                             poly_map.insert(vid, (c.clone(), *k, *t));
                         }
@@ -230,7 +234,13 @@ fn fold_vaffle_body_once(body: &mut FuncBody, types: &TypeTable) -> bool {
                 if let Some(&c) = const_map.get(src) {
                     if let Some(w) = type_bit_width(*ty, types) {
                         let result = if c.lo & 1 != 0 {
-                            mask_constant(Constant { hi: u128::MAX, lo: u128::MAX }, w)
+                            mask_constant(
+                                Constant {
+                                    hi: u128::MAX,
+                                    lo: u128::MAX,
+                                },
+                                w,
+                            )
                         } else {
                             Constant { hi: 0, lo: 0 }
                         };
@@ -265,8 +275,7 @@ fn fold_vaffle_body_once(body: &mut FuncBody, types: &TypeTable) -> bool {
                                 .get(v)
                                 .and_then(|&tid| type_bit_width(tid, types))
                                 .unwrap_or(1);
-                            let shifted =
-                                constant_shl(mask_constant(part_c, part_w), offset);
+                            let shifted = constant_shl(mask_constant(part_c, part_w), offset);
                             result = constant_or(result, shifted);
                             offset += part_w;
                             if offset >= total_w {
@@ -303,19 +312,43 @@ fn fold_vaffle_terminator_dead_branch(
     const_map: &BTreeMap<ValueId, Constant>,
 ) -> bool {
     match term {
-        Terminator::IfNonzero { cond, then_target, else_target } => {
+        Terminator::IfNonzero {
+            cond,
+            then_target,
+            else_target,
+        } => {
             if let Some(&c) = const_map.get(cond) {
-                let tgt = if c.lo & 1 != 0 { then_target } else { else_target };
-                let new_target = vaffle::Target { block: tgt.block, args: tgt.args.clone(), reentry: tgt.reentry.clone() };
+                let tgt = if c.lo & 1 != 0 {
+                    then_target
+                } else {
+                    else_target
+                };
+                let new_target = vaffle::Target {
+                    block: tgt.block,
+                    args: tgt.args.clone(),
+                    reentry: tgt.reentry.clone(),
+                };
                 *term = Terminator::Jump(new_target);
                 return true;
             }
         }
-        Terminator::Table { index, targets, default_target } => {
+        Terminator::Table {
+            index,
+            targets,
+            default_target,
+        } => {
             if let Some(&c) = const_map.get(index) {
                 let idx = c.lo as usize;
-                let tgt = if idx < targets.len() { &targets[idx] } else { default_target };
-                let new_target = vaffle::Target { block: tgt.block, args: tgt.args.clone(), reentry: tgt.reentry.clone() };
+                let tgt = if idx < targets.len() {
+                    &targets[idx]
+                } else {
+                    default_target
+                };
+                let new_target = vaffle::Target {
+                    block: tgt.block,
+                    args: tgt.args.clone(),
+                    reentry: tgt.reentry.clone(),
+                };
                 *term = Terminator::Jump(new_target);
                 return true;
             }

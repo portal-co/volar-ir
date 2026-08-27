@@ -27,13 +27,7 @@ impl<'a> Arbitrary<'a> for ArbitraryBIir {
             .map(|_| {
                 let n_stmts = u.int_in_range(0usize..=8)?;
                 let raw_stmts = (0..n_stmts)
-                    .map(|_| {
-                        Ok((
-                            u8::arbitrary(u)?,
-                            u32::arbitrary(u)?,
-                            u32::arbitrary(u)?,
-                        ))
-                    })
+                    .map(|_| Ok((u8::arbitrary(u)?, u32::arbitrary(u)?, u32::arbitrary(u)?)))
                     .collect::<Result<_>>()?;
                 let raw_term = arb_raw_term(u)?;
                 Ok((raw_stmts, raw_term))

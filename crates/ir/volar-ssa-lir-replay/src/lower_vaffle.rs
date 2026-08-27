@@ -3,7 +3,7 @@
 
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 
-use vaffle::{FuncDecl, FuncId, FuncBody, Module, Target as VTarget, Terminator, Value, ValueId};
+use vaffle::{FuncBody, FuncDecl, FuncId, Module, Target as VTarget, Terminator, Value, ValueId};
 use volar_ir_common::{IrType, Stmt, Type as NativeType, TypeId, TypeTable};
 use volar_lir::{BranchTarget, LirTarget, LirType};
 use volar_provenance::{KeepProvenance, ProvenanceHandler};
@@ -136,7 +136,11 @@ fn lower_vaffle_func<P, T, H>(
     T: LirTarget<H::Output>,
 {
     let sig = &module.sigs[body.sig.0];
-    let input_tys: Vec<LirType> = sig.params.iter().map(|tid| type_to_lir(*tid, &module.types)).collect();
+    let input_tys: Vec<LirType> = sig
+        .params
+        .iter()
+        .map(|tid| type_to_lir(*tid, &module.types))
+        .collect();
     let ret_ty = results_to_lir(&sig.results, &module.types);
 
     let (entry_handle, entry_param_groups) = target.begin_function(name, &input_tys, ret_ty);
@@ -148,14 +152,21 @@ fn lower_vaffle_func<P, T, H>(
             block_handles[bi] = Some(target.create_block());
         }
     }
-    let block_handles: Vec<T::Block> = block_handles.into_iter().map(|b| b.expect("every block handle assigned")).collect();
+    let block_handles: Vec<T::Block> = block_handles
+        .into_iter()
+        .map(|b| b.expect("every block handle assigned"))
+        .collect();
 
     let mut vals: Vec<Option<T::Value>> = alloc::vec![None; body.values.len()];
 
     // Seed the entry block's params from `begin_function`'s flat scalar groups.
     {
         let entry_block = &body.blocks[body.entry.0];
-        for ((vid, _tid), group) in entry_block.params.iter().zip(entry_param_groups.into_iter()) {
+        for ((vid, _tid), group) in entry_block
+            .params
+            .iter()
+            .zip(entry_param_groups.into_iter())
+        {
             vals[vid.0] = Some(group.into_iter().next().expect("empty param scalar group"));
         }
     }
@@ -186,9 +197,27 @@ fn lower_vaffle_func<P, T, H>(
         for &vid in &block.stmts {
             let node = &body.values[vid.0];
             target.set_prov(handler.map(&node.prov));
-            lower_vaffle_value(vid, &node.kind, module, func_names, &block_handles, &mut vals, &mut call_agg, &mut multi_results, target);
+            lower_vaffle_value(
+                vid,
+                &node.kind,
+                module,
+                func_names,
+                &block_handles,
+                &mut vals,
+                &mut call_agg,
+                &mut multi_results,
+                target,
+            );
         }
-        lower_vaffle_terminator(&block.terminator, body, module, func_names, &vals, &block_handles, target);
+        lower_vaffle_terminator(
+            &block.terminator,
+            body,
+            module,
+            func_names,
+            &vals,
+            &block_handles,
+            target,
+        );
     }
 
     target.end_function();
@@ -199,7 +228,9 @@ fn lower_vaffle_func<P, T, H>(
 // ============================================================================
 
 fn get<V: Clone>(vals: &[Option<V>], v: &ValueId) -> V {
-    vals[v.0].clone().expect("VAFFLE value used before it was defined")
+    vals[v.0]
+        .clone()
+        .expect("VAFFLE value used before it was defined")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -223,32 +254,64 @@ fn lower_vaffle_value<P, T, Q>(
             // Params are seeded up front from block-param handles; a `Param`
             // entry should never appear in `Block::stmts` (mirroring the
             // VAFFLE fuzz interpreter's own evaluator convention).
-            assert!(vals[vid.0].is_some(), "Value::Param encountered in Block::stmts without a pre-seeded value");
+            assert!(
+                vals[vid.0].is_some(),
+                "Value::Param encountered in Block::stmts without a pre-seeded value"
+            );
         }
-        Value::Op(Stmt::OracleCall { name, args, output_tys, .. }) => {
+        Value::Op(Stmt::OracleCall {
+            name,
+            args,
+            output_tys,
+            ..
+        }) => {
             let arg_vals: Vec<T::Value> = args.iter().map(|a| get(vals, a)).collect();
             let arg_lir_tys: Vec<LirType> = args.iter().map(|_| LirType::U64).collect();
-            let ret_tys: Vec<LirType> = output_tys.iter().map(|tid| type_to_lir(*tid, &module.types)).collect();
+            let ret_tys: Vec<LirType> = output_tys
+                .iter()
+                .map(|tid| type_to_lir(*tid, &module.types))
+                .collect();
             let results = target.oracle(name, &arg_lir_tys, &arg_vals, &ret_tys);
             multi_results.insert(vid.0, results);
             vals[vid.0] = Some(target.iconst(LirType::Bool, 0));
         }
         Value::Op(Stmt::OracleOutput { call, idx, .. }) => {
-            let results = multi_results.get(&call.0).expect("OracleOutput: no stashed results for OracleCall");
+            let results = multi_results
+                .get(&call.0)
+                .expect("OracleOutput: no stashed results for OracleCall");
             vals[vid.0] = Some(results[*idx].clone());
         }
-        Value::Op(Stmt::ActionCall { name, guard, args, fallbacks, output_tys, .. }) => {
+        Value::Op(Stmt::ActionCall {
+            name,
+            guard,
+            args,
+            fallbacks,
+            output_tys,
+            ..
+        }) => {
             let guard_val = get(vals, guard);
             let arg_vals: Vec<T::Value> = args.iter().map(|a| get(vals, a)).collect();
             let fallback_vals: Vec<T::Value> = fallbacks.iter().map(|a| get(vals, a)).collect();
             let arg_lir_tys: Vec<LirType> = args.iter().map(|_| LirType::U64).collect();
-            let ret_tys: Vec<LirType> = output_tys.iter().map(|tid| type_to_lir(*tid, &module.types)).collect();
-            let results = target.action(name, guard_val, &arg_lir_tys, &arg_vals, &fallback_vals, &ret_tys);
+            let ret_tys: Vec<LirType> = output_tys
+                .iter()
+                .map(|tid| type_to_lir(*tid, &module.types))
+                .collect();
+            let results = target.action(
+                name,
+                guard_val,
+                &arg_lir_tys,
+                &arg_vals,
+                &fallback_vals,
+                &ret_tys,
+            );
             multi_results.insert(vid.0, results);
             vals[vid.0] = Some(target.iconst(LirType::Bool, 0));
         }
         Value::Op(Stmt::ActionOutput { call, idx, .. }) => {
-            let results = multi_results.get(&call.0).expect("ActionOutput: no stashed results for ActionCall");
+            let results = multi_results
+                .get(&call.0)
+                .expect("ActionOutput: no stashed results for ActionCall");
             vals[vid.0] = Some(results[*idx].clone());
         }
         Value::Op(Stmt::Rng { ty, .. }) => {
@@ -262,9 +325,21 @@ fn lower_vaffle_value<P, T, Q>(
         Value::Call { func, args } => {
             let arg_vals: Vec<T::Value> = args.iter().map(|a| get(vals, a)).collect();
             let callee_sig = &module.sigs[module.funcs[func.0].sig().0];
-            let arg_lir_tys: Vec<LirType> = callee_sig.params.iter().map(|tid| type_to_lir(*tid, &module.types)).collect();
+            let arg_lir_tys: Vec<LirType> = callee_sig
+                .params
+                .iter()
+                .map(|tid| type_to_lir(*tid, &module.types))
+                .collect();
             let ret_ty = results_to_lir(&callee_sig.results, &module.types);
-            let results = emit_callee_call(*func, module, func_names, &arg_lir_tys, &arg_vals, ret_ty, target);
+            let results = emit_callee_call(
+                *func,
+                module,
+                func_names,
+                &arg_lir_tys,
+                &arg_vals,
+                ret_ty,
+                target,
+            );
             call_agg.insert(vid.0, results);
             // Unused placeholder: VAFFLE always projects call results via
             // `Value::Output`, never the call's own `ValueId` directly (see
@@ -272,32 +347,45 @@ fn lower_vaffle_value<P, T, Q>(
             // empty value for the call site itself).
             vals[vid.0] = Some(target.iconst(LirType::Bool, 0));
         }
-        Value::Output { value: call_vid, idx } => {
-            let results = call_agg.get(&call_vid.0).expect("Output: no stashed results for Call");
+        Value::Output {
+            value: call_vid,
+            idx,
+        } => {
+            let results = call_agg
+                .get(&call_vid.0)
+                .expect("Output: no stashed results for Call");
             vals[vid.0] = Some(results[*idx].clone());
         }
         Value::StackAlloc { elem_ty, count, .. } => {
             let lir_ty = type_to_lir(*elem_ty, &module.types);
-            let ext = target.stack_alloc_ext().expect("StackAlloc: target has no memory model");
+            let ext = target
+                .stack_alloc_ext()
+                .expect("StackAlloc: target has no memory model");
             vals[vid.0] = Some(ext.alloca(lir_ty, *count));
         }
         Value::PtrLoad { ptr, pointee_ty } => {
             let lir_ty = type_to_lir(*pointee_ty, &module.types);
             let ptr_val = get(vals, ptr);
-            let ext = target.stack_alloc_ext().expect("PtrLoad: target has no memory model");
+            let ext = target
+                .stack_alloc_ext()
+                .expect("PtrLoad: target has no memory model");
             vals[vid.0] = Some(ext.ptr_load(ptr_val, lir_ty));
         }
         Value::PtrStore { ptr, val } => {
             let ptr_val = get(vals, ptr);
             let val_val = get(vals, val);
-            let ext = target.stack_alloc_ext().expect("PtrStore: target has no memory model");
+            let ext = target
+                .stack_alloc_ext()
+                .expect("PtrStore: target has no memory model");
             ext.ptr_store(ptr_val, val_val);
             // No result value — nothing else may reference this `ValueId`.
         }
         Value::PtrOffset { ptr, idx, .. } => {
             let ptr_val = get(vals, ptr);
             let idx_val = get(vals, idx);
-            let ext = target.stack_alloc_ext().expect("PtrOffset: target has no memory model");
+            let ext = target
+                .stack_alloc_ext()
+                .expect("PtrOffset: target has no memory model");
             vals[vid.0] = Some(ext.ptr_offset(ptr_val, idx_val));
         }
         Value::BlockAddr { block } => {
@@ -321,7 +409,11 @@ fn lower_vaffle_stmt<T: LirTarget<Q>, Q: Clone>(
             let lir_ty = type_to_lir(*tid, types);
             target.iconst(lir_ty, c.lo as i64)
         }
-        Stmt::Transmute { src, src_ty, dst_ty } => {
+        Stmt::Transmute {
+            src,
+            src_ty,
+            dst_ty,
+        } => {
             let sv = get(vals, src);
             let src_lir = type_to_lir(*src_ty, types);
             let dst_lir = type_to_lir(*dst_ty, types);
@@ -333,7 +425,11 @@ fn lower_vaffle_stmt<T: LirTarget<Q>, Q: Clone>(
                 sv
             }
         }
-        Stmt::Poly { ty, coeffs, constant } => {
+        Stmt::Poly {
+            ty,
+            coeffs,
+            constant,
+        } => {
             let lir_ty = type_to_lir(*ty, types);
             let mut acc = target.iconst(lir_ty, (constant.lo & 1) as i64);
             for (varset, &coeff) in coeffs {
@@ -440,7 +536,9 @@ where
     match &module.funcs[func.0] {
         FuncDecl::Import { name, .. } => target.call_extern(name, arg_lir_tys, arg_vals, ret_ty),
         FuncDecl::Body(_) => {
-            let name = func_names[func.0].as_deref().expect("Body func must have an assigned name");
+            let name = func_names[func.0]
+                .as_deref()
+                .expect("Body func must have an assigned name");
             target.call(name, arg_lir_tys, arg_vals, ret_ty)
         }
         _ => panic!("emit_callee_call: unhandled FuncDecl variant — add lowering for this variant"),
@@ -492,7 +590,11 @@ fn lower_vaffle_terminator<P, T, Q>(
         Terminator::Jump(t) => {
             target.jump(block_handles[t.block.0].clone(), branch(t, vals));
         }
-        Terminator::IfNonzero { cond, then_target, else_target } => {
+        Terminator::IfNonzero {
+            cond,
+            then_target,
+            else_target,
+        } => {
             let cond_val = get(vals, cond);
             target.branch(
                 cond_val,
@@ -505,12 +607,28 @@ fn lower_vaffle_terminator<P, T, Q>(
         Terminator::ReturnCall { func, args } => {
             let arg_vals: Vec<T::Value> = args.iter().map(|v| get(vals, v)).collect();
             let callee_sig = &module.sigs[module.funcs[func.0].sig().0];
-            let arg_lir_tys: Vec<LirType> = callee_sig.params.iter().map(|tid| type_to_lir(*tid, &module.types)).collect();
+            let arg_lir_tys: Vec<LirType> = callee_sig
+                .params
+                .iter()
+                .map(|tid| type_to_lir(*tid, &module.types))
+                .collect();
             let ret_ty = results_to_lir(&callee_sig.results, &module.types);
-            let results = emit_callee_call(*func, module, func_names, &arg_lir_tys, &arg_vals, ret_ty, target);
+            let results = emit_callee_call(
+                *func,
+                module,
+                func_names,
+                &arg_lir_tys,
+                &arg_vals,
+                ret_ty,
+                target,
+            );
             target.ret(&results);
         }
-        Terminator::Table { index, targets, default_target } => {
+        Terminator::Table {
+            index,
+            targets,
+            default_target,
+        } => {
             let index_val = get(vals, index);
             let is_block_addr = matches!(&body.values[index.0].kind, Value::BlockAddr { .. });
             if is_block_addr {
@@ -543,9 +661,16 @@ fn lower_vaffle_terminator<P, T, Q>(
                 for (i, t) in targets.iter().enumerate() {
                     cases.push((i as i64, block_handles[t.block.0].clone(), branch(t, vals)));
                 }
-                target.switch(index_val, &cases, block_handles[default_target.block.0].clone(), branch(default_target, vals));
+                target.switch(
+                    index_val,
+                    &cases,
+                    block_handles[default_target.block.0].clone(),
+                    branch(default_target, vals),
+                );
             }
         }
-        _ => panic!("lower_vaffle_terminator: unhandled Terminator variant — add lowering for this variant"),
+        _ => panic!(
+            "lower_vaffle_terminator: unhandled Terminator variant — add lowering for this variant"
+        ),
     }
 }

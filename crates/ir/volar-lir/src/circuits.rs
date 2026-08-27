@@ -51,11 +51,7 @@ pub trait BitCircuitBuilder {
     /// degree-0 term (again, only its low bit matters).
     ///
     /// Returns the SSA variable that holds this polynomial's result.
-    fn bc_poly(
-        &mut self,
-        coeffs: BTreeMap<Vec<Self::Bit>, u8>,
-        constant: u128,
-    ) -> Self::Bit;
+    fn bc_poly(&mut self, coeffs: BTreeMap<Vec<Self::Bit>, u8>, constant: u128) -> Self::Bit;
 
     // ---- Derived single-bit ops (may be overridden for efficiency) ----------
 
@@ -104,9 +100,12 @@ pub trait BitCircuitBuilder {
     /// (3 ANDs + 2 XORs); backends with native 3-variable Poly stmts should
     /// override this.
     fn bc_carry3(&mut self, a: Self::Bit, b: Self::Bit, c: Self::Bit) -> Self::Bit {
-        let mut ab = vec![a.clone(), b.clone()]; ab.sort();
-        let mut ac = vec![a.clone(), c.clone()]; ac.sort();
-        let mut bc = vec![b.clone(), c.clone()]; bc.sort();
+        let mut ab = vec![a.clone(), b.clone()];
+        ab.sort();
+        let mut ac = vec![a.clone(), c.clone()];
+        ac.sort();
+        let mut bc = vec![b.clone(), c.clone()];
+        bc.sort();
         let mut coeffs = BTreeMap::new();
         coeffs.insert(ab, 1u8);
         coeffs.insert(ac, 1u8);
@@ -271,11 +270,7 @@ pub fn bc_shl<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit], shift: &[B::Bit])
 }
 
 /// Logical right shift (fills with zeros).
-pub fn bc_lshr<B: BitCircuitBuilder>(
-    b: &mut B,
-    val: &[B::Bit],
-    shift: &[B::Bit],
-) -> Vec<B::Bit> {
+pub fn bc_lshr<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit], shift: &[B::Bit]) -> Vec<B::Bit> {
     let n = val.len();
     let stages = barrel_stages(n, shift.len());
     let mut cur = val.to_vec();
@@ -297,11 +292,7 @@ pub fn bc_lshr<B: BitCircuitBuilder>(
 }
 
 /// Arithmetic right shift (sign-extends).
-pub fn bc_ashr<B: BitCircuitBuilder>(
-    b: &mut B,
-    val: &[B::Bit],
-    shift: &[B::Bit],
-) -> Vec<B::Bit> {
+pub fn bc_ashr<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit], shift: &[B::Bit]) -> Vec<B::Bit> {
     let n = val.len();
     let sign = val[n - 1].clone();
     let stages = barrel_stages(n, shift.len());
@@ -393,17 +384,26 @@ pub fn bc_sle<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> B:
 
 /// Pointwise XOR of two equal-length bit vectors.
 pub fn bc_xor_vec<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> Vec<B::Bit> {
-    a.iter().zip(x).map(|(ai, xi)| b.bc_xor(ai.clone(), xi.clone())).collect()
+    a.iter()
+        .zip(x)
+        .map(|(ai, xi)| b.bc_xor(ai.clone(), xi.clone()))
+        .collect()
 }
 
 /// Pointwise AND of two equal-length bit vectors.
 pub fn bc_and_vec<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> Vec<B::Bit> {
-    a.iter().zip(x).map(|(ai, xi)| b.bc_and(ai.clone(), xi.clone())).collect()
+    a.iter()
+        .zip(x)
+        .map(|(ai, xi)| b.bc_and(ai.clone(), xi.clone()))
+        .collect()
 }
 
 /// Pointwise OR of two equal-length bit vectors.
 pub fn bc_or_vec<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> Vec<B::Bit> {
-    a.iter().zip(x).map(|(ai, xi)| b.bc_or(ai.clone(), xi.clone())).collect()
+    a.iter()
+        .zip(x)
+        .map(|(ai, xi)| b.bc_or(ai.clone(), xi.clone()))
+        .collect()
 }
 
 /// Pointwise NOT of a bit vector.
@@ -451,7 +451,9 @@ pub fn bc_rotl<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit], shift: &[B::Bit]
     let n = val.len();
     let left = bc_shl(b, val, shift);
     // n - shift (same bit width as shift)
-    let n_bits: Vec<B::Bit> = (0..shift.len()).map(|i| b.bc_const((n >> i) & 1 != 0)).collect();
+    let n_bits: Vec<B::Bit> = (0..shift.len())
+        .map(|i| b.bc_const((n >> i) & 1 != 0))
+        .collect();
     let n_minus = bc_sub(b, &n_bits, shift);
     let right = bc_lshr(b, val, &n_minus);
     bc_or_vec(b, &left, &right)
@@ -461,7 +463,9 @@ pub fn bc_rotl<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit], shift: &[B::Bit]
 pub fn bc_rotr<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit], shift: &[B::Bit]) -> Vec<B::Bit> {
     let n = val.len();
     let right = bc_lshr(b, val, shift);
-    let n_bits: Vec<B::Bit> = (0..shift.len()).map(|i| b.bc_const((n >> i) & 1 != 0)).collect();
+    let n_bits: Vec<B::Bit> = (0..shift.len())
+        .map(|i| b.bc_const((n >> i) & 1 != 0))
+        .collect();
     let n_minus = bc_sub(b, &n_bits, shift);
     let left = bc_shl(b, val, &n_minus);
     bc_or_vec(b, &right, &left)
@@ -473,7 +477,9 @@ pub fn bc_rotr<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit], shift: &[B::Bit]
 /// sums `NOT(any_above[i])` across all positions as a binary counter.
 pub fn bc_clz<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit]) -> Vec<B::Bit> {
     let n = val.len();
-    if n == 0 { return vec![]; }
+    if n == 0 {
+        return vec![];
+    }
     // any_above[i] = val[n-1] | val[n-2] | ... | val[i]
     let mut any_above = vec![b.bc_const(false); n];
     any_above[n - 1] = val[n - 1].clone();
@@ -497,7 +503,9 @@ pub fn bc_clz<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit]) -> Vec<B::Bit> {
 /// prefix-OR scan, then sums `NOT(any_below[i])`.
 pub fn bc_ctz<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit]) -> Vec<B::Bit> {
     let n = val.len();
-    if n == 0 { return vec![]; }
+    if n == 0 {
+        return vec![];
+    }
     // any_below[i] = val[0] | val[1] | ... | val[i]
     let mut any_below = vec![b.bc_const(false); n];
     any_below[0] = val[0].clone();
@@ -520,7 +528,9 @@ pub fn bc_ctz<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit]) -> Vec<B::Bit> {
 /// Extends each input bit to `n` bits with zero-padding and ripple-adds them.
 pub fn bc_popcnt<B: BitCircuitBuilder>(b: &mut B, val: &[B::Bit]) -> Vec<B::Bit> {
     let n = val.len();
-    if n == 0 { return vec![]; }
+    if n == 0 {
+        return vec![];
+    }
     let mut acc: Vec<B::Bit> = (0..n).map(|_| b.bc_const(false)).collect();
     for bit in val {
         let mut addend: Vec<B::Bit> = vec![bit.clone()];
@@ -566,12 +576,7 @@ pub trait StorageEmitter: BitCircuitBuilder {
     /// [`StackPtr::materialize`].  The implementation calls
     /// [`compose_address`](Self::compose_address) to package it, then emits
     /// the read stmt.
-    fn emit_read(
-        &mut self,
-        storage: StorageId,
-        ty: TypeId,
-        addr_bits: &[Self::Bit],
-    ) -> Self::Bit;
+    fn emit_read(&mut self, storage: StorageId, ty: TypeId, addr_bits: &[Self::Bit]) -> Self::Bit;
 
     /// Emit `StorageWrite` with a wide address.
     fn emit_write(
@@ -627,11 +632,7 @@ pub fn n_packs(n: usize) -> usize {
 /// [`StorageEmitter::compose_pack`].
 ///
 /// Short final chunks are zero-padded to `pack_w` bits.
-pub fn pack_bits<B: StorageEmitter>(
-    b: &mut B,
-    bits: &[B::Bit],
-    pack_w: usize,
-) -> Vec<B::Bit> {
+pub fn pack_bits<B: StorageEmitter>(b: &mut B, bits: &[B::Bit], pack_w: usize) -> Vec<B::Bit> {
     bits.chunks(pack_w)
         .map(|chunk| {
             let mut parts: Vec<B::Bit> = chunk.to_vec();
@@ -697,7 +698,9 @@ impl<Bit: Clone + Ord> StackPtr<Bit> {
     /// Create a fully-constant stack pointer.  All bits are emitted as
     /// `bc_const` - maximally foldable.
     pub fn from_const<B: BitCircuitBuilder<Bit = Bit>>(b: &mut B, val: u64, width: usize) -> Self {
-        let base = (0..width).map(|i| b.bc_const((val >> i) & 1 != 0)).collect();
+        let base = (0..width)
+            .map(|i| b.bc_const((val >> i) & 1 != 0))
+            .collect();
         StackPtr { base, offset: 0 }
     }
 
@@ -713,10 +716,7 @@ impl<Bit: Clone + Ord> StackPtr<Bit> {
 
     /// Advance by a variable (circuit-time) amount.  Materialises the current
     /// pointer, adds `amount`, and resets the constant offset to 0.
-    pub fn advance_var<B: BitCircuitBuilder<Bit = Bit>>(        &mut self,
-        b: &mut B,
-        amount: &[Bit],
-    ) {
+    pub fn advance_var<B: BitCircuitBuilder<Bit = Bit>>(&mut self, b: &mut B, amount: &[Bit]) {
         let current = self.materialize(b);
         self.base = bc_add(b, &current, amount, false);
         self.offset = 0;
@@ -819,16 +819,22 @@ pub fn frame_read_args<B: StorageEmitter>(
     sp: &StackPtr<B::Bit>,
     layout: &FrameLayout,
 ) -> Vec<Vec<B::Bit>> {
-    layout.params.iter().map(|(param_off, slot_count, ty)| {
-        let mut slot_sp = sp.clone();
-        slot_sp.advance(*param_off);
-        (0..(*slot_count as usize)).map(|j| {
-            let mut addr_sp = slot_sp.clone();
-            addr_sp.advance(j as u64);
-            let addr = addr_sp.materialize(b);
-            b.emit_read(layout.storage, *ty, &addr)
-        }).collect()
-    }).collect()
+    layout
+        .params
+        .iter()
+        .map(|(param_off, slot_count, ty)| {
+            let mut slot_sp = sp.clone();
+            slot_sp.advance(*param_off);
+            (0..(*slot_count as usize))
+                .map(|j| {
+                    let mut addr_sp = slot_sp.clone();
+                    addr_sp.advance(j as u64);
+                    let addr = addr_sp.materialize(b);
+                    b.emit_read(layout.storage, *ty, &addr)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Write return-value bits into a stack frame.
@@ -861,12 +867,14 @@ pub fn frame_read_ret<B: StorageEmitter>(
         Some((ret_off, slot_count, ty)) => {
             let mut slot_sp = sp.clone();
             slot_sp.advance(*ret_off);
-            (0..(*slot_count as usize)).map(|j| {
-                let mut addr_sp = slot_sp.clone();
-                addr_sp.advance(j as u64);
-                let addr = addr_sp.materialize(b);
-                b.emit_read(layout.storage, *ty, &addr)
-            }).collect()
+            (0..(*slot_count as usize))
+                .map(|j| {
+                    let mut addr_sp = slot_sp.clone();
+                    addr_sp.advance(j as u64);
+                    let addr = addr_sp.materialize(b);
+                    b.emit_read(layout.storage, *ty, &addr)
+                })
+                .collect()
         }
     }
 }

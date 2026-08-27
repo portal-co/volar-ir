@@ -33,17 +33,17 @@ use inkwell::module::Module as LlvmModule;
 use inkwell::types::BasicTypeEnum;
 
 use volar_ir::ir::{
-    Constant, IRBlock, IRBlockTargetId, IRBranchTarget, IRBlocks, IRStmt, IRTerminator, IRTypeId,
+    Constant, IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRTypeId,
     IRTypes, IRVarId, StorageId,
 };
 use volar_ir_common::Node;
 use volar_lir::circuits::BitCircuitBuilder;
 
-pub use volar_llvm_import_core::{LoweringLimits, ModuleInput};
 use volar_llvm_import_core::{
-    ArgumentBinding, execute_module, Export, ExecutionBackend, ExecutionResult, FrontendError,
-    HostCallRegistry, LowerRequest, ScalarBinding,
+    ArgumentBinding, ExecutionBackend, ExecutionResult, Export, FrontendError, HostCallRegistry,
+    LowerRequest, ScalarBinding, execute_module,
 };
+pub use volar_llvm_import_core::{LoweringLimits, ModuleInput};
 
 /// A diagnostic from [`import`]/[`import_module`].
 #[derive(Debug)]
@@ -170,7 +170,11 @@ struct BlockEmitter {
 
 impl BlockEmitter {
     fn new(bit_tid: IRTypeId) -> Self {
-        BlockEmitter { stmts: Vec::new(), next_var: 0, bit_tid }
+        BlockEmitter {
+            stmts: Vec::new(),
+            next_var: 0,
+            bit_tid,
+        }
     }
 
     fn emit(&mut self, stmt: IRStmt) -> IRVarId {
@@ -185,11 +189,24 @@ impl BitCircuitBuilder for BlockEmitter {
     type Bit = IRVarId;
 
     fn bc_const(&mut self, val: bool) -> IRVarId {
-        self.emit(IRStmt::Const(Constant { hi: 0, lo: val as u128 }, self.bit_tid))
+        self.emit(IRStmt::Const(
+            Constant {
+                hi: 0,
+                lo: val as u128,
+            },
+            self.bit_tid,
+        ))
     }
 
     fn bc_poly(&mut self, coeffs: BTreeMap<Vec<IRVarId>, u8>, constant: u128) -> IRVarId {
-        self.emit(IRStmt::Poly { ty: self.bit_tid, coeffs, constant: Constant { hi: 0, lo: constant } })
+        self.emit(IRStmt::Poly {
+            ty: self.bit_tid,
+            coeffs,
+            constant: Constant {
+                hi: 0,
+                lo: constant,
+            },
+        })
     }
 }
 
@@ -201,7 +218,9 @@ struct VolarIrBitSink {
 
 impl VolarIrBitSink {
     fn new(bit_tid: IRTypeId) -> Self {
-        VolarIrBitSink { emitter: BlockEmitter::new(bit_tid) }
+        VolarIrBitSink {
+            emitter: BlockEmitter::new(bit_tid),
+        }
     }
 
     /// Convert the flat gate trace plus the interpreter's designated
@@ -254,9 +273,14 @@ impl VolarIrBitSink {
 
         let params = vec![bit_tid; n_inputs];
         let output_vars: Vec<IRVarId> = result.outputs.iter().map(|v| old_to_new[v]).collect();
-        let terminator =
-            IRTerminator::Jmp { target: IRBranchTarget::new(IRBlockTargetId::Return, output_vars) };
-        IRBlock { params, stmts: new_stmts, terminator }
+        let terminator = IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Return, output_vars),
+        };
+        IRBlock {
+            params,
+            stmts: new_stmts,
+            terminator,
+        }
     }
 }
 
@@ -284,7 +308,12 @@ impl ExecutionBackend for VolarIrBitSink {
         Ok(self.emitter.bc_xor(left, right))
     }
 
-    fn mux(&mut self, cond: IRVarId, then: IRVarId, r#else: IRVarId) -> Result<IRVarId, Infallible> {
+    fn mux(
+        &mut self,
+        cond: IRVarId,
+        then: IRVarId,
+        r#else: IRVarId,
+    ) -> Result<IRVarId, Infallible> {
         Ok(self.emitter.bc_select(cond, then, r#else))
     }
 }

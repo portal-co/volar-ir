@@ -38,15 +38,16 @@ impl core::fmt::Display for ParseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ParseError::UnsupportedVersion(v) => write!(f, "unsupported version: {}", v),
-            ParseError::UnknownDirective(d)   => write!(f, "unknown directive: {}", d),
-            ParseError::UnexpectedEof         => write!(f, "unexpected end of input"),
-            ParseError::UnexpectedToken { line, col, got } =>
-                write!(f, "unexpected token at {}:{}: {}", line, col, got),
-            ParseError::MissingField(k)       => write!(f, "missing required field: {}", k),
-            ParseError::InvalidInt(s)         => write!(f, "invalid integer: {}", s),
-            ParseError::UnknownNativeType(s)  => write!(f, "unknown native type: {}", s),
-            ParseError::UnknownStructId(id)   => write!(f, "undefined struct id: {}", id),
-            ParseError::MissingVersionLine    => write!(f, "missing version line"),
+            ParseError::UnknownDirective(d) => write!(f, "unknown directive: {}", d),
+            ParseError::UnexpectedEof => write!(f, "unexpected end of input"),
+            ParseError::UnexpectedToken { line, col, got } => {
+                write!(f, "unexpected token at {}:{}: {}", line, col, got)
+            }
+            ParseError::MissingField(k) => write!(f, "missing required field: {}", k),
+            ParseError::InvalidInt(s) => write!(f, "invalid integer: {}", s),
+            ParseError::UnknownNativeType(s) => write!(f, "unknown native type: {}", s),
+            ParseError::UnknownStructId(id) => write!(f, "undefined struct id: {}", id),
+            ParseError::MissingVersionLine => write!(f, "missing version line"),
         }
     }
 }

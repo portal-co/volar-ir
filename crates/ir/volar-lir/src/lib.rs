@@ -23,7 +23,10 @@ use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use volar_ir_common::{ReentryHint, Type as NativeType};
 
 pub mod circuits;
-pub use circuits::{BitCircuitBuilder, StorageEmitter, StackPtr, FrameLayout, PACK_W, n_packs, pack_bits, unpack_words};
+pub use circuits::{
+    BitCircuitBuilder, FrameLayout, PACK_W, StackPtr, StorageEmitter, n_packs, pack_bits,
+    unpack_words,
+};
 
 // ============================================================================
 // Name configuration
@@ -45,7 +48,10 @@ pub use circuits::{BitCircuitBuilder, StorageEmitter, StackPtr, FrameLayout, PAC
 ///
 /// An empty `prefix` and empty `remap` (the default) is the identity.
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct NameConfig {
     /// Prefix prepended to all names not found in `remap`.
     pub prefix: String,
@@ -76,7 +82,10 @@ impl NameConfig {
 ///
 /// Note: `Clone`, not `Copy` — `Arr` boxes its element type.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[non_exhaustive]
 #[cfg_attr(feature = "rkyv", rkyv(serialize_bounds(
     __S: rkyv::ser::Writer + rkyv::ser::Allocator,
@@ -99,7 +108,10 @@ pub enum LirType {
     U128,
     // ---- Aggregates ---------------------------------------------------------
     /// Fixed-size homogeneous array: `[elem; len]`.
-    Arr(#[cfg_attr(feature = "rkyv", rkyv(omit_bounds))] Box<LirType>, usize),
+    Arr(
+        #[cfg_attr(feature = "rkyv", rkyv(omit_bounds))] Box<LirType>,
+        usize,
+    ),
     /// Named struct registered via `LirTarget::define_struct`.
     Struct(StructId),
     /// An opaque Volar-IR-native field element, treated as a **single** value
@@ -141,7 +153,10 @@ impl LirType {
 
     /// Whether this scalar type is signed. Panics on aggregates.
     pub fn is_signed(&self) -> bool {
-        matches!(self, LirType::I8 | LirType::I16 | LirType::I32 | LirType::I64 | LirType::I128)
+        matches!(
+            self,
+            LirType::I8 | LirType::I16 | LirType::I32 | LirType::I64 | LirType::I128
+        )
     }
 
     pub fn is_scalar(&self) -> bool {
@@ -322,7 +337,10 @@ pub type StructId = u32;
 
 /// One field in a struct definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct FieldDef {
     pub name: String,
     pub ty: LirType,
@@ -330,7 +348,10 @@ pub struct FieldDef {
 
 /// A named struct with an ordered list of fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct StructDef {
     pub name: String,
     pub fields: Vec<FieldDef>,
@@ -341,7 +362,10 @@ pub struct StructDef {
 // ============================================================================
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum IcmpPred {
     Eq,
     Ne,
@@ -354,7 +378,6 @@ pub enum IcmpPred {
     Sgt,
     Sge,
 }
-
 
 // ============================================================================
 // Branch targets (terminators)
@@ -678,6 +701,97 @@ pub trait LirTarget<Prov: Clone = ()> {
     /// Generate a fresh random value of `ty`.  Each call is an independent
     /// sample; implementations must not alias results.
     fn rng(&mut self, ty: LirType) -> Self::Value;
+
+    /// Invoke one bit of a named oracle through the portable external-bit
+    /// ABI. The default symbol is `oracle_<name>` and is still routed through
+    /// [`NameConfig`] by native backends, so a deployment can remap every
+    /// source without rewriting its IR.
+    ///
+    /// ABI: `bool oracle_<name>(bool... args, u32 bit, u64 occurrence)`.
+    fn oracle_bit(
+        &mut self,
+        name: &str,
+        args: &[Self::Value],
+        bit: usize,
+        occurrence: u64,
+    ) -> Self::Value {
+        let mut arg_tys = alloc::vec![LirType::Bool; args.len()];
+        let mut values = args.to_vec();
+        arg_tys.push(LirType::U32);
+        values.push(self.iconst(LirType::U32, bit as i64));
+        arg_tys.push(LirType::U64);
+        values.push(self.iconst(LirType::U64, occurrence as i64));
+        self.call_extern(
+            &alloc::format!("oracle_{name}"),
+            &arg_tys,
+            &values,
+            Some(LirType::Bool),
+        )
+        .into_iter()
+        .next()
+        .expect("external oracle bit must return exactly one Bool")
+    }
+
+    /// Invoke one fresh bit from a named RNG source.
+    ///
+    /// ABI: `bool rng_<name>(u32 bit, u64 occurrence)`.
+    fn rng_bit(&mut self, name: &str, bit: usize, occurrence: u64) -> Self::Value {
+        let values = [
+            self.iconst(LirType::U32, bit as i64),
+            self.iconst(LirType::U64, occurrence as i64),
+        ];
+        self.call_extern(
+            &alloc::format!("rng_{name}"),
+            &[LirType::U32, LirType::U64],
+            &values,
+            Some(LirType::Bool),
+        )
+        .into_iter()
+        .next()
+        .expect("external RNG bit must return exactly one Bool")
+    }
+
+    /// Emit one direct action-storage side effect through the portable
+    /// external-bit ABI. The action owns the storage write and chooses
+    /// `fallback` when `guard` is false.
+    ///
+    /// ABI: `void action_<name>(bool... args, bool guard, bool fallback,
+    /// u64 storage, u32 lane, u64 address, u32 bit, u64 occurrence)`.
+    #[allow(clippy::too_many_arguments)]
+    fn action_store_bit(
+        &mut self,
+        name: &str,
+        guard: Self::Value,
+        args: &[Self::Value],
+        fallback: Self::Value,
+        storage: u64,
+        lane: u32,
+        address: Self::Value,
+        bit: usize,
+        occurrence: u64,
+    ) {
+        let mut arg_tys = alloc::vec![LirType::Bool; args.len()];
+        let mut values = args.to_vec();
+        arg_tys.extend([
+            LirType::Bool,
+            LirType::Bool,
+            LirType::U64,
+            LirType::U32,
+            LirType::U64,
+            LirType::U32,
+            LirType::U64,
+        ]);
+        values.extend([
+            guard,
+            fallback,
+            self.iconst(LirType::U64, storage as i64),
+            self.iconst(LirType::U32, lane as i64),
+            address,
+            self.iconst(LirType::U32, bit as i64),
+            self.iconst(LirType::U64, occurrence as i64),
+        ]);
+        self.call_extern(&alloc::format!("action_{name}"), &arg_tys, &values, None);
+    }
 
     /// Return a mutable reference to the [`StackAllocExt`] implementation for
     /// this backend, if it supports stack allocation and pointer operations.

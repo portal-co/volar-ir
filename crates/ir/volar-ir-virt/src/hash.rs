@@ -45,7 +45,7 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use volar_ir::ir::{IRStmt, IRType, IRTypeId, IRTypes, IRVarId};
 use volar_ir_common::{Constant, OracleDecl, StorageId, Type as PrimType};
-use volar_lir::circuits::{bc_add, BitCircuitBuilder};
+use volar_lir::circuits::{BitCircuitBuilder, bc_add};
 
 // ============================================================================
 // IrEmitter
@@ -159,26 +159,34 @@ impl BitCircuitBuilder for BitEmitter<'_> {
     type Bit = IRVarId;
 
     fn bc_const(&mut self, val: bool) -> IRVarId {
-        self.inner.emit(IRStmt::Const(Constant { hi: 0, lo: val as u128 }, self.bit_ty))
+        self.inner.emit(IRStmt::Const(
+            Constant {
+                hi: 0,
+                lo: val as u128,
+            },
+            self.bit_ty,
+        ))
     }
 
-    fn bc_poly(
-        &mut self,
-        coeffs: BTreeMap<Vec<IRVarId>, u8>,
-        constant: u128,
-    ) -> IRVarId {
+    fn bc_poly(&mut self, coeffs: BTreeMap<Vec<IRVarId>, u8>, constant: u128) -> IRVarId {
         self.inner.emit(IRStmt::Poly {
             ty: self.bit_ty,
             coeffs,
-            constant: Constant { hi: 0, lo: constant },
+            constant: Constant {
+                hi: 0,
+                lo: constant,
+            },
         })
     }
 
     /// Override with the single-Poly degree-2 majority (1 stmt vs 5).
     fn bc_carry3(&mut self, a: IRVarId, b: IRVarId, c: IRVarId) -> IRVarId {
-        let mut ab = vec![a, b]; ab.sort();
-        let mut ac = vec![a, c]; ac.sort();
-        let mut bc = vec![b, c]; bc.sort();
+        let mut ab = vec![a, b];
+        ab.sort();
+        let mut ac = vec![a, c];
+        ac.sort();
+        let mut bc = vec![b, c];
+        bc.sort();
         let mut coeffs = BTreeMap::new();
         coeffs.insert(ab, 1u8);
         coeffs.insert(ac, 1u8);
@@ -224,14 +232,21 @@ impl IrHashAlgorithm for XorFoldHash32 {
     ) -> IRVarId {
         let u32_ty = emitter.intern_type(IRType::Primitive(PrimType::_32));
         let mut h = emitter.emit(IRStmt::Const(
-            Constant { hi: 0, lo: self.seed as u128 },
+            Constant {
+                hi: 0,
+                lo: self.seed as u128,
+            },
             u32_ty,
         ));
         for &(var, ty) in inputs {
             let w = if ty == u32_ty {
                 var
             } else {
-                emitter.emit(IRStmt::Transmute { src: var, src_ty: ty, dst_ty: u32_ty })
+                emitter.emit(IRStmt::Transmute {
+                    src: var,
+                    src_ty: ty,
+                    dst_ty: u32_ty,
+                })
             };
             let mut xor: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
             xor.insert(vec![h], 1);
@@ -241,7 +256,11 @@ impl IrHashAlgorithm for XorFoldHash32 {
                 coeffs: xor,
                 constant: Constant { hi: 0, lo: 0 },
             });
-            h = emitter.emit(IRStmt::Rol { src: h, ty: u32_ty, n: 13 });
+            h = emitter.emit(IRStmt::Rol {
+                src: h,
+                ty: u32_ty,
+                n: 13,
+            });
         }
         h
     }
@@ -262,7 +281,9 @@ impl IrHashAlgorithm for XorFoldHash32 {
         h.to_le_bytes().to_vec()
     }
 
-    fn name(&self) -> &str { "xorfold32" }
+    fn name(&self) -> &str {
+        "xorfold32"
+    }
 }
 
 // ============================================================================
@@ -311,7 +332,11 @@ impl IrHashAlgorithm for SipHash48 {
         key_vars: &[(IRVarId, IRTypeId)],
         inputs: &[(IRVarId, IRTypeId)],
     ) -> IRVarId {
-        assert_eq!(key_vars.len(), 2, "SipHash48 requires exactly two 64-bit key words");
+        assert_eq!(
+            key_vars.len(),
+            2,
+            "SipHash48 requires exactly two 64-bit key words"
+        );
         let u64_ty = emitter.intern_type(IRType::Primitive(PrimType::_64));
         let k0 = key_vars[0].0;
         let k1 = key_vars[1].0;
@@ -339,7 +364,11 @@ impl IrHashAlgorithm for SipHash48 {
                 let m = if ty == u64_ty {
                     var
                 } else {
-                    emitter.emit(IRStmt::Transmute { src: var, src_ty: ty, dst_ty: u64_ty })
+                    emitter.emit(IRStmt::Transmute {
+                        src: var,
+                        src_ty: ty,
+                        dst_ty: u64_ty,
+                    })
                 };
                 let block = if i + 1 == n && len_byte != 0 {
                     sip_xor_const(emitter, m, len_byte, u64_ty)
@@ -355,16 +384,15 @@ impl IrHashAlgorithm for SipHash48 {
     }
 
     fn hash_bytes_native(&self, key_words: &[&[u8]], inputs: &[&[u8]]) -> Vec<u8> {
-        assert_eq!(key_words.len(), 2, "SipHash48 requires exactly two key-word slices");
+        assert_eq!(
+            key_words.len(),
+            2,
+            "SipHash48 requires exactly two key-word slices"
+        );
         let k0 = le_bytes_to_u64(key_words[0]);
         let k1 = le_bytes_to_u64(key_words[1]);
 
-        let mut v = [
-            k0 ^ SIP_C0,
-            k1 ^ SIP_C1,
-            k0 ^ SIP_C2,
-            k1 ^ SIP_C3,
-        ];
+        let mut v = [k0 ^ SIP_C0, k1 ^ SIP_C1, k0 ^ SIP_C2, k1 ^ SIP_C3];
 
         let n = inputs.len();
         let len_byte = (((if n == 0 { 0 } else { n * 8 }) & 0xFF) as u64) << 56;
@@ -382,12 +410,16 @@ impl IrHashAlgorithm for SipHash48 {
 
         // Finalise.
         v[2] ^= 0xff;
-        for _ in 0..8 { sip_round_native(&mut v); }
+        for _ in 0..8 {
+            sip_round_native(&mut v);
+        }
         let result = v[0] ^ v[1] ^ v[2] ^ v[3];
         result.to_le_bytes().to_vec()
     }
 
-    fn name(&self) -> &str { "siphash48" }
+    fn name(&self) -> &str {
+        "siphash48"
+    }
 }
 
 // ============================================================================
@@ -440,7 +472,9 @@ fn sip_compress_ir(
     u64_ty: IRTypeId,
 ) {
     v[3] = sip_xor(emitter, v[3], m, u64_ty);
-    for _ in 0..c { sip_round_ir(emitter, v, u64_ty); }
+    for _ in 0..c {
+        sip_round_ir(emitter, v, u64_ty);
+    }
     v[0] = sip_xor(emitter, v[0], m, u64_ty);
 }
 
@@ -452,7 +486,9 @@ fn sip_finalize_ir(
     u64_ty: IRTypeId,
 ) -> IRVarId {
     v[2] = sip_xor_const(emitter, v[2], 0xff, u64_ty);
-    for _ in 0..d { sip_round_ir(emitter, v, u64_ty); }
+    for _ in 0..d {
+        sip_round_ir(emitter, v, u64_ty);
+    }
     let r01 = sip_xor(emitter, v[0], v[1], u64_ty);
     let r23 = sip_xor(emitter, v[2], v[3], u64_ty);
     sip_xor(emitter, r01, r23, u64_ty)
@@ -465,25 +501,38 @@ fn sip_xor(emitter: &mut dyn IrEmitter, a: IRVarId, b: IRVarId, u64_ty: IRTypeId
     let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
     coeffs.insert(vec![a], 1);
     coeffs.insert(vec![b], 1);
-    emitter.emit(IRStmt::Poly { ty: u64_ty, coeffs, constant: Constant { hi: 0, lo: 0 } })
+    emitter.emit(IRStmt::Poly {
+        ty: u64_ty,
+        coeffs,
+        constant: Constant { hi: 0, lo: 0 },
+    })
 }
 
 /// `a XOR k` where `k` is a compile-time `u64` constant.
 /// Returns `a` unchanged when `k == 0`.
 fn sip_xor_const(emitter: &mut dyn IrEmitter, a: IRVarId, k: u64, u64_ty: IRTypeId) -> IRVarId {
-    if k == 0 { return a; }
+    if k == 0 {
+        return a;
+    }
     let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
     coeffs.insert(vec![a], 1);
     emitter.emit(IRStmt::Poly {
         ty: u64_ty,
         coeffs,
-        constant: Constant { hi: 0, lo: k as u128 },
+        constant: Constant {
+            hi: 0,
+            lo: k as u128,
+        },
     })
 }
 
 /// Rotate `a` left by `n` bits over `_64`.
 fn sip_rol64(emitter: &mut dyn IrEmitter, a: IRVarId, n: usize, u64_ty: IRTypeId) -> IRVarId {
-    emitter.emit(IRStmt::Rol { src: a, ty: u64_ty, n })
+    emitter.emit(IRStmt::Rol {
+        src: a,
+        ty: u64_ty,
+        n,
+    })
 }
 
 /// 64-bit modular addition using the ripple-carry emulation from
@@ -495,18 +544,34 @@ fn sip_add64(emitter: &mut dyn IrEmitter, a: IRVarId, b: IRVarId, u64_ty: IRType
     let bit_ty = emitter.bit_ty();
     // Decompose: bit i of word = Shuffle { result_bits: [(i, word)], ty: Bit }
     let bits_a: Vec<IRVarId> = (0u8..64)
-        .map(|i| emitter.emit(IRStmt::Shuffle { result_bits: vec![(i, a)], ty: bit_ty }))
+        .map(|i| {
+            emitter.emit(IRStmt::Shuffle {
+                result_bits: vec![(i, a)],
+                ty: bit_ty,
+            })
+        })
         .collect();
     let bits_b: Vec<IRVarId> = (0u8..64)
-        .map(|i| emitter.emit(IRStmt::Shuffle { result_bits: vec![(i, b)], ty: bit_ty }))
+        .map(|i| {
+            emitter.emit(IRStmt::Shuffle {
+                result_bits: vec![(i, b)],
+                ty: bit_ty,
+            })
+        })
         .collect();
     // Ripple-carry add (from volar_lir::circuits).
     let sum_bits = {
-        let mut bce = BitEmitter { inner: emitter, bit_ty };
+        let mut bce = BitEmitter {
+            inner: emitter,
+            bit_ty,
+        };
         bc_add(&mut bce, &bits_a, &bits_b, false)
     };
     // Repack bits into a single _64 word.
-    emitter.emit(IRStmt::Merge { parts: sum_bits, ty: u64_ty })
+    emitter.emit(IRStmt::Merge {
+        parts: sum_bits,
+        ty: u64_ty,
+    })
 }
 
 // ============================================================================
@@ -532,7 +597,9 @@ fn sip_round_native(v: &mut [u64; 4]) {
 
 fn sip_compress_native(v: &mut [u64; 4], m: u64, c: u8) {
     v[3] ^= m;
-    for _ in 0..c { sip_round_native(v); }
+    for _ in 0..c {
+        sip_round_native(v);
+    }
     v[0] ^= m;
 }
 
@@ -553,11 +620,11 @@ fn le_bytes_to_u64(bytes: &[u8]) -> u64 {
 /// Canonical little-endian byte encoding for a typed constant.
 pub fn constant_to_le_bytes(c: &Constant, ty: &IRType) -> Vec<u8> {
     match ty {
-        IRType::Primitive(PrimType::Bit)  => vec![(c.lo & 1) as u8],
-        IRType::Primitive(PrimType::_8)   => vec![(c.lo & 0xFF) as u8],
-        IRType::Primitive(PrimType::_16)  => (c.lo as u16).to_le_bytes().to_vec(),
-        IRType::Primitive(PrimType::_32)  => (c.lo as u32).to_le_bytes().to_vec(),
-        IRType::Primitive(PrimType::_64)  => (c.lo as u64).to_le_bytes().to_vec(),
+        IRType::Primitive(PrimType::Bit) => vec![(c.lo & 1) as u8],
+        IRType::Primitive(PrimType::_8) => vec![(c.lo & 0xFF) as u8],
+        IRType::Primitive(PrimType::_16) => (c.lo as u16).to_le_bytes().to_vec(),
+        IRType::Primitive(PrimType::_32) => (c.lo as u32).to_le_bytes().to_vec(),
+        IRType::Primitive(PrimType::_64) => (c.lo as u64).to_le_bytes().to_vec(),
         IRType::Primitive(PrimType::_128) => c.lo.to_le_bytes().to_vec(),
         IRType::Primitive(PrimType::_256) => {
             let mut b = c.lo.to_le_bytes().to_vec();
@@ -579,6 +646,8 @@ pub fn bytes_to_constant(bytes: &[u8]) -> Constant {
         let hi_n = (bytes.len() - 16).min(16);
         hi_buf[..hi_n].copy_from_slice(&bytes[16..16 + hi_n]);
         u128::from_le_bytes(hi_buf)
-    } else { 0 };
+    } else {
+        0
+    };
     Constant { hi, lo }
 }
