@@ -60,6 +60,28 @@ pub struct NameConfig {
     pub remap: BTreeMap<String, String>,
 }
 
+/// Destination for one result of an [`LirTarget::action_store`] call.
+///
+/// The action runtime owns the actual write.  Keeping the destination in the
+/// call ABI (rather than materialising an intermediate SSA result) preserves
+/// the source `ActionStore` operation's effect-only semantics and lets a host
+/// implement storage atomically for a multi-result action.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct ActionStoreTarget<Value> {
+    /// Logical storage segment selected by the Volar IR statement.
+    pub storage: u64,
+    /// Logical lane within that segment.
+    pub lane: u32,
+    /// Runtime address of the destination element.
+    pub address: Value,
+    /// ABI type of [`address`](Self::address).
+    pub address_ty: LirType,
+}
+
 impl NameConfig {
     /// Apply this configuration to `name`.
     pub fn apply(&self, name: &str) -> String {
@@ -106,6 +128,20 @@ pub enum LirType {
     U64,
     I128,
     U128,
+    /// 256-bit signed integer. This is a packed, little-endian bitvector
+    /// when converted from Volar IR's `_256` primitive.
+    I256,
+    /// 256-bit unsigned integer. This is a packed, little-endian bitvector
+    /// when converted from Volar IR's `_256` primitive.
+    U256,
+    /// A lane-wise vector. Unlike [`Arr`](Self::Arr), this is a first-class
+    /// arithmetic value for targets that have vector instructions (LLVM).
+    /// Backends without vector registers expose the same value as flattened
+    /// little-endian scalar lanes at their ABI boundary.
+    Vector(
+        #[cfg_attr(feature = "rkyv", rkyv(omit_bounds))] Box<LirType>,
+        usize,
+    ),
     // ---- Aggregates ---------------------------------------------------------
     /// Fixed-size homogeneous array: `[elem; len]`.
     Arr(
@@ -144,6 +180,8 @@ impl LirType {
             LirType::I32 | LirType::U32 => 32,
             LirType::I64 | LirType::U64 => 64,
             LirType::I128 | LirType::U128 => 128,
+            LirType::I256 | LirType::U256 => 256,
+            LirType::Vector(elem, len) => elem.bit_width() * (*len as u32),
             LirType::Arr(elem, len) => elem.bit_width() * (*len as u32),
             LirType::Struct(_) => panic!("bit_width not defined for Struct"),
             LirType::Native(_) => panic!("bit_width not meaningful for Native field elements"),
@@ -155,7 +193,12 @@ impl LirType {
     pub fn is_signed(&self) -> bool {
         matches!(
             self,
-            LirType::I8 | LirType::I16 | LirType::I32 | LirType::I64 | LirType::I128
+            LirType::I8
+                | LirType::I16
+                | LirType::I32
+                | LirType::I64
+                | LirType::I128
+                | LirType::I256
         )
     }
 
@@ -702,6 +745,16 @@ pub trait LirTarget<Prov: Clone = ()> {
     /// sample; implementations must not alias results.
     fn rng(&mut self, ty: LirType) -> Self::Value;
 
+    /// Generate a fresh random value from a named source.
+    ///
+    /// The default preserves the original anonymous-runtime ABI.  Native
+    /// targets override it to expose `rng_<name>` as a configurable external
+    /// symbol/import, while circuit targets can retain their existing source
+    /// handling without a second implementation.
+    fn rng_named(&mut self, _name: &str, ty: LirType) -> Self::Value {
+        self.rng(ty)
+    }
+
     /// Invoke one bit of a named oracle through the portable external-bit
     /// ABI. The default symbol is `oracle_<name>` and is still routed through
     /// [`NameConfig`] by native backends, so a deployment can remap every
@@ -791,6 +844,51 @@ pub trait LirTarget<Prov: Clone = ()> {
             self.iconst(LirType::U64, occurrence as i64),
         ]);
         self.call_extern(&alloc::format!("action_{name}"), &arg_tys, &values, None);
+    }
+
+    /// Invoke an action and give its host implementation every result's
+    /// storage destination directly.
+    ///
+    /// This is the typed counterpart of [`action_store_bit`](Self::action_store_bit).
+    /// The portable argument order is:
+    ///
+    /// `args..., guard, fallbacks..., (storage, lane, address)...`
+    ///
+    /// `fallbacks`, `ret_tys`, and `targets` have one item per action result.
+    /// The action runtime writes either its result (when `guard` is true) or
+    /// the corresponding fallback (when false); it returns no SSA value.
+    /// Native targets retain each value's type, while targets with a flat ABI
+    /// lower individual values according to their normal call ABI.
+    fn action_store(
+        &mut self,
+        name: &str,
+        guard: Self::Value,
+        arg_tys: &[LirType],
+        args: &[Self::Value],
+        fallbacks: &[Self::Value],
+        ret_tys: &[LirType],
+        targets: &[ActionStoreTarget<Self::Value>],
+    ) {
+        assert_eq!(
+            fallbacks.len(),
+            ret_tys.len(),
+            "one fallback per action result"
+        );
+        assert_eq!(targets.len(), ret_tys.len(), "one target per action result");
+
+        let mut abi_tys = arg_tys.to_vec();
+        let mut values = args.to_vec();
+        abi_tys.push(LirType::Bool);
+        values.push(guard);
+        abi_tys.extend_from_slice(ret_tys);
+        values.extend_from_slice(fallbacks);
+        for target in targets {
+            abi_tys.extend([LirType::U64, LirType::U32, target.address_ty.clone()]);
+            values.push(self.iconst(LirType::U64, target.storage as i64));
+            values.push(self.iconst(LirType::U32, target.lane as i64));
+            values.push(target.address.clone());
+        }
+        self.call_extern(&alloc::format!("action_{name}"), &abi_tys, &values, None);
     }
 
     /// Return a mutable reference to the [`StackAllocExt`] implementation for

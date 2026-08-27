@@ -1,9 +1,9 @@
 // @reliability: normal
 //! Lowering passes from the circuit IRs (`BIrBlocks`, `IRBlocks`) to `LirTarget`.
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
 use volar_ir_config::IrLoweringConfig;
-use volar_lir::{BranchTarget, LirTarget, LirType};
+use volar_lir::{ActionStoreTarget, BranchTarget, LirTarget, LirType};
 use volar_provenance::ProvenanceHandler;
 
 use volar_ir::{
@@ -348,6 +348,12 @@ pub fn lower_ir_with_handler<P, T, H>(
 {
     let entry = &blocks.blocks[0];
 
+    // Compute the declared type of every SSA value before emitting anything.
+    // External calls must preserve their real input ABI, rather than treating
+    // every value as the historical U64 placeholder.
+    let block_var_tys: Vec<Vec<Option<volar_ir::ir::IRTypeId>>> =
+        blocks.blocks.iter().map(infer_block_var_types).collect();
+
     // Map entry block param types to LirType.
     let input_tys: Vec<LirType> = entry
         .params
@@ -355,9 +361,12 @@ pub fn lower_ir_with_handler<P, T, H>(
         .map(|tid| ir_type_to_lir(&types.0[tid.0 as usize], types))
         .collect();
 
-    // Determine return type from the return terminator's args.
-    // For simplicity, assume single-output; we'll pack multi-output below.
-    let ret_ty = Some(LirType::U64);
+    // Preserve a single typed Volar return directly.  The legacy U64 packing
+    // remains only for the older multi-bit/multi-output return convention;
+    // native vector and packed-256 values must never flow through that path.
+    let direct_return_ty =
+        typed_return_type(blocks, &block_var_tys, types).filter(requires_native_return_abi);
+    let ret_ty = Some(direct_return_ty.clone().unwrap_or(LirType::U64));
 
     let (entry_handle, entry_param_groups) = target.begin_function(name, &input_tys, ret_ty);
     // All params are scalar types, so each group has exactly one value.
@@ -410,10 +419,7 @@ pub fn lower_ir_with_handler<P, T, H>(
                         .iter()
                         .map(|id| vals_per_block[bi][id.0 as usize].clone())
                         .collect();
-                    let arg_lir_tys: Vec<LirType> = args
-                        .iter()
-                        .map(|_| LirType::U64) // conservative; full impl should track types
-                        .collect();
+                    let arg_lir_tys = lir_types_for_vars(args, &block_var_tys[bi], types);
                     let ret_tys: Vec<LirType> = output_tys
                         .iter()
                         .map(|tid| ir_type_to_lir(&types.0[tid.0 as usize], types))
@@ -448,7 +454,7 @@ pub fn lower_ir_with_handler<P, T, H>(
                         .iter()
                         .map(|id| vals_per_block[bi][id.0 as usize].clone())
                         .collect();
-                    let arg_lir_tys: Vec<LirType> = args.iter().map(|_| LirType::U64).collect();
+                    let arg_lir_tys = lir_types_for_vars(args, &block_var_tys[bi], types);
                     let ret_tys: Vec<LirType> = output_tys
                         .iter()
                         .map(|tid| ir_type_to_lir(&types.0[tid.0 as usize], types))
@@ -471,10 +477,67 @@ pub fn lower_ir_with_handler<P, T, H>(
                         .expect("ActionOutput: no stashed results for ActionCall");
                     vals_per_block[bi].push(results[*idx].clone());
                 }
+                // ---- Direct action storage --------------------------------
+                IRStmt::ActionStore {
+                    name,
+                    guard,
+                    args,
+                    fallbacks,
+                    output_tys,
+                    targets,
+                } => {
+                    let guard = vals_per_block[bi][guard.0 as usize].clone();
+                    let args: Vec<T::Value> = args
+                        .iter()
+                        .map(|id| vals_per_block[bi][id.0 as usize].clone())
+                        .collect();
+                    let fallbacks: Vec<T::Value> = fallbacks
+                        .iter()
+                        .map(|id| vals_per_block[bi][id.0 as usize].clone())
+                        .collect();
+                    let arg_lir_tys = lir_types_for_vars(
+                        match &stmt.kind {
+                            IRStmt::ActionStore { args, .. } => args,
+                            _ => unreachable!(),
+                        },
+                        &block_var_tys[bi],
+                        types,
+                    );
+                    let ret_tys: Vec<LirType> = output_tys
+                        .iter()
+                        .map(|tid| ir_type_to_lir(&types.0[tid.0 as usize], types))
+                        .collect();
+                    let target_values: Vec<ActionStoreTarget<T::Value>> = targets
+                        .iter()
+                        .map(|target| {
+                            let address_ty =
+                                lir_type_for_var(target.addr, &block_var_tys[bi], types);
+                            ActionStoreTarget {
+                                storage: target.storage.0 as u64,
+                                lane: 0,
+                                address: vals_per_block[bi][target.addr.0 as usize].clone(),
+                                address_ty,
+                            }
+                        })
+                        .collect();
+                    target.action_store(
+                        name,
+                        guard,
+                        &arg_lir_tys,
+                        &args,
+                        &fallbacks,
+                        &ret_tys,
+                        &target_values,
+                    );
+                    // Effect-only statements have no valid SSA result.  Keep
+                    // a private placeholder solely to retain the IR's stable
+                    // variable numbering; type validation forbids consuming it.
+                    vals_per_block[bi].push(target.iconst(LirType::Bool, 0));
+                }
                 // ---- Rng: emit target.rng() --------------------------------
-                IRStmt::Rng { name: _, ty } => {
+                IRStmt::Rng { name, ty } => {
                     let lir_ty = ir_type_to_lir(&types.0[ty.0 as usize], types);
-                    vals_per_block[bi].push(target.rng(lir_ty));
+                    vals_per_block[bi].push(target.rng_named(name, lir_ty));
                 }
                 // ---- All other stmts: existing lowering --------------------
                 other => {
@@ -490,6 +553,7 @@ pub fn lower_ir_with_handler<P, T, H>(
             &block_vals,
             &block_handles,
             &block_param_counts,
+            direct_return_ty.is_some(),
             target,
         );
     }
@@ -515,20 +579,149 @@ fn ir_type_bits(ty: &IRType, types: &IRTypes) -> u32 {
 }
 
 fn ir_type_to_lir(ty: &IRType, types: &IRTypes) -> LirType {
-    let bits = ir_type_bits(ty, types);
-    match bits {
-        1 => LirType::Bool,
-        2..=8 => LirType::U8,
-        9..=16 => LirType::U16,
-        17..=32 => LirType::U32,
-        33..=64 => LirType::U64,
-        w => unimplemented!(
-            "ir_type_to_lir: {}-bit type {:?} exceeds 64-bit word; \
-             multi-word lowering is not yet implemented",
-            w,
-            ty
+    match ty {
+        IRType::Primitive(Type::Bit) => LirType::Bool,
+        IRType::Primitive(Type::_8) => LirType::U8,
+        IRType::Primitive(Type::_16) => LirType::U16,
+        IRType::Primitive(Type::_32) => LirType::U32,
+        IRType::Primitive(Type::_64) => LirType::U64,
+        IRType::Primitive(Type::_128) => LirType::U128,
+        IRType::Primitive(Type::_256) => LirType::U256,
+        IRType::Primitive(Type::AES8) => LirType::Native(Type::AES8),
+        IRType::Primitive(Type::Galois64) => LirType::Native(Type::Galois64),
+        IRType::Primitive(Type::Z3) => {
+            panic!("ir_type_to_lir: Z3 values cannot lower through the GF(2) native targets")
+        }
+        IRType::Vec(lanes, element) => LirType::Vector(
+            Box::new(ir_type_to_lir(&types.0[element.0 as usize], types)),
+            *lanes,
         ),
+        IRType::Tuple(_) => {
+            panic!("ir_type_to_lir: tuple lowering requires target struct registration")
+        }
+        other => panic!("ir_type_to_lir: unsupported Volar IR type {other:?}"),
     }
+}
+
+/// Type of an SSA result when lowering directly to LIR.
+///
+/// Effect-only instructions deliberately return `None`: retaining that fact
+/// here prevents a later external call from silently accepting their dummy
+/// positional placeholder as a U64 argument.
+fn lir_stmt_result_type(stmt: &IRStmt) -> Option<volar_ir::ir::IRTypeId> {
+    match stmt {
+        IRStmt::StorageRead { ty, .. }
+        | IRStmt::Const(_, ty)
+        | IRStmt::Rol { ty, .. }
+        | IRStmt::Ror { ty, .. }
+        | IRStmt::Merge { ty, .. }
+        | IRStmt::Splat { ty, .. }
+        | IRStmt::Shuffle { ty, .. }
+        | IRStmt::OracleOutput { ty, .. }
+        | IRStmt::ActionOutput { ty, .. }
+        | IRStmt::Rng { ty, .. }
+        | IRStmt::Poly { ty, .. } => Some(*ty),
+        IRStmt::Transmute { dst_ty, .. } => Some(*dst_ty),
+        IRStmt::OracleCall { result_ty, .. } | IRStmt::ActionCall { result_ty, .. } => {
+            Some(*result_ty)
+        }
+        IRStmt::StorageWrite { .. } | IRStmt::ActionStore { .. } => None,
+        _ => None,
+    }
+}
+
+fn infer_block_var_types<P: Clone>(
+    block: &volar_ir::ir::IRBlock<P>,
+) -> Vec<Option<volar_ir::ir::IRTypeId>> {
+    let mut result = block.params.iter().copied().map(Some).collect::<Vec<_>>();
+    result.extend(
+        block
+            .stmts
+            .iter()
+            .map(|stmt| lir_stmt_result_type(&stmt.kind)),
+    );
+    result
+}
+
+fn lir_type_for_var(
+    var: volar_ir::ir::IRVarId,
+    var_tys: &[Option<volar_ir::ir::IRTypeId>],
+    types: &IRTypes,
+) -> LirType {
+    let tid = var_tys
+        .get(var.0 as usize)
+        .and_then(|ty| *ty)
+        .unwrap_or_else(|| panic!("LIR lowering: SSA value {} has no data type", var.0));
+    ir_type_to_lir(&types.0[tid.0 as usize], types)
+}
+
+fn lir_types_for_vars(
+    vars: &[volar_ir::ir::IRVarId],
+    var_tys: &[Option<volar_ir::ir::IRTypeId>],
+    types: &IRTypes,
+) -> Vec<LirType> {
+    vars.iter()
+        .copied()
+        .map(|var| lir_type_for_var(var, var_tys, types))
+        .collect()
+}
+
+fn typed_single_return<P: Clone>(
+    block: &volar_ir::ir::IRBlock<P>,
+    var_tys: &[Option<volar_ir::ir::IRTypeId>],
+    types: &IRTypes,
+) -> Option<LirType> {
+    let IRTerminator::Jmp { target } = &block.terminator else {
+        return None;
+    };
+    if !matches!(target.dest, IRBlockTargetId::Return) || target.args.len() != 1 {
+        return None;
+    }
+    Some(lir_type_for_var(target.args[0], var_tys, types))
+}
+
+/// Return a native LIR type only when every `return` edge has exactly one
+/// value of that same type.  A function has one ABI return declaration, so it
+/// would be invalid to decide per basic block (and would accidentally make a
+/// multi-block U64 function emit `ret i8`, for example).
+fn typed_return_type<P: Clone>(
+    blocks: &IRBlocks<P>,
+    block_var_tys: &[Vec<Option<volar_ir::ir::IRTypeId>>],
+    types: &IRTypes,
+) -> Option<LirType> {
+    let mut result: Option<LirType> = None;
+    for (block, var_tys) in blocks.blocks.iter().zip(block_var_tys) {
+        let Some(ty) = typed_single_return(block, var_tys, types) else {
+            if matches!(
+                block.terminator,
+                IRTerminator::Jmp {
+                    target: IRBranchTarget {
+                        dest: IRBlockTargetId::Return,
+                        ..
+                    }
+                }
+            ) {
+                return None;
+            }
+            continue;
+        };
+        match &result {
+            Some(existing) if existing != &ty => return None,
+            Some(_) => {}
+            None => result = Some(ty),
+        }
+    }
+    result
+}
+
+/// The historical direct-IR entry-point ABI returns narrow scalar values in
+/// a zero-extended `U64`.  Keep that compatibility for existing hosts while
+/// using a real native return for values that cannot be represented there.
+fn requires_native_return_abi(ty: &LirType) -> bool {
+    matches!(
+        ty,
+        LirType::I128 | LirType::U128 | LirType::I256 | LirType::U256 | LirType::Vector(_, _)
+    )
 }
 
 fn lower_ir_stmt<Q: Clone, T: LirTarget<Q>>(
@@ -669,6 +862,7 @@ fn lower_ir_terminator<Q: Clone, T: LirTarget<Q>>(
     vals: &[T::Value],
     block_handles: &[T::Block],
     block_param_counts: &[usize],
+    direct_typed_return: bool,
     target: &mut T,
 ) {
     match term {
@@ -682,8 +876,12 @@ fn lower_ir_terminator<Q: Clone, T: LirTarget<Q>>(
                 .collect();
             match &jump_target.dest {
                 IRBlockTargetId::Return => {
-                    let ret = pack_bits_to_u64(&arg_vals, target);
-                    target.ret(&[ret]);
+                    if direct_typed_return {
+                        target.ret(&arg_vals);
+                    } else {
+                        let ret = pack_bits_to_u64(&arg_vals, target);
+                        target.ret(&[ret]);
+                    }
                 }
                 IRBlockTargetId::Block(id) => {
                     target.jump(

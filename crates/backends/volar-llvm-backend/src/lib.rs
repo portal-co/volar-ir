@@ -36,8 +36,8 @@
 //! LLVM 20 uses untyped `ptr` for all pointer values.  `ptr_load` and GEP
 //! operations receive the pointee type explicitly (stored in `LlvmValue::ty`).
 
-use std::collections::HashMap;
 use std::vec::Vec;
+use std::{collections::HashMap, num::NonZeroU32};
 
 use inkwell::{
     AddressSpace,
@@ -111,6 +111,21 @@ struct FunctionState<'ctx> {
     ret_ty: Option<LirType>,
     /// One entry per block created via `begin_function` / `create_block`.
     blocks: Vec<BlockState<'ctx>>,
+}
+
+#[derive(Clone, Copy)]
+enum IntBinOp {
+    Add,
+    Sub,
+    Mul,
+    Udiv,
+    Sdiv,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Lshr,
+    Ashr,
 }
 
 // ============================================================================
@@ -222,6 +237,16 @@ impl<'ctx> LlvmBackend<'ctx> {
             LirType::I32 | LirType::U32 => self.context.i32_type().into(),
             LirType::I64 | LirType::U64 => self.context.i64_type().into(),
             LirType::I128 | LirType::U128 => self.context.i128_type().into(),
+            LirType::I256 | LirType::U256 => self
+                .context
+                .custom_width_int_type(NonZeroU32::new(256).unwrap())
+                .expect("256 is a valid LLVM integer width")
+                .into(),
+            LirType::Vector(elem, lanes) => self
+                .lir_type_to_llvm(elem)
+                .into_int_type()
+                .vec_type(*lanes as u32)
+                .into(),
             LirType::Native(t) => self.native_type_to_llvm(*t).into(),
             // LLVM 21 opaque pointer.
             LirType::Ptr(_) => self.context.ptr_type(AddressSpace::default()).into(),
@@ -244,9 +269,11 @@ impl<'ctx> LlvmBackend<'ctx> {
             NativeType::_16 => self.context.i16_type(),
             NativeType::_32 => self.context.i32_type(),
             NativeType::_64 | NativeType::Galois64 => self.context.i64_type(),
-            // 128-bit: use i128
             NativeType::_128 => self.context.i128_type(),
-            // 256-bit and beyond: conservative fallback to i64
+            NativeType::_256 => self
+                .context
+                .custom_width_int_type(NonZeroU32::new(256).unwrap())
+                .expect("256 is a valid LLVM integer width"),
             _ => self.context.i64_type(),
         }
     }
@@ -263,25 +290,108 @@ impl<'ctx> LlvmBackend<'ctx> {
         fv
     }
 
+    /// Call an external whose logical result list is represented as a native
+    /// LLVM struct when it contains more than one value.  This keeps each
+    /// result's exact scalar/vector type at the ABI boundary instead of
+    /// silently discarding every result after the first.
+    fn call_extern_results(
+        &mut self,
+        name: &str,
+        arg_tys: &[LirType],
+        args: &[LlvmValue<'ctx>],
+        ret_tys: &[LirType],
+    ) -> Vec<LlvmValue<'ctx>> {
+        assert!(
+            !ret_tys.is_empty(),
+            "external result list must be non-empty"
+        );
+        if ret_tys.len() == 1 {
+            return self.call_extern(name, arg_tys, args, Some(ret_tys[0].clone()));
+        }
+
+        let params = arg_tys
+            .iter()
+            .map(|ty| self.lir_type_to_llvm(ty).into())
+            .collect::<Vec<BasicMetadataTypeEnum<'ctx>>>();
+        let fields = ret_tys
+            .iter()
+            .map(|ty| self.lir_type_to_llvm(ty))
+            .collect::<Vec<BasicTypeEnum<'ctx>>>();
+        let result_ty = self.context.struct_type(&fields, false);
+        let function = self.declare_extern(
+            &self.name_config.apply(name),
+            result_ty.fn_type(&params, false),
+        );
+        let args = args
+            .iter()
+            .map(|value| value.inner.into())
+            .collect::<Vec<BasicMetadataValueEnum<'ctx>>>();
+        let result = self
+            .builder
+            .build_call(function, &args, "")
+            .unwrap()
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_struct_value();
+        ret_tys
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| LlvmValue {
+                inner: self
+                    .builder
+                    .build_extract_value(result, index as u32, "")
+                    .unwrap(),
+                ty: ty.clone(),
+            })
+            .collect()
+    }
+
     /// Build a binary integer operation, returning a fresh value.
     fn int_binop(
         &mut self,
         lhs: LlvmValue<'ctx>,
         rhs: LlvmValue<'ctx>,
-        op: impl FnOnce(
-            &Builder<'ctx>,
-            inkwell::values::IntValue<'ctx>,
-            inkwell::values::IntValue<'ctx>,
-        ) -> inkwell::values::IntValue<'ctx>,
+        op: IntBinOp,
     ) -> LlvmValue<'ctx> {
         let ty = lhs.ty.clone();
-        let l = lhs.inner.into_int_value();
-        let r = rhs.inner.into_int_value();
-        let result = op(&self.builder, l, r);
-        LlvmValue {
-            inner: result.into(),
-            ty,
-        }
+        let result = match (lhs.inner, rhs.inner) {
+            (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
+                let value = match op {
+                    IntBinOp::Add => self.builder.build_int_add(l, r, ""),
+                    IntBinOp::Sub => self.builder.build_int_sub(l, r, ""),
+                    IntBinOp::Mul => self.builder.build_int_mul(l, r, ""),
+                    IntBinOp::Udiv => self.builder.build_int_unsigned_div(l, r, ""),
+                    IntBinOp::Sdiv => self.builder.build_int_signed_div(l, r, ""),
+                    IntBinOp::And => self.builder.build_and(l, r, ""),
+                    IntBinOp::Or => self.builder.build_or(l, r, ""),
+                    IntBinOp::Xor => self.builder.build_xor(l, r, ""),
+                    IntBinOp::Shl => self.builder.build_left_shift(l, r, ""),
+                    IntBinOp::Lshr => self.builder.build_right_shift(l, r, false, ""),
+                    IntBinOp::Ashr => self.builder.build_right_shift(l, r, true, ""),
+                }
+                .unwrap();
+                value.into()
+            }
+            (BasicValueEnum::VectorValue(l), BasicValueEnum::VectorValue(r)) => {
+                let value = match op {
+                    IntBinOp::Add => self.builder.build_int_add(l, r, ""),
+                    IntBinOp::Sub => self.builder.build_int_sub(l, r, ""),
+                    IntBinOp::Mul => self.builder.build_int_mul(l, r, ""),
+                    IntBinOp::Udiv => self.builder.build_int_unsigned_div(l, r, ""),
+                    IntBinOp::Sdiv => self.builder.build_int_signed_div(l, r, ""),
+                    IntBinOp::And => self.builder.build_and(l, r, ""),
+                    IntBinOp::Or => self.builder.build_or(l, r, ""),
+                    IntBinOp::Xor => self.builder.build_xor(l, r, ""),
+                    IntBinOp::Shl => self.builder.build_left_shift(l, r, ""),
+                    IntBinOp::Lshr => self.builder.build_right_shift(l, r, false, ""),
+                    IntBinOp::Ashr => self.builder.build_right_shift(l, r, true, ""),
+                }
+                .unwrap();
+                value.into()
+            }
+            _ => panic!("LLVM integer operation requires matching scalar or vector integer values"),
+        };
+        LlvmValue { inner: result, ty }
     }
 
     /// Return the current insertion block (panics if builder is not positioned).
@@ -529,41 +639,37 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
     // ---- Arithmetic ---------------------------------------------------------
 
     fn add(&mut self, lhs: LlvmValue<'ctx>, rhs: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(lhs, rhs, |b, l, r| b.build_int_add(l, r, "").unwrap())
+        self.int_binop(lhs, rhs, IntBinOp::Add)
     }
 
     fn sub(&mut self, lhs: LlvmValue<'ctx>, rhs: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(lhs, rhs, |b, l, r| b.build_int_sub(l, r, "").unwrap())
+        self.int_binop(lhs, rhs, IntBinOp::Sub)
     }
 
     fn mul(&mut self, lhs: LlvmValue<'ctx>, rhs: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(lhs, rhs, |b, l, r| b.build_int_mul(l, r, "").unwrap())
+        self.int_binop(lhs, rhs, IntBinOp::Mul)
     }
 
     fn udiv(&mut self, lhs: LlvmValue<'ctx>, rhs: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(lhs, rhs, |b, l, r| {
-            b.build_int_unsigned_div(l, r, "").unwrap()
-        })
+        self.int_binop(lhs, rhs, IntBinOp::Udiv)
     }
 
     fn sdiv(&mut self, lhs: LlvmValue<'ctx>, rhs: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(lhs, rhs, |b, l, r| {
-            b.build_int_signed_div(l, r, "").unwrap()
-        })
+        self.int_binop(lhs, rhs, IntBinOp::Sdiv)
     }
 
     // ---- Bitwise ------------------------------------------------------------
 
     fn and(&mut self, lhs: LlvmValue<'ctx>, rhs: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(lhs, rhs, |b, l, r| b.build_and(l, r, "").unwrap())
+        self.int_binop(lhs, rhs, IntBinOp::And)
     }
 
     fn or(&mut self, lhs: LlvmValue<'ctx>, rhs: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(lhs, rhs, |b, l, r| b.build_or(l, r, "").unwrap())
+        self.int_binop(lhs, rhs, IntBinOp::Or)
     }
 
     fn xor(&mut self, lhs: LlvmValue<'ctx>, rhs: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(lhs, rhs, |b, l, r| b.build_xor(l, r, "").unwrap())
+        self.int_binop(lhs, rhs, IntBinOp::Xor)
     }
 
     fn not(&mut self, val: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
@@ -583,21 +689,17 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
     }
 
     fn shl(&mut self, val: LlvmValue<'ctx>, shift: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
-        self.int_binop(val, shift, |b, l, r| b.build_left_shift(l, r, "").unwrap())
+        self.int_binop(val, shift, IntBinOp::Shl)
     }
 
     fn lshr(&mut self, val: LlvmValue<'ctx>, shift: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
         // sign_extend = false → logical (zero-fill) right shift
-        self.int_binop(val, shift, |b, l, r| {
-            b.build_right_shift(l, r, false, "").unwrap()
-        })
+        self.int_binop(val, shift, IntBinOp::Lshr)
     }
 
     fn ashr(&mut self, val: LlvmValue<'ctx>, shift: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
         // sign_extend = true → arithmetic (sign-fill) right shift
-        self.int_binop(val, shift, |b, l, r| {
-            b.build_right_shift(l, r, true, "").unwrap()
-        })
+        self.int_binop(val, shift, IntBinOp::Ashr)
     }
 
     // ---- Comparison ---------------------------------------------------------
@@ -938,9 +1040,7 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         args: &[LlvmValue<'ctx>],
         ret_tys: &[LirType],
     ) -> Vec<LlvmValue<'ctx>> {
-        // Treat oracle as a plain extern call (single output, like the C backend).
-        let ret_ty = ret_tys.first().cloned();
-        self.call_extern(&format!("oracle_{name}"), arg_tys, args, ret_ty)
+        self.call_extern_results(&format!("oracle_{name}"), arg_tys, args, ret_tys)
     }
 
     fn action(
@@ -952,9 +1052,11 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         fallbacks: &[LlvmValue<'ctx>],
         ret_tys: &[LirType],
     ) -> Vec<LlvmValue<'ctx>> {
-        // Call the action unconditionally, then select between result and fallback.
-        let ret_ty = ret_tys.first().cloned();
-        let action_result = self.call_extern(&format!("action_{name}"), arg_tys, args, ret_ty);
+        // Legacy ActionCall returns values; ActionStore is the side-effecting
+        // ABI. Preserve this historical form by selecting every native result
+        // against its fallback after one struct-returning external call.
+        let action_result =
+            self.call_extern_results(&format!("action_{name}"), arg_tys, args, ret_tys);
         action_result
             .iter()
             .zip(fallbacks.iter())
@@ -997,6 +1099,13 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         // Load and return.
         let loaded = self.builder.build_load(llvm_ty, slot, "").unwrap();
         LlvmValue { inner: loaded, ty }
+    }
+
+    fn rng_named(&mut self, name: &str, ty: LirType) -> LlvmValue<'ctx> {
+        self.call_extern(&format!("rng_{name}"), &[], &[], Some(ty))
+            .into_iter()
+            .next()
+            .expect("named RNG must return exactly one value")
     }
 
     fn stack_alloc_ext(&mut self) -> Option<&mut dyn StackAllocExt<Value = LlvmValue<'ctx>>> {
@@ -1108,10 +1217,13 @@ mod tests {
     use std::collections::BTreeMap;
     use volar_ir::{
         boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId},
-        ir::{IRBlockTargetId, IRVarId},
+        ir::{
+            IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType,
+            IRTypes, IRVarId,
+        },
     };
-    use volar_ir_common::{Node, StorageId};
-    use volar_ir_passes::lower_lir::lower_biir;
+    use volar_ir_common::{ActionTarget, Node, StorageId, Type};
+    use volar_ir_passes::lower_lir::{lower_biir, lower_ir};
 
     fn external_bit_fixture() -> BIrBlocks {
         BIrBlocks {
@@ -1183,6 +1295,163 @@ mod tests {
         assert!(ir.contains("declare i1 @host_nonce_bit(i32, i64)"), "{ir}");
         assert!(
             ir.contains("declare void @host_commit_bit(i1, i1, i1, i1, i64, i32, i64, i32, i64)"),
+            "{ir}"
+        );
+    }
+
+    #[test]
+    fn preserves_packed_i256_and_lane_vectors_in_native_llvm_ir() {
+        let context = Context::create();
+        let mut backend = LlvmBackend::new(&context, "wide_vectors");
+        let vector = LirType::Vector(Box::new(LirType::U32), 4);
+        let (entry, params) = backend.begin_function(
+            "vector_add",
+            &[vector.clone(), vector.clone()],
+            Some(vector),
+        );
+        backend.switch_to_block(entry);
+        let sum = backend.add(params[0][0].clone(), params[1][0].clone());
+        backend.ret(&[sum]);
+        backend.end_function();
+
+        let (entry, params) = backend.begin_function(
+            "wide_xor",
+            &[LirType::U256, LirType::U256],
+            Some(LirType::U256),
+        );
+        backend.switch_to_block(entry);
+        let value = backend.xor(params[0][0].clone(), params[1][0].clone());
+        backend.ret(&[value]);
+        backend.end_function();
+
+        let ir = backend.finish().print_to_string().to_string();
+        assert!(ir.contains("<4 x i32>"), "{ir}");
+        assert!(ir.contains("i256"), "{ir}");
+        assert!(ir.contains("add <4 x i32>"), "{ir}");
+        assert!(ir.contains("xor i256"), "{ir}");
+    }
+
+    #[test]
+    fn high_volar_ir_keeps_wide_and_vector_return_abi() {
+        fn rng_program(ty: volar_ir::ir::IRTypeId, name: &str) -> IRBlocks {
+            let mut block = IRBlock {
+                params: vec![],
+                stmts: vec![],
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+                },
+            };
+            block.push_stmt(
+                IRStmt::Rng {
+                    name: name.into(),
+                    ty,
+                },
+                (),
+            );
+            IRBlocks::new(vec![block])
+        }
+
+        let mut types = IRTypes::new();
+        let wide = types.primitive(Type::_256);
+        let word = types.primitive(Type::_32);
+        let vector = types.push(IRType::Vec(4, word));
+        let context = Context::create();
+        let mut backend = LlvmBackend::new(&context, "typed_high_ir");
+        lower_ir(&rng_program(wide, "wide"), &types, "run_wide", &mut backend);
+        lower_ir(
+            &rng_program(vector, "vector"),
+            &types,
+            "run_vector",
+            &mut backend,
+        );
+
+        let ir = backend.finish().print_to_string().to_string();
+        assert!(ir.contains("define i256 @run_wide()"), "{ir}");
+        assert!(ir.contains("define <4 x i32> @run_vector()"), "{ir}");
+        assert!(ir.contains("declare i256 @rng_wide()"), "{ir}");
+        assert!(ir.contains("declare <4 x i32> @rng_vector()"), "{ir}");
+        assert!(!ir.contains("define i64 @run_wide()"), "{ir}");
+    }
+
+    #[test]
+    fn high_volar_externals_keep_native_arguments_results_and_action_storage() {
+        let mut types = IRTypes::new();
+        let bit = types.bit();
+        let wide = types.primitive(Type::_256);
+        let word = types.primitive(Type::_32);
+        let lanes = types.push(IRType::Vec(4, word));
+        let pair = types.push(IRType::Tuple(vec![wide, lanes]));
+        let address = types.primitive(Type::_64);
+
+        let mut oracle_block = IRBlock {
+            params: vec![wide],
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(2)]),
+            },
+        };
+        oracle_block.push_stmt(
+            IRStmt::OracleCall {
+                name: "pair".into(),
+                args: vec![IRVarId(0)],
+                output_tys: vec![wide, lanes],
+                result_ty: pair,
+            },
+            (),
+        );
+        oracle_block.push_stmt(
+            IRStmt::OracleOutput {
+                call: IRVarId(1),
+                idx: 0,
+                ty: wide,
+            },
+            (),
+        );
+
+        let mut action_block = IRBlock {
+            params: vec![bit, wide, wide, address],
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(1)]),
+            },
+        };
+        action_block.push_stmt(
+            IRStmt::ActionStore {
+                name: "commit".into(),
+                guard: IRVarId(0),
+                args: vec![IRVarId(1)],
+                fallbacks: vec![IRVarId(2)],
+                output_tys: vec![wide],
+                targets: vec![ActionTarget {
+                    storage: StorageId(7),
+                    addr: IRVarId(3),
+                }],
+            },
+            (),
+        );
+
+        let context = Context::create();
+        let mut backend = LlvmBackend::new(&context, "typed_externals");
+        lower_ir(
+            &IRBlocks::new(vec![oracle_block]),
+            &types,
+            "oracle_wrapper",
+            &mut backend,
+        );
+        lower_ir(
+            &IRBlocks::new(vec![action_block]),
+            &types,
+            "action_wrapper",
+            &mut backend,
+        );
+        let ir = backend.finish().print_to_string().to_string();
+        assert!(
+            ir.contains("declare { i256, <4 x i32> } @oracle_pair(i256)"),
+            "{ir}"
+        );
+        assert!(ir.contains("extractvalue { i256, <4 x i32> }"), "{ir}");
+        assert!(
+            ir.contains("declare void @action_commit(i256, i1, i256, i64, i32, i64)"),
             "{ir}"
         );
     }

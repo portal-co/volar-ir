@@ -68,7 +68,7 @@ enum BinOpKind {
 #[derive(Clone, Debug)]
 enum Op {
     Iconst {
-        dest: u32,
+        dests: Vec<u32>,
         ty: LirType,
         val: i64,
     },
@@ -77,10 +77,23 @@ enum Op {
         kind: BinOpKind,
         lhs: u32,
         rhs: u32,
+        is_i64: bool,
+    },
+    /// Carry/borrow-propagating add/subtract over a packed multi-word value.
+    WideAddSub {
+        dests: Vec<u32>,
+        lhs: Vec<u32>,
+        rhs: Vec<u32>,
+        subtract: bool,
+        is_i64: bool,
+        carry: u32,
+        aux: u32,
     },
     Not {
         dest: u32,
         val: u32,
+        is_i64: bool,
+        is_bool: bool,
     },
     Icmp {
         dest: u32,
@@ -104,10 +117,10 @@ enum Op {
         dst_ty: LirType,
     },
     Select {
-        dest: u32,
+        dests: Vec<u32>,
         cond: u32,
-        then_val: u32,
-        else_val: u32,
+        then_vals: Vec<u32>,
+        else_vals: Vec<u32>,
     },
     /// Copy `src` into local `dest` (used by arr helpers / parallel assign).
     Copy {
@@ -168,8 +181,10 @@ struct BlockState {
 }
 
 struct ValueInfo {
-    /// WASM local index holding this value.
-    local: u32,
+    /// WASM locals holding this value in canonical little-endian ABI order.
+    /// A scalar has exactly one local; `_128`/`_256` and lane vectors are
+    /// represented by multiple MVP numeric locals rather than SIMD.
+    locals: Vec<u32>,
     ty: LirType,
 }
 
@@ -186,19 +201,37 @@ struct FunctionState {
     current_block: Option<u32>,
     /// Local index reserved for the PC dispatcher (`None` until first multi-block use).
     pc_local: Option<u32>,
+    /// Scratch locals used by multi-word operations.
+    temp_locals: Vec<(u32, ValType)>,
 }
 
 impl FunctionState {
     fn alloc_value(&mut self, ty: LirType) -> WasmValue {
-        let local = self.next_local;
-        self.next_local += 1;
+        let local_tys = WasmBackend::wasm_value_tys(&ty);
+        let locals = (0..local_tys.len())
+            .map(|_| {
+                let local = self.next_local;
+                self.next_local += 1;
+                local
+            })
+            .collect();
         let id = self.values.len() as u32;
-        self.values.push(ValueInfo { local, ty });
+        self.values.push(ValueInfo { locals, ty });
         WasmValue(id)
     }
 
     fn local_of(&self, v: WasmValue) -> u32 {
-        self.values[v.0 as usize].local
+        let locals = &self.values[v.0 as usize].locals;
+        assert_eq!(
+            locals.len(),
+            1,
+            "WasmBackend: scalar operation received a multi-word value"
+        );
+        locals[0]
+    }
+
+    fn locals_of(&self, v: WasmValue) -> &[u32] {
+        &self.values[v.0 as usize].locals
     }
 
     fn ty_of(&self, v: WasmValue) -> &LirType {
@@ -220,6 +253,13 @@ impl FunctionState {
         if is_term {
             block.terminated = true;
         }
+    }
+
+    fn alloc_temp(&mut self, ty: ValType) -> u32 {
+        let local = self.next_local;
+        self.next_local += 1;
+        self.temp_locals.push((local, ty));
+        local
     }
 
     fn ensure_pc_local(&mut self) -> u32 {
@@ -448,6 +488,17 @@ impl WasmBackend {
             .expect("WasmBackend: not inside a function")
     }
 
+    fn flatten_value_locals(&self, values: &[WasmValue]) -> Vec<u32> {
+        let state = self
+            .current
+            .as_ref()
+            .expect("WasmBackend: not inside a function");
+        values
+            .iter()
+            .flat_map(|value| state.locals_of(*value).iter().copied())
+            .collect()
+    }
+
     fn intern_type(&mut self, params: &[ValType], results: &[ValType]) -> u32 {
         let key = (params.to_vec(), results.to_vec());
         if let Some(&idx) = self.type_map.get(&key) {
@@ -503,8 +554,12 @@ impl WasmBackend {
             | LirType::I32
             | LirType::U32 => ValType::I32,
             LirType::I64 | LirType::U64 => ValType::I64,
-            LirType::I128 | LirType::U128 => {
-                panic!("WasmBackend: i128/u128 not supported yet")
+            LirType::I128
+            | LirType::U128
+            | LirType::I256
+            | LirType::U256
+            | LirType::Vector(_, _) => {
+                panic!("WasmBackend: multi-word type passed where one Wasm value was required")
             }
             LirType::Native(t) => match t {
                 NativeType::Bit
@@ -513,7 +568,11 @@ impl WasmBackend {
                 | NativeType::_16
                 | NativeType::_32 => ValType::I32,
                 NativeType::_64 | NativeType::Galois64 => ValType::I64,
-                NativeType::_128 => panic!("WasmBackend: Native::_128 not supported yet"),
+                NativeType::_128 | NativeType::_256 => {
+                    panic!(
+                        "WasmBackend: multi-word native type passed where one Wasm value was required"
+                    )
+                }
                 _ => ValType::I64,
             },
             LirType::Arr(_, _) | LirType::Struct(_) => {
@@ -530,19 +589,210 @@ impl WasmBackend {
         matches!(Self::lir_to_val_ty(ty), ValType::I64)
     }
 
+    /// Canonical portable Wasm ABI expansion for one logical LIR value.
+    ///
+    /// Wasm MVP has neither arbitrary-width integers nor portable SIMD, so
+    /// wide packed integers use little-endian `i64` words and vectors expand
+    /// lane-by-lane using the element's native `i32`/`i64` representation.
+    fn wasm_value_tys(ty: &LirType) -> Vec<ValType> {
+        match ty {
+            LirType::I128 | LirType::U128 => vec![ValType::I64, ValType::I64],
+            LirType::I256 | LirType::U256 => {
+                vec![ValType::I64, ValType::I64, ValType::I64, ValType::I64]
+            }
+            LirType::Vector(element, lanes) => {
+                let mut values = Vec::new();
+                for _ in 0..*lanes {
+                    values.extend(Self::wasm_value_tys(element));
+                }
+                values
+            }
+            LirType::Native(NativeType::_128) => vec![ValType::I64, ValType::I64],
+            LirType::Native(NativeType::_256) => {
+                vec![ValType::I64, ValType::I64, ValType::I64, ValType::I64]
+            }
+            _ => vec![Self::lir_to_val_ty(ty)],
+        }
+    }
+
     fn binop(&mut self, lhs: WasmValue, rhs: WasmValue, kind: BinOpKind) -> WasmValue {
         let ty = self.state().ty_of(lhs).clone();
-        let dest = self.state().alloc_value(ty);
-        let dest_l = self.state().local_of(dest);
-        let lhs_l = self.state().local_of(lhs);
-        let rhs_l = self.state().local_of(rhs);
-        self.state().push_op(Op::Binop {
-            dest: dest_l,
-            kind,
-            lhs: lhs_l,
-            rhs: rhs_l,
-        });
+        let dest = self.state().alloc_value(ty.clone());
+        let dests = self.state().locals_of(dest).to_vec();
+        let lhs = self.state().locals_of(lhs).to_vec();
+        let rhs = self.state().locals_of(rhs).to_vec();
+        self.push_binop_components(&ty, &dests, &lhs, &rhs, &kind);
         dest
+    }
+
+    /// Whether a logical value is one integer split into little-endian i64
+    /// limbs, rather than a vector of independently-operable values.
+    fn is_packed_wide(ty: &LirType) -> bool {
+        matches!(
+            ty,
+            LirType::I128
+                | LirType::U128
+                | LirType::I256
+                | LirType::U256
+                | LirType::Native(NativeType::_128 | NativeType::_256)
+        )
+    }
+
+    fn push_binop_components(
+        &mut self,
+        ty: &LirType,
+        dests: &[u32],
+        lhs: &[u32],
+        rhs: &[u32],
+        kind: &BinOpKind,
+    ) {
+        assert_eq!(
+            dests.len(),
+            lhs.len(),
+            "binary destination ABI width mismatch"
+        );
+        assert_eq!(lhs.len(), rhs.len(), "binary operand ABI width mismatch");
+
+        if let LirType::Vector(element, lanes) = ty {
+            let lane_width = Self::wasm_value_tys(element).len();
+            for lane in 0..*lanes {
+                let start = lane * lane_width;
+                self.push_binop_components(
+                    element,
+                    &dests[start..start + lane_width],
+                    &lhs[start..start + lane_width],
+                    &rhs[start..start + lane_width],
+                    kind,
+                );
+            }
+            return;
+        }
+
+        if Self::is_packed_wide(ty) {
+            match kind {
+                BinOpKind::Add | BinOpKind::Sub => {
+                    let carry = self.state().alloc_temp(ValType::I32);
+                    let aux = self.state().alloc_temp(ValType::I32);
+                    self.state().push_op(Op::WideAddSub {
+                        dests: dests.to_vec(),
+                        lhs: lhs.to_vec(),
+                        rhs: rhs.to_vec(),
+                        subtract: matches!(kind, BinOpKind::Sub),
+                        is_i64: true,
+                        carry,
+                        aux,
+                    });
+                }
+                BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
+                    for ((dest, lhs), rhs) in dests.iter().zip(lhs).zip(rhs) {
+                        self.state().push_op(Op::Binop {
+                            dest: *dest,
+                            kind: kind.clone(),
+                            lhs: *lhs,
+                            rhs: *rhs,
+                            is_i64: true,
+                        });
+                    }
+                }
+                _ => panic!(
+                    "WasmBackend: {kind:?} is not yet supported for packed {}-bit integers",
+                    ty.bit_width()
+                ),
+            }
+            return;
+        }
+
+        assert_eq!(dests.len(), 1, "scalar operation received grouped values");
+        self.state().push_op(Op::Binop {
+            dest: dests[0],
+            kind: kind.clone(),
+            lhs: lhs[0],
+            rhs: rhs[0],
+            is_i64: Self::is_i64(ty),
+        });
+    }
+
+    fn push_not_components(&mut self, ty: &LirType, dests: &[u32], vals: &[u32]) {
+        assert_eq!(dests.len(), vals.len(), "not operand ABI width mismatch");
+        if let LirType::Vector(element, lanes) = ty {
+            let lane_width = Self::wasm_value_tys(element).len();
+            for lane in 0..*lanes {
+                let start = lane * lane_width;
+                self.push_not_components(
+                    element,
+                    &dests[start..start + lane_width],
+                    &vals[start..start + lane_width],
+                );
+            }
+            return;
+        }
+
+        if Self::is_packed_wide(ty) {
+            for (dest, val) in dests.iter().zip(vals) {
+                self.state().push_op(Op::Not {
+                    dest: *dest,
+                    val: *val,
+                    is_i64: true,
+                    is_bool: false,
+                });
+            }
+            return;
+        }
+
+        assert_eq!(dests.len(), 1, "scalar not received grouped values");
+        self.state().push_op(Op::Not {
+            dest: dests[0],
+            val: vals[0],
+            is_i64: Self::is_i64(ty),
+            is_bool: *ty == LirType::Bool,
+        });
+    }
+
+    fn call_extern_results(
+        &mut self,
+        name: &str,
+        arg_tys: &[LirType],
+        args: &[WasmValue],
+        ret_tys: &[LirType],
+    ) -> Vec<WasmValue> {
+        let flat_arg_tys: Vec<LirType> = arg_tys
+            .iter()
+            .flat_map(|ty| self.flatten_scalar_tys(ty))
+            .collect();
+        assert_eq!(
+            flat_arg_tys.len(),
+            args.len(),
+            "call_extern_results: flat arg count mismatch"
+        );
+        let params = flat_arg_tys
+            .iter()
+            .flat_map(Self::wasm_value_tys)
+            .collect::<Vec<_>>();
+        let flat_rets = ret_tys
+            .iter()
+            .flat_map(|ty| self.flatten_scalar_tys(ty))
+            .collect::<Vec<_>>();
+        let results = flat_rets
+            .iter()
+            .flat_map(Self::wasm_value_tys)
+            .collect::<Vec<_>>();
+        let resolved = self.name_config.apply(name);
+        let func_idx = self.ensure_import(&resolved, &params, &results);
+
+        let mut values = Vec::with_capacity(flat_rets.len());
+        let mut dests = Vec::new();
+        for ty in &flat_rets {
+            let value = self.state().alloc_value(ty.clone());
+            dests.extend_from_slice(self.state().locals_of(value));
+            values.push(value);
+        }
+        let args = self.flatten_value_locals(args);
+        self.state().push_op(Op::Call {
+            dests,
+            func_idx,
+            args,
+        });
+        values
     }
 }
 
@@ -558,13 +808,25 @@ fn local_decls_in_alloc_order(state: &FunctionState) -> Vec<(u32, ValType)> {
     // Build a map local_idx → ValType for every non-param local.
     let mut local_ty: BTreeMap<u32, ValType> = BTreeMap::new();
     for v in &state.values {
-        if v.local >= param_count {
-            local_ty.insert(v.local, WasmBackend::lir_to_val_ty(&v.ty));
+        for (local, ty) in v
+            .locals
+            .iter()
+            .copied()
+            .zip(WasmBackend::wasm_value_tys(&v.ty))
+        {
+            if local >= param_count {
+                local_ty.insert(local, ty);
+            }
         }
     }
     if let Some(pc) = state.pc_local {
         if pc >= param_count {
             local_ty.insert(pc, ValType::I32);
+        }
+    }
+    for (local, ty) in &state.temp_locals {
+        if *local >= param_count {
+            local_ty.insert(*local, *ty);
         }
     }
     for (_idx, vt) in local_ty {
@@ -579,8 +841,8 @@ fn emit(func: &mut Function, instr: Instruction<'_>) {
     InstructionSink::<(), ()>::instruction(func, &mut (), &instr).unwrap();
 }
 
-fn emit_const(func: &mut Function, ty: &LirType, val: i64) {
-    match WasmBackend::lir_to_val_ty(ty) {
+fn emit_val_const(func: &mut Function, ty: ValType, val: i64) {
+    match ty {
         ValType::I32 => emit(func, Instruction::I32Const(val as i32)),
         ValType::I64 => emit(func, Instruction::I64Const(val)),
         _ => panic!("WasmBackend: unsupported const type"),
@@ -643,7 +905,7 @@ fn emit_icmp_instr(func: &mut Function, pred: IcmpPred, is_i64: bool) {
 
 fn local_ty_lookup(state: &FunctionState, local: u32) -> LirType {
     for v in &state.values {
-        if v.local == local {
+        if v.locals.contains(&local) {
             return v.ty.clone();
         }
     }
@@ -660,30 +922,122 @@ fn emit_op(
     sibling_idx: &BTreeMap<String, u32>,
 ) {
     match op {
-        Op::Iconst { dest, ty, val } => {
-            emit_const(func, ty, *val);
-            emit(func, Instruction::LocalSet(*dest));
+        Op::Iconst { dests, ty, val } => {
+            let word_tys = WasmBackend::wasm_value_tys(ty);
+            assert_eq!(dests.len(), word_tys.len(), "constant ABI width mismatch");
+            for (index, (dest, word_ty)) in dests.iter().zip(word_tys).enumerate() {
+                emit_val_const(func, word_ty, if index == 0 { *val } else { 0 });
+                emit(func, Instruction::LocalSet(*dest));
+            }
         }
         Op::Binop {
             dest,
             kind,
             lhs,
             rhs,
+            is_i64,
         } => {
-            let ty = local_ty_lookup(state, *lhs);
-            let i64 = WasmBackend::is_i64(&ty);
             emit(func, Instruction::LocalGet(*lhs));
             emit(func, Instruction::LocalGet(*rhs));
-            emit_binop_instr(func, kind, i64);
+            emit_binop_instr(func, kind, *is_i64);
             emit(func, Instruction::LocalSet(*dest));
         }
-        Op::Not { dest, val } => {
-            let ty = local_ty_lookup(state, *val);
+        Op::WideAddSub {
+            dests,
+            lhs,
+            rhs,
+            subtract,
+            is_i64,
+            carry,
+            aux,
+        } => {
+            assert_eq!(
+                dests.len(),
+                lhs.len(),
+                "wide add/sub destination ABI width mismatch"
+            );
+            assert_eq!(
+                lhs.len(),
+                rhs.len(),
+                "wide add/sub operand ABI width mismatch"
+            );
+            // `carry` is an i32 Boolean carried between little-endian limbs.
+            emit(func, Instruction::I32Const(0));
+            emit(func, Instruction::LocalSet(*carry));
+            for ((dest, lhs), rhs) in dests.iter().zip(lhs).zip(rhs) {
+                // First calculate a +/- b and remember its carry/borrow.
+                emit(func, Instruction::LocalGet(*lhs));
+                emit(func, Instruction::LocalGet(*rhs));
+                if *subtract {
+                    emit_binop_instr(func, &BinOpKind::Sub, *is_i64);
+                } else {
+                    emit_binop_instr(func, &BinOpKind::Add, *is_i64);
+                }
+                emit(func, Instruction::LocalSet(*dest));
+
+                if *subtract {
+                    emit(func, Instruction::LocalGet(*lhs));
+                    emit(func, Instruction::LocalGet(*rhs));
+                    emit_icmp_instr(func, IcmpPred::Ult, *is_i64);
+                } else {
+                    emit(func, Instruction::LocalGet(*dest));
+                    emit(func, Instruction::LocalGet(*lhs));
+                    emit_icmp_instr(func, IcmpPred::Ult, *is_i64);
+                }
+                emit(func, Instruction::LocalSet(*aux));
+
+                // Fold in the carry/borrow from the less-significant limb.
+                emit(func, Instruction::LocalGet(*dest));
+                emit(func, Instruction::LocalGet(*carry));
+                if *is_i64 {
+                    emit(func, Instruction::I64ExtendI32U);
+                }
+                if *subtract {
+                    emit(func, Instruction::I64Sub);
+                } else {
+                    emit(func, Instruction::I64Add);
+                }
+                emit(func, Instruction::LocalSet(*dest));
+
+                // A carry-in creates another carry exactly when `d == 0`;
+                // a borrow-in creates another borrow exactly when `d == MAX`.
+                emit(func, Instruction::LocalGet(*carry));
+                emit(func, Instruction::LocalGet(*dest));
+                if *subtract {
+                    if *is_i64 {
+                        emit(func, Instruction::I64Const(-1));
+                    } else {
+                        emit(func, Instruction::I32Const(-1));
+                    }
+                } else if *is_i64 {
+                    emit(func, Instruction::I64Const(0));
+                } else {
+                    emit(func, Instruction::I32Const(0));
+                }
+                if *is_i64 {
+                    emit(func, Instruction::I64Eq);
+                } else {
+                    emit(func, Instruction::I32Eq);
+                }
+                emit(func, Instruction::I32And);
+                emit(func, Instruction::LocalSet(*carry));
+                emit(func, Instruction::LocalGet(*aux));
+                emit(func, Instruction::LocalGet(*carry));
+                emit(func, Instruction::I32Or);
+                emit(func, Instruction::LocalSet(*carry));
+            }
+        }
+        Op::Not {
+            dest,
+            val,
+            is_i64,
+            is_bool,
+        } => {
             emit(func, Instruction::LocalGet(*val));
-            if ty == LirType::Bool {
+            if *is_bool {
                 emit(func, Instruction::I32Const(1));
                 emit(func, Instruction::I32Xor);
-            } else if WasmBackend::is_i64(&ty) {
+            } else if *is_i64 {
                 emit(func, Instruction::I64Const(-1));
                 emit(func, Instruction::I64Xor);
             } else {
@@ -774,16 +1128,18 @@ fn emit_op(
             emit(func, Instruction::LocalSet(*dest));
         }
         Op::Select {
-            dest,
+            dests,
             cond,
-            then_val,
-            else_val,
+            then_vals,
+            else_vals,
         } => {
-            emit(func, Instruction::LocalGet(*then_val));
-            emit(func, Instruction::LocalGet(*else_val));
-            emit(func, Instruction::LocalGet(*cond));
-            emit(func, Instruction::Select);
-            emit(func, Instruction::LocalSet(*dest));
+            for ((dest, then_val), else_val) in dests.iter().zip(then_vals).zip(else_vals) {
+                emit(func, Instruction::LocalGet(*then_val));
+                emit(func, Instruction::LocalGet(*else_val));
+                emit(func, Instruction::LocalGet(*cond));
+                emit(func, Instruction::Select);
+                emit(func, Instruction::LocalSet(*dest));
+            }
         }
         Op::Copy { dest, src } => {
             emit(func, Instruction::LocalGet(*src));
@@ -1047,13 +1403,15 @@ impl LirTarget for WasmBackend {
             .map(|ty| self.flatten_scalar_tys(ty))
             .collect();
         let flat_params: Vec<LirType> = flat_param_groups.iter().flatten().cloned().collect();
-        let wasm_param_tys: Vec<ValType> = flat_params.iter().map(Self::lir_to_val_ty).collect();
+        let wasm_param_tys: Vec<ValType> =
+            flat_params.iter().flat_map(Self::wasm_value_tys).collect();
 
         let flat_rets = ret
             .as_ref()
             .map(|ty| self.flatten_scalar_tys(ty))
             .unwrap_or_default();
-        let wasm_result_tys: Vec<ValType> = flat_rets.iter().map(Self::lir_to_val_ty).collect();
+        let wasm_result_tys: Vec<ValType> =
+            flat_rets.iter().flat_map(Self::wasm_value_tys).collect();
 
         let mut state = FunctionState {
             name: self.name_config.apply(name),
@@ -1068,6 +1426,7 @@ impl LirTarget for WasmBackend {
             }],
             current_block: None,
             pc_local: None,
+            temp_locals: Vec::new(),
         };
 
         // Allocate parameter values as locals 0..n-1.
@@ -1075,14 +1434,7 @@ impl LirTarget for WasmBackend {
         for group in &flat_param_groups {
             let mut g = Vec::new();
             for ty in group {
-                let local = state.next_local;
-                state.next_local += 1;
-                let id = state.values.len() as u32;
-                state.values.push(ValueInfo {
-                    local,
-                    ty: ty.clone(),
-                });
-                g.push(WasmValue(id));
+                g.push(state.alloc_value(ty.clone()));
             }
             param_vals.push(g);
         }
@@ -1132,10 +1484,10 @@ impl LirTarget for WasmBackend {
 
     fn add_block_param(&mut self, block: WasmBlock, ty: LirType) -> WasmValue {
         let v = self.state().alloc_value(ty);
-        let local = self.state().local_of(v);
+        let locals = self.state().locals_of(v).to_vec();
         self.state().blocks[block.0 as usize]
             .param_locals
-            .push(local);
+            .extend_from_slice(&locals);
         v
     }
 
@@ -1145,12 +1497,8 @@ impl LirTarget for WasmBackend {
 
     fn iconst(&mut self, ty: LirType, val: i64) -> WasmValue {
         let dest = self.state().alloc_value(ty.clone());
-        let dest_l = self.state().local_of(dest);
-        self.state().push_op(Op::Iconst {
-            dest: dest_l,
-            ty,
-            val,
-        });
+        let dests = self.state().locals_of(dest).to_vec();
+        self.state().push_op(Op::Iconst { dests, ty, val });
         dest
     }
 
@@ -1181,13 +1529,10 @@ impl LirTarget for WasmBackend {
     }
     fn not(&mut self, val: WasmValue) -> WasmValue {
         let ty = self.state().ty_of(val).clone();
-        let dest = self.state().alloc_value(ty);
-        let dest_l = self.state().local_of(dest);
-        let val_l = self.state().local_of(val);
-        self.state().push_op(Op::Not {
-            dest: dest_l,
-            val: val_l,
-        });
+        let dest = self.state().alloc_value(ty.clone());
+        let dests = self.state().locals_of(dest).to_vec();
+        let vals = self.state().locals_of(val).to_vec();
+        self.push_not_components(&ty, &dests, &vals);
         dest
     }
     fn shl(&mut self, val: WasmValue, shift: WasmValue) -> WasmValue {
@@ -1251,15 +1596,20 @@ impl LirTarget for WasmBackend {
     fn select(&mut self, cond: WasmValue, then_val: WasmValue, else_val: WasmValue) -> WasmValue {
         let ty = self.state().ty_of(then_val).clone();
         let dest = self.state().alloc_value(ty);
-        let dest_l = self.state().local_of(dest);
+        let dests = self.state().locals_of(dest).to_vec();
         let cond_l = self.state().local_of(cond);
-        let then_l = self.state().local_of(then_val);
-        let else_l = self.state().local_of(else_val);
+        let then_vals = self.state().locals_of(then_val).to_vec();
+        let else_vals = self.state().locals_of(else_val).to_vec();
+        assert_eq!(
+            then_vals.len(),
+            else_vals.len(),
+            "select operand ABI width mismatch"
+        );
         self.state().push_op(Op::Select {
-            dest: dest_l,
+            dests,
             cond: cond_l,
-            then_val: then_l,
-            else_val: else_l,
+            then_vals,
+            else_vals,
         });
         dest
     }
@@ -1280,39 +1630,7 @@ impl LirTarget for WasmBackend {
         args: &[WasmValue],
         ret_ty: Option<LirType>,
     ) -> Vec<WasmValue> {
-        let flat_arg_tys: Vec<LirType> = arg_tys
-            .iter()
-            .flat_map(|ty| self.flatten_scalar_tys(ty))
-            .collect();
-        assert_eq!(
-            flat_arg_tys.len(),
-            args.len(),
-            "call_extern: flat arg count mismatch"
-        );
-        let param_vts: Vec<ValType> = flat_arg_tys.iter().map(Self::lir_to_val_ty).collect();
-        let flat_rets = ret_ty
-            .as_ref()
-            .map(|ty| self.flatten_scalar_tys(ty))
-            .unwrap_or_default();
-        let result_vts: Vec<ValType> = flat_rets.iter().map(Self::lir_to_val_ty).collect();
-
-        let resolved = self.name_config.apply(name);
-        let func_idx = self.ensure_import(&resolved, &param_vts, &result_vts);
-
-        let mut dests = Vec::new();
-        let mut dest_locals = Vec::new();
-        for ty in &flat_rets {
-            let v = self.state().alloc_value(ty.clone());
-            dest_locals.push(self.state().local_of(v));
-            dests.push(v);
-        }
-        let arg_locals: Vec<u32> = args.iter().map(|a| self.state().local_of(*a)).collect();
-        self.state().push_op(Op::Call {
-            dests: dest_locals,
-            func_idx,
-            args: arg_locals,
-        });
-        dests
+        self.call_extern_results(name, arg_tys, args, ret_ty.as_slice())
     }
 
     /// Call a function defined in this same module.
@@ -1350,10 +1668,10 @@ impl LirTarget for WasmBackend {
         let mut dest_locals = Vec::new();
         for ty in &flat_rets {
             let v = self.state().alloc_value(ty.clone());
-            dest_locals.push(self.state().local_of(v));
+            dest_locals.extend_from_slice(self.state().locals_of(v));
             dests.push(v);
         }
-        let arg_locals: Vec<u32> = args.iter().map(|a| self.state().local_of(*a)).collect();
+        let arg_locals = self.flatten_value_locals(args);
         self.state().push_op(Op::CallSibling {
             dests: dest_locals,
             name: resolved_name,
@@ -1363,11 +1681,7 @@ impl LirTarget for WasmBackend {
     }
 
     fn jump(&mut self, target: WasmBlock, branch: BranchTarget<WasmValue>) {
-        let args: Vec<u32> = branch
-            .args
-            .iter()
-            .map(|a| self.state().local_of(*a))
-            .collect();
+        let args = self.flatten_value_locals(&branch.args);
         self.state().push_op(Op::Jump {
             target: target.0,
             args,
@@ -1383,16 +1697,8 @@ impl LirTarget for WasmBackend {
         else_branch: BranchTarget<WasmValue>,
     ) {
         let cond_l = self.state().local_of(cond);
-        let then_args: Vec<u32> = then_branch
-            .args
-            .iter()
-            .map(|a| self.state().local_of(*a))
-            .collect();
-        let else_args: Vec<u32> = else_branch
-            .args
-            .iter()
-            .map(|a| self.state().local_of(*a))
-            .collect();
+        let then_args = self.flatten_value_locals(&then_branch.args);
+        let else_args = self.flatten_value_locals(&else_branch.args);
         self.state().push_op(Op::Branch {
             cond: cond_l,
             then_block: then_block.0,
@@ -1403,7 +1709,7 @@ impl LirTarget for WasmBackend {
     }
 
     fn ret(&mut self, vals: &[WasmValue]) {
-        let locals: Vec<u32> = vals.iter().map(|v| self.state().local_of(*v)).collect();
+        let locals = self.flatten_value_locals(vals);
         self.state().push_op(Op::Ret { vals: locals });
     }
 
@@ -1424,19 +1730,11 @@ impl LirTarget for WasmBackend {
         let cases: Vec<(i64, u32, Vec<u32>)> = cases
             .iter()
             .map(|(key, block, branch)| {
-                let args: Vec<u32> = branch
-                    .args
-                    .iter()
-                    .map(|a| self.state().local_of(*a))
-                    .collect();
+                let args = self.flatten_value_locals(&branch.args);
                 (*key, block.0, args)
             })
             .collect();
-        let default_args: Vec<u32> = default_branch
-            .args
-            .iter()
-            .map(|a| self.state().local_of(*a))
-            .collect();
+        let default_args = self.flatten_value_locals(&default_branch.args);
         self.state().push_op(Op::Table {
             index: index_l,
             cases,
@@ -1456,8 +1754,7 @@ impl LirTarget for WasmBackend {
         args: &[WasmValue],
         ret_tys: &[LirType],
     ) -> Vec<WasmValue> {
-        let ret_ty = ret_tys.first().cloned();
-        self.call_extern(&alloc::format!("oracle_{name}"), arg_tys, args, ret_ty)
+        self.call_extern_results(&alloc::format!("oracle_{name}"), arg_tys, args, ret_tys)
     }
 
     fn action(
@@ -1469,8 +1766,8 @@ impl LirTarget for WasmBackend {
         fallbacks: &[WasmValue],
         ret_tys: &[LirType],
     ) -> Vec<WasmValue> {
-        let ret_ty = ret_tys.first().cloned();
-        let results = self.call_extern(&alloc::format!("action_{name}"), arg_tys, args, ret_ty);
+        let results =
+            self.call_extern_results(&alloc::format!("action_{name}"), arg_tys, args, ret_tys);
         results
             .iter()
             .zip(fallbacks.iter())
@@ -1480,18 +1777,20 @@ impl LirTarget for WasmBackend {
 
     fn rng(&mut self, ty: LirType) -> WasmValue {
         // Import: `rng_fn(out_ptr: i32, len: i32)` is awkward without memory.
-        // MVP: import a function that returns the scalar directly.
+        // The portable ABI instead returns the (possibly flattened) value
+        // directly, just like named Volar RNG sources do.
         let name = self.rng_fn.clone();
-        let vt = Self::lir_to_val_ty(&ty);
-        let func_idx = self.ensure_import(&name, &[], &[vt]);
-        let dest = self.state().alloc_value(ty);
-        let dest_l = self.state().local_of(dest);
-        self.state().push_op(Op::Call {
-            dests: vec![dest_l],
-            func_idx,
-            args: vec![],
-        });
-        dest
+        self.call_extern(&name, &[], &[], Some(ty))
+            .into_iter()
+            .next()
+            .expect("RNG must return exactly one value")
+    }
+
+    fn rng_named(&mut self, name: &str, ty: LirType) -> WasmValue {
+        self.call_extern(&alloc::format!("rng_{name}"), &[], &[], Some(ty))
+            .into_iter()
+            .next()
+            .expect("named RNG must return exactly one value")
     }
 
     // StackAllocExt intentionally unsupported for now.
@@ -1503,10 +1802,13 @@ mod tests {
     use alloc::collections::BTreeMap;
     use volar_ir::{
         boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId},
-        ir::{IRBlockTargetId, IRVarId},
+        ir::{
+            IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType,
+            IRTypes, IRVarId,
+        },
     };
-    use volar_ir_common::{Node, StorageId};
-    use volar_ir_passes::lower_lir::lower_biir;
+    use volar_ir_common::{ActionTarget, Node, StorageId, Type};
+    use volar_ir_passes::lower_lir::{lower_biir, lower_ir};
 
     fn external_bit_fixture() -> BIrBlocks {
         BIrBlocks {
@@ -1584,5 +1886,205 @@ mod tests {
                 ("volar-host".into(), "host_commit_bit".into()),
             ]
         );
+    }
+
+    #[test]
+    fn high_volar_wide_and_vector_values_use_flat_wasm_multivalue_abi() {
+        fn rng_program(ty: volar_ir::ir::IRTypeId, name: &str) -> IRBlocks {
+            let mut block = IRBlock {
+                params: vec![],
+                stmts: vec![],
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+                },
+            };
+            block.push_stmt(
+                IRStmt::Rng {
+                    name: name.into(),
+                    ty,
+                },
+                (),
+            );
+            IRBlocks::new(vec![block])
+        }
+
+        let mut types = IRTypes::new();
+        let wide = types.primitive(Type::_256);
+        let word = types.primitive(Type::_32);
+        let vector = types.push(IRType::Vec(4, word));
+        let mut backend = WasmBackend::new().with_import_module("volar-host");
+        lower_ir(&rng_program(wide, "wide"), &types, "run_wide", &mut backend);
+        lower_ir(
+            &rng_program(vector, "vector"),
+            &types,
+            "run_vector",
+            &mut backend,
+        );
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, backend.finish()).unwrap();
+        let export_results = |name| match module.get_export(name).unwrap() {
+            wasmtime::ExternType::Func(function) => function.results().collect::<Vec<_>>(),
+            other => panic!("{name} is not a function export: {other:?}"),
+        };
+        let wide_results = export_results("run_wide");
+        let vector_results = export_results("run_vector");
+        assert_eq!(wide_results.len(), 4);
+        assert!(
+            wide_results
+                .iter()
+                .all(|ty| matches!(ty, wasmtime::ValType::I64))
+        );
+        assert_eq!(vector_results.len(), 4);
+        assert!(
+            vector_results
+                .iter()
+                .all(|ty| matches!(ty, wasmtime::ValType::I32))
+        );
+        let imports: Vec<_> = module
+            .imports()
+            .map(|import| (import.module().to_string(), import.name().to_string()))
+            .collect();
+        assert_eq!(
+            imports,
+            vec![
+                ("volar-host".into(), "rng_wide".into()),
+                ("volar-host".into(), "rng_vector".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn packed_wide_and_vector_adds_execute_with_the_flat_wasm_abi() {
+        let mut backend = WasmBackend::new();
+
+        let (entry, params) = backend.begin_function(
+            "add_u128",
+            &[LirType::U128, LirType::U128],
+            Some(LirType::U128),
+        );
+        backend.switch_to_block(entry);
+        let sum = backend.add(params[0][0], params[1][0]);
+        backend.ret(&[sum]);
+        backend.end_function();
+
+        let lanes = LirType::Vector(Box::new(LirType::U64), 2);
+        let (entry, params) =
+            backend.begin_function("add_lanes", &[lanes.clone(), lanes.clone()], Some(lanes));
+        backend.switch_to_block(entry);
+        let sum = backend.add(params[0][0], params[1][0]);
+        backend.ret(&[sum]);
+        backend.end_function();
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, backend.finish()).unwrap();
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let add_u128 = instance
+            .get_typed_func::<(i64, i64, i64, i64), (i64, i64)>(&mut store, "add_u128")
+            .unwrap();
+        assert_eq!(add_u128.call(&mut store, (-1, 0, 1, 0)).unwrap(), (0, 1));
+        let add_lanes = instance
+            .get_typed_func::<(i64, i64, i64, i64), (i64, i64)>(&mut store, "add_lanes")
+            .unwrap();
+        assert_eq!(add_lanes.call(&mut store, (3, 11, 4, 9)).unwrap(), (7, 20));
+    }
+
+    #[test]
+    fn high_volar_externals_use_flat_wasm_multivalue_results_and_direct_storage() {
+        let mut types = IRTypes::new();
+        let bit = types.bit();
+        let wide = types.primitive(Type::_256);
+        let word = types.primitive(Type::_32);
+        let lanes = types.push(IRType::Vec(4, word));
+        let pair = types.push(IRType::Tuple(vec![wide, lanes]));
+        let address = types.primitive(Type::_64);
+
+        let mut oracle_block = IRBlock {
+            params: vec![wide],
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(2)]),
+            },
+        };
+        oracle_block.push_stmt(
+            IRStmt::OracleCall {
+                name: "pair".into(),
+                args: vec![IRVarId(0)],
+                output_tys: vec![wide, lanes],
+                result_ty: pair,
+            },
+            (),
+        );
+        oracle_block.push_stmt(
+            IRStmt::OracleOutput {
+                call: IRVarId(1),
+                idx: 0,
+                ty: wide,
+            },
+            (),
+        );
+
+        let mut action_block = IRBlock {
+            params: vec![bit, wide, wide, address],
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(1)]),
+            },
+        };
+        action_block.push_stmt(
+            IRStmt::ActionStore {
+                name: "commit".into(),
+                guard: IRVarId(0),
+                args: vec![IRVarId(1)],
+                fallbacks: vec![IRVarId(2)],
+                output_tys: vec![wide],
+                targets: vec![ActionTarget {
+                    storage: StorageId(7),
+                    addr: IRVarId(3),
+                }],
+            },
+            (),
+        );
+
+        let mut backend = WasmBackend::new().with_import_module("volar-host");
+        lower_ir(
+            &IRBlocks::new(vec![oracle_block]),
+            &types,
+            "oracle_wrapper",
+            &mut backend,
+        );
+        lower_ir(
+            &IRBlocks::new(vec![action_block]),
+            &types,
+            "action_wrapper",
+            &mut backend,
+        );
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, backend.finish()).unwrap();
+        let mut imports = module.imports();
+        let oracle = imports.next().unwrap();
+        assert_eq!(oracle.module(), "volar-host");
+        assert_eq!(oracle.name(), "oracle_pair");
+        let results = match oracle.ty() {
+            wasmtime::ExternType::Func(function) => function.results().collect::<Vec<_>>(),
+            other => panic!("oracle import is not a function: {other:?}"),
+        };
+        assert_eq!(results.len(), 8);
+        assert!(
+            results[..4]
+                .iter()
+                .all(|ty| matches!(ty, wasmtime::ValType::I64))
+        );
+        assert!(
+            results[4..]
+                .iter()
+                .all(|ty| matches!(ty, wasmtime::ValType::I32))
+        );
+        let action = imports.next().unwrap();
+        assert_eq!(action.module(), "volar-host");
+        assert_eq!(action.name(), "action_commit");
+        assert!(matches!(action.ty(), wasmtime::ExternType::Func(_)));
+        assert!(imports.next().is_none());
     }
 }
