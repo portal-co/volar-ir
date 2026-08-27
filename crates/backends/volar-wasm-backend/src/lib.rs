@@ -72,6 +72,17 @@ enum Op {
         ty: LirType,
         val: i64,
     },
+    /// Initialise a group of same-width numeric locals to zero.
+    Zero {
+        dests: Vec<u32>,
+        is_i64: bool,
+    },
+    /// Truncate an i64 limb to its low i32 without consulting its logical
+    /// grouped value type.
+    LowWordI64ToI32 {
+        dest: u32,
+        val: u32,
+    },
     Binop {
         dest: u32,
         kind: BinOpKind,
@@ -88,6 +99,13 @@ enum Op {
         is_i64: bool,
         carry: u32,
         aux: u32,
+    },
+    /// A logical shift across a little-endian packed i64 limb group.
+    WideShift {
+        dests: Vec<u32>,
+        val: Vec<u32>,
+        shift: Vec<u32>,
+        left: bool,
     },
     Not {
         dest: u32,
@@ -694,6 +712,12 @@ impl WasmBackend {
                         });
                     }
                 }
+                BinOpKind::Shl | BinOpKind::Lshr => self.state().push_op(Op::WideShift {
+                    dests: dests.to_vec(),
+                    val: lhs.to_vec(),
+                    shift: rhs.to_vec(),
+                    left: matches!(kind, BinOpKind::Shl),
+                }),
                 _ => panic!(
                     "WasmBackend: {kind:?} is not yet supported for packed {}-bit integers",
                     ty.bit_width()
@@ -930,6 +954,21 @@ fn emit_op(
                 emit(func, Instruction::LocalSet(*dest));
             }
         }
+        Op::Zero { dests, is_i64 } => {
+            for dest in dests {
+                if *is_i64 {
+                    emit(func, Instruction::I64Const(0));
+                } else {
+                    emit(func, Instruction::I32Const(0));
+                }
+                emit(func, Instruction::LocalSet(*dest));
+            }
+        }
+        Op::LowWordI64ToI32 { dest, val } => {
+            emit(func, Instruction::LocalGet(*val));
+            emit(func, Instruction::I32WrapI64);
+            emit(func, Instruction::LocalSet(*dest));
+        }
         Op::Binop {
             dest,
             kind,
@@ -1026,6 +1065,116 @@ fn emit_op(
                 emit(func, Instruction::I32Or);
                 emit(func, Instruction::LocalSet(*carry));
             }
+        }
+        Op::WideShift {
+            dests,
+            val,
+            shift,
+            left,
+        } => {
+            assert_eq!(
+                dests.len(),
+                val.len(),
+                "wide shift destination ABI width mismatch"
+            );
+            assert_eq!(
+                val.len(),
+                shift.len(),
+                "wide shift operand ABI width mismatch"
+            );
+            assert!(!dests.is_empty(), "wide shift requires at least one limb");
+
+            // A packed shift count is itself a wide integer.  Any nonzero
+            // high limb, or a low limb outside the value width, produces the
+            // zero value already present in freshly allocated Wasm locals.
+            emit(func, Instruction::I32Const(1));
+            for high in shift.iter().skip(1) {
+                emit(func, Instruction::LocalGet(*high));
+                emit(func, Instruction::I64Const(0));
+                emit(func, Instruction::I64Eq);
+                emit(func, Instruction::I32And);
+            }
+            emit(func, Instruction::LocalGet(shift[0]));
+            emit(func, Instruction::I64Const((dests.len() * 64) as i64));
+            emit(func, Instruction::I64LtU);
+            emit(func, Instruction::I32And);
+            emit(func, Instruction::If(wasm_encoder::BlockType::Empty));
+
+            // There are only two or four limbs today.  Emit one constant
+            // limb-offset case for each 64-bit window; Wasm's native shifts
+            // handle the remaining `shift % 64` bits.
+            for limb_offset in 0..dests.len() {
+                emit(func, Instruction::LocalGet(shift[0]));
+                emit(func, Instruction::I64Const((limb_offset * 64) as i64));
+                emit(func, Instruction::I64GeU);
+                emit(func, Instruction::LocalGet(shift[0]));
+                emit(func, Instruction::I64Const(((limb_offset + 1) * 64) as i64));
+                emit(func, Instruction::I64LtU);
+                emit(func, Instruction::I32And);
+                emit(func, Instruction::If(wasm_encoder::BlockType::Empty));
+
+                for (index, dest) in dests.iter().enumerate() {
+                    let source = if *left {
+                        index.checked_sub(limb_offset)
+                    } else {
+                        index
+                            .checked_add(limb_offset)
+                            .filter(|source| *source < val.len())
+                    };
+                    if let Some(source) = source {
+                        emit(func, Instruction::LocalGet(val[source]));
+                        emit(func, Instruction::LocalGet(shift[0]));
+                        emit(
+                            func,
+                            if *left {
+                                Instruction::I64Shl
+                            } else {
+                                Instruction::I64ShrU
+                            },
+                        );
+                    } else {
+                        emit(func, Instruction::I64Const(0));
+                    }
+                    emit(func, Instruction::LocalSet(*dest));
+                }
+
+                // The cross-limb term is only meaningful for a nonzero bit
+                // shift.  Guard it explicitly so `64 - 0` is not observed by
+                // Wasm's modulo-64 shift-count semantics as zero.
+                emit(func, Instruction::LocalGet(shift[0]));
+                emit(func, Instruction::I64Const(0));
+                emit(func, Instruction::I64Ne);
+                emit(func, Instruction::If(wasm_encoder::BlockType::Empty));
+                for (index, dest) in dests.iter().enumerate() {
+                    let source = if *left {
+                        index.checked_sub(limb_offset + 1)
+                    } else {
+                        index
+                            .checked_add(limb_offset + 1)
+                            .filter(|source| *source < val.len())
+                    };
+                    if let Some(source) = source {
+                        emit(func, Instruction::LocalGet(*dest));
+                        emit(func, Instruction::LocalGet(val[source]));
+                        emit(func, Instruction::I64Const(64));
+                        emit(func, Instruction::LocalGet(shift[0]));
+                        emit(func, Instruction::I64Sub);
+                        emit(
+                            func,
+                            if *left {
+                                Instruction::I64ShrU
+                            } else {
+                                Instruction::I64Shl
+                            },
+                        );
+                        emit(func, Instruction::I64Or);
+                        emit(func, Instruction::LocalSet(*dest));
+                    }
+                }
+                emit(func, Instruction::End);
+                emit(func, Instruction::End);
+            }
+            emit(func, Instruction::End);
         }
         Op::Not {
             dest,
@@ -1560,6 +1709,39 @@ impl LirTarget for WasmBackend {
     }
 
     fn zext(&mut self, val: WasmValue, dst_ty: LirType) -> WasmValue {
+        let src_ty = self.state().ty_of(val).clone();
+        if Self::is_packed_wide(&dst_ty) {
+            let source = if Self::wasm_value_tys(&src_ty).len() == 1
+                && Self::wasm_value_tys(&dst_ty)[0] == ValType::I64
+                && Self::wasm_value_tys(&src_ty)[0] == ValType::I32
+            {
+                // Reuse the scalar conversion path before placing the low
+                // word into the packed representation.
+                self.zext(val, LirType::U64)
+            } else {
+                val
+            };
+            let source_locals = self.state().locals_of(source).to_vec();
+            let dest = self.state().alloc_value(dst_ty);
+            let dest_locals = self.state().locals_of(dest).to_vec();
+            assert!(
+                source_locals.len() <= dest_locals.len(),
+                "zext cannot shrink a packed value"
+            );
+            for (dest, source) in dest_locals.iter().zip(&source_locals) {
+                self.state().push_op(Op::Copy {
+                    dest: *dest,
+                    src: *source,
+                });
+            }
+            if source_locals.len() < dest_locals.len() {
+                self.state().push_op(Op::Zero {
+                    dests: dest_locals[source_locals.len()..].to_vec(),
+                    is_i64: true,
+                });
+            }
+            return dest;
+        }
         let dest = self.state().alloc_value(dst_ty.clone());
         let dest_l = self.state().local_of(dest);
         let val_l = self.state().local_of(val);
@@ -1582,6 +1764,30 @@ impl LirTarget for WasmBackend {
         dest
     }
     fn trunc(&mut self, val: WasmValue, dst_ty: LirType) -> WasmValue {
+        let src_ty = self.state().ty_of(val).clone();
+        if Self::is_packed_wide(&src_ty) {
+            let source_locals = self.state().locals_of(val).to_vec();
+            let dest = self.state().alloc_value(dst_ty.clone());
+            let dest_locals = self.state().locals_of(dest).to_vec();
+            assert!(
+                dest_locals.len() <= source_locals.len(),
+                "trunc cannot widen a packed value"
+            );
+            if dest_locals.len() == 1 && Self::wasm_value_tys(&dst_ty)[0] == ValType::I32 {
+                self.state().push_op(Op::LowWordI64ToI32 {
+                    dest: dest_locals[0],
+                    val: source_locals[0],
+                });
+            } else {
+                for (dest, source) in dest_locals.iter().zip(source_locals) {
+                    self.state().push_op(Op::Copy {
+                        dest: *dest,
+                        src: source,
+                    });
+                }
+            }
+            return dest;
+        }
         let dest = self.state().alloc_value(dst_ty.clone());
         let dest_l = self.state().local_of(dest);
         let val_l = self.state().local_of(val);
@@ -1968,6 +2174,40 @@ mod tests {
         backend.ret(&[sum]);
         backend.end_function();
 
+        let (entry, params) = backend.begin_function(
+            "shift_u128",
+            &[LirType::U128, LirType::U128],
+            Some(LirType::U128),
+        );
+        backend.switch_to_block(entry);
+        let shifted_left = backend.shl(params[0][0], params[1][0]);
+        backend.ret(&[shifted_left]);
+        backend.end_function();
+
+        let (entry, params) = backend.begin_function(
+            "lshr_u128",
+            &[LirType::U128, LirType::U128],
+            Some(LirType::U128),
+        );
+        backend.switch_to_block(entry);
+        let shifted_right = backend.lshr(params[0][0], params[1][0]);
+        backend.ret(&[shifted_right]);
+        backend.end_function();
+
+        let (entry, params) =
+            backend.begin_function("widen_u32", &[LirType::U32], Some(LirType::U128));
+        backend.switch_to_block(entry);
+        let widened = backend.zext(params[0][0], LirType::U128);
+        backend.ret(&[widened]);
+        backend.end_function();
+
+        let (entry, params) =
+            backend.begin_function("truncate_u128", &[LirType::U128], Some(LirType::U32));
+        backend.switch_to_block(entry);
+        let truncated = backend.trunc(params[0][0], LirType::U32);
+        backend.ret(&[truncated]);
+        backend.end_function();
+
         let lanes = LirType::Vector(Box::new(LirType::U64), 2);
         let (entry, params) =
             backend.begin_function("add_lanes", &[lanes.clone(), lanes.clone()], Some(lanes));
@@ -1988,6 +2228,65 @@ mod tests {
             .get_typed_func::<(i64, i64, i64, i64), (i64, i64)>(&mut store, "add_lanes")
             .unwrap();
         assert_eq!(add_lanes.call(&mut store, (3, 11, 4, 9)).unwrap(), (7, 20));
+        let shift_u128 = instance
+            .get_typed_func::<(i64, i64, i64, i64), (i64, i64)>(&mut store, "shift_u128")
+            .unwrap();
+        assert_eq!(shift_u128.call(&mut store, (1, 0, 65, 0)).unwrap(), (0, 2));
+        let lshr_u128 = instance
+            .get_typed_func::<(i64, i64, i64, i64), (i64, i64)>(&mut store, "lshr_u128")
+            .unwrap();
+        assert_eq!(lshr_u128.call(&mut store, (0, 2, 65, 0)).unwrap(), (1, 0));
+        let widen_u32 = instance
+            .get_typed_func::<i32, (i64, i64)>(&mut store, "widen_u32")
+            .unwrap();
+        assert_eq!(
+            widen_u32.call(&mut store, -1).unwrap(),
+            (u32::MAX as i64, 0)
+        );
+        let truncate_u128 = instance
+            .get_typed_func::<(i64, i64), i32>(&mut store, "truncate_u128")
+            .unwrap();
+        assert_eq!(
+            truncate_u128.call(&mut store, (0x1_0000_0001, 9)).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn high_volar_merge_executes_through_wide_wasm_extension_and_shift() {
+        let mut types = IRTypes::new();
+        let word = types.primitive(Type::_64);
+        let wide = types.primitive(Type::_128);
+        let mut block = IRBlock {
+            params: alloc::vec![word, word],
+            stmts: Vec::new(),
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, alloc::vec![IRVarId(2)]),
+            },
+        };
+        block.push_stmt(
+            IRStmt::Merge {
+                parts: alloc::vec![IRVarId(0), IRVarId(1)],
+                ty: wide,
+            },
+            (),
+        );
+
+        let mut backend = WasmBackend::new();
+        lower_ir(
+            &IRBlocks::new(alloc::vec![block]),
+            &types,
+            "merge",
+            &mut backend,
+        );
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, backend.finish()).unwrap();
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let merge = instance
+            .get_typed_func::<(i64, i64), (i64, i64)>(&mut store, "merge")
+            .unwrap();
+        assert_eq!(merge.call(&mut store, (5, 9)).unwrap(), (5, 9));
     }
 
     #[test]
