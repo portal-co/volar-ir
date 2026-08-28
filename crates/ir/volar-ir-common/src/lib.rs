@@ -7,69 +7,16 @@ extern crate alloc;
 pub mod complexity;
 pub use complexity::{MeasureSpec, ReentryHint, StructRef};
 
+mod generated;
+pub use generated::{
+    ActionDecl, Constant, Node, OracleDecl, PreInitSegment, RngDecl, StorageId, Type, TypeId,
+};
+
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-
-/// Primitive (non-compound) types shared across Volar IR and VAFFLE.
-///
-/// Compound types (`Vec`, `Tuple`, `Block`, `Func`) are expressed by
-/// [`IrType`] and referenced via [`TypeId`].
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-#[non_exhaustive]
-pub enum Type {
-    /// Single GF(2) element (one bit).
-    Bit,
-    /// 8-bit integer / byte.
-    _8,
-    /// 16-bit integer.
-    _16,
-    /// 32-bit integer.
-    _32,
-    /// 64-bit integer.
-    _64,
-    /// 128-bit integer.
-    _128,
-    /// 256-bit value (e.g. full AES lane).
-    _256,
-    /// GF(2^8) element via the AES polynomial.
-    AES8,
-    /// GF(2^64) field element.
-    Galois64,
-    /// GF(3) element — mod-3 integer stored in 2 bits.
-    ///
-    /// Used by the TFHE backend; not valid in `lower_ir_to_boolar` (GF(2)-only).
-    Z3,
-}
-
-/// A 256-bit compile-time constant, split into high and low 128-bit halves.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-#[cfg_attr(feature = "rkyv", rkyv(attr(derive(PartialEq, Eq, PartialOrd, Ord))))]
-pub struct Constant {
-    pub hi: u128,
-    pub lo: u128,
-}
 
 // ============================================================================
 // Unified type system
 // ============================================================================
-
-/// An opaque index into a [`TypeTable`].
-///
-/// Both Volar IR (`IRTypeId`) and VAFFLE use this; the former is now just a
-/// re-export alias in `volar-ir`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct TypeId(pub u32);
 
 /// The full IR type language, shared between Volar IR and VAFFLE.
 ///
@@ -181,40 +128,6 @@ impl Default for TypeTable {
 // External-primitive declarations (shared by Volar IR and VAFFLE)
 // ============================================================================
 
-/// Declaration of a named pure oracle.
-///
-/// An oracle is a deterministic external function evaluated by all parties.
-/// Its implementation is provided by the execution environment at protocol time.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct OracleDecl {
-    pub name: alloc::string::String,
-    /// Parameter types in order.
-    pub params: alloc::vec::Vec<TypeId>,
-    /// Return types in order (length ≥ 1).
-    pub results: alloc::vec::Vec<TypeId>,
-}
-
-/// Declaration of a named conditional action.
-///
-/// An action is a side-effectful external function invoked by one party
-/// (prover / evaluator) only when a boolean guard is 1.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct ActionDecl {
-    pub name: alloc::string::String,
-    /// Parameter types in order.
-    pub params: alloc::vec::Vec<TypeId>,
-    /// Return types in order (length ≥ 1).
-    pub results: alloc::vec::Vec<TypeId>,
-}
-
 /// The storage destination for one declared result of an [`ActionDecl`].
 ///
 /// Actions are effects, not values: their declared results are written to
@@ -232,41 +145,9 @@ pub struct ActionTarget<Addr, Stor = StorageId> {
     pub addr: Addr,
 }
 
-/// Declaration of a named RNG source.
-///
-/// An RNG source is a zero-argument external function that produces a fresh
-/// random value of `ty` on each call.  Unlike `rand`, it is modeled as a named
-/// external primitive so that the compiler can emit a call to a named function
-/// rather than depending on any specific RNG crate.
-///
-/// Each [`Stmt::Rng`] references an `RngDecl` by name.  The execution
-/// environment supplies the concrete implementation.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct RngDecl {
-    pub name: alloc::string::String,
-    /// Type of the fresh random value produced on each call.
-    pub ty: TypeId,
-}
-
 // ============================================================================
 // Shared statement type
 // ============================================================================
-
-/// Identifies one of potentially many independent storage spaces.
-///
-/// `StorageId(0)` is the "default" storage.  Higher IDs may be used for
-/// separate stacks, heaps, or per-type scratch spaces.  The execution
-/// environment maps each `StorageId` to a concrete address space.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct StorageId(pub u32);
 
 impl StorageId {
     /// The default / "main" storage space.
@@ -297,34 +178,6 @@ impl StorageId {
     /// with any realistic number of declared memories can't collide with
     /// it.
     pub const VAFFLE_SSA_SPILL: StorageId = StorageId(1_000_000);
-}
-
-/// A contiguous run of pre-initialised typed elements for a storage space.
-///
-/// Represents WASM active data-segment initialisation: at module instantiation,
-/// before any code runs, cells `offset .. offset + data.len()` of the storage
-/// identified by `(storage, ty)` are set to the corresponding `data` values.
-///
-/// Multiple segments may share the same `StorageId` but have different `TypeId`s
-/// (different element-width lanes of the same logical storage).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct PreInitSegment {
-    /// Which storage space to initialise.
-    pub storage: StorageId,
-    /// Element type — indexes the containing module's `TypeTable`.
-    /// Multiple segments for the same `StorageId` may use different `TypeId`s.
-    pub ty: TypeId,
-    /// Element offset of `data[0]` within the `(storage, ty)` lane.
-    /// For WASM byte-typed memories this equals the WASM byte offset.
-    pub offset: usize,
-    /// Typed initial values — one `Constant` per element.
-    /// `hi = 0` for types narrower than 128 bits; `lo` holds the value.
-    /// Can be bit-packed by the consumer; prefer the typed accessors below.
-    pub data: alloc::vec::Vec<Constant>,
 }
 
 impl PreInitSegment {
@@ -1238,30 +1091,6 @@ impl StorageAllocator {
 // Node: shared per-value provenance + side wrapper
 // ============================================================================
 
-/// A node wrapping an IR/AST payload `T` with provenance (`P`) and
-/// [`SideId`] metadata.
-///
-/// SSA/arena-style IRs (Volar IR's `IRStmt`, VAFFLE's `Value`) wrap each
-/// statement or arena entry directly — `T` does not itself mention `P`, so
-/// [`map_prov`](Self::map_prov) is the only mapping operation needed.
-/// Tree-shaped IRs whose payload recursively embeds `P` (e.g. a compiler's
-/// expression IR) wrap their recursive `Kind` enum instead; such IRs define
-/// their own recursive provenance-mapping logic over `T`; `Node` only owns
-/// the per-node `prov`/`side` pair, not the recursion.
-///
-/// `side` is never touched by provenance mapping — the two annotations are
-/// independent axes (see the crate-level docs of `volar-side`).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct Node<T, P: Clone = ()> {
-    pub kind: T,
-    pub prov: P,
-    pub side: Option<volar_side::SideId>,
-}
-
 impl<T, P: Clone> Node<T, P> {
     /// Construct a node from its parts.
     pub fn new(kind: T, prov: P, side: Option<volar_side::SideId>) -> Self {
@@ -1277,6 +1106,49 @@ impl<T, P: Clone> Node<T, P> {
             prov: f(self.prov),
             side: self.side,
         }
+    }
+}
+
+#[cfg(all(test, feature = "rkyv"))]
+mod generated_binary_compat_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_artifacts_match_the_pinned_derive_layout() {
+        // These are fixtures produced by the former rkyv_derive definitions
+        // under the workspace's pinned rkyv 0.8 configuration.  Keep them
+        // byte-for-byte: persisted blobs deliberately have no migration here.
+        assert_eq!(
+            rkyv::to_bytes::<rkyv::rancor::Error>(&TypeId(0x1020_3040))
+                .unwrap()
+                .as_slice(),
+            &[0x40, 0x30, 0x20, 0x10]
+        );
+        assert_eq!(
+            rkyv::to_bytes::<rkyv::rancor::Error>(&StorageId(0xa0b0_c0d0))
+                .unwrap()
+                .as_slice(),
+            &[0xd0, 0xc0, 0xb0, 0xa0]
+        );
+        assert_eq!(
+            rkyv::to_bytes::<rkyv::rancor::Error>(&Type::Galois64)
+                .unwrap()
+                .as_slice(),
+            &[8]
+        );
+        assert_eq!(
+            rkyv::to_bytes::<rkyv::rancor::Error>(&Constant {
+                hi: 0x0001_0203_0405_0607_0809_0a0b_0c0d_0e0f,
+                lo: 0xf0f1_f2f3_f4f5_f6f7_f8f9_fafb_fcfd_feff,
+            })
+            .unwrap()
+            .as_slice(),
+            &[
+                0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02,
+                0x01, 0x00, 0xff, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa, 0xf9, 0xf8, 0xf7, 0xf6, 0xf5, 0xf4,
+                0xf3, 0xf2, 0xf1, 0xf0,
+            ]
+        );
     }
 }
 

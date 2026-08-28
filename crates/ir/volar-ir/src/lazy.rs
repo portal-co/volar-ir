@@ -8,55 +8,16 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use lazy_repo::{ChunkCodec, ChunkRef, ChunkSink, DecodeError, DecodedChunk, Repository};
-use volar_ir_common::Node;
+use lazy_repo::{ChunkCodec, ChunkSink, DecodeError, DecodedChunk, Repository};
 
 use crate::{
-    boolar::{BIrPreInitSegment, BIrStmt},
+    boolar::BIrStmt,
     circuit::BCircuit,
     ir::IRVarId,
 };
 
-/// Root metadata for a Boolar circuit whose statement body is loaded in
-/// semantic ranges.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct ChunkedBCircuit {
-    /// On-disk format revision.
-    pub version: u32,
-    /// Number of input bit parameters.
-    pub params: u32,
-    /// Bit-granular storage values installed before a fresh execution.
-    pub pre_init: Vec<BIrPreInitSegment>,
-    /// Variables returned to the caller.
-    pub outputs: Vec<IRVarId>,
-    /// Consecutive statement ranges in execution order.
-    pub statement_chunks: Vec<BStmtChunkRef>,
-    /// Target-specific bound and liveness data for out-of-core wire execution.
-    pub wire_schedule: WireSchedule,
-}
-
-/// Build-time wire liveness data consumed by bounded lazy runners.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct WireSchedule {
-    /// Maximum number of wire values the runner may retain in RAM.
-    pub resident_wires: u32,
-    /// Maximum temporary operand wires required by one Boolar statement.
-    pub temporary_wires: u32,
-    /// Last use position for each Boolar variable (parameters then results).
-    /// Position zero precedes the first statement; each statement occupies
-    /// `index + 1`; the final position preserves declared outputs.
-    pub last_use: Vec<u32>,
-    /// Variables that become dead after each position, including position zero.
-    pub release_at: Vec<Vec<u32>>,
-}
+mod generated;
+pub use generated::{BStmtChunk, BStmtChunkRef, ChunkedBCircuit, WireSchedule};
 
 /// Why a requested target wire budget cannot run a circuit.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -230,34 +191,6 @@ impl ChunkedBCircuit {
         }
         Ok(loaded)
     }
-}
-
-/// A content reference plus the semantic statement range it contains.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct BStmtChunkRef {
-    /// Content-addressed encoded chunk.
-    pub chunk: ChunkRef,
-    /// Index of the first statement in the circuit-wide sequence.
-    pub first: u32,
-    /// Number of complete statements in the chunk.
-    pub statements: u32,
-}
-
-/// The decoded payload of one [`BStmtChunkRef`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct BStmtChunk<P: Clone> {
-    /// Index of the first statement in the circuit-wide sequence.
-    pub first: u32,
-    /// Complete Boolar statement nodes in execution order.
-    pub stmts: Vec<Node<BIrStmt, P>>,
 }
 
 /// Why an eager circuit could not be emitted as bounded lazy chunks.

@@ -1,0 +1,804 @@
+{
+  "format": "volar-ir-schema",
+  "version": 1,
+  "roots": [
+    { "id": "saved-lir", "rust": "volar_lir_saved::SavedLirModule", "typescript": "SavedLirModule", "text": { "kind": "legacy-v1", "header": "volar-lir-saved v1" } },
+    { "id": "volar-ir", "rust": "volar_ir_text::SavedIrBlocks", "typescript": "SavedIrBlocks", "text": { "kind": "sectioned-v1", "header": "volar-ir v1" } },
+    { "id": "boolar-ir", "rust": "volar_ir_text::SavedBIrBlocks", "typescript": "SavedBIrBlocks", "text": { "kind": "sectioned-v1", "header": "volar-ir v1 / boolar:" } },
+    { "id": "vaffle-module", "rust": "vaffle::Module<()>", "typescript": "VaffleModule", "text": { "kind": "portable-v1", "header": "volar-portable-text v1 root=vaffle-module" } },
+    { "id": "v-circuit", "rust": "volar_ir::VCircuit<()>", "typescript": "VCircuit", "text": { "kind": "portable-v1", "header": "volar-portable-text v1 root=v-circuit" } },
+    { "id": "b-circuit", "rust": "volar_ir::BCircuit<()>", "typescript": "BCircuit", "text": { "kind": "portable-v1", "header": "volar-portable-text v1 root=b-circuit" } },
+    { "id": "reversible-circuit", "rust": "volar_ir::RCircuit", "typescript": "RCircuit", "text": { "kind": "portable-v1", "header": "volar-portable-text v1 root=reversible-circuit" } },
+    { "id": "chunked-b-circuit", "rust": "volar_ir::ChunkedBCircuit", "typescript": "ChunkedBCircuit", "text": { "kind": "portable-v1", "header": "volar-portable-text v1 root=chunked-b-circuit" } }
+  ],
+  "types": [
+    { "rust": "volar_ir_common::Type", "crate_name": "volar-ir-common", "kind": "enum", "rkyv": true },
+    { "rust": "volar_ir_common::Constant", "crate_name": "volar-ir-common", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir_common::TypeId", "crate_name": "volar-ir-common", "kind": "newtype", "rkyv": true },
+    { "rust": "volar_ir_common::IrType", "crate_name": "volar-ir-common", "kind": "recursive enum", "rkyv": true },
+    { "rust": "volar_ir_common::TypeTable", "crate_name": "volar-ir-common", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir_common::OracleDecl", "crate_name": "volar-ir-common", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir_common::ActionDecl", "crate_name": "volar-ir-common", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir_common::ActionTarget", "crate_name": "volar-ir-common", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_ir_common::RngDecl", "crate_name": "volar-ir-common", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir_common::StorageId", "crate_name": "volar-ir-common", "kind": "newtype", "rkyv": true },
+    { "rust": "volar_ir_common::PreInitSegment", "crate_name": "volar-ir-common", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir_common::Stmt", "crate_name": "volar-ir-common", "kind": "generic enum", "rkyv": true },
+    { "rust": "volar_ir_common::Node", "crate_name": "volar-ir-common", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_ir_common::ReentryHint", "crate_name": "volar-ir-common", "kind": "recursive record", "rkyv": true },
+    { "rust": "volar_ir_common::StructRef", "crate_name": "volar-ir-common", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir_common::MeasureSpec", "crate_name": "volar-ir-common", "kind": "recursive enum", "rkyv": true },
+    { "rust": "volar_ir::IRBlockId", "crate_name": "volar-ir", "kind": "newtype", "rkyv": true },
+    { "rust": "volar_ir::IRBlocks", "crate_name": "volar-ir", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_ir::IRBlock", "crate_name": "volar-ir", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_ir::IRVarId", "crate_name": "volar-ir", "kind": "newtype", "rkyv": true },
+    { "rust": "volar_ir::IRBranchTarget", "crate_name": "volar-ir", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_ir::IRTerminator", "crate_name": "volar-ir", "kind": "generic enum", "rkyv": true },
+    { "rust": "volar_ir::IRBlockTargetId", "crate_name": "volar-ir", "kind": "generic enum", "rkyv": true },
+    { "rust": "volar_ir::LaneId", "crate_name": "volar-ir", "kind": "newtype", "rkyv": true },
+    { "rust": "volar_ir::BIrPreInitSegment", "crate_name": "volar-ir", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir::BIrBlocks", "crate_name": "volar-ir", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_ir::BIrBlock", "crate_name": "volar-ir", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_ir::BIrStmt", "crate_name": "volar-ir", "kind": "generic enum", "rkyv": true },
+    { "rust": "volar_ir::BIrTerminator", "crate_name": "volar-ir", "kind": "generic enum", "rkyv": true },
+    { "rust": "volar_ir::BIrTarget", "crate_name": "volar-ir", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_ir::VCircuit", "crate_name": "volar-ir", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_ir::BCircuit", "crate_name": "volar-ir", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_ir::RGate", "crate_name": "volar-ir", "kind": "enum", "rkyv": true },
+    { "rust": "volar_ir::RExternalKind", "crate_name": "volar-ir", "kind": "enum", "rkyv": true },
+    { "rust": "volar_ir::RCircuit", "crate_name": "volar-ir", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir::ChunkedBCircuit", "crate_name": "volar-ir", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir::WireSchedule", "crate_name": "volar-ir", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir::BStmtChunkRef", "crate_name": "volar-ir", "kind": "record", "rkyv": true },
+    { "rust": "volar_ir::BStmtChunk", "crate_name": "volar-ir", "kind": "generic record", "rkyv": true },
+    { "rust": "vaffle::Module", "crate_name": "vaffle", "kind": "generic record", "rkyv": true },
+    { "rust": "vaffle::SigId", "crate_name": "vaffle", "kind": "newtype", "rkyv": true },
+    { "rust": "vaffle::FuncId", "crate_name": "vaffle", "kind": "newtype", "rkyv": true },
+    { "rust": "vaffle::BlockId", "crate_name": "vaffle", "kind": "newtype", "rkyv": true },
+    { "rust": "vaffle::ValueId", "crate_name": "vaffle", "kind": "newtype", "rkyv": true },
+    { "rust": "vaffle::SigDecl", "crate_name": "vaffle", "kind": "record", "rkyv": true },
+    { "rust": "vaffle::FuncDecl", "crate_name": "vaffle", "kind": "generic enum", "rkyv": true },
+    { "rust": "vaffle::FuncBody", "crate_name": "vaffle", "kind": "generic record", "rkyv": true },
+    { "rust": "vaffle::Block", "crate_name": "vaffle", "kind": "record", "rkyv": true },
+    { "rust": "vaffle::Target", "crate_name": "vaffle", "kind": "generic record", "rkyv": true },
+    { "rust": "vaffle::Terminator", "crate_name": "vaffle", "kind": "generic enum", "rkyv": true },
+    { "rust": "vaffle::Value", "crate_name": "vaffle", "kind": "generic enum", "rkyv": true },
+    { "rust": "volar_lir::NameConfig", "crate_name": "volar-lir", "kind": "record", "rkyv": true },
+    { "rust": "volar_lir::ActionStoreTarget", "crate_name": "volar-lir", "kind": "generic record", "rkyv": true },
+    { "rust": "volar_lir::LirType", "crate_name": "volar-lir", "kind": "recursive enum", "rkyv": true },
+    { "rust": "volar_lir::FieldDef", "crate_name": "volar-lir", "kind": "record", "rkyv": true },
+    { "rust": "volar_lir::StructDef", "crate_name": "volar-lir", "kind": "record", "rkyv": true },
+    { "rust": "volar_lir::IcmpPred", "crate_name": "volar-lir", "kind": "enum", "rkyv": true },
+    { "rust": "volar_lir_saved::LirCall", "crate_name": "volar-lir-saved", "kind": "enum", "rkyv": true },
+    { "rust": "volar_lir_saved::SavedLirModule", "crate_name": "volar-lir-saved", "kind": "record", "rkyv": true },
+    { "rust": "volar_side::SideId", "crate_name": "volar-side", "kind": "newtype", "rkyv": true }
+  ],
+  "generated": [
+    {
+      "id": "primitive-type",
+      "doc": "Primitive (non-compound) type shared across Volar IR and VAFFLE.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "Type",
+        "kind": "unit-enum",
+        "variants": ["Bit", "_8", "_16", "_32", "_64", "_128", "_256", "AES8", "Galois64", "Z3"],
+        "non_exhaustive": true
+      },
+      "typescript": "PrimitiveType"
+    },
+    {
+      "id": "constant",
+      "doc": "A 256-bit compile-time constant, split into high and low 128-bit halves.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "Constant",
+        "kind": "record",
+        "archived_ord": true,
+        "fields": [
+          { "name": "hi", "ty": "u128" },
+          { "name": "lo", "ty": "u128" }
+        ]
+      },
+      "typescript": "Constant"
+    },
+    {
+      "id": "oracle-declaration",
+      "doc": "Declaration of a named pure oracle.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "OracleDecl",
+        "kind": "record",
+        "copy": false,
+        "fields": [
+          { "name": "name", "ty": "alloc::string::String" },
+          { "name": "params", "ty": "alloc::vec::Vec<TypeId>" },
+          { "name": "results", "ty": "alloc::vec::Vec<TypeId>" }
+        ]
+      },
+      "typescript": "OracleDecl"
+    },
+    {
+      "id": "action-declaration",
+      "doc": "Declaration of a named conditional action.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "ActionDecl",
+        "kind": "record",
+        "copy": false,
+        "fields": [
+          { "name": "name", "ty": "alloc::string::String" },
+          { "name": "params", "ty": "alloc::vec::Vec<TypeId>" },
+          { "name": "results", "ty": "alloc::vec::Vec<TypeId>" }
+        ]
+      },
+      "typescript": "ActionDecl"
+    },
+    {
+      "id": "rng-declaration",
+      "doc": "Declaration of a named source of fresh random values.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "RngDecl",
+        "kind": "record",
+        "copy": false,
+        "fields": [
+          { "name": "name", "ty": "alloc::string::String" },
+          { "name": "ty", "ty": "TypeId" }
+        ]
+      },
+      "typescript": "RngDecl"
+    },
+    {
+      "id": "pre-init-segment",
+      "doc": "A contiguous run of pre-initialised typed storage elements.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "PreInitSegment",
+        "kind": "record",
+        "copy": false,
+        "fields": [
+          { "name": "storage", "ty": "StorageId" },
+          { "name": "ty", "ty": "TypeId" },
+          { "name": "offset", "ty": "usize" },
+          { "name": "data", "ty": "alloc::vec::Vec<Constant>" }
+        ]
+      },
+      "typescript": "PreInitSegment"
+    },
+    {
+      "id": "side-id",
+      "doc": "Opaque identifier naming which actor, party, or role a value belongs to.",
+      "rust": {
+        "output": "crates/ir/volar-side/src/generated.rs",
+        "name": "SideId",
+        "kind": "newtype",
+        "inner": "u32"
+      },
+      "typescript": "SideId"
+    },
+    {
+      "id": "type-id",
+      "doc": "Opaque index into the module-local IR type table.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "TypeId",
+        "kind": "newtype",
+        "inner": "u32"
+      },
+      "typescript": "TypeId"
+    },
+    {
+      "id": "storage-id",
+      "doc": "Opaque identifier for an independent storage space.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "StorageId",
+        "kind": "newtype",
+        "inner": "u32"
+      },
+      "typescript": "StorageId"
+    },
+    {
+      "id": "ir-block-id",
+      "doc": "Opaque index of a block in an IR block list.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/ir/generated.rs",
+        "name": "IRBlockId",
+        "kind": "newtype",
+        "inner": "u32"
+      },
+      "typescript": "IRBlockId"
+    },
+    {
+      "id": "ir-var-id",
+      "doc": "Opaque identifier of an SSA value in a block.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/ir/generated.rs",
+        "name": "IRVarId",
+        "kind": "newtype",
+        "inner": "u32"
+      },
+      "typescript": "IRVarId"
+    },
+    {
+      "id": "lane-id",
+      "doc": "Opaque identifier of a bit-granular storage lane.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/boolar/generated.rs",
+        "name": "LaneId",
+        "kind": "newtype",
+        "inner": "u32"
+      },
+      "typescript": "LaneId"
+    },
+    {
+      "id": "boolar-pre-init-segment",
+      "doc": "A bit-granular pre-initialised storage segment.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/boolar/generated.rs",
+        "name": "BIrPreInitSegment",
+        "kind": "record",
+        "copy": false,
+        "fields": [
+          { "name": "storage", "ty": "volar_ir_common::StorageId" },
+          { "name": "lane", "ty": "LaneId" },
+          { "name": "offset", "ty": "u64" },
+          { "name": "data", "ty": "alloc::vec::Vec<bool>" }
+        ]
+      },
+      "typescript": "BIrPreInitSegment"
+    },
+    {
+      "id": "vaffle-sig-id",
+      "doc": "Opaque index of a VAFFLE function signature.",
+      "rust": {
+        "output": "crates/ir/vaffle/src/generated.rs",
+        "name": "SigId",
+        "kind": "newtype",
+        "inner": "usize"
+      },
+      "typescript": "SigId"
+    },
+    {
+      "id": "vaffle-func-id",
+      "doc": "Opaque index of a VAFFLE function.",
+      "rust": {
+        "output": "crates/ir/vaffle/src/generated.rs",
+        "name": "FuncId",
+        "kind": "newtype",
+        "inner": "usize"
+      },
+      "typescript": "FuncId"
+    },
+    {
+      "id": "vaffle-block-id",
+      "doc": "Opaque index of a VAFFLE basic block.",
+      "rust": {
+        "output": "crates/ir/vaffle/src/generated.rs",
+        "name": "BlockId",
+        "kind": "newtype",
+        "inner": "usize"
+      },
+      "typescript": "BlockId"
+    },
+    {
+      "id": "vaffle-value-id",
+      "doc": "Opaque identifier of a VAFFLE SSA value.",
+      "rust": {
+        "output": "crates/ir/vaffle/src/generated.rs",
+        "name": "ValueId",
+        "kind": "newtype",
+        "inner": "usize"
+      },
+      "typescript": "ValueId"
+    },
+    {
+      "id": "vaffle-signature",
+      "doc": "A VAFFLE function signature expressed as module-local type IDs.",
+      "rust": {
+        "output": "crates/ir/vaffle/src/generated.rs",
+        "name": "SigDecl",
+        "kind": "record",
+        "copy": false,
+        "derives": ["Clone", "Debug"],
+        "fields": [
+          { "name": "params", "ty": "alloc::vec::Vec<volar_ir_common::TypeId>" },
+          { "name": "results", "ty": "alloc::vec::Vec<volar_ir_common::TypeId>" }
+        ]
+      },
+      "typescript": "VaffleSignature"
+    },
+    {
+      "id": "reversible-external-kind",
+      "doc": "Class of a replayable reversible external source.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/rcircuit/generated.rs",
+        "name": "RExternalKind",
+        "kind": "unit-enum",
+        "variants": ["Oracle", "Rng"]
+      },
+      "typescript": "ReversibleExternalKind"
+    },
+    {
+      "id": "reversible-circuit",
+      "doc": "A validated reversible circuit over a fixed number of wires.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/rcircuit/generated.rs",
+        "name": "RCircuit",
+        "kind": "record",
+        "copy": false,
+        "default": true,
+        "fields": [
+          { "name": "num_wires", "ty": "usize" },
+          { "name": "gates", "ty": "alloc::vec::Vec<crate::rcircuit::RGate>" }
+        ]
+      },
+      "typescript": "RCircuit"
+    },
+    {
+      "id": "icmp-predicate",
+      "doc": "Integer comparison predicate used by low-level IR.",
+      "rust": {
+        "output": "crates/ir/volar-lir/src/generated.rs",
+        "name": "IcmpPred",
+        "kind": "unit-enum",
+        "variants": ["Eq", "Ne", "Ult", "Ule", "Ugt", "Uge", "Slt", "Sle", "Sgt", "Sge"]
+      },
+      "typescript": "IcmpPred"
+    },
+    {
+      "id": "lir-field-definition",
+      "doc": "One named field in a saved LIR struct definition.",
+      "rust": {
+        "output": "crates/ir/volar-lir/src/generated.rs",
+        "name": "FieldDef",
+        "kind": "record",
+        "copy": false,
+        "derives": ["Clone", "Debug", "PartialEq", "Eq"],
+        "fields": [
+          { "name": "name", "ty": "alloc::string::String" },
+          { "name": "ty", "ty": "crate::LirType" }
+        ]
+      },
+      "typescript": "LirFieldDefinition"
+    },
+    {
+      "id": "lir-name-configuration",
+      "doc": "Controls how a low-level backend maps logical names to emitted names.",
+      "rust": {
+        "output": "crates/ir/volar-lir/src/generated.rs",
+        "name": "NameConfig",
+        "kind": "record",
+        "copy": false,
+        "default": true,
+        "derives": ["Clone", "Debug"],
+        "fields": [
+          { "name": "prefix", "ty": "alloc::string::String" },
+          { "name": "remap", "ty": "alloc::collections::BTreeMap<alloc::string::String, alloc::string::String>" }
+        ]
+      },
+      "typescript": "LirNameConfig"
+    },
+    {
+      "id": "lir-action-store-target",
+      "doc": "Destination for one low-level action-store result.",
+      "rust": {
+        "output": "crates/ir/volar-lir/src/generated.rs",
+        "name": "ActionStoreTarget",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "Value" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "Hash", "Debug"],
+        "fields": [
+          { "name": "storage", "ty": "u64" },
+          { "name": "lane", "ty": "u32" },
+          { "name": "address", "ty": "Value" },
+          { "name": "address_ty", "ty": "crate::LirType" }
+        ]
+      },
+      "typescript": "LirActionStoreTarget"
+    },
+    {
+      "id": "lir-struct-definition",
+      "doc": "A named saved LIR struct definition.",
+      "rust": {
+        "output": "crates/ir/volar-lir/src/generated.rs",
+        "name": "StructDef",
+        "kind": "record",
+        "copy": false,
+        "derives": ["Clone", "Debug", "PartialEq", "Eq"],
+        "fields": [
+          { "name": "name", "ty": "alloc::string::String" },
+          { "name": "fields", "ty": "alloc::vec::Vec<crate::FieldDef>" }
+        ]
+      },
+      "typescript": "LirStructDefinition"
+    },
+    {
+      "id": "struct-reference",
+      "doc": "Portable reference to a compiler struct (module path plus name).",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/complexity/generated.rs",
+        "name": "StructRef",
+        "kind": "record",
+        "copy": false,
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "module_path", "ty": "alloc::vec::Vec<alloc::string::String>" },
+          { "name": "name", "ty": "alloc::string::String" }
+        ]
+      },
+      "typescript": "StructRef"
+    },
+    {
+      "id": "chunked-boolar-circuit",
+      "doc": "Root metadata for a Boolar circuit whose statement body is loaded in semantic ranges.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/lazy/generated.rs",
+        "name": "ChunkedBCircuit",
+        "kind": "record",
+        "copy": false,
+        "derives": ["Clone", "Debug", "Eq", "PartialEq"],
+        "fields": [
+          { "name": "version", "ty": "u32" },
+          { "name": "params", "ty": "u32" },
+          { "name": "pre_init", "ty": "alloc::vec::Vec<crate::boolar::BIrPreInitSegment>" },
+          { "name": "outputs", "ty": "alloc::vec::Vec<crate::ir::IRVarId>" },
+          { "name": "statement_chunks", "ty": "alloc::vec::Vec<crate::lazy::BStmtChunkRef>" },
+          { "name": "wire_schedule", "ty": "crate::lazy::WireSchedule" }
+        ]
+      },
+      "typescript": "ChunkedBCircuit"
+    },
+    {
+      "id": "boolar-statement-chunk-reference",
+      "doc": "A content reference plus the semantic statement range it contains.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/lazy/generated.rs",
+        "name": "BStmtChunkRef",
+        "kind": "record",
+        "copy": false,
+        "derives": ["Clone", "Debug", "Eq", "PartialEq"],
+        "fields": [
+          { "name": "chunk", "ty": "lazy_repo::ChunkRef" },
+          { "name": "first", "ty": "u32" },
+          { "name": "statements", "ty": "u32" }
+        ]
+      },
+      "typescript": "BStmtChunkRef"
+    },
+    {
+      "id": "vaffle-block",
+      "doc": "A VAFFLE basic block with ordered statements and a terminator.",
+      "rust": {
+        "output": "crates/ir/vaffle/src/generated.rs",
+        "name": "Block",
+        "kind": "record",
+        "copy": false,
+        "derives": ["Clone", "Debug"],
+        "fields": [
+          { "name": "params", "ty": "alloc::vec::Vec<(crate::ValueId, volar_ir_common::TypeId)>" },
+          { "name": "stmts", "ty": "alloc::vec::Vec<crate::ValueId>" },
+          { "name": "terminator", "ty": "crate::Terminator" }
+        ]
+      },
+      "typescript": "VaffleBlock"
+    },
+    {
+      "id": "reentry-hint",
+      "doc": "Well-founded descent metadata attached to a branch target.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/complexity/generated.rs",
+        "name": "ReentryHint",
+        "kind": "record",
+        "copy": false,
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "measures", "ty": "alloc::vec::Vec<crate::complexity::MeasureSpec>" }
+        ]
+      },
+      "typescript": "ReentryHint"
+    },
+    {
+      "id": "saved-lir-module",
+      "doc": "A recorded sequence of low-level IR target calls that can be replayed into any target.",
+      "rust": {
+        "output": "crates/ir/volar-lir-saved/src/generated.rs",
+        "name": "SavedLirModule",
+        "kind": "record",
+        "copy": false,
+        "default": true,
+        "derives": ["Clone", "Debug", "PartialEq"],
+        "fields": [
+          { "name": "calls", "ty": "alloc::vec::Vec<crate::LirCall>" }
+        ]
+      },
+      "typescript": "SavedLirModule"
+    },
+    {
+      "id": "ir-node",
+      "doc": "An IR value paired with provenance and an optional side annotation.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "Node",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "T" },
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "kind", "ty": "T" },
+          { "name": "prov", "ty": "P" },
+          { "name": "side", "ty": "core::option::Option<volar_side::SideId>" }
+        ]
+      },
+      "typescript": "IrNode"
+    },
+    {
+      "id": "volar-ir-blocks",
+      "doc": "A complete Volar IR circuit module with declarations, blocks, and pre-initialized storage.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/ir/generated.rs",
+        "name": "IRBlocks",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "oracles", "ty": "alloc::vec::Vec<volar_ir_common::OracleDecl>" },
+          { "name": "actions", "ty": "alloc::vec::Vec<volar_ir_common::ActionDecl>" },
+          { "name": "rngs", "ty": "alloc::vec::Vec<volar_ir_common::RngDecl>" },
+          { "name": "blocks", "ty": "alloc::vec::Vec<crate::ir::IRBlock<P>>" },
+          { "name": "pre_init", "ty": "alloc::vec::Vec<volar_ir_common::PreInitSegment>" }
+        ]
+      },
+      "typescript": "VolarIrBlocks"
+    },
+    {
+      "id": "volar-ir-block",
+      "doc": "One typed Volar IR block with statements and a terminator.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/ir/generated.rs",
+        "name": "IRBlock",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "params", "ty": "alloc::vec::Vec<volar_ir_common::TypeId>" },
+          { "name": "stmts", "ty": "alloc::vec::Vec<volar_ir_common::Node<crate::ir::IRStmt, P>>" },
+          { "name": "terminator", "ty": "crate::ir::IRTerminator" }
+        ]
+      },
+      "typescript": "VolarIrBlock"
+    },
+    {
+      "id": "volar-ir-branch-target",
+      "doc": "A Volar IR branch destination, its argument list, and optional reentry hint.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/ir/generated.rs",
+        "name": "IRBranchTarget",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "Var", "default": "IRVarId" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "dest", "ty": "crate::ir::IRBlockTargetId<Var>" },
+          { "name": "args", "ty": "alloc::vec::Vec<Var>" },
+          { "name": "reentry", "ty": "core::option::Option<volar_ir_common::ReentryHint>" }
+        ]
+      },
+      "typescript": "VolarIrBranchTarget"
+    },
+    {
+      "id": "boolar-ir-blocks",
+      "doc": "A complete Boolar circuit module with bit blocks and pre-initialized storage.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/boolar/generated.rs",
+        "name": "BIrBlocks",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "blocks", "ty": "alloc::vec::Vec<crate::boolar::BIrBlock<P>>" },
+          { "name": "pre_init", "ty": "alloc::vec::Vec<crate::boolar::BIrPreInitSegment>" }
+        ]
+      },
+      "typescript": "BoolarIrBlocks"
+    },
+    {
+      "id": "boolar-ir-block",
+      "doc": "One Boolar block with bit statements and a terminator.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/boolar/generated.rs",
+        "name": "BIrBlock",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "params", "ty": "u32" },
+          { "name": "stmts", "ty": "alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>>" },
+          { "name": "terminator", "ty": "crate::boolar::BIrTerminator" }
+        ]
+      },
+      "typescript": "BoolarIrBlock"
+    },
+    {
+      "id": "boolar-ir-target",
+      "doc": "A Boolar branch destination and its argument list.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/boolar/generated.rs",
+        "name": "BIrTarget",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "Var", "default": "crate::ir::IRVarId" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "block", "ty": "crate::ir::IRBlockTargetId<Var>" },
+          { "name": "args", "ty": "alloc::vec::Vec<Var>" }
+        ]
+      },
+      "typescript": "BoolarIrTarget"
+    },
+    {
+      "id": "v-circuit",
+      "doc": "A circuit-fused Volar IR program with typed inputs, statements, and outputs.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/circuit/generated.rs",
+        "name": "VCircuit",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "params", "ty": "alloc::vec::Vec<volar_ir_common::TypeId>" },
+          { "name": "stmts", "ty": "alloc::vec::Vec<volar_ir_common::Node<crate::ir::IRStmt, P>>" },
+          { "name": "outputs", "ty": "alloc::vec::Vec<crate::ir::IRVarId>" }
+        ]
+      },
+      "typescript": "VCircuit"
+    },
+    {
+      "id": "b-circuit",
+      "doc": "A circuit-fused Boolar program with input count, statements, storage, and outputs.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/circuit/generated.rs",
+        "name": "BCircuit",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "params", "ty": "u32" },
+          { "name": "stmts", "ty": "alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>>" },
+          { "name": "pre_init", "ty": "alloc::vec::Vec<crate::boolar::BIrPreInitSegment>" },
+          { "name": "outputs", "ty": "alloc::vec::Vec<crate::ir::IRVarId>" }
+        ]
+      },
+      "typescript": "BCircuit"
+    },
+    {
+      "id": "boolar-statement-chunk",
+      "doc": "The decoded payload of one content-addressed Boolar statement chunk.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/lazy/generated.rs",
+        "name": "BStmtChunk",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone" }
+        ],
+        "derives": ["Clone", "Debug", "Eq", "PartialEq"],
+        "fields": [
+          { "name": "first", "ty": "u32" },
+          { "name": "stmts", "ty": "alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>>" }
+        ]
+      },
+      "typescript": "BStmtChunk"
+    },
+    {
+      "id": "vaffle-module",
+      "doc": "A VAFFLE module containing types, declarations, functions, signatures, exports, and storage initialization.",
+      "rust": {
+        "output": "crates/ir/vaffle/src/generated.rs",
+        "name": "Module",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Debug"],
+        "fields": [
+          { "name": "types", "ty": "volar_ir_common::TypeTable" },
+          { "name": "oracles", "ty": "alloc::vec::Vec<volar_ir_common::OracleDecl>" },
+          { "name": "actions", "ty": "alloc::vec::Vec<volar_ir_common::ActionDecl>" },
+          { "name": "funcs", "ty": "alloc::vec::Vec<crate::FuncDecl<P>>" },
+          { "name": "sigs", "ty": "alloc::vec::Vec<crate::SigDecl>" },
+          { "name": "exports", "ty": "alloc::collections::BTreeMap<alloc::string::String, crate::FuncId>" },
+          { "name": "pre_init", "ty": "alloc::vec::Vec<volar_ir_common::PreInitSegment>" }
+        ]
+      },
+      "typescript": "VaffleModule"
+    },
+    {
+      "id": "vaffle-function-body",
+      "doc": "One VAFFLE function body with blocks, values, and an entry block.",
+      "rust": {
+        "output": "crates/ir/vaffle/src/generated.rs",
+        "name": "FuncBody",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Debug"],
+        "fields": [
+          { "name": "sig", "ty": "crate::SigId" },
+          { "name": "blocks", "ty": "alloc::vec::Vec<crate::Block>" },
+          { "name": "values", "ty": "alloc::vec::Vec<volar_ir_common::Node<crate::Value, P>>" },
+          { "name": "entry", "ty": "crate::BlockId" }
+        ]
+      },
+      "typescript": "VaffleFunctionBody"
+    },
+    {
+      "id": "vaffle-target",
+      "doc": "A VAFFLE branch target, arguments, and optional reentry hint.",
+      "rust": {
+        "output": "crates/ir/vaffle/src/generated.rs",
+        "name": "Target",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "V", "default": "ValueId" }
+        ],
+        "derives": ["Clone", "Debug"],
+        "fields": [
+          { "name": "block", "ty": "crate::BlockId" },
+          { "name": "args", "ty": "alloc::vec::Vec<V>" },
+          { "name": "reentry", "ty": "core::option::Option<volar_ir_common::ReentryHint>" }
+        ]
+      },
+      "typescript": "VaffleTarget"
+    },
+    {
+      "id": "wire-schedule",
+      "doc": "Build-time wire liveness data consumed by bounded lazy runners.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/lazy/generated.rs",
+        "name": "WireSchedule",
+        "kind": "record",
+        "copy": false,
+        "fields": [
+          { "name": "resident_wires", "ty": "u32" },
+          { "name": "temporary_wires", "ty": "u32" },
+          { "name": "last_use", "ty": "alloc::vec::Vec<u32>" },
+          { "name": "release_at", "ty": "alloc::vec::Vec<alloc::vec::Vec<u32>>" }
+        ]
+      },
+      "typescript": "WireSchedule"
+    }
+  ]
+}

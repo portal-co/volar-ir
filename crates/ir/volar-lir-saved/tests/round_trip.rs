@@ -10,7 +10,7 @@
 
 #![cfg(feature = "rkyv")]
 
-use volar_lir::{LirTarget, LirType};
+use volar_lir::{BranchTarget, LirTarget, LirType};
 use volar_lir_saved::{RecordingTarget, SavedLirModule};
 
 /// Build a module with a single function:
@@ -52,13 +52,19 @@ fn build_max_module() -> SavedLirModule {
 
     rec.switch_to_block(entry);
     let cond = rec.icmp(IcmpPred::Uge, a, b);
-    rec.branch(cond, then_block, &[], else_block, &[]);
+    rec.branch(
+        cond,
+        then_block,
+        BranchTarget::default(),
+        else_block,
+        BranchTarget::default(),
+    );
 
     rec.switch_to_block(then_block);
-    rec.jump(merge_block, &[a]);
+    rec.jump(merge_block, BranchTarget::args([a]));
 
     rec.switch_to_block(else_block);
-    rec.jump(merge_block, &[b]);
+    rec.jump(merge_block, BranchTarget::args([b]));
 
     rec.switch_to_block(merge_block);
     rec.ret(&[result_param]);

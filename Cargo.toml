@@ -26,6 +26,7 @@ members = [
     "crates/frontends/volar-wasm-circuit-import",
     "crates/pass/volar-llvm-plugin-api",
     "crates/pass/volar-llvm-plugin",
+    "crates/tools/volar-ir-schema-gen",
 ]
 resolver = "3"
 
@@ -60,7 +61,7 @@ portal-pc-waffle-ir       = { version = "0.6.0-alpha.1", git = "https://github.c
 portal-pc-waffle-frontend = { version = "0.6.0-alpha.1", git = "https://github.com/portal-co/waffle-" }
 wax-meta                  = { version = "0.1.0", git = "https://github.com/portal-co/portal-container.git" }
 
-rkyv = { version = "0.8", default-features = false, features = ["alloc"] }
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 
 inkwell = { version = "0.10.0", features = [
     "llvm22-1",

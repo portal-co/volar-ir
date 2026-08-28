@@ -11,8 +11,11 @@
 use alloc::vec::Vec;
 use volar_ir_common::Node;
 
+mod generated;
+pub use generated::{BCircuit, VCircuit};
+
 use crate::{
-    boolar::{BIrBlock, BIrBlocks, BIrPreInitSegment, BIrStmt},
+    boolar::{BIrBlock, BIrBlocks, BIrStmt},
     ir::{IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId, IRVarId},
 };
 
@@ -71,29 +74,6 @@ impl core::fmt::Display for CircuitFusionError {
 // ============================================================================
 // Circuit-fused Volar IR
 // ============================================================================
-
-/// A circuit-fused Volar program: exactly one block with no control flow.
-///
-/// The former `Jmp { dest: Return, args }` terminator becomes [`outputs`](Self::outputs).
-/// There is deliberately **no terminator field**: a fused circuit cannot hide
-/// a jump. First-class `Block`-typed values and dynamic dispatch have no place
-/// in this shape either; producers that could introduce them are rejected at
-/// fusion time (see [`CircuitFusionError`]).
-///
-/// The type parameter `P` is a per-statement provenance annotation carried on
-/// each [`Node`], exactly as in the unfused IRs.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct VCircuit<P: Clone = ()> {
-    /// Input parameters, typed as in [`crate::ir::IRBlock::params`].
-    pub params: Vec<IRTypeId>,
-    pub stmts: Vec<Node<crate::ir::IRStmt, P>>,
-    /// The variables returned to the caller.
-    pub outputs: Vec<IRVarId>,
-}
 
 impl<P: Clone> VCircuit<P> {
     /// Construct an empty fused circuit with the given input types.
@@ -219,26 +199,6 @@ impl<P: Clone> From<VCircuit<P>> for IRBlocks<P> {
 // ============================================================================
 // Circuit-fused Boolar IR
 // ============================================================================
-
-/// A circuit-fused Boolar program: exactly one bit-block with no control flow.
-///
-/// Mirror of [`VCircuit`] at the bit level: the former
-/// `Jmp(BIrTarget { block: Return, args })` terminator becomes
-/// [`outputs`](Self::outputs), and there is no terminator field.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct BCircuit<P: Clone = ()> {
-    /// Number of input parameters (all bits).
-    pub params: u32,
-    pub stmts: Vec<Node<BIrStmt, P>>,
-    /// Bit-granular storage values to install before a fresh circuit run.
-    pub pre_init: Vec<BIrPreInitSegment>,
-    /// The variables returned to the caller.
-    pub outputs: Vec<IRVarId>,
-}
 
 impl<P: Clone> BCircuit<P> {
     /// Construct an empty fused circuit with `params` input bits.

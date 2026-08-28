@@ -5,7 +5,7 @@
 //! # Types serialised
 //!
 //! - [`SavedIrBlocks`] — a `(TypeTable, IRBlocks<()>)` pair in `.vir` format.
-//! - [`SavedBIrBlocks`] — a `BIrBlocks<()>` in `.vbir` format.
+//! - [`SavedBIrBlocks`] — a `BIrBlocks<()>` in the `boolar:` `.vir` section.
 //!
 //! # Traits
 //!

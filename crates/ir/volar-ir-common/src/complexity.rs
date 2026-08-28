@@ -4,38 +4,10 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 
-/// Attached to a branch target: measures that MUST decrease on re-entry via this edge.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-#[cfg_attr(feature = "rkyv", rkyv(serialize_bounds(
-    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
-    __S::Error: rkyv::rancor::Source,
-)))]
-#[cfg_attr(feature = "rkyv", rkyv(bytecheck(bounds(
-    __C: rkyv::validation::ArchiveContext,
-    __C::Error: rkyv::rancor::Source,
-))))]
-#[cfg_attr(feature = "rkyv", rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source)))]
-pub struct ReentryHint {
-    #[cfg_attr(feature = "rkyv", rkyv(omit_bounds))]
-    pub measures: Vec<MeasureSpec>,
-}
-
-/// Portable reference to a compiler struct (module path + name).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct StructRef {
-    pub module_path: Vec<String>,
-    pub name: String,
-}
+mod generated;
+pub use generated::{ReentryHint, StructRef};
 
 /// Recursive well-founded measure over target-block params.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

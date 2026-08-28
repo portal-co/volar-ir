@@ -389,10 +389,8 @@ fn ir_terminator_jmp_cond() {
         stmts: vec![],
         terminator: IRTerminator::JumpCond {
             condition: v(0),
-            true_block: IRBlockTargetId::Block(block_id(1)),
-            true_args: vec![v(0)],
-            false_block: IRBlockTargetId::Return,
-            false_args: vec![],
+            then_target: IRBranchTarget::new(IRBlockTargetId::Block(block_id(1)), vec![v(0)]),
+            else_target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
         },
     };
     let block1 = IRBlock {
@@ -418,8 +416,14 @@ fn ir_terminator_jmp_cond() {
 fn ir_terminator_jmp_table() {
     let types = TypeTable(vec![IrType::Primitive(Type::_8)]);
     let mut cases = BTreeMap::new();
-    cases.insert(c(0, 1), (IRBlockTargetId::Block(block_id(1)), vec![]));
-    cases.insert(c(0, 2), (IRBlockTargetId::Return, vec![]));
+    cases.insert(
+        c(0, 1),
+        IRBranchTarget::new(IRBlockTargetId::Block(block_id(1)), vec![]),
+    );
+    cases.insert(
+        c(0, 2),
+        IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
+    );
     let block0 = IRBlock {
         params: vec![ty(0)],
         stmts: vec![],
@@ -522,6 +526,25 @@ fn bir_simple_round_trip() {
 }
 
 #[test]
+fn bir_uses_the_schema_section_header() {
+    let text = SavedBIrBlocks {
+        blocks: BIrBlocks {
+            blocks: vec![BIrBlock {
+                params: 0,
+                stmts: vec![],
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: vec![],
+                }),
+            }],
+            pre_init: vec![],
+        },
+    }
+    .to_text_string();
+    assert!(text.starts_with("volar-ir v1\nboolar:\n"));
+}
+
+#[test]
 fn bir_oracle_action_rng() {
     let block = BIrBlock {
         params: 4, // v0..v3
@@ -531,7 +554,7 @@ fn bir_oracle_action_rng() {
                 args: vec![v(0), v(1)],
                 num_bits: 4,
             }), // v4
-            node(BIrStmt::OracleBit { call: v(4), bit: 2 }), // v5
+            node(BIrStmt::OracleProjectedBit { call: v(4), bit: 2 }), // v5
             node(BIrStmt::ActionCall {
                 name: "ac".into(),
                 guard: v(0),
@@ -539,7 +562,7 @@ fn bir_oracle_action_rng() {
                 fallback: vec![v(2)],
                 num_bits: 2,
             }), // v6
-            node(BIrStmt::ActionBit { call: v(6), bit: 0 }), // v7
+            node(BIrStmt::ActionBit { call: v(6), bit: 0 }),          // v7
             node(BIrStmt::Rng {
                 name: "rng1".into(),
             }), // v8

@@ -6,57 +6,8 @@ use super::{ir::*, *};
 use volar_ir_common::{Node, StorageId};
 use volar_side::SideId;
 
-/// Opaque lane discriminator for Boolar storage spaces.
-///
-/// Different Volar value types may legally share one [`StorageId`]; the lane
-/// keeps those values' cells from colliding. It carries **no width
-/// semantics** — every Boolar storage cell is exactly one bit. Lowering
-/// allocates lanes by dense first-use renumbering of the source type table
-/// and emits a total `LaneId → TypeId` side table from the same pass run.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct LaneId(pub u32);
-
-/// A bit-granular pre-initialised storage segment.
-///
-/// `data[i]` initialises the flat cell at `offset + i` within the
-/// `(storage, lane)` space, using the appended-address layout produced by
-/// lowering (`base + (bit_index << addr_width)`).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct BIrPreInitSegment {
-    /// Which storage space to initialise.
-    pub storage: StorageId,
-    /// Which typed-value lane within that space.
-    pub lane: LaneId,
-    /// Flat bit-cell offset of `data[0]` within the `(storage, lane)` space.
-    pub offset: u64,
-    /// One entry per initialised cell; each is a single bit.
-    pub data: alloc::vec::Vec<bool>,
-}
-
-/// A complete Boolar circuit — a set of boolean-gate blocks.
-///
-/// The type parameter `P` is an optional per-statement provenance annotation.
-/// Use `P = ()` (the default) when provenance is not needed.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct BIrBlocks<P: Clone = ()> {
-    /// The blocks of the circuit, in order. Block 0 is the entry.
-    pub blocks: Vec<BIrBlock<P>>,
-    /// Pre-initialised storage segments propagated from WASM data sections,
-    /// expanded to bit granularity by lowering.
-    pub pre_init: alloc::vec::Vec<BIrPreInitSegment>,
-}
+mod generated;
+pub use generated::{BIrBlock, BIrBlocks, BIrPreInitSegment, BIrTarget, LaneId};
 
 impl<P: Clone> BIrBlocks<P> {
     pub fn is_movfuscated(&self) -> bool {
@@ -72,24 +23,6 @@ impl<P: Clone> BIrBlocks<P> {
                 _ => false,
             };
     }
-}
-
-/// A single block in a Boolar circuit.
-///
-/// The type parameter `P` is an optional per-statement provenance annotation.
-/// Each statement also carries an optional [`SideId`] naming which
-/// actor/party/role it belongs to (see `volar-side`); both annotations live
-/// together on the [`Node`] wrapping each statement, so they can never drift
-/// out of sync with `stmts` the way two parallel `Vec`s could.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct BIrBlock<P: Clone = ()> {
-    pub params: u32,
-    pub stmts: Vec<Node<BIrStmt, P>>,
-    pub terminator: BIrTerminator,
 }
 
 impl<P: Clone> BIrBlock<P> {
@@ -668,16 +601,6 @@ impl<Var> BIrTerminator<Var> {
             },
         }
     }
-}
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct BIrTarget<Var = IRVarId> {
-    pub block: IRBlockTargetId<Var>,
-    pub args: Vec<Var>,
 }
 
 impl<Var> BIrTarget<Var> {

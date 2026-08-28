@@ -4,17 +4,20 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::ToString;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId};
-use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId};
+use volar_ir::ir::{
+    IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId,
+};
 use volar_ir_common::{
     ActionDecl, Constant, IrType, OracleDecl, RngDecl, Stmt, StorageId, Type, TypeId, TypeTable,
 };
 
 use super::{error::ParseError, lexer::Lexer};
 use crate::{
-    boolar::{FORMAT_HEADER as BIR_HEADER, SavedBIrBlocks},
+    boolar::{FORMAT_HEADER as BIR_HEADER, FORMAT_SECTION as BIR_SECTION, SavedBIrBlocks},
     ir::{FORMAT_HEADER as IR_HEADER, SavedIrBlocks},
 };
 
@@ -66,37 +69,6 @@ fn read_var_id_list(lex: &mut Lexer) -> Result<Vec<IRVarId>, ParseError> {
 
 fn read_type_id_list(lex: &mut Lexer) -> Result<Vec<TypeId>, ParseError> {
     Ok(lex.read_u32_list()?.into_iter().map(mk_type).collect())
-}
-
-// ============================================================================
-// Parse TypeTable
-// ============================================================================
-
-fn parse_type_table(lex: &mut Lexer) -> Result<TypeTable, ParseError> {
-    let mut types: Vec<IrType> = Vec::new();
-    loop {
-        // peek at next directive: stop if not "type"
-        let saved_pos = {
-            // We need a multi-token lookahead — easiest is to try read_ident and
-            // put back if it's not "type".  We clone the lexer state (only need pos+line+col).
-            lex.skip();
-            lex.pos()
-        };
-        // We can't "unread" so we'll check bytes manually.
-        let remaining = lex.read_to_newline(); // tentative – need to not consume
-        // Actually, instead of lookahead: parse_type_table is called first;
-        // non-"type" lines are handled by the outer loop returning TypeTable.
-        // We use a peek approach via read_ident, but we need to not consume if wrong.
-        // Solution: restart lex from scratch is impossible. Use the approach of
-        // parsing in a loop and stopping on the first non-"type" token.
-        // We already consumed a line above. This won't work.
-        // REVISED DESIGN: parse the whole file with a single dispatch loop.
-        let _ = remaining;
-        let _ = saved_pos;
-        break;
-    }
-    // This function is not used directly; see parse_saved_ir_blocks.
-    Ok(TypeTable(types))
 }
 
 fn parse_ir_type(kw: &str, lex: &mut Lexer) -> Result<IrType, ParseError> {
@@ -783,10 +755,19 @@ pub(crate) fn parse_saved_bir_blocks(s: &str) -> Result<SavedBIrBlocks, ParseErr
         return Err(ParseError::MissingVersionLine);
     }
     if header != BIR_HEADER {
-        if header.starts_with("volar-bir v") {
+        if header.starts_with("volar-ir v") || header.starts_with("volar-bir v") {
             return Err(ParseError::UnsupportedVersion(header));
         }
         return Err(ParseError::MissingVersionLine);
+    }
+    let section = lex.read_ident()?.to_string();
+    let section_is_valid = section == BIR_SECTION.trim_end_matches(':') && lex.try_byte(b':');
+    if !section_is_valid {
+        return Err(ParseError::UnexpectedToken {
+            line: 2,
+            col: 1,
+            got: section,
+        });
     }
 
     let mut blocks: Vec<BIrBlock<()>> = Vec::new();

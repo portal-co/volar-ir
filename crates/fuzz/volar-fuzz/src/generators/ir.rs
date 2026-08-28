@@ -381,17 +381,24 @@ fn build_extended_ir_stmts(
             let oracle_idx = (a as usize) % oracle_decls.len();
             let decl = &oracle_decls[oracle_idx];
 
-            // Build arg list: one var per oracle param type (match by type, fallback any).
-            let args: Vec<IRVarId> = decl
+            // Only emit when every oracle param has a type-matching var:
+            // `lower_ir_to_boolar`'s external-source validation rejects
+            // mismatched oracle args, so a fallback to any-typed var would
+            // produce a program that fails to lower.
+            let args: Option<Vec<IRVarId>> = decl
                 .params
                 .iter()
                 .map(|&param_tid| {
-                    // Prefer a var with the same TypeId; fall back to any var.
-                    let matching = var_info.iter().find(|(tid, _, _)| *tid == param_tid);
-                    let fallback = &var_info[(a as usize) % n_vars];
-                    matching.unwrap_or(fallback).2
+                    var_info
+                        .iter()
+                        .find(|(tid, _, _)| *tid == param_tid)
+                        .map(|(_, _, var)| *var)
                 })
                 .collect();
+            let args = match args {
+                Some(args) => args,
+                None => continue,
+            };
 
             // Pre-intern the result Tuple type.
             let output_tys = decl.results.clone();

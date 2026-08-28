@@ -5,70 +5,10 @@ use volar_ir_common::{ActionDecl, Node, OracleDecl, PreInitSegment, Stmt, TypeId
 
 extern crate alloc;
 
-/// A VAFFLE module: the top-level container for types, signatures, functions,
-/// and the symbol table.
-///
-/// `types` is the shared [`TypeTable`] that all [`TypeId`] references within
-/// this module index into.  Construct it with [`TypeTable::new`] and use
-/// [`TypeTable::intern`] / [`TypeTable::primitive`] to populate it.
-#[derive(Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct Module<P: Clone = ()> {
-    /// Shared type intern table.
-    pub types: TypeTable,
-    /// Declared pure oracles available in this module.
-    pub oracles: Vec<OracleDecl>,
-    /// Declared conditional actions available in this module.
-    pub actions: Vec<ActionDecl>,
-    pub funcs: Vec<FuncDecl<P>>,
-    pub sigs: Vec<SigDecl>,
-    pub exports: BTreeMap<String, FuncId>,
-    /// Pre-initialised storage segments (from WASM active data segments).
-    pub pre_init: Vec<PreInitSegment>,
-}
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct SigId(pub usize);
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct FuncId(pub usize);
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct BlockId(pub usize);
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct ValueId(pub usize);
-
-/// A function signature: parameter types and result types, expressed as
-/// [`TypeId`] references into the containing [`Module::types`] table.
-///
-/// For import declarations the same information is also available as
-/// `IrType::Func` in the type table, allowing function types to be used as
-/// first-class values in VAFFLE programs.
-#[derive(Clone, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct SigDecl {
-    pub params: Vec<TypeId>,
-    pub results: Vec<TypeId>,
-}
+mod generated;
+pub use generated::{
+    Block, BlockId, FuncBody, FuncId, Module, SigDecl, SigId, Target, ValueId,
+};
 
 #[derive(Debug)]
 #[cfg_attr(
@@ -84,49 +24,6 @@ pub enum FuncDecl<P: Clone = ()> {
     },
     Body(FuncBody<P>),
 }
-/// `values` is a flat arena of every `Value` in the function, addressed by
-/// [`ValueId`]. Each entry carries its own provenance and [`SideId`](volar_side::SideId)
-/// via the [`Node`] wrapper — this is the single source of truth for both
-/// annotations; [`Block::stmts`] is ordering-only and holds no metadata of
-/// its own.
-#[derive(Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct FuncBody<P: Clone = ()> {
-    pub sig: SigId,
-    pub blocks: Vec<Block>,
-    pub values: Vec<Node<Value, P>>,
-    pub entry: BlockId,
-}
-/// `Block` carries no provenance/side metadata of its own — those annotations
-/// live on the [`FuncBody::values`] arena entry that each [`ValueId`] in
-/// `stmts` points to, so `Block` does not need to be generic over `P`.
-#[derive(Clone, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct Block {
-    /// Block parameters: `(value_id, type_id)` pairs.
-    pub params: Vec<(ValueId, TypeId)>,
-    pub stmts: Vec<ValueId>,
-    pub terminator: Terminator,
-}
-use volar_ir_common::ReentryHint;
-
-#[derive(Clone, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct Target<V = ValueId> {
-    pub block: BlockId,
-    pub args: Vec<V>,
-    pub reentry: Option<ReentryHint>,
-}
-
 impl<V> Target<V> {
     pub fn map<Ctx, NV, E>(
         self,

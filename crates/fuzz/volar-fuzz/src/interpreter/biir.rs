@@ -180,6 +180,23 @@ fn eval_stmt(
             .and_then(|bits| bits.get(*bit))
             .copied()
             .unwrap_or(false),
+        BIrStmt::OracleBit {
+            name,
+            args,
+            bit,
+            ..
+        } => {
+            // Direct one-bit oracle invocation. hash_oracle's output stream is
+            // prefix-stable in the requested width, so bit `bit` of a width-
+            // (bit+1) evaluation is the declared result bit. `occurrence` is
+            // replay identity only; the hash oracle is stateless.
+            let oracle_idx: u32 = name
+                .bytes()
+                .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+            let flat_inputs: Vec<bool> = args.iter().map(|v| get(vars, v)).collect();
+            let out = hash_oracle(oracle_idx, &flat_inputs, bit + 1);
+            out.get(*bit).copied().unwrap_or(false)
+        }
         BIrStmt::ActionCall { .. } => panic!("eval_biir: ActionCall not supported"),
         BIrStmt::ActionBit { .. } => panic!("eval_biir: ActionBit not supported"),
         BIrStmt::Rng { .. } => panic!("eval_biir: Rng not supported"),

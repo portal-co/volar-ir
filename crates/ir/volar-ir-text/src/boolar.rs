@@ -1,10 +1,11 @@
 // @reliability: experimental
 // @ai: assisted
-//! [`WriteText`] + [`ParseText`] for [`SavedBIrBlocks`] (the `.vbir` format).
+//! [`WriteText`] + [`ParseText`] for [`SavedBIrBlocks`] (the Boolar `.vir` format).
 //!
 //! Format summary:
 //! ```text
-//! volar-bir v1
+//! volar-ir v1
+//! boolar:
 //! begin_block 0
 //! params 4
 //! v4 = zero
@@ -17,12 +18,12 @@
 
 use crate::WriteText;
 use crate::ir::{write_block_target, write_quoted_str, write_var, write_var_list};
-use alloc::string::ToString;
 use core::fmt;
 use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTerminator};
-use volar_ir::ir::{IRBlockTargetId, IRVarId};
+use volar_ir::ir::IRVarId;
 
-pub(crate) const FORMAT_HEADER: &str = "volar-bir v1";
+pub(crate) const FORMAT_HEADER: &str = "volar-ir v1";
+pub(crate) const FORMAT_SECTION: &str = "boolar:";
 
 // ============================================================================
 // SavedBIrBlocks — public struct
@@ -246,6 +247,8 @@ fn write_bir_block(id: usize, block: &BIrBlock<()>, w: &mut dyn fmt::Write) -> f
 impl WriteText for SavedBIrBlocks {
     fn write_text(&self, w: &mut dyn fmt::Write) -> fmt::Result {
         w.write_str(FORMAT_HEADER)?;
+        w.write_char('\n')?;
+        w.write_str(FORMAT_SECTION)?;
         w.write_char('\n')?;
         for (i, block) in self.blocks.blocks.iter().enumerate() {
             write_bir_block(i, block, w)?;

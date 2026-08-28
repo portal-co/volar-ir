@@ -5,6 +5,9 @@
 // Pure data structure definitions; no cryptographic claims.
 use super::*;
 
+mod generated;
+pub use generated::{IRBlock, IRBlockId, IRBlocks, IRBranchTarget, IRVarId};
+
 /// Re-export the shared `Stmt` enum so downstream crates can pattern-match
 /// on `IRStmt` variants without depending on `volar-ir-common` directly.
 pub use volar_ir_common::Stmt;
@@ -38,36 +41,6 @@ pub use volar_ir_common::{
 // Blocks and control flow
 // ============================================================================
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct IRBlockId(pub u32);
-
-/// A complete Volar IR circuit module — a set of blocks with their
-/// oracle, action, and RNG declarations.
-///
-/// The type parameter `P` is an optional provenance annotation.  Each
-/// statement in each block carries a `P` value recording where it originated.
-/// Use `P = ()` (the default) when provenance is not needed.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct IRBlocks<P: Clone = ()> {
-    /// Oracles declared for this circuit (resolved by the execution environment).
-    pub oracles: Vec<OracleDecl>,
-    /// Actions declared for this circuit (resolved by the execution environment).
-    pub actions: Vec<ActionDecl>,
-    /// RNG sources declared for this circuit (resolved by the execution environment).
-    pub rngs: Vec<RngDecl>,
-    /// The blocks of the circuit, in order.  Block 0 is the entry.
-    pub blocks: Vec<IRBlock<P>>,
-    /// Pre-initialised storage segments propagated from WASM data sections.
-    pub pre_init: alloc::vec::Vec<PreInitSegment>,
-}
 impl<P: Clone> IRBlocks<P> {
     /// Construct an `IRBlocks` with no oracle, action, or RNG declarations.
     pub fn new(blocks: Vec<IRBlock<P>>) -> Self {
@@ -96,24 +69,6 @@ impl<P: Clone> IRBlocks<P> {
                 _ => false,
             }
     }
-}
-
-/// A single block in a Volar IR circuit.
-///
-/// The type parameter `P` is an optional per-statement provenance annotation.
-/// Each statement also carries an optional `SideId` (see `volar-side`) naming
-/// which actor/party/role it belongs to; both annotations live together on
-/// the [`Node`](volar_ir_common::Node) wrapping each statement, so they can
-/// never drift out of sync with `stmts` the way two parallel `Vec`s could.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct IRBlock<P: Clone = ()> {
-    pub params: Vec<IRTypeId>,
-    pub stmts: Vec<volar_ir_common::Node<IRStmt, P>>,
-    pub terminator: IRTerminator,
 }
 
 impl<P: Clone> IRBlock<P> {
@@ -178,17 +133,6 @@ impl<P: Clone> IRBlocks<P> {
 }
 
 // ============================================================================
-// Variable IDs
-// ============================================================================
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct IRVarId(pub u32);
-
-// ============================================================================
 // Statement type
 // ============================================================================
 
@@ -206,18 +150,6 @@ pub type IRStmt<Var = IRVarId, Addr = Var, Ty = IRTypeId, Stor = volar_ir_common
 // ============================================================================
 // Branch targets
 // ============================================================================
-
-/// A jump/branch destination with optional reentry complexity hint.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct IRBranchTarget<Var = IRVarId> {
-    pub dest: IRBlockTargetId<Var>,
-    pub args: Vec<Var>,
-    pub reentry: Option<ReentryHint>,
-}
 
 impl<Var> IRBranchTarget<Var> {
     pub fn new(dest: IRBlockTargetId<Var>, args: Vec<Var>) -> Self {

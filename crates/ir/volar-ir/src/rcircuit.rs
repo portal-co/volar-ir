@@ -16,6 +16,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use volar_ir_common::StorageId;
 
+mod generated;
+pub use generated::{RCircuit, RExternalKind};
+
 /// A single reversible gate. Every variant is a bijection on the joint
 /// (wires, storage) state, and an involution (applying it twice is identity).
 ///
@@ -96,17 +99,6 @@ pub enum RGate {
         bit: usize,
         occurrence: u64,
     },
-}
-
-/// External source class for [`RGate::ExternalXor`].
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub enum RExternalKind {
-    Oracle,
-    Rng,
 }
 
 /// Replayable external source dispatch for reversible circuits.
@@ -242,16 +234,6 @@ fn addr_cell_index(addr_wires: &[usize], wires: &[bool]) -> u64 {
 /// consumer demand). Cross-referencing back to Boolar value space goes through
 /// the watchlist machinery produced alongside circuits by `to_reversible`
 /// (in `volar-ir-passes`), not through embedded names.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct RCircuit {
-    pub num_wires: usize,
-    pub gates: Vec<RGate>,
-}
-
 impl RCircuit {
     /// Construct and validate a reversible circuit.
     pub fn new(num_wires: usize, gates: Vec<RGate>) -> Result<Self, RCircuitError> {

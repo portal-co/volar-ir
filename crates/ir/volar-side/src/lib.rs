@@ -50,17 +50,8 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Opaque identifier naming which actor/party/role a value belongs to.
-///
-/// Carries no semantics of its own — meaning is assigned entirely by a
-/// [`SideHandler`], parallel to how `IRVarId`/`StorageId` are opaque indices.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-#[cfg_attr(feature = "rkyv", rkyv(attr(derive(PartialEq, Eq, PartialOrd, Ord))))]
-pub struct SideId(pub u32);
+mod generated;
+pub use generated::SideId;
 
 /// Strategy that resolves a side identifier into the protection a value
 /// belonging to that side requires.
@@ -208,6 +199,20 @@ mod tests {
     fn side_id_equality_is_by_value() {
         assert_eq!(SideId(3), SideId(3));
         assert_ne!(SideId(3), SideId(4));
+    }
+
+    #[cfg(feature = "rkyv")]
+    #[test]
+    fn side_id_binary_fixture_matches_the_derived_layout() {
+        // Captured from the rkyv_derive implementation replaced by the
+        // schema-generated implementation.  Existing artifacts retain this
+        // layout under the pinned workspace rkyv configuration.
+        assert_eq!(
+            rkyv::to_bytes::<rkyv::rancor::Error>(&SideId(0x1020_3040))
+                .unwrap()
+                .as_slice(),
+            &[0x40, 0x30, 0x20, 0x10]
+        );
     }
 
     // ---- UniformProtection -----------------------------------------------------

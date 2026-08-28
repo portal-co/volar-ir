@@ -19,8 +19,11 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use volar_ir_common::{ReentryHint, Type as NativeType};
+
+mod generated;
+pub use generated::{ActionStoreTarget, FieldDef, IcmpPred, NameConfig, StructDef};
 
 pub mod circuits;
 pub use circuits::{
@@ -47,41 +50,6 @@ pub use circuits::{
 /// 2. Otherwise, prepend `prefix` to `name` and return the result.
 ///
 /// An empty `prefix` and empty `remap` (the default) is the identity.
-#[derive(Clone, Debug, Default)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct NameConfig {
-    /// Prefix prepended to all names not found in `remap`.
-    pub prefix: String,
-    /// Per-name overrides.  Keys are the original (un-prefixed) names; values
-    /// are used verbatim (no prefix is applied to them).
-    pub remap: BTreeMap<String, String>,
-}
-
-/// Destination for one result of an [`LirTarget::action_store`] call.
-///
-/// The action runtime owns the actual write.  Keeping the destination in the
-/// call ABI (rather than materialising an intermediate SSA result) preserves
-/// the source `ActionStore` operation's effect-only semantics and lets a host
-/// implement storage atomically for a multi-result action.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct ActionStoreTarget<Value> {
-    /// Logical storage segment selected by the Volar IR statement.
-    pub storage: u64,
-    /// Logical lane within that segment.
-    pub lane: u32,
-    /// Runtime address of the destination element.
-    pub address: Value,
-    /// ABI type of [`address`](Self::address).
-    pub address_ty: LirType,
-}
-
 impl NameConfig {
     /// Apply this configuration to `name`.
     pub fn apply(&self, name: &str) -> String {
@@ -378,49 +346,9 @@ pub trait HeapAllocExt {
 
 pub type StructId = u32;
 
-/// One field in a struct definition.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct FieldDef {
-    pub name: String,
-    pub ty: LirType,
-}
-
-/// A named struct with an ordered list of fields.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct StructDef {
-    pub name: String,
-    pub fields: Vec<FieldDef>,
-}
-
 // ============================================================================
 // Comparison predicates
 // ============================================================================
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub enum IcmpPred {
-    Eq,
-    Ne,
-    Ult,
-    Ule,
-    Ugt,
-    Uge,
-    Slt,
-    Sle,
-    Sgt,
-    Sge,
-}
 
 // ============================================================================
 // Branch targets (terminators)

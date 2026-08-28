@@ -28,6 +28,9 @@ use volar_lir::{
     BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef, StructId,
 };
 
+mod generated;
+pub use generated::SavedLirModule;
+
 // ============================================================================
 // Call log
 // ============================================================================
@@ -305,17 +308,6 @@ pub enum LirCall {
 // ============================================================================
 // SavedLirModule
 // ============================================================================
-
-/// A recorded sequence of [`LirTarget`] API calls that can be replayed into
-/// any target.
-#[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-pub struct SavedLirModule {
-    pub calls: Vec<LirCall>,
-}
 
 impl SavedLirModule {
     /// Record-once / replay-many: fan out into every target of the same type.
