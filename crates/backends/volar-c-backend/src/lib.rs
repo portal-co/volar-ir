@@ -19,7 +19,7 @@
 //! - `arr_set` emits a copy-and-mutate pattern (functional update).
 //! - `call_extern` emits `extern` declarations in `finish()`.
 
-use std::{collections::BTreeSet, fmt::Write as FmtWrite, string::String, vec::Vec};
+use std::{collections::{BTreeMap, BTreeSet}, fmt::Write as FmtWrite, string::String, vec::Vec};
 use volar_ir_common::Type as NativeType;
 use volar_lir::{
     BranchTarget, HeapAllocExt, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef,
@@ -175,6 +175,12 @@ pub struct CBackend {
     /// their own `begin_function`/`end_function` has produced a definition —
     /// C requires declaration-before-use, unlike the other backends.
     sibling_decls: Vec<String>,
+    /// Signatures of functions defined in this translation unit, keyed by
+    /// (applied) name. `call_extern` consults this before emitting an
+    /// `extern` declaration: an `extern` that disagrees with a same-TU
+    /// definition is a conflicting-types compile error, so a defined name
+    /// gets a forward declaration from its real signature instead.
+    defined_sigs: BTreeMap<String, (Vec<String>, String)>,
     /// Next StructId to assign.
     next_struct_id: StructId,
     /// Name configuration: prefix and per-name remaps applied to all defined
@@ -198,6 +204,7 @@ impl CBackend {
             struct_names: Vec::new(),
             all_typedefs: Vec::new(),
             array_typedef_set: BTreeSet::new(),
+            defined_sigs: BTreeMap::new(),
             extern_decls: Vec::new(),
             sibling_decls: Vec::new(),
             next_struct_id: 0,
@@ -306,17 +313,25 @@ impl CBackend {
 
     /// Register an array typedef (and any nested array typedefs) in DFS order.
     /// No-ops if already registered.
+    ///
+    /// Recurses through pointers: a `Ptr(Arr(..))` value (e.g. the Vec
+    /// fat-pointer's `data` field, or a `Box<[T; N]>` parameter) renders as
+    /// `Arr_T_N*`, which requires the `Arr_T_N` typedef to exist.
     fn register_array_typedef(&mut self, ty: &LirType) {
-        if let LirType::Arr(elem, len) = ty {
-            // Register the element type first (handles nesting).
-            let elem_clone = *elem.clone();
-            self.register_array_typedef(&elem_clone);
-            let name = arr_typedef_name(elem, *len);
-            if self.array_typedef_set.insert(name.clone()) {
-                let elem_c = lir_type_to_c_free(&elem_clone, &self.struct_names);
-                let td = format!("typedef struct {{ {elem_c} data[{len}]; }} {name};\n");
-                self.all_typedefs.push(td);
+        match ty {
+            LirType::Arr(elem, len) => {
+                // Register the element type first (handles nesting).
+                let elem_clone = *elem.clone();
+                self.register_array_typedef(&elem_clone);
+                let name = arr_typedef_name(elem, *len);
+                if self.array_typedef_set.insert(name.clone()) {
+                    let elem_c = lir_type_to_c_free(&elem_clone, &self.struct_names);
+                    let td = format!("typedef struct {{ {elem_c} data[{len}]; }} {name};\n");
+                    self.all_typedefs.push(td);
+                }
             }
+            LirType::Ptr(inner) => self.register_array_typedef(inner),
+            _ => {}
         }
     }
 
@@ -562,6 +577,13 @@ impl LirTarget for CBackend {
         }
 
         let param_ctypes: Vec<String> = params.iter().map(|ty| self.type_to_c(ty)).collect();
+        let applied_name = self.name_config.apply(name);
+        let ret_c = ret
+            .as_ref()
+            .map(|ty| self.type_to_c(ty))
+            .unwrap_or_else(|| "void".to_string());
+        self.defined_sigs
+            .insert(applied_name.clone(), (param_ctypes.clone(), ret_c));
 
         let mut state = FunctionState {
             name: self.name_config.apply(name),
@@ -629,6 +651,28 @@ impl LirTarget for CBackend {
         func.push_str(&state.preamble);
         func.push_str(&state.body);
         writeln!(func, "}}").unwrap();
+
+        // Reconcile extern declarations: a caller lowered via `call_extern`
+        // before this definition existed may have emitted an `extern` whose
+        // signature disagrees with the real one (a conflicting-types compile
+        // error). Replace it with a matching forward declaration — the
+        // definition doubles as the declaration for later callers.
+        {
+            let name = state.name.clone();
+            let proto = format!("{ret_cty} {name}({param_list});\n");
+            let wrong_marker = format!(" {name}(");
+            self.extern_decls = self
+                .extern_decls
+                .drain(..)
+                .flat_map(|d| {
+                    if d.starts_with("extern ") && d.contains(&wrong_marker) && d != proto {
+                        Some(proto.clone())
+                    } else {
+                        Some(d)
+                    }
+                })
+                .collect();
+        }
 
         self.completed_functions.push(func);
     }
@@ -836,15 +880,43 @@ impl LirTarget for CBackend {
             .collect();
 
         // Build the extern declaration using the aggregate C types.
+        // Register typedefs first: an `Arr`-typed argument renders into the
+        // declaration, so its typedef must exist.
+        for ty in arg_tys {
+            self.register_array_typedef(ty);
+        }
+        if let Some(ty) = &ret_ty {
+            self.register_array_typedef(ty);
+        }
         let arg_c_tys: Vec<String> = arg_tys.iter().map(|ty| self.type_to_c(ty)).collect();
         let ret_c_ty = ret_ty
             .as_ref()
             .map(|ty| self.type_to_c(ty))
             .unwrap_or_else(|| "void".to_string());
-        let params_str = arg_c_tys.join(", ");
-        let extern_decl = format!("extern {ret_c_ty} {name}({params_str});\n");
-        if !self.extern_decls.contains(&extern_decl) {
-            self.extern_decls.push(extern_decl);
+
+        // If this translation unit also DEFINES a function with this name
+        // (possible when a caller falls back to `call_extern` for a function
+        // that was planned and emitted as an instance), an `extern` with a
+        // differing signature is a conflicting-types compile error. Emit a
+        // forward declaration from the definition's real signature instead —
+        // the call itself stays as emitted below, so signature agreement is
+        // the caller's responsibility (as before).
+        if let Some((def_params, def_ret)) = self.defined_sigs.get(name) {
+            if def_params != &arg_c_tys || def_ret != &ret_c_ty {
+                let params_str = def_params.join(", ");
+                let proto = format!("{def_ret} {name}({params_str});\n");
+                if !self.sibling_decls.contains(&proto) {
+                    self.sibling_decls.push(proto);
+                }
+            }
+            // Signature matches (or a decl already exists): no extern needed.
+            // Fall through to the call emission.
+        } else {
+            let params_str = arg_c_tys.join(", ");
+            let extern_decl = format!("extern {ret_c_ty} {name}({params_str});\n");
+            if !self.extern_decls.contains(&extern_decl) {
+                self.extern_decls.push(extern_decl);
+            }
         }
 
         let packed_names: Vec<String> = packed_args
@@ -902,6 +974,13 @@ impl LirTarget for CBackend {
             .map(|ty| self.pack_scalars(ty, args, &mut offset))
             .collect();
 
+        // Register typedefs first (same reasoning as `call_extern`).
+        for ty in arg_tys {
+            self.register_array_typedef(ty);
+        }
+        if let Some(ty) = &ret_ty {
+            self.register_array_typedef(ty);
+        }
         let arg_c_tys: Vec<String> = arg_tys.iter().map(|ty| self.type_to_c(ty)).collect();
         let ret_c_ty = ret_ty
             .as_ref()
@@ -1151,6 +1230,10 @@ impl StackAllocExt for CBackend {
     /// ```
     /// Returns the pointer value `vN` of type `LirType::Ptr(elem_ty)`.
     fn alloca(&mut self, elem_ty: LirType, count: usize) -> CValue {
+        // The slot declaration renders `elem_c slot[count]` — register any
+        // array typedefs inside the element type (e.g. a promoted slot of
+        // nested-array type).
+        self.register_array_typedef(&elem_ty);
         let elem_c = lir_type_to_c_free(&elem_ty, &self.struct_names);
         let ptr_c = format!("{elem_c}*");
         let ptr_ty = LirType::Ptr(Box::new(elem_ty));
@@ -1223,6 +1306,7 @@ impl HeapAllocExt for CBackend {
     /// ```
     /// Returns the pointer value `vN` of type `LirType::Ptr(elem_ty)`.
     fn heap_alloc(&mut self, elem_ty: LirType, count: usize) -> CValue {
+        self.register_array_typedef(&elem_ty);
         let elem_c = lir_type_to_c_free(&elem_ty, &self.struct_names);
         let ptr_c = format!("{elem_c}*");
         let ptr_ty = LirType::Ptr(Box::new(elem_ty));

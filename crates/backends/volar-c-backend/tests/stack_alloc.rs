@@ -157,3 +157,109 @@ fn test_alloca_in_preamble() {
          slot_pos={slot_pos}, block_label_pos={block_label_pos}\n---\n{c_src}"
     );
 }
+
+// ============================================================================
+// Regression: `Ptr(Arr(..))` values must register the array typedef.
+//
+// A struct field of type `Ptr(Arr(U8, 32))` (e.g. a Vec fat-pointer's `data`
+// field) renders as `Arr_U8_32* data;`; the referenced typedef must be
+// emitted alongside the struct or the translation unit does not compile.
+// ============================================================================
+
+#[test]
+fn test_ptr_to_array_field_registers_typedef() {
+    use volar_lir::{FieldDef, StructDef};
+
+    let mut b = CBackend::new();
+
+    // struct Vec_U8x32 { Arr_U8_32* data; uint64_t len; }
+    let vec_id = b.define_struct(StructDef {
+        name: "Vec_U8x32".to_owned(),
+        fields: vec![
+            FieldDef {
+                name: "data".to_owned(),
+                ty: LirType::Ptr(Box::new(LirType::Arr(
+                    Box::new(LirType::U8),
+                    32,
+                ))),
+            },
+            FieldDef {
+                name: "len".to_owned(),
+                ty: LirType::U64,
+            },
+        ],
+    });
+
+    // The struct definition (emitted in `finish`) must contain the
+    // `Arr_U8_32` typedef — assert before compiling so the failure message
+    // is precise.
+    let (entry, params) = b.begin_function(
+        "fat_ptr_len",
+        &[LirType::Struct(vec_id)],
+        Some(LirType::U64),
+    );
+    b.switch_to_block(entry);
+    // Unpack the struct param: param 0 has 2 flat scalars (ptr, len).
+    let scalars = &params[0];
+    b.ret(&[scalars[1].clone()]);
+    b.end_function();
+
+    let c_src = b.finish();
+    assert!(
+        c_src.contains("} Arr_U8_32;"),
+        "Ptr(Arr) struct field must register the array typedef:\n{c_src}"
+    );
+    let output = compile_and_run(
+        &c_src,
+        r#"
+  static uint8_t backing[32];
+  Vec_U8x32 v = { .data = backing, .len = 32 };
+  printf("%llu\n", (unsigned long long)fat_ptr_len(v));
+"#,
+    );
+    assert_eq!(output.trim(), "32");
+}
+
+// ============================================================================
+// Regression: `alloca` of a nested-array element type must register the
+// element typedef (the declaration renders `Arr_U8_4 slot[2];`).
+// ============================================================================
+
+#[test]
+fn test_alloca_nested_array_registers_typedef() {
+    let mut b = CBackend::new();
+
+    let (entry, _) = b.begin_function("nested_slot_sum", &[], Some(LirType::U64));
+    b.switch_to_block(entry);
+
+    // [[u8; 4]; 2] slot: alloca element type is itself an array. Each
+    // `ptr_index_store` writes one whole row (4 scalars).
+    let inner = LirType::Arr(Box::new(LirType::U8), 4);
+    let ptr = b.alloca(inner.clone(), 2);
+    let idx0 = b.iconst(LirType::U64, 0);
+    let idx1 = b.iconst(LirType::U64, 1);
+    let zero = b.iconst(LirType::U8, 0);
+    let three = b.iconst(LirType::U8, 3);
+    let four = b.iconst(LirType::U8, 4);
+    b.ptr_index_store(ptr.clone(), idx0.clone(), &[three, zero.clone(), zero.clone(), zero.clone()], &inner);
+    b.ptr_index_store(ptr.clone(), idx1.clone(), &[four, zero.clone(), zero.clone(), zero.clone()], &inner);
+    // Read back rows 0 and 1, sum their first cells.
+    let a = b.ptr_index_load(ptr.clone(), idx0, &inner);
+    let c = b.ptr_index_load(ptr, idx1, &inner);
+    let a0 = b.zext(a[0].clone(), LirType::U64);
+    let c0 = b.zext(c[0].clone(), LirType::U64);
+    let sum = b.add(a0, c0);
+    b.ret(&[sum]);
+    b.end_function();
+
+    let c_src = b.finish();
+    assert!(
+        c_src.contains("} Arr_U8_4;"),
+        "alloca of nested-array element type must register the element typedef:\n{c_src}"
+    );
+    let output = compile_and_run(
+        &c_src,
+        r#"  printf("%llu\n", (unsigned long long)nested_slot_sum());"#,
+    );
+    assert_eq!(output.trim(), "7");
+}
