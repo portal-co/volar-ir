@@ -178,10 +178,7 @@ fn test_ptr_to_array_field_registers_typedef() {
         fields: vec![
             FieldDef {
                 name: "data".to_owned(),
-                ty: LirType::Ptr(Box::new(LirType::Arr(
-                    Box::new(LirType::U8),
-                    32,
-                ))),
+                ty: LirType::Ptr(Box::new(LirType::Arr(Box::new(LirType::U8), 32))),
             },
             FieldDef {
                 name: "len".to_owned(),
@@ -241,8 +238,18 @@ fn test_alloca_nested_array_registers_typedef() {
     let zero = b.iconst(LirType::U8, 0);
     let three = b.iconst(LirType::U8, 3);
     let four = b.iconst(LirType::U8, 4);
-    b.ptr_index_store(ptr.clone(), idx0.clone(), &[three, zero.clone(), zero.clone(), zero.clone()], &inner);
-    b.ptr_index_store(ptr.clone(), idx1.clone(), &[four, zero.clone(), zero.clone(), zero.clone()], &inner);
+    b.ptr_index_store(
+        ptr.clone(),
+        idx0.clone(),
+        &[three, zero.clone(), zero.clone(), zero.clone()],
+        &inner,
+    );
+    b.ptr_index_store(
+        ptr.clone(),
+        idx1.clone(),
+        &[four, zero.clone(), zero.clone(), zero.clone()],
+        &inner,
+    );
     // Read back rows 0 and 1, sum their first cells.
     let a = b.ptr_index_load(ptr.clone(), idx0, &inner);
     let c = b.ptr_index_load(ptr, idx1, &inner);
