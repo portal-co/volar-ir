@@ -40,6 +40,15 @@
                                               ▼
                                        Reversible circuit (RCircuit:
                                        X/CNOT/Toffoli/XorLut2/StorageSwap)
+                                              │
+                                              │ to_boolar_circuit
+                                              │ full wire-state transition
+                                              ▼
+                                   BCircuit (all wires as inputs + outputs)
+                                              │
+                                              │ hardcode inputs / remove outputs
+                                              ▼
+                                      caller-selected Boolar projection
 ```
 
 `to_reversible` preserves the original naive behavior. Library consumers opt
@@ -51,6 +60,15 @@ and Ruckenstein, *Towards general-purpose program obfuscation via local mixing*
 dirty borrowed wires, and becomes identity for every nonzero workspace input.
 Stateful storage statements remain available in naive mode and are rejected by
 hardened mode because they do not have the required pure wire-function contract.
+
+`to_boolar_circuit` exposes an `RCircuit` as an ordinary `BCircuit` without
+guessing its logical ABI: reversible wire `i` becomes Boolean parameter and
+output `i`. Consumers may hardcode known workspace/register inputs and remove
+unneeded output positions to obtain a conventional projection. These helpers
+do not remove dead statements or effects; run the normal optimization passes
+afterward when appropriate. Action-backed storage-XOR gates lower through
+Boolar's legacy action-call form, so their explicit reversible replay
+`occurrence` becomes ordinary Boolar action ordering.
 
 Consumers outside this repo (in `volar`) take the boolean circuit (or the
 movfuscated Volar IR directly) into ZK proof weaving or garbled-circuit

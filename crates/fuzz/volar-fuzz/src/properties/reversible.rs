@@ -19,6 +19,7 @@ use volar_ir_common::StorageId;
 use volar_ir_passes::to_reversible::{ValueWatchlist, to_reversible, translate_watchlist};
 use volar_ir_passes::{
     LoweringMode, lower_to_circuit_fused, movfuscate_biir_with_control_provenance,
+    to_boolar_circuit,
 };
 
 use crate::generators::biir::gen_biir_and_inputs;
@@ -80,6 +81,22 @@ proptest! {
             Ok(x) => x,
             Err(_) => return Ok(()),
         };
+
+        // The reverse transform exposes every reversible wire as both a
+        // Boolar input and output, so it must agree for arbitrary dirty
+        // workspace/y assignments too, not only the initialized embedding
+        // path checked below.
+        let normal = to_boolar_circuit(&rc).expect("validated RCircuit lowers");
+        prop_assert_eq!(normal.params as usize, rc.num_wires);
+        let mut arbitrary_wires: Vec<bool> = (0..rc.num_wires)
+            .map(|i| (ymask >> (i % u32::BITS as usize)) & 1 == 1)
+            .collect();
+        let normal_outputs = eval_fused_pure(&normal, &arbitrary_wires)
+            .expect("pure RCircuit lowers to pure Boolar");
+        rc.apply_pure(&mut arbitrary_wires)
+            .expect("pure RCircuit applies without storage or externals");
+        prop_assert_eq!(normal_outputs, arbitrary_wires,
+            "reverse Boolar transform disagrees on complete wire state");
 
         // Watchlist translation must resolve a sample var fail-closed.
         if circ.var_space() > 0 {

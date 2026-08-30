@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod dispatch_accumulator;
+pub mod from_reversible;
 pub mod fuse_to_circuit;
 pub mod lower_ir_to_boolar;
 pub mod lower_lir;
@@ -11,6 +12,9 @@ pub mod movfuscate;
 pub mod raise_to_z3;
 pub mod to_reversible;
 
+pub use from_reversible::{
+    CircuitTransformError, hardcode_circuit_inputs, remove_circuit_outputs, to_boolar_circuit,
+};
 pub use fuse_to_circuit::{
     lower_to_circuit_fused, to_circuit_fused_boolar, to_circuit_fused_volar,
 };
