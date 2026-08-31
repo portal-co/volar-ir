@@ -737,3 +737,122 @@ fn comments_and_blank_lines_ir() {
     let parsed2 = SavedIrBlocks::parse_text(&text2).unwrap_or_else(|e| panic!("re-parse: {:?}", e));
     assert_eq!(text2, parsed2.to_text_string());
 }
+
+// ============================================================================
+// Region + gadget-binding sections
+// ============================================================================
+
+#[cfg(test)]
+mod regions_gadgets {
+    use crate::regions::{
+        parse_impl::parse_with_regions, write_gadget_bindings,
+    };
+    use crate::{ParseText, SavedBIrBlocks, WriteText};
+    use alloc::string::ToString;
+    use alloc::vec;
+    use volar_ir::boolar::{LaneId, BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
+    use volar_ir::gadget::{AuxSource, GadgetBinding, Port, PortKind, GadgetSpec};
+    use volar_ir::ir::{IRBlockId, IRBlockTargetId, IRVarId};
+    use crate::tests::v;
+    use volar_ir::region::{
+        RegionEntry, RegionId, RegionSelector, RegionTable, WireAnchor,
+    };
+    use volar_ir_common::{Node, StorageId};
+
+    fn bir_fixture() -> volar_ir::boolar::BIrBlocks<()> {
+        volar_ir::boolar::BIrBlocks {
+            blocks: vec![BIrBlock {
+                params: 4,
+                stmts: vec![Node::new(BIrStmt::Xor(v(0), v(1)), (), None)],
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: vec![v(2)],
+                }),
+            }],
+            pre_init: vec![],
+        }
+    }
+
+    #[test]
+    fn regions_section_roundtrip() {
+        let table = RegionTable {
+            entries: vec![
+                RegionEntry {
+                    anchor: WireAnchor::Input { start: 0, len: 4 },
+                    regions: [RegionId(0), RegionId(1)].into_iter().collect(),
+                },
+                RegionEntry {
+                    anchor: WireAnchor::Input { start: 4, len: 1 },
+                    regions: [RegionId(2)].into_iter().collect(),
+                },
+                RegionEntry {
+                    anchor: WireAnchor::Output { start: 0, len: 4 },
+                    regions: [RegionId(0)].into_iter().collect(),
+                },
+                RegionEntry {
+                    anchor: WireAnchor::Storage {
+                        storage: StorageId(0),
+                        lane: LaneId(0),
+                        start: 0,
+                        len: 8,
+                    },
+                    regions: [RegionId(3)].into_iter().collect(),
+                },
+            ],
+            names: Default::default(),
+        };
+        let text = table.to_text_string();
+        let expected = "regions {\n\
+            \x20 input [0, 4) -> {0, 1}\n\
+            \x20 input [4, 5) -> {2}\n\
+            \x20 output [0, 4) -> {0}\n\
+            \x20 storage S0 L0 [0, 8) -> {3}\n\
+        }\n";
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn full_document_roundtrip() {
+        let circuit = SavedBIrBlocks { blocks: bir_fixture() };
+        let mut doc = circuit.to_text_string();
+        doc.push_str(&RegionTable {
+            entries: vec![
+                RegionEntry {
+                    anchor: WireAnchor::Input { start: 0, len: 4 },
+                    regions: [RegionId(0)].into_iter().collect(),
+                },
+                RegionEntry {
+                    anchor: WireAnchor::Output { start: 0, len: 1 },
+                    regions: [RegionId(0)].into_iter().collect(),
+                },
+            ],
+            names: Default::default(),
+        }
+        .to_text_string());
+        let bindings = vec![GadgetBinding {
+            gadget: "pad".to_string(),
+            selector: RegionSelector {
+                all_of: [RegionId(0)].into_iter().collect(),
+                none_of: [RegionId(1)].into_iter().collect(),
+            },
+            aux_sources: vec![AuxSource::Const(vec![true, false])],
+            rng_source: None,
+        }];
+        let mut sink = alloc::string::String::new();
+        write_gadget_bindings(&bindings, &mut sink).unwrap();
+        doc.push_str(&sink);
+
+        let parsed = parse_with_regions(&doc).expect("parses");
+        assert_eq!(parsed.circuit.blocks.blocks.len(), 1);
+        assert_eq!(parsed.regions.entries.len(), 2);
+        assert_eq!(parsed.bindings.len(), 1);
+        assert_eq!(parsed.bindings[0].gadget, "pad");
+        assert_eq!(parsed.bindings[0].aux_sources.len(), 1);
+        assert_eq!(
+            parsed.bindings[0].aux_sources[0],
+            AuxSource::Const(vec![true, false])
+        );
+        assert_eq!(parsed.bindings[0].selector.all_of, [RegionId(0)].into_iter().collect());
+        assert_eq!(parsed.bindings[0].selector.none_of, [RegionId(1)].into_iter().collect());
+    }
+}

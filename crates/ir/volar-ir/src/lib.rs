@@ -4,7 +4,9 @@ use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 extern crate alloc;
 pub mod boolar;
 pub mod circuit;
+pub mod gadget;
 pub mod ir;
+pub mod region;
 #[cfg(feature = "lazy")]
 pub mod lazy;
 pub mod public;

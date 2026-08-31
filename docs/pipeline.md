@@ -41,6 +41,12 @@
                                        Reversible circuit (RCircuit:
                                        X/CNOT/Toffoli/XorLut2/StorageSwap)
                                               │
+                                              │ apply_gadgets.rs
+                                              │  splice gadget circuits onto
+                                              │  region-tagged boundary wires
+                                              ▼
+                                       Wrapped BCircuit (ciphertext boundary)
+                                              │
                                               │ to_boolar_circuit
                                               │ full wire-state transition
                                               ▼
@@ -85,6 +91,9 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | `volar-ir-opt` | DCE, CSE, constant folding, store-forwarding — across Volar IR, Boolar IR, and VAFFLE |
 | `volar-ir-virt` | Virtualization (dispatch-mode block interpretation) |
 | `volar-lir` / `volar-lir-text` / `volar-lir-saved` | Mid-level IR shared with backend consumers in `volar` |
+| `volar-ir` (`region.rs`, `gadget.rs`) | Input/output wire regions + gadget spec/binding types (companion metadata) |
+| `volar-ir-passes` (`apply_gadgets.rs`) | Gadget application: splice gadgets onto region-tagged boundary wires |
+| `volar-ir-text` (`regions.rs`) | Text sections for the region/gadget side tables |
 
 ## Related documents
 
@@ -96,6 +105,7 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | Provenance | [`provenance.md`](provenance.md) |
 | VAFFLE lowering detail | [`waffle-lowering.md`](waffle-lowering.md) |
 | Fuzzing | [`fuzzing.md`](fuzzing.md) |
+| Wire regions & gadgets (plan) | [`wire-regions-gadgets-plan.md`](wire-regions-gadgets-plan.md) |
 | Full pipeline (weaving, backends, proving) | `volar` repo's `docs/pipeline.md` |
 
 ## Retro CPU Boolar circuits (fixtures)

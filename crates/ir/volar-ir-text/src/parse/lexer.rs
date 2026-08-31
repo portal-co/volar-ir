@@ -149,6 +149,17 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    pub fn read_u64(&mut self) -> Result<u64, ParseError> {
+        self.skip();
+        let raw = self.read_unsigned_int_str()?;
+        if raw.starts_with("0x") || raw.starts_with("0X") {
+            u64::from_str_radix(&raw[2..], 16).map_err(|_| ParseError::InvalidInt(raw.to_string()))
+        } else {
+            raw.parse::<u64>()
+                .map_err(|_| ParseError::InvalidInt(raw.to_string()))
+        }
+    }
+
     pub fn read_usize(&mut self) -> Result<usize, ParseError> {
         self.read_u32().map(|v| v as usize)
     }

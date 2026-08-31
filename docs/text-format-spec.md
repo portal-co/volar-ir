@@ -323,6 +323,36 @@ block_target ::= "block:" <nat> | "return" | "dyn:" "v" <nat>
 
 Boolar IR uses the same file header (`volar-ir v1`) with a `boolar:` section prefix.
 
+### 4.6 Region and gadget side-table sections (`volar-ir-text`)
+
+After the `boolar:` body, a document may carry two optional side-table
+sections (see [`wire-regions-gadgets-plan.md`](wire-regions-gadgets-plan.md)):
+
+```
+regions {
+  input [0, 4) -> {0, 1}
+  input [4, 5) -> {2}
+  output [0, 4) -> {0}
+  storage S0 L0 [0, 8) -> {3}
+}
+gadgets {
+  gadget "pad" on {all=[0], none=[1]} aux=[const [1, 0], input [4, 5), rng "nonce"]
+}
+```
+
+- `regions { … }`: one entry per boundary anchor; ranges are
+  `[start, start + length)` over input bits, output positions, or flat
+  `(StorageId, LaneId)` cell addresses (`S<nat> L<nat>`). The right-hand
+  side is the entry's set of region ids. Region ids are semantic; names
+  are not serialised.
+- `gadgets { … }`: one `gadget` binding per line: quoted gadget-library
+  name, a selector `{all=[ids], none=[ids]}`, and aux-port sources in
+  declaration order (`const [bits]`, `input [start, end)`, `rng "name"`).
+  Gadget bodies live in the consumer's `GadgetLibrary`, not in the file.
+
+Parsed by `volar_ir_text::regions::parse_impl::parse_with_regions`, which
+returns the circuit together with its `RegionTable` and gadget bindings.
+
 ---
 
 ## 5. `volar-compiler` high-level IR / `.vca` format

@@ -26,4 +26,8 @@ pub enum ParseError {
     TypeIdOutOfRange(u32),
     /// A variable reference `vN` was out of range for the current block.
     VarOutOfRange(u32),
+    /// A region entry carried an empty region-id set.
+    EmptyRegionSet,
+    /// The `regions { … }` section appeared more than once.
+    DuplicateSection(&'static str),
 }

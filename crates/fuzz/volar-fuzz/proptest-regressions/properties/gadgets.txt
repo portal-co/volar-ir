@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cf0019d6046ecf5b243dc985de45c283086a78328063cd7a3ffdafdbdb896146 # shrinks to tc = TestCase { n_params: 1, n_cells: 0, raw_gates: [], reads: [], writes: [], out_len: 1, wrap_inputs: [(false, false)], wrap_outputs: [(false, false)], wrap_cells: [true], keys: [false, false, false, false] }

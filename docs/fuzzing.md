@@ -29,6 +29,7 @@ crates/fuzz/volar-fuzz/src/
     ├── biir_passes.rs  — Properties A, B, C (movfuscate + lower_to_circuit)
     ├── ir_passes.rs    — Properties D, D2 (lower_ir_to_boolar incl. storage traffic)
     └── reversible.rs   — Property E (to_reversible XOR embedding + joint reversibility)
+    └── gadgets.rs      — Property G (gadget application preserves boundary semantics)
 
 fuzz/
 ├── Cargo.toml
@@ -170,6 +171,22 @@ bit_unflatten(eval_biir(lower_ir_to_boolar(ir), bit_flatten(inputs)), output_wid
 
 Verifies that the `IRBlocks → BIrBlocks` lowering pass is semantics-preserving
 for the generated integer-arithmetic circuits.
+
+### Property G — gadget application preserves boundary semantics
+
+For randomly generated pure-gate fused circuits with statically addressed
+storage, random region tables, and per-wire XOR-pad gadget bindings
+(self-inverse, `E = E⁻¹ = XOR k`):
+
+```
+eval(apply_gadgets(C, regions, bindings), x ⊕ k on wrapped inputs)
+    == eval(C, x) ⊕ k on wrapped outputs   (verbatim at unwrapped positions)
+```
+
+Inputs tagged with both a wrap region and the `plaintext` region must stay
+*unwrapped* (`none_of` selector semantics), and wrapped storage traffic
+(read→decrypt, write→encrypt, re-encrypted/synthetic pre-init) must preserve
+the core's view of storage.
 
 ---
 

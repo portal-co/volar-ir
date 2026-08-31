@@ -692,7 +692,7 @@ fn parse_bir_terminator(kw: &str, lex: &mut Lexer) -> Result<BIrTerminator, Pars
 // Parse a single BIrBlock
 // ============================================================================
 
-fn parse_bir_block(lex: &mut Lexer) -> Result<BIrBlock<()>, ParseError> {
+pub(crate) fn parse_bir_block(lex: &mut Lexer) -> Result<BIrBlock<()>, ParseError> {
     let kw = lex.read_ident()?;
     if kw != "params" {
         return Err(ParseError::MissingField("params".into()));
