@@ -200,6 +200,41 @@ From here, consumers in the `volar` repo continue the pipeline: `weave_garbler`
 
 ---
 
+## Verifiable Compute (opt-in)
+
+[`vc-spec` Draft 0.1](https://sinui0.github.io/vc-spec/docs/spec) is an opt-in
+mode on WAFFLE→VAFFLE lowering. Default [`lower_waffle_module`] stays
+untagged. Pass a [`VcConfig`](../crates/ir/volar-vaffle-target/src/vc.rs) to
+`lower_waffle_module_with_vc` to attach existing **side** and **region**
+metadata; there is no separate taint IR.
+
+| vc-spec | Lowering |
+|---|---|
+| Visibility `public` / `private` / `blind` | `SideId` interned as `"public"` / `"local"` / `"remote"` (local-party view) |
+| Same visibilities as boundary roles | `RegionId` named `"public"` / `"private"` / `"blind"` in `TypedRegionTable::names` |
+| Call configuration (export + tagged args) | `FuncInput` anchors + `Node.side` on that function's original WASM params |
+| Returns are revealed | `FuncOutput` anchors in region `"public"` |
+| `mem_write` public | `pre_init` bytes + public storage region |
+| `mem_write` private/blind | storage region only (party inputs at weave/eval time, not constants) |
+| Data segments | already `pre_init`; tagged `"public"` |
+| `mem_reveal` | extra `"public"` region, unioned onto split storage intervals |
+| Constants | `I32Const`/`I64Const` and immutable `global.get` emitted with public side |
+| VCI `vc.reveal_i32/i64` + `_wait` | identity-with-public-side when the handle is a locally produced concrete handle |
+
+`volar-side` stays policy-free. `VcProtection { Public, Private, Blind }` and
+`VcSideHandler` live in `volar-vaffle-target`.
+
+Not in this landing:
+
+- VCI `realloc` (guest export convention, not a lowering concern)
+- VCI float reveal (`f32`/`f64` already unsupported)
+- Annihilator / spec-precise `select` taint (circuit values are already
+  correct; those rules only refine side metadata)
+- Cross-function `reveal`/`wait` pairing (fail-closed: handle must be a
+  locally produced unconsumed constant)
+
+---
+
 ## Error Handling
 
 ```rust

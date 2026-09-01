@@ -100,6 +100,11 @@ or weaver config; everything else can propagate for free.
   variants carry an optional `side: Option<SideId>`, populated into the
   lowered `Node<Value, P>::side` for that arena entry by
   `lower_waffle_module`/`lower_waffle_function`.
+- **WASM vc-spec call configuration**: `VcConfig`
+  (`crates/ir/volar-vaffle-target/src/vc.rs`) — opt-in
+  `lower_waffle_module_with_vc` tags export parameters as public/local/remote
+  sides and companion `TypedRegionTable` regions. See
+  [waffle-lowering.md](waffle-lowering.md#verifiable-compute-opt-in).
 - **VAFFLE → Volar IR**: `lower_vaffle_to_ir`
   (`crates/ir/volar-vaffle-target/src/lower_to_ir.rs`) carries each
   `Node<Value, P>::side` through into the corresponding output `Node`.
@@ -182,7 +187,7 @@ not-yet-migrated entry points.
 |---|---|
 | `volar-side` | `SideId`, `SideHandler` trait, `propagate`, `UniformProtection`, `TableProtection`, `SideTable` (no-std, zero dependency on the rest of the workspace — designed to be extractable into a standalone crate) |
 | `volar-ir-common` | `Node<T, P>` wrapper + `MapKind<P, Q>` trait, used by every IR in the workspace |
-| `volar-vaffle-target` | `WaffleImportConfig` side assignment; `lower_vaffle_to_ir` side preservation |
+| `volar-vaffle-target` | `WaffleImportConfig` side assignment; `VcConfig` / `lower_waffle_module_with_vc`; `lower_vaffle_to_ir` side preservation |
 | `volar-lir` | `LirTarget::set_side` |
 | `volar-weaver` | `VoleProtection`, `VoleSideAssignments`, `weave_vole_*_with_side`; `FheProtection` vocabulary |
 

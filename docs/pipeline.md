@@ -108,6 +108,7 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | Virtualization | [`virt.md`](virt.md) |
 | Provenance | [`provenance.md`](provenance.md) |
 | VAFFLE lowering detail | [`waffle-lowering.md`](waffle-lowering.md) |
+| Verifiable Compute (opt-in WAFFLE tagging) | [`waffle-lowering.md`](waffle-lowering.md#verifiable-compute-opt-in) |
 | Fuzzing | [`fuzzing.md`](fuzzing.md) |
 | Wire regions & gadgets (plan) | [`wire-regions-gadgets-plan.md`](wire-regions-gadgets-plan.md) |
 | Typed gadgets, higher-level IR gadgets, region threading through passes (plan) | [`typed-gadgets-and-region-threading-plan.md`](typed-gadgets-and-region-threading-plan.md) |

@@ -8,6 +8,8 @@
 //!   arithmetic from [`volar_lir::circuits`].
 //! - [`waffle_lower`] — translation of WAFFLE [`FunctionBody`] to VAFFLE,
 //!   covering integer ops, branches, and direct function calls.
+//! - [`vc`] — opt-in vc-spec call configuration, memory writes/reveals, and
+//!   VCI `reveal_*` lowering onto [`volar_side::SideId`] + typed regions.
 
 #![no_std]
 extern crate alloc;
@@ -19,6 +21,7 @@ pub mod plan;
 pub mod target;
 pub mod vaffle_regions;
 pub mod vaffle_ssa;
+pub mod vc;
 pub mod waffle_lower;
 
 pub use import_config::{WaffleImportConfig, WaffleImportKind};
@@ -27,7 +30,11 @@ pub use lower_to_ir::{
     lower_vaffle_to_ir_with_inlining,
 };
 pub use target::{VaffleBlock, VaffleTarget, VaffleValue};
+pub use vc::{
+    VcArg, VcArtifact, VcConfig, VcMemReveal, VcMemWrite, VcProtection, VcSideHandler,
+    VcVisibility,
+};
 pub use waffle_lower::{
     UnsupportedOp, WasmMetadataMode, lower_waffle_function, lower_waffle_function_lazy,
-    lower_waffle_module, lower_waffle_module_with_metadata,
+    lower_waffle_module, lower_waffle_module_with_metadata, lower_waffle_module_with_vc,
 };

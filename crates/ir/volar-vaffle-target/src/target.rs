@@ -32,6 +32,8 @@ use vaffle::{
     ValueId,
 };
 
+use crate::vc::VcLoweringState;
+
 // ============================================================================
 // Public types
 // ============================================================================
@@ -160,6 +162,8 @@ pub struct VaffleTarget {
     /// pattern doesn't guard against (harmless there since externs are
     /// never later "completed" by an `end_function`).
     pending_funcs: BTreeMap<String, FuncId>,
+    /// Opt-in vc-spec session. `None` keeps default lowering untagged.
+    pub(crate) vc: Option<VcLoweringState>,
 }
 
 impl VaffleTarget {
@@ -180,6 +184,7 @@ impl VaffleTarget {
             struct_widths: vec![],
             optimized_abi: false,
             pending_funcs: BTreeMap::new(),
+            vc: None,
         }
     }
 
@@ -222,6 +227,36 @@ impl VaffleTarget {
 
     fn intern_type(&mut self, ty: IrType) -> TypeId {
         self.module.types.intern(ty)
+    }
+
+    /// Patch `.side` on an already-emitted arena node (param tagging).
+    pub(crate) fn set_node_side(&mut self, id: ValueId, side: Option<volar_side::SideId>) {
+        self.fb().all_values[id.0].side = side;
+    }
+
+    /// Read an all-`Const` bit vector as `u64` (LSB first). `None` if any
+    /// bit is not a constant — used to fail-closed on symbolic VCI handles.
+    pub(crate) fn const_u64(&self, bits: &[ValueId]) -> Option<u64> {
+        let values = &self.func.as_ref()?.all_values;
+        let mut acc = 0u64;
+        for (i, &id) in bits.iter().enumerate() {
+            if i >= 64 {
+                return None;
+            }
+            match &values[id.0].kind {
+                Value::Op(Stmt::Const(c, _)) => {
+                    if c.lo & 1 == 1 {
+                        acc |= 1u64 << i;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(acc)
+    }
+
+    pub(crate) fn vc_public_side(&self) -> Option<volar_side::SideId> {
+        self.vc.as_ref().map(|s| s.ids.public)
     }
 
     fn bits_for(&self, ty: &LirType) -> usize {

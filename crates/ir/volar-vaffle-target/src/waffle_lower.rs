@@ -54,6 +54,8 @@
 //! `UnsupportedOp` is returned for any unhandled op, type, or terminator.
 //! The module-level helper [`lower_waffle_module`] skips those functions and
 //! collects errors rather than panicking.
+//!
+//! Opt-in vc-spec tagging: [`crate::lower_waffle_module_with_vc`].
 
 use alloc::{
     collections::BTreeMap,
@@ -85,6 +87,10 @@ use volar_lir::{BitCircuitBuilder, BranchTarget, IcmpPred, LirTarget, LirType};
 
 use crate::import_config::{WaffleImportConfig, WaffleImportKind};
 use crate::target::{VaffleBlock, VaffleTarget, VaffleValue, bits_for_lir_type};
+use crate::vc::{
+    RevealedBits, VcArtifact, VcConfig, VcIds, VcLoweringState, VcVisibility, VciOp,
+    build_vc_regions, resolve_call_func_name, validate_vc_regions, vci_op_for_func,
+};
 use vaffle::ValueId;
 
 // ============================================================================
@@ -141,6 +147,77 @@ pub fn lower_waffle_module(
     config: &WaffleImportConfig,
 ) -> Vec<(String, UnsupportedOp)> {
     lower_waffle_module_with_metadata(wasm, target, config, WasmMetadataMode::RespectUnstable)
+}
+
+/// Opt-in vc-spec lowering: tagged arguments, `mem_write`/`mem_reveal`, and
+/// VCI `vc.reveal_*` identity-with-public-side. Default [`lower_waffle_module`]
+/// is unchanged. The returned [`VcArtifact`] carries interned sides and a
+/// [`volar_ir::typed_gadget::TypedRegionTable`].
+pub fn lower_waffle_module_with_vc(
+    wasm: &WModule,
+    target: &mut VaffleTarget,
+    config: &WaffleImportConfig,
+    vc: &VcConfig,
+) -> (Vec<(String, UnsupportedOp)>, VcArtifact) {
+    let ids = VcIds::intern();
+    let mut calls = BTreeMap::new();
+    for (key, args) in &vc.calls {
+        calls.insert(resolve_call_func_name(wasm, key), args.clone());
+    }
+    target.vc = Some(VcLoweringState::new(ids, calls));
+
+    let errors = lower_waffle_module_with_metadata(
+        wasm,
+        target,
+        config,
+        WasmMetadataMode::RespectUnstable,
+    );
+    apply_vc_public_mem_writes(target, vc);
+
+    let byte_tid = target.byte_tid();
+    let state = target.vc.take().expect("vc session");
+    let regions = build_vc_regions(
+        wasm,
+        &target.module,
+        vc,
+        &state.ids,
+        &state.calls,
+        byte_tid,
+    );
+    let _ = validate_vc_regions(&regions, &target.module, vc);
+    let artifact = VcArtifact {
+        regions,
+        handler: state.ids.handler(),
+        sides: state.ids.sides,
+    };
+    (errors, artifact)
+}
+
+fn apply_vc_public_mem_writes(target: &mut VaffleTarget, vc: &VcConfig) {
+    let byte_tid = target.byte_tid();
+    for w in &vc.mem_writes {
+        if w.visibility != VcVisibility::Public {
+            continue;
+        }
+        let Some(bytes) = w.bytes.as_ref() else {
+            continue;
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        target.module.pre_init.push(PreInitSegment {
+            storage: StorageId::memory(w.memory),
+            ty: byte_tid,
+            offset: w.offset as usize,
+            data: bytes
+                .iter()
+                .map(|&b| Constant {
+                    hi: 0,
+                    lo: b as u128,
+                })
+                .collect(),
+        });
+    }
 }
 
 /// As [`lower_waffle_module`], with an explicit source-neutral metadata mode.
@@ -385,6 +462,7 @@ pub fn lower_waffle_function(
     let ret_hint = ret_lir.first().cloned();
     let (entry_block, param_groups) = target.begin_function(name, &all_param_lir, ret_hint);
     target.switch_to_block(entry_block);
+    tag_vc_entry_params(target, name, &param_groups, param_lir.len());
 
     // ---- Map WAFFLE blocks → VAFFLE blocks ----------------------------------
     let mut block_map: BTreeMap<portal_pc_waffle_ir::Block, VaffleBlock> = BTreeMap::new();
@@ -582,8 +660,10 @@ fn lower_op(
 
     Ok(Some(match op {
         // ---- Constants -------------------------------------------------
-        Operator::I32Const { value } => tgt.iconst(LirType::U32, *value as i32 as i64),
-        Operator::I64Const { value } => tgt.iconst(LirType::U64, *value as i64),
+        Operator::I32Const { value } => {
+            vc_iconst(tgt, LirType::U32, *value as i32 as i64)
+        }
+        Operator::I64Const { value } => vc_iconst(tgt, LirType::U64, *value as i64),
 
         // ---- I32 arithmetic --------------------------------------------
         Operator::I32Add => tgt.add(get(0)?, get(1)?),
@@ -877,7 +957,7 @@ fn lower_op(
             } else {
                 let lir_ty = waffle_ty(g_data.ty)?;
                 let val = g_data.value.unwrap_or(0) as i64;
-                return Ok(Some(tgt.iconst(lir_ty, val)));
+                return Ok(Some(vc_iconst(tgt, lir_ty, val)));
             }
         }
         Operator::GlobalSet { global_index } => {
@@ -895,6 +975,11 @@ fn lower_op(
         // ---- Direct call (multi-result, globals threaded) --------------
         Operator::Call { function_index } => {
             let fid = *function_index;
+            if tgt.vc.is_some() {
+                if let Some(op) = vci_op_for_func(wasm, fid) {
+                    return lower_vci_reveal(op, args, val_map, tgt, body);
+                }
+            }
             let name = callee_name(wasm, fid);
 
             // Oracle / action dispatch: bypass globals threading.
@@ -1395,6 +1480,128 @@ fn callee_name(wasm: &WModule, fid: portal_pc_waffle_ir::Func) -> String {
         FuncDecl::Body(_, name, _) => name.clone(),
         FuncDecl::Import(_, name) => name.clone(),
         _ => alloc::format!("func_{}", fid.index()),
+    }
+}
+
+fn vc_iconst(tgt: &mut VaffleTarget, ty: LirType, val: i64) -> VaffleValue {
+    if let Some(side) = tgt.vc_public_side() {
+        tgt.set_side(Some(side));
+        let v = tgt.iconst(ty, val);
+        tgt.set_side(None);
+        v
+    } else {
+        tgt.iconst(ty, val)
+    }
+}
+
+fn tag_vc_entry_params(
+    target: &mut VaffleTarget,
+    name: &str,
+    param_groups: &[Vec<VaffleValue>],
+    n_orig_params: usize,
+) {
+    let (args, public) = {
+        let Some(vc) = target.vc.as_mut() else {
+            return;
+        };
+        vc.reveals.clear();
+        (vc.calls.get(name).cloned(), vc.ids.public)
+    };
+    let sides: Vec<Option<volar_side::SideId>> = {
+        let Some(vc) = target.vc.as_ref() else {
+            return;
+        };
+        (0..n_orig_params)
+            .map(|i| {
+                args.as_ref()
+                    .and_then(|a| a.get(i))
+                    .map(|arg| vc.ids.side_of(arg.visibility()))
+            })
+            .collect()
+    };
+
+    for (i, group) in param_groups.iter().enumerate() {
+        let side = if i < n_orig_params {
+            sides[i]
+        } else {
+            Some(public)
+        };
+        let Some(side) = side else {
+            continue;
+        };
+        for vv in group {
+            for &bit in &vv.bits {
+                target.set_node_side(bit, Some(side));
+            }
+        }
+    }
+}
+
+fn lower_vci_reveal(
+    op: VciOp,
+    args: &[WValue],
+    val_map: &BTreeMap<WValue, VaffleValue>,
+    tgt: &mut VaffleTarget,
+    body: &FunctionBody,
+) -> Result<Option<VaffleValue>, UnsupportedOp> {
+    let get = |i: usize| -> Result<VaffleValue, UnsupportedOp> {
+        resolve_wval(body, val_map, args[i])
+            .ok_or_else(|| UnsupportedOp(alloc::format!("undefined value {:?}", args[i])))
+    };
+    match op {
+        VciOp::UnsupportedFloat => Err(UnsupportedOp(
+            "VCI float reveal is unsupported (no f32/f64 circuit)".into(),
+        )),
+        VciOp::RevealI32 | VciOp::RevealI64 => {
+            let x = get(0)?;
+            let public = tgt
+                .vc_public_side()
+                .expect("VCI reveal requires an active VC session");
+            let n = {
+                let vc = tgt.vc.as_mut().expect("VC session");
+                vc.next_handle = vc.next_handle.saturating_add(1);
+                let n = vc.next_handle;
+                vc.reveals.insert(
+                    n,
+                    RevealedBits {
+                        bits: x.bits.clone(),
+                        ty: x.ty.clone(),
+                    },
+                );
+                n
+            };
+            tgt.set_side(Some(public));
+            let handle = tgt.iconst(LirType::U32, n as i64);
+            tgt.set_side(None);
+            Ok(Some(handle))
+        }
+        VciOp::WaitI32 | VciOp::WaitI64 => {
+            let h = get(0)?;
+            let n = tgt.const_u64(&h.bits).ok_or_else(|| {
+                UnsupportedOp("VCI reveal handle is not a concrete constant".into())
+            })?;
+            if n == 0 || n > u32::MAX as u64 {
+                return Err(UnsupportedOp("VCI reveal handle is not valid".into()));
+            }
+            let revealed = {
+                let vc = tgt.vc.as_mut().expect("VC session");
+                vc.reveals.remove(&(n as u32)).ok_or_else(|| {
+                    UnsupportedOp("VCI reveal handle is not valid and unconsumed".into())
+                })?
+            };
+            let public = tgt
+                .vc_public_side()
+                .expect("VCI wait requires an active VC session");
+            tgt.set_side(Some(public));
+            let zero = tgt.iconst(revealed.ty.clone(), 0);
+            let src = VaffleValue {
+                bits: revealed.bits,
+                ty: revealed.ty,
+            };
+            let out = tgt.xor(src, zero);
+            tgt.set_side(None);
+            Ok(Some(out))
+        }
     }
 }
 
