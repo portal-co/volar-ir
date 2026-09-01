@@ -66,6 +66,13 @@ entry:
         })
     });
     assert!(!live_body_call);
+
+    let (blocks, _) = Pipeline::from_llvm_inlined(&path, &["caller"])
+        .lower_to_volar_ir()
+        .unroll_ir()
+        .to_volar_ir()
+        .expect("llvm inlined+unroll");
+    assert!(blocks.is_circuit());
     let _ = fs::remove_file(&path);
 }
 

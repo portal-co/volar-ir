@@ -549,6 +549,34 @@ fn splice_call<P: Clone>(
     };
     let repurposed: BTreeSet<usize> = existing_outputs.values().map(|v| v.0).collect();
 
+    // Continuation arity follows the call site's Output projections when
+    // those are the live results. LLVM import bit-blasts a single wide
+    // SigDecl result into one Output per bit; using only `callee_results`
+    // would drop the extra Outputs from the CFG while the terminator
+    // still names them (unowned uses in vaffle_ssa).
+    let bit_tid = module.types.bit();
+    let result_slots: Vec<(usize, TypeId)> = if existing_outputs.is_empty() {
+        callee_results
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| (i, *ty))
+            .collect()
+    } else {
+        let mut idxs: Vec<usize> = existing_outputs.keys().copied().collect();
+        idxs.sort_unstable();
+        let blasted = idxs.len() != callee_results.len();
+        idxs.into_iter()
+            .map(|idx| {
+                let ty = if blasted {
+                    bit_tid
+                } else {
+                    callee_results[idx]
+                };
+                (idx, ty)
+            })
+            .collect()
+    };
+
     let FuncDecl::Body(body) = &mut module.funcs[func_idx] else {
         unreachable!()
     };
@@ -562,9 +590,9 @@ fn splice_call<P: Clone>(
         let call_node = &body.values[call_vid.0];
         (call_node.prov.clone(), call_node.side)
     };
-    let mut cont_params: Vec<(ValueId, TypeId)> = Vec::with_capacity(callee_results.len());
-    for (k, ty) in callee_results.iter().enumerate() {
-        let param_vid = if let Some(&vid) = existing_outputs.get(&k) {
+    let mut cont_params: Vec<(ValueId, TypeId)> = Vec::with_capacity(result_slots.len());
+    for (k, (out_idx, ty)) in result_slots.iter().enumerate() {
+        let param_vid = if let Some(&vid) = existing_outputs.get(out_idx) {
             body.values[vid.0].kind = Value::Param {
                 block: cont_block_id,
                 ty: *ty,
@@ -805,6 +833,7 @@ fn remap_callee_terminator(term: Terminator, value_base: usize, block_base: usiz
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use alloc::collections::BTreeSet;
     use alloc::vec;
     use vaffle::{
         Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, Target, Terminator, Value,
@@ -1492,6 +1521,119 @@ mod tests {
         body.blocks.iter().any(|b| {
             matches!(&b.terminator, Terminator::ReturnCall { func, .. } if *func == callee)
         })
+    }
+
+    /// LLVM import bit-blasts a single wide SigDecl result into one
+    /// `Output` per bit. The continuation must keep every projection.
+    #[test]
+    fn everything_keeps_bit_blasted_outputs() {
+        let mut m = empty_module();
+        let bit = m.types.bit();
+        let u32_ty = m.types.primitive(Type::_32);
+
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u32_ty],
+        });
+        m.sigs.push(SigDecl {
+            params: vec![bit, bit],
+            results: vec![u32_ty],
+        });
+
+        let callee = FuncBody {
+            sig: vaffle::SigId(1),
+            blocks: vec![Block {
+                params: vec![(ValueId(0), bit), (ValueId(1), bit)],
+                stmts: vec![],
+                terminator: Terminator::Return {
+                    values: vec![ValueId(0), ValueId(1)],
+                },
+            }],
+            values: vec![
+                Node::new(
+                    Value::Param {
+                        block: BlockId(0),
+                        ty: bit,
+                        idx: 0,
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(
+                    Value::Param {
+                        block: BlockId(0),
+                        ty: bit,
+                        idx: 1,
+                    },
+                    (),
+                    None,
+                ),
+            ],
+            entry: BlockId(0),
+        };
+
+        let caller = FuncBody {
+            sig: vaffle::SigId(0),
+            blocks: vec![Block {
+                params: vec![],
+                stmts: vec![ValueId(0), ValueId(1), ValueId(2), ValueId(3), ValueId(4)],
+                terminator: Terminator::Return {
+                    values: vec![ValueId(3), ValueId(4)],
+                },
+            }],
+            values: vec![
+                const_node(0, bit),
+                const_node(1, bit),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![ValueId(0), ValueId(1)],
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(Value::Output { value: ValueId(2), idx: 0 }, (), None),
+                Node::new(Value::Output { value: ValueId(2), idx: 1 }, (), None),
+            ],
+            entry: BlockId(0),
+        };
+
+        m.funcs.push(FuncDecl::Body(caller));
+        m.funcs.push(FuncDecl::Body(callee));
+
+        inline_vaffle_everything(&mut m, &[FuncId(0)]).expect("bit-blasted call inlines");
+        let FuncDecl::Body(caller) = &m.funcs[0] else {
+            panic!("expected caller body");
+        };
+        for vid in [ValueId(3), ValueId(4)] {
+            match &caller.values[vid.0].kind {
+                Value::Param { .. } => {}
+                other => panic!("expected Output {vid:?} to become a continuation param, got {other:?}"),
+            }
+        }
+        let owned: BTreeSet<usize> = caller
+            .blocks
+            .iter()
+            .flat_map(|b| {
+                b.params
+                    .iter()
+                    .map(|(v, _)| v.0)
+                    .chain(b.stmts.iter().map(|v| v.0))
+            })
+            .collect();
+        for b in &caller.blocks {
+            if let Terminator::Return { values } | Terminator::Jump(Target { args: values, .. }) =
+                &b.terminator
+            {
+                for v in values {
+                    assert!(
+                        owned.contains(&v.0),
+                        "terminator uses unowned value {}",
+                        v.0
+                    );
+                }
+            }
+        }
     }
 
     #[test]
