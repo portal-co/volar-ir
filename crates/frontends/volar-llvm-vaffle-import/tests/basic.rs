@@ -6,7 +6,7 @@
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use vaffle::{FuncDecl, Terminator, Value};
-use volar_llvm_vaffle_import::import_module;
+use volar_llvm_vaffle_import::{import_module, import_module_inlined};
 
 fn parse(source: &str) -> Context {
     let context = Context::create();
@@ -97,6 +97,54 @@ entry:
     assert!(
         matches!(&out.funcs[callee_id.0], FuncDecl::Body(_)),
         "callee should also be imported as its own function body"
+    );
+    let _ = context;
+}
+
+#[test]
+fn import_module_inlined_eliminates_body_calls() {
+    let source = r#"
+define i32 @callee(i32 %x) {
+entry:
+  %r = add i32 %x, 1
+  ret i32 %r
+}
+
+define i32 @caller(i32 %x) {
+entry:
+  %r = call i32 @callee(i32 %x)
+  ret i32 %r
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+
+    let out = import_module_inlined(&module, &["caller"]).expect("inlined import succeeds");
+    let caller_id = *out.exports.get("caller").expect("caller exported");
+    let FuncDecl::Body(caller_body) = &out.funcs[caller_id.0] else {
+        panic!("expected caller to have a body");
+    };
+    let live_body_call = caller_body.blocks.iter().any(|b| {
+        b.stmts.iter().any(|vid| {
+            matches!(
+                &caller_body.values[vid.0].kind,
+                Value::Call { func, .. }
+                    if matches!(out.funcs.get(func.0), Some(FuncDecl::Body(_)))
+            )
+        }) || matches!(
+            &b.terminator,
+            Terminator::ReturnCall { func, .. }
+                if matches!(out.funcs.get(func.0), Some(FuncDecl::Body(_)))
+        )
+    });
+    assert!(
+        !live_body_call,
+        "inline-everything should leave no live Body-to-Body calls"
     );
     let _ = context;
 }

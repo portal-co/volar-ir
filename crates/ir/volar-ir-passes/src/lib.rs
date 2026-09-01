@@ -13,6 +13,7 @@ pub mod movfuscate;
 pub mod raise_to_z3;
 pub mod region_lowering;
 pub mod to_reversible;
+pub mod unroll_ir;
 
 pub use apply_gadgets::{apply_gadgets, GadgetApplication};
 pub use from_reversible::{
@@ -38,4 +39,7 @@ pub use raise_to_z3::raise_bits_to_z3;
 pub use to_reversible::{
     ReversibleMode, ToReversibleError, UnknownVar, ValueWatchlist, VarWireMap, WireWatchEntry,
     WireWatchlist, to_reversible, to_reversible_with_mode, translate_watchlist,
+};
+pub use unroll_ir::{
+    UnrollError, UnrollLimits, unroll_ir_everything, unroll_ir_everything_with_limits,
 };

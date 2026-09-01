@@ -63,8 +63,8 @@ use volar_ir::ir::{
 };
 use volar_ir_common::{Constant, IrType, Stmt, StorageId, Type, TypeId};
 use volar_lir::circuits::{
-    BitCircuitBuilder, FrameLayout, PACK_W, StackPtr, StorageEmitter, bc_add, frame_read_cont,
-    frame_reload, frame_spill, frame_write_cont, frame_write_ret, n_packs, pack_bits, unpack_words,
+    bc_add, frame_read_cont, frame_reload, frame_spill, frame_write_cont, frame_write_ret, n_packs,
+    pack_bits, unpack_words, BitCircuitBuilder, FrameLayout, StackPtr, StorageEmitter, PACK_W,
 };
 
 /// Width of the stack-pointer address in bits.
@@ -139,6 +139,18 @@ pub fn lower_vaffle_to_ir_with_inlining<P: Clone>(
 ) -> (IRBlocks<P>, IRTypes) {
     volar_ir_opt::inline_vaffle::inline_vaffle_module(&mut module, budget);
     lower_vaffle_to_ir(&module)
+}
+
+/// Like [`lower_vaffle_to_ir_with_inlining`], but runs
+/// [`volar_ir_opt::inline_vaffle::inline_vaffle_everything`] so every
+/// non-recursive intra-module call (including tail calls) is spliced before
+/// IR lowering. Fails closed on recursion or leftover Body-to-Body calls.
+pub fn lower_vaffle_to_ir_fully_inlined<P: Clone>(
+    mut module: Module<P>,
+    entries: &[vaffle::FuncId],
+) -> Result<(IRBlocks<P>, IRTypes), volar_ir_opt::inline_vaffle::InlineEverythingError> {
+    volar_ir_opt::inline_vaffle::inline_vaffle_everything(&mut module, entries)?;
+    Ok(lower_vaffle_to_ir(&module))
 }
 
 /// Temporary diagnostic variant of [`lower_vaffle_to_ir`] that also returns
@@ -602,10 +614,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     }
 
     pub(crate) fn emit_entry_and_exit(&mut self) {
-        // Block 0: entry.  Params: none.  Body: SP = const 0.  Jump to func 0.
-        let mut em = BlockEmitter::new(vec![]);
-
+        // Block 0: module trampoline. Circuit inputs are the first function's
+        // packed parameter words (empty when that function is nullary). Body:
+        // SP = const 0, write the exit continuation, jump to func 0 with
+        // `[sp_words…, param_words…]` so the callee entry arity matches.
         if self.func_info.is_empty() {
+            let em = BlockEmitter::new(vec![]);
             self.blocks.push(em.finish(IRTerminator::Jmp {
                 target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
             }));
@@ -619,6 +633,9 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             return;
         }
 
+        let n_param_words = self.func_info[0].n_param_words;
+        let mut em = BlockEmitter::new(vec![PACK_TID; n_param_words]);
+
         // The entry block's infrastructure statements (SP init, continuation
         // write) have no VAFFLE source statement of their own — they scaffold
         // the jump into func 0's body, so they inherit that function's first
@@ -629,6 +646,8 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         }.or_else(|| self.control_prov.clone())
             .expect("emit_entry_and_exit: entry function has no source value; supply explicit control provenance");
         em.set_prov(entry_prov.clone());
+
+        let param_words: Vec<IRVarId> = (0..n_param_words as u32).map(IRVarId).collect();
 
         let sp = StackPtr::<IRVarId>::from_const(&mut em, 0, SP_BITS);
 
@@ -658,12 +677,14 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         new_sp.advance(own_size);
         let new_sp_bits = new_sp.materialize(&mut em);
 
-        // Pack SP bits into words for the jump.
-        let sp_words = pack_bits(&mut em, &new_sp_bits, PACK_W);
+        // Pack SP bits into words for the jump; append the trampoline's own
+        // packed parameter words so the callee entry sees SP + params.
+        let mut jump_args = pack_bits(&mut em, &new_sp_bits, PACK_W);
+        jump_args.extend(param_words);
 
         let entry_target = IRBlockId(info.entry_block as u32);
         self.blocks.push(em.finish(IRTerminator::Jmp {
-            target: IRBranchTarget::new(IRBlockTargetId::Block(entry_target), sp_words),
+            target: IRBranchTarget::new(IRBlockTargetId::Block(entry_target), jump_args),
         }));
 
         // Block 1: exit continuation.  Packed params: [sp_words, ret_words].
@@ -744,7 +765,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 let all_bits = unpack_words(&mut em, &param_word_ids, n_params, PACK_W);
                 for (pi, &bit) in all_bits.iter().enumerate() {
                     if pi < vaffle_block.params.len() {
-                        val_map.insert(vaffle_block.params[pi].0.0, bit);
+                        val_map.insert(vaffle_block.params[pi].0 .0, bit);
                     }
                 }
             } else {
@@ -1782,11 +1803,27 @@ mod tests {
 
         let (ir_blocks, ir_types) = lower_vaffle_to_ir(&t.module);
 
-        // Block 0 is the module entry (no params).
-        // Block 2 is the function's entry block.  Its params should be
-        // ceil(SP_BITS / PACK_W) packed SP words + ceil(1 / PACK_W) param words
-        // (Bool = 1 bit, packed into 1 PACK_TID word).
+        // Block 0 is the module trampoline: packed entry-function params
+        // (circuit inputs). Block 2 is the function's entry block.  Its
+        // params should be ceil(SP_BITS / PACK_W) packed SP words +
+        // ceil(1 / PACK_W) param words (Bool = 1 bit, packed into 1 PACK_TID
+        // word). The trampoline jump must pass SP + those same param words.
         assert!(ir_blocks.blocks.len() >= 3);
+        assert_eq!(
+            ir_blocks.blocks[0].params.len(),
+            1,
+            "trampoline should carry the packed Bool param"
+        );
+        match &ir_blocks.blocks[0].terminator {
+            IRTerminator::Jmp { target } => {
+                assert_eq!(
+                    target.args.len(),
+                    ir_blocks.blocks[2].params.len(),
+                    "trampoline jump arity must match function entry params"
+                );
+            }
+            other => panic!("expected trampoline Jmp, got {other:?}"),
+        }
         let func_entry = &ir_blocks.blocks[2];
         let sp_packs = (SP_BITS + PACK_W - 1) / PACK_W;
         let bool_packs = 1_usize; // ceil(1 bit / PACK_W) = 1

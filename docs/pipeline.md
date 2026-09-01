@@ -14,14 +14,17 @@
 ```
  VAFFLE (volar-aware WAFFLE; optimizations, inlining)
      │
+     │  optional inline_vaffle_everything  (volar-ir-opt)
      │  replace function calls with block jumps  (volar-vaffle-target)
      ▼
  Volar IR   (SSA; field-level; protocol-agnostic)
-     │  constant folding, DCE, CSE  (volar-ir-opt)
-     │
-     │  replace conditional blocks with real-vs-fake flags  (movfuscate.rs)
-     ▼
- Movfuscated Volar IR
+    │  constant folding, DCE, CSE  (volar-ir-opt)
+    │
+    ├─ unroll_ir_everything (concrete CF) → single is_circuit() block
+    │
+    │  replace conditional blocks with real-vs-fake flags  (movfuscate.rs)
+    ▼
+ Movfuscated Volar IR  (looping; arbitrary CF)
      │  constant folding, SSA  (volar-ir-opt)
      │
      │  booleanize
@@ -87,8 +90,12 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | `vaffle` | VAFFLE module representation, mirrors `portal-pc-waffle-ir::Module` |
 | `volar-vaffle-target` | Lowers VAFFLE (and WAFFLE, via `portal-pc-waffle-frontend`) into Volar IR |
 | `volar-ir` | Volar IR and Boolar IR types |
-| `volar-ir-passes` | `movfuscate.rs` (movfuscation), `lower_to_circuit.rs` (circuit lowering), `fuse_to_circuit.rs` (circuit-fused forms), `to_reversible.rs` (reversible lowering) |
-| `volar-ir-opt` | DCE, CSE, constant folding, store-forwarding — across Volar IR, Boolar IR, and VAFFLE |
+| `volar-ir-passes` | `movfuscate.rs` (looping circuit, arbitrary CF), `unroll_ir.rs` (combinational circuit, concrete CF), `lower_to_circuit.rs` (budgeted MUX unroll of a movfuscated loop), `fuse_to_circuit.rs`, `to_reversible.rs` |
+| `volar-ir-opt` | DCE, CSE, constant folding, store-forwarding, budgeted VAFFLE inlining, `inline_vaffle_everything` |
+| `volar-ir-build` | Build-time pipeline: WASM / structural LLVM / LLVM-direct / VAFFLE / Volar IR / LIR sources; inline-everything; unroll vs movfuscate; terminate at Volar IR or LIR |
+| `volar-llvm-vaffle-import` | Structural LLVM → VAFFLE (calls preserved). `import_module_inlined` composes with inline-everything |
+| `volar-llvm-ir-import` | LLVM-direct: execution-mode import to a single `is_circuit()` block (concrete CF required) |
+| `volar-wasm-circuit-import` | Control-free WASM → `VCircuit` (source-level call expansion; not the builder's VAFFLE path) |
 | `volar-ir-virt` | Virtualization (dispatch-mode block interpretation) |
 | `volar-lir` / `volar-lir-text` / `volar-lir-saved` | Mid-level IR shared with backend consumers in `volar` |
 | `volar-ir` (`region.rs`, `gadget.rs`) | Input/output wire regions + gadget spec/binding types (companion metadata) |
@@ -98,6 +105,27 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | `volar-ir-passes` (`region_lowering.rs`) | Typed→bit table/library lowering; region-table threading across movfuscation, unrolling, and reversible lowering |
 | `volar-ir-text` (`typed_regions.rs`) | Text sections for the typed tables (spec stubs, not bodies) |
 | `volar-vaffle-target` (`vaffle_regions.rs`) | VAFFLE-level table validation + lowering onto the Volar-IR level |
+
+## Circuit-shape strategies and frontends
+
+Three ways to get a single-block circuit, with different control-flow contracts:
+
+| Transform | Input CF | Result | When it fails |
+|---|---|---|---|
+| `unroll_ir_everything` | Concrete (every branch/switch/address folds along the walked path; finite) | One **non-looped** block (`is_circuit()`, `Jmp Return`) | Symbolic branch/switch/address, non-finite loop, resource cap |
+| `movfuscate_ir` | Arbitrary, including symbolic | One **self-looping** block (`is_movfuscated()`) | Does not fail closed on symbolic CF |
+| `lower_to_circuit` | Already-movfuscated self-loop | Budgeted MUX-unroll of that loop | Trip may exceed the budget; the circuit still exists but may not have terminated |
+
+`unroll_ir_everything` and `movfuscate_ir` are mutually alternative shape strategies on Volar IR. Folding may run before either. Do not use `lower_to_circuit` as a substitute for unroll-everything: it assumes a symbolic-PC movfuscated loop.
+
+Frontend routes that feed those passes:
+
+- **WASM (call-preserving):** `Pipeline::from_wasm` → WAFFLE → VAFFLE (`lower_waffle_module`). Calls stay as `Value::Call` until a later pass.
+- **WASM (fully inlined):** `from_wasm_inlined` = the above plus `inline_vaffle_everything`, then `lower_vaffle_to_ir`, then optional `unroll_ir` or `movfuscate`. Distinct from `volar-wasm-circuit-import` (control-free `VCircuit`, source-level call expansion).
+- **LLVM structural:** `volar-llvm-vaffle-import::import_module` preserves calls. `import_module_inlined` / `from_llvm_inlined` compose inline-everything on top. Then unroll (concrete CF) or movfuscate (symbolic CF).
+- **LLVM-direct:** `volar-llvm-ir-import` / `from_llvm_direct` is a specialized interpreter that already emits `is_circuit()` when control flow is concrete. It is not rewritten on top of unroll-everything. Structural + inline + unroll should agree with direct when both succeed; when CF is data-dependent, direct and unroll fail and structural + movfuscate still works.
+
+`volar-ir-build` is the std builder for these sources and passes; it terminates at VAFFLE, Volar IR, or LIR. Object emit, weaving, and `cargo:rerun-if-changed` stay in `volar`'s `volar-build`, which thin-wraps this crate.
 
 ## Related documents
 

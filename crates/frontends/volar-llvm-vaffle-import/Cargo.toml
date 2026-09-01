@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 vaffle = { workspace = true }
 volar-ir-common = { workspace = true }
+volar-ir-opt = { workspace = true }
 volar-lir = { workspace = true }
 inkwell = { workspace = true }
 volar-llvm-constchain = { path = "../../../../llvm-bridge/crates/volar-llvm-constchain" }

@@ -1,0 +1,39 @@
+[package]
+name = "volar-ir-build"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Build-time IR transformation pipeline: VAFFLE/WASM/LLVM sources, inline-everything, unroll-everything vs movfuscation, lower to Volar IR / LIR"
+repository.workspace = true
+
+[features]
+default = []
+vaffle = ["dep:vaffle", "dep:volar-vaffle-target"]
+wasm = ["vaffle", "dep:portal-pc-waffle-ir", "dep:portal-pc-waffle-frontend"]
+llvm = ["vaffle", "dep:inkwell", "dep:volar-llvm-vaffle-import", "dep:volar-llvm-ir-import"]
+
+[dependencies]
+volar-ir = { workspace = true, features = ["rkyv"] }
+volar-ir-common.workspace = true
+volar-ir-opt.workspace = true
+volar-ir-passes.workspace = true
+volar-lir-saved = { workspace = true, features = ["rkyv"] }
+rkyv = { workspace = true, features = ["bytecheck"] }
+vaffle = { workspace = true, features = ["rkyv"], optional = true }
+volar-vaffle-target = { workspace = true, optional = true }
+portal-pc-waffle-ir = { workspace = true, optional = true }
+portal-pc-waffle-frontend = { workspace = true, optional = true }
+inkwell = { workspace = true, optional = true }
+volar-llvm-vaffle-import = { workspace = true, optional = true }
+volar-llvm-ir-import = { workspace = true, optional = true }
+
+[dev-dependencies]
+wat = "1.212.0"
+
+[[test]]
+name = "wasm_inlined"
+required-features = ["wasm"]
+
+[[test]]
+name = "llvm_frontends"
+required-features = ["llvm"]

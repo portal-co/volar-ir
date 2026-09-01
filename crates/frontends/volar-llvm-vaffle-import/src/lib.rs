@@ -109,6 +109,33 @@ pub fn import_module<'ctx>(llvm_module: &LlvmModule<'ctx>, entries: &[&str]) -> 
     Ok(importer.finish())
 }
 
+/// Structural import followed by [`volar_ir_opt::inline_vaffle::inline_vaffle_everything`].
+///
+/// [`import_module`] itself stays call-preserving. This wrapper splices every
+/// non-recursive intra-module call (including tail calls) so fewer calls
+/// reach VAFFLE-to-IR's on-stack convention. Recursion and leftover
+/// Body-to-Body calls fail closed.
+pub fn import_module_inlined<'ctx>(
+    llvm_module: &LlvmModule<'ctx>,
+    entries: &[&str],
+) -> IResult<Module> {
+    let mut module = import_module(llvm_module, entries)?;
+    let ids: Vec<FuncId> = entries
+        .iter()
+        .map(|name| {
+            module.exports.get(*name).copied().ok_or_else(|| {
+                ImportError::Unsupported(format!(
+                    "entry function `{name}` was not exported after import"
+                ))
+            })
+        })
+        .collect::<IResult<Vec<FuncId>>>()?;
+    volar_ir_opt::inline_vaffle::inline_vaffle_everything(&mut module, &ids).map_err(|e| {
+        ImportError::Unsupported(e.to_string())
+    })?;
+    Ok(module)
+}
+
 /// One VAFFLE bit-typed value per LLVM bit, LSB first — mirrors
 /// `VaffleTarget::VaffleValue.bits`.
 type Bits = Vec<ValueId>;

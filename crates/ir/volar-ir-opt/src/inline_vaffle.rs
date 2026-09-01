@@ -68,6 +68,7 @@ use alloc::{
     vec::Vec,
 };
 use core::convert::Infallible;
+use core::fmt;
 
 use vaffle::{
     Block, BlockId, FuncBody, FuncDecl, FuncId, Module, Target, Terminator, Value, ValueId,
@@ -118,6 +119,104 @@ pub fn inline_vaffle_module<P: Clone>(module: &mut Module<P>, budget: InlineBudg
     }
 
     total_inlined
+}
+
+/// Why [`inline_vaffle_everything`] could not eliminate every intra-module
+/// Body-to-Body call reachable from the given entries.
+///
+/// Aligns with the budgeted pass's recursion rule: recursive functions are
+/// never inlining *targets*, so a leftover Body-to-Body call after unlimited
+/// inlining is either recursion or an unexpected remainder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InlineEverythingError {
+    /// `entries` contained a [`FuncId`] that is not a function in the module.
+    UnknownEntry { entry: FuncId },
+    /// One or more entry-reachable Body-to-Body calls remain because the
+    /// callee can reach itself (self- or mutually-recursive).
+    Recursive { funcs: Vec<FuncId> },
+    /// A Body-to-Body call remains for a reason other than recursion.
+    RemainingCall { caller: FuncId, callee: FuncId },
+}
+
+impl fmt::Display for InlineEverythingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InlineEverythingError::UnknownEntry { entry } => {
+                write!(f, "unknown entry function {}", entry.0)
+            }
+            InlineEverythingError::Recursive { funcs } => {
+                write!(f, "recursive functions cannot be fully inlined:")?;
+                for id in funcs {
+                    write!(f, " {}", id.0)?;
+                }
+                Ok(())
+            }
+            InlineEverythingError::RemainingCall { caller, callee } => {
+                write!(
+                    f,
+                    "remaining Body-to-Body call from {} to {}",
+                    caller.0, callee.0
+                )
+            }
+        }
+    }
+}
+
+impl core::error::Error for InlineEverythingError {}
+
+/// Unlimited-budget inlining of every non-recursive intra-module call,
+/// including [`Terminator::ReturnCall`].
+///
+/// After success, every Body-to-Body `Call`/`ReturnCall` reachable from
+/// `entries` is gone (imports/oracles/actions may remain). Unused callee
+/// bodies are left in place so [`FuncId`]s stay stable. Fails closed on
+/// recursion or any leftover Body call.
+pub fn inline_vaffle_everything<P: Clone>(
+    module: &mut Module<P>,
+    entries: &[FuncId],
+) -> Result<usize, InlineEverythingError> {
+    for &entry in entries {
+        if entry.0 >= module.funcs.len() {
+            return Err(InlineEverythingError::UnknownEntry { entry });
+        }
+    }
+
+    let unlimited = InlineBudget {
+        max_callee_values: usize::MAX,
+        total_budget: usize::MAX,
+    };
+    let recursive = recursive_funcs(&module.funcs);
+    let order = bottom_up_order(&module.funcs);
+
+    let mut spent = 0usize;
+    let mut total_inlined = 0usize;
+
+    for func_idx in order {
+        inline_calls_in_function(
+            module,
+            func_idx,
+            &recursive,
+            &unlimited,
+            &mut spent,
+            &mut total_inlined,
+        );
+        inline_return_calls_in_function(
+            module,
+            func_idx,
+            &recursive,
+            &mut spent,
+            &mut total_inlined,
+        );
+    }
+
+    if let Some(err) = remaining_body_call_error(module, entries, &recursive) {
+        return Err(err);
+    }
+
+    // Unused callee bodies are left in place (FuncId-stable). A splice keeps
+    // the old Value::Call arena entry; rewriting those as Import stubs
+    // confuses VAFFLE-to-IR lowering, which still walks the values arena.
+    Ok(total_inlined)
 }
 
 // ============================================================================
@@ -284,6 +383,111 @@ fn clone_func_body<P: Clone>(b: &FuncBody<P>) -> FuncBody<P> {
     }
 }
 
+fn inline_return_calls_in_function<P: Clone>(
+    module: &mut Module<P>,
+    func_idx: usize,
+    recursive: &BTreeSet<usize>,
+    spent: &mut usize,
+    total_inlined: &mut usize,
+) {
+    if !matches!(&module.funcs[func_idx], FuncDecl::Body(_)) {
+        return;
+    }
+
+    loop {
+        let next = {
+            let FuncDecl::Body(body) = &module.funcs[func_idx] else {
+                return;
+            };
+            body.blocks.iter().enumerate().find_map(|(bi, b)| {
+                let Terminator::ReturnCall { func, .. } = &b.terminator else {
+                    return None;
+                };
+                let callee_idx = func.0;
+                if callee_idx == func_idx || recursive.contains(&callee_idx) {
+                    return None;
+                }
+                match module.funcs.get(callee_idx) {
+                    Some(FuncDecl::Body(_)) => Some((BlockId(bi), FuncId(callee_idx))),
+                    _ => None,
+                }
+            })
+        };
+
+        let Some((block_id, callee_id)) = next else {
+            return;
+        };
+
+        let callee_body = match &module.funcs[callee_id.0] {
+            FuncDecl::Body(b) => clone_func_body(b),
+            _ => unreachable!("eligibility check above already required FuncDecl::Body"),
+        };
+
+        let added = splice_return_call(module, func_idx, block_id, &callee_body);
+        *spent += added;
+        *total_inlined += 1;
+    }
+}
+
+fn live_callee_ids<P: Clone>(body: &FuncBody<P>) -> impl Iterator<Item = FuncId> + '_ {
+    let from_stmts = body.blocks.iter().flat_map(|b| {
+        b.stmts.iter().filter_map(|&vid| match &body.values[vid.0].kind {
+            Value::Call { func, .. } => Some(*func),
+            _ => None,
+        })
+    });
+    let from_terms = body.blocks.iter().filter_map(|b| match &b.terminator {
+        Terminator::ReturnCall { func, .. } => Some(*func),
+        _ => None,
+    });
+    from_stmts.chain(from_terms)
+}
+
+fn remaining_body_call_error<P: Clone>(
+    module: &Module<P>,
+    entries: &[FuncId],
+    recursive: &BTreeSet<usize>,
+) -> Option<InlineEverythingError> {
+    let mut seen = BTreeSet::new();
+    let mut stack: Vec<usize> = entries.iter().map(|e| e.0).collect();
+    let mut leftover: Vec<(FuncId, FuncId)> = Vec::new();
+
+    while let Some(idx) = stack.pop() {
+        if !seen.insert(idx) {
+            continue;
+        }
+        let FuncDecl::Body(body) = &module.funcs[idx] else {
+            continue;
+        };
+        for callee in live_callee_ids(body) {
+            stack.push(callee.0);
+            if matches!(module.funcs.get(callee.0), Some(FuncDecl::Body(_))) {
+                leftover.push((FuncId(idx), callee));
+            }
+        }
+    }
+
+    if leftover.is_empty() {
+        return None;
+    }
+
+    let recursive_leftover: Vec<FuncId> = leftover
+        .iter()
+        .filter(|(_, callee)| recursive.contains(&callee.0))
+        .map(|(_, callee)| *callee)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !recursive_leftover.is_empty() {
+        return Some(InlineEverythingError::Recursive {
+            funcs: recursive_leftover,
+        });
+    }
+
+    let (caller, callee) = leftover[0];
+    Some(InlineEverythingError::RemainingCall { caller, callee })
+}
+
 // ============================================================================
 // Splicing
 // ============================================================================
@@ -427,6 +631,60 @@ fn splice_call<P: Clone>(
     added
 }
 
+/// Splice `callee_body` in place of a [`Terminator::ReturnCall`]. The
+/// terminator becomes a jump into the remapped callee entry; callee
+/// `Return`s stay `Return` (they are already the caller's returns).
+fn splice_return_call<P: Clone>(
+    module: &mut Module<P>,
+    func_idx: usize,
+    block_id: BlockId,
+    callee_body: &FuncBody<P>,
+) -> usize {
+    let (value_base, block_base, slot_base) = match &module.funcs[func_idx] {
+        FuncDecl::Body(b) => (b.values.len(), b.blocks.len(), stack_slot_high_water(b)),
+        _ => unreachable!(),
+    };
+
+    let remapped_values: Vec<Node<Value, P>> = callee_body
+        .values
+        .iter()
+        .map(|n| remap_callee_node(n, value_base, block_base, slot_base))
+        .collect();
+    let remapped_blocks: Vec<Block> = callee_body
+        .blocks
+        .iter()
+        .map(|b| remap_callee_block(b, value_base, block_base))
+        .collect();
+    let remapped_entry = BlockId(callee_body.entry.0 + block_base);
+    let added = remapped_values.len();
+
+    let call_args = {
+        let FuncDecl::Body(body) = &module.funcs[func_idx] else {
+            unreachable!()
+        };
+        match &body.blocks[block_id.0].terminator {
+            Terminator::ReturnCall { args, .. } => args.clone(),
+            _ => panic!(
+                "inline_vaffle::splice_return_call: block terminator is not ReturnCall"
+            ),
+        }
+    };
+
+    let FuncDecl::Body(body) = &mut module.funcs[func_idx] else {
+        unreachable!()
+    };
+
+    body.values.extend(remapped_values);
+    body.blocks.extend(remapped_blocks);
+    body.blocks[block_id.0].terminator = Terminator::Jump(Target {
+        block: remapped_entry,
+        args: call_args,
+        reentry: None,
+    });
+
+    added
+}
+
 fn find_call_site<P: Clone>(body: &FuncBody<P>, call_vid: ValueId) -> Option<(BlockId, usize)> {
     for (bi, b) in body.blocks.iter().enumerate() {
         if let Some(pos) = b.stmts.iter().position(|&v| v == call_vid) {
@@ -554,7 +812,7 @@ mod tests {
     };
     use volar_ir_common::{Constant, Node, Stmt, Type, TypeId, TypeTable};
 
-    use super::{InlineBudget, inline_vaffle_module};
+    use super::{InlineBudget, InlineEverythingError, inline_vaffle_everything, inline_vaffle_module};
 
     fn empty_module() -> Module {
         Module {
@@ -1228,5 +1486,305 @@ mod tests {
             unreachable!()
         };
         assert_eq!(b1, b2);
+    }
+
+    fn has_live_return_call_to(body: &FuncBody, callee: FuncId) -> bool {
+        body.blocks.iter().any(|b| {
+            matches!(&b.terminator, Terminator::ReturnCall { func, .. } if *func == callee)
+        })
+    }
+
+    #[test]
+    fn everything_inlines_call_and_dces_callee() {
+        let mut m = empty_module();
+        let u64_ty = m.types.primitive(Type::_64);
+
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        m.sigs.push(SigDecl {
+            params: vec![u64_ty],
+            results: vec![u64_ty],
+        });
+
+        let callee = FuncBody {
+            sig: vaffle::SigId(1),
+            blocks: vec![Block {
+                params: vec![(ValueId(0), u64_ty)],
+                stmts: vec![],
+                terminator: Terminator::Return {
+                    values: vec![ValueId(0)],
+                },
+            }],
+            values: vec![Node::new(
+                Value::Param {
+                    block: BlockId(0),
+                    ty: u64_ty,
+                    idx: 0,
+                },
+                (),
+                None,
+            )],
+            entry: BlockId(0),
+        };
+
+        let v0 = ValueId(0);
+        let v1 = ValueId(1);
+        let v2 = ValueId(2);
+        let caller = FuncBody {
+            sig: vaffle::SigId(0),
+            blocks: vec![Block {
+                params: vec![],
+                stmts: vec![v0, v1, v2],
+                terminator: Terminator::Return { values: vec![v2] },
+            }],
+            values: vec![
+                const_node(5, u64_ty),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![v0],
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(Value::Output { value: v1, idx: 0 }, (), None),
+            ],
+            entry: BlockId(0),
+        };
+
+        m.funcs.push(FuncDecl::Body(caller));
+        m.funcs.push(FuncDecl::Body(callee));
+        m.exports
+            .insert(alloc::string::String::from("caller"), FuncId(0));
+
+        let n = inline_vaffle_everything(&mut m, &[FuncId(0)]).expect("should fully inline");
+        assert_eq!(n, 1);
+        let FuncDecl::Body(caller) = &m.funcs[0] else {
+            panic!("expected FuncDecl::Body")
+        };
+        assert!(
+            !has_live_call_to(caller, FuncId(1)),
+            "no live Body-to-Body call should remain"
+        );
+        assert!(!caller.blocks.iter().any(|b| {
+            matches!(&b.terminator, Terminator::ReturnCall { .. })
+        }));
+    }
+
+    #[test]
+    fn everything_splices_return_call() {
+        let mut m = empty_module();
+        let u64_ty = m.types.primitive(Type::_64);
+
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        m.sigs.push(SigDecl {
+            params: vec![u64_ty],
+            results: vec![u64_ty],
+        });
+
+        let callee = FuncBody {
+            sig: vaffle::SigId(1),
+            blocks: vec![Block {
+                params: vec![(ValueId(0), u64_ty)],
+                stmts: vec![],
+                terminator: Terminator::Return {
+                    values: vec![ValueId(0)],
+                },
+            }],
+            values: vec![Node::new(
+                Value::Param {
+                    block: BlockId(0),
+                    ty: u64_ty,
+                    idx: 0,
+                },
+                (),
+                None,
+            )],
+            entry: BlockId(0),
+        };
+
+        let v0 = ValueId(0);
+        let caller = FuncBody {
+            sig: vaffle::SigId(0),
+            blocks: vec![Block {
+                params: vec![],
+                stmts: vec![v0],
+                terminator: Terminator::ReturnCall {
+                    func: FuncId(1),
+                    args: vec![v0],
+                },
+            }],
+            values: vec![const_node(7, u64_ty)],
+            entry: BlockId(0),
+        };
+
+        m.funcs.push(FuncDecl::Body(caller));
+        m.funcs.push(FuncDecl::Body(callee));
+
+        let n = inline_vaffle_everything(&mut m, &[FuncId(0)]).expect("should inline ReturnCall");
+        assert_eq!(n, 1);
+        let FuncDecl::Body(caller) = &m.funcs[0] else {
+            panic!("expected FuncDecl::Body")
+        };
+        assert!(!has_live_return_call_to(caller, FuncId(1)));
+        assert!(
+            caller
+                .blocks
+                .iter()
+                .any(|b| matches!(&b.terminator, Terminator::Jump(_))),
+            "ReturnCall should become a jump into the spliced callee"
+        );
+    }
+
+    #[test]
+    fn everything_leaves_import_calls() {
+        let mut m = empty_module();
+        let u64_ty = m.types.primitive(Type::_64);
+
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        m.sigs.push(SigDecl {
+            params: vec![u64_ty],
+            results: vec![u64_ty],
+        });
+
+        let v0 = ValueId(0);
+        let v1 = ValueId(1);
+        let v2 = ValueId(2);
+        let caller = FuncBody {
+            sig: vaffle::SigId(0),
+            blocks: vec![Block {
+                params: vec![],
+                stmts: vec![v0, v1, v2],
+                terminator: Terminator::Return { values: vec![v2] },
+            }],
+            values: vec![
+                const_node(1, u64_ty),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![v0],
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(Value::Output { value: v1, idx: 0 }, (), None),
+            ],
+            entry: BlockId(0),
+        };
+
+        m.funcs.push(FuncDecl::Body(caller));
+        m.funcs.push(FuncDecl::Import {
+            module: alloc::string::String::from("env"),
+            name: alloc::string::String::from("oracle"),
+            sig: vaffle::SigId(1),
+        });
+
+        let n = inline_vaffle_everything(&mut m, &[FuncId(0)]).expect("imports are allowed");
+        assert_eq!(n, 0);
+        assert_eq!(m.funcs.len(), 2);
+        let FuncDecl::Body(caller) = &m.funcs[0] else {
+            panic!()
+        };
+        assert!(has_live_call_to(caller, FuncId(1)));
+    }
+
+    #[test]
+    fn everything_fails_closed_on_recursion() {
+        let mut m = empty_module();
+        let u64_ty = m.types.primitive(Type::_64);
+
+        m.sigs.push(SigDecl {
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        m.sigs.push(SigDecl {
+            params: vec![u64_ty],
+            results: vec![u64_ty],
+        });
+
+        let callee = FuncBody {
+            sig: vaffle::SigId(1),
+            blocks: vec![Block {
+                params: vec![(ValueId(0), u64_ty)],
+                stmts: vec![ValueId(1)],
+                terminator: Terminator::Return {
+                    values: vec![ValueId(0)],
+                },
+            }],
+            values: vec![
+                Node::new(
+                    Value::Param {
+                        block: BlockId(0),
+                        ty: u64_ty,
+                        idx: 0,
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![ValueId(0)],
+                    },
+                    (),
+                    None,
+                ),
+            ],
+            entry: BlockId(0),
+        };
+
+        let v0 = ValueId(0);
+        let v1 = ValueId(1);
+        let v2 = ValueId(2);
+        let caller = FuncBody {
+            sig: vaffle::SigId(0),
+            blocks: vec![Block {
+                params: vec![],
+                stmts: vec![v0, v1, v2],
+                terminator: Terminator::Return { values: vec![v2] },
+            }],
+            values: vec![
+                const_node(1, u64_ty),
+                Node::new(
+                    Value::Call {
+                        func: FuncId(1),
+                        args: vec![v0],
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(Value::Output { value: v1, idx: 0 }, (), None),
+            ],
+            entry: BlockId(0),
+        };
+
+        m.funcs.push(FuncDecl::Body(caller));
+        m.funcs.push(FuncDecl::Body(callee));
+
+        let err = inline_vaffle_everything(&mut m, &[FuncId(0)]).expect_err("recursion");
+        match err {
+            InlineEverythingError::Recursive { funcs } => {
+                assert!(funcs.contains(&FuncId(1)));
+            }
+            other => panic!("expected Recursive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn everything_unknown_entry() {
+        let mut m = empty_module();
+        let err = inline_vaffle_everything(&mut m, &[FuncId(0)]).expect_err("missing entry");
+        assert_eq!(
+            err,
+            InlineEverythingError::UnknownEntry { entry: FuncId(0) }
+        );
     }
 }

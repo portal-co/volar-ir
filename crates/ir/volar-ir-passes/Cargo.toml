@@ -12,3 +12,4 @@ volar-lir.workspace = true
 volar-ir-common.workspace = true
 volar-provenance.workspace = true
 volar-ir-config.workspace = true
+volar-ir-opt.workspace = true
