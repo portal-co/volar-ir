@@ -429,9 +429,12 @@ equivalence**, not IR shape.
   already supports overlap detection; ordering/associativity rules are
   deferred until a concrete consumer needs them. v1 rejects overlap
   fail-closed.
-- **Gadgets at the typed `VCircuit` level** (splicing before booleanization).
-  Bit-level splicing subsumes it; a typed layer can be added later by
-  lowering `VCircuit → BCircuit` first.
+- **Typed gadget ports, gadgets at the typed `VCircuit` level, gadgets on
+  field-level `IRBlocks`/VAFFLE, and region-table threading through the
+  passes between these levels** — now planned in
+  [`typed-gadgets-and-region-threading-plan.md`](typed-gadgets-and-region-threading-plan.md).
+  Bit-level splicing subsumes typed splicing; a typed layer can be added
+  later by lowering `VCircuit → BCircuit` first.
 - **Regions/gadgets on field-level `IRBlocks`/VAFFLE.** Boundary structure
   there is richer (typed params, `Dyn` calls); revisit after the circuit
   level is proven.

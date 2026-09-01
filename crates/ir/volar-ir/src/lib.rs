@@ -7,6 +7,7 @@ pub mod circuit;
 pub mod gadget;
 pub mod ir;
 pub mod region;
+pub mod typed_gadget;
 #[cfg(feature = "lazy")]
 pub mod lazy;
 pub mod public;

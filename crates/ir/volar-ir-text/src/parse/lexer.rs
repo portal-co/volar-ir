@@ -31,6 +31,19 @@ impl<'a> Lexer<'a> {
             col: 1,
         }
     }
+
+    /// Snapshot the cursor for speculative parsing (see [`Self::restore`]).
+    pub fn save(&self) -> (usize, u32, u32) {
+        (self.pos, self.line, self.col)
+    }
+
+    /// Restore a cursor snapshot taken by [`Self::save`].
+    pub fn restore(&mut self, saved: (usize, u32, u32)) {
+        self.pos = saved.0;
+        self.line = saved.1;
+        self.col = saved.2;
+    }
+
     pub fn pos(&self) -> Pos {
         Pos {
             line: self.line,

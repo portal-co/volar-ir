@@ -18,6 +18,7 @@ extern crate alloc;
 pub mod boolar;
 pub mod ir;
 pub mod regions;
+pub mod typed_regions;
 
 #[cfg(feature = "parse")]
 pub mod parse;

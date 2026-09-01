@@ -452,7 +452,7 @@ pub mod parse_impl {
     }
 
     impl Lexer<'_> {
-        fn read_ident_kw(&mut self, kw: &str) -> Result<(), ParseError> {
+        pub(crate) fn read_ident_kw(&mut self, kw: &str) -> Result<(), ParseError> {
             let got = self.read_ident()?;
             if got != kw {
                 return Err(ParseError::UnexpectedToken {

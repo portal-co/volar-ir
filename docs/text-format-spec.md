@@ -353,6 +353,49 @@ gadgets {
 Parsed by `volar_ir_text::regions::parse_impl::parse_with_regions`, which
 returns the circuit together with its `RegionTable` and gadget bindings.
 
+### 4.7 Typed region/gadget side-table sections (`volar-ir-text`)
+
+The typed authoring layer (`volar_ir::typed_gadget`, see
+[`typed-gadgets-and-region-threading-plan.md`](typed-gadgets-and-region-threading-plan.md))
+has three optional sections mirroring §4.6:
+
+```
+typed_regions {
+  input p0 [0, 8) -> {0}
+  block_input b1 p0 [2, 5) -> {1}
+  func_input f2 p0 [0, 4) -> {2}
+  output o0 [1, 5) -> {0}
+  func_output f0 r1 [0, 2) -> {3}
+  storage S1 T3 [0, 4) -> {4}
+}
+typed_gadgets {
+  gadget "pad8" on {all=[0], none=[1]} aux=[const <90>, <12345:1>, input p1 [0], rng "nonce"] rng_source="stream"
+}
+typed_gadget_specs {
+  spec "pad8" data:"data" T0:1 aux:"key" T2:3
+}
+```
+
+- `typed_regions { … }`: typed anchors — `input p<param> [start, end)`,
+  `block_input b<block> p<param> [start, end)`, `func_input f<func>
+  p<param> [start, end)`, `output o<out> [start, end)`, `func_output
+  f<func> r<result> [start, end)`, and `storage S<id> T<ty> [start, end)`
+  (a typed storage anchor covers all bit planes of its type). Ranges are
+  bit positions within the carrier's own layout, LSB-first.
+- `typed_gadgets { … }`: typed bindings. Aux sources are `input
+  p<param> [<bit>]` (bit start within the param), `const` (a comma-
+  separated list of `<lo>` or `<lo>:<hi>` 128-bit words — one word per
+  aux port value), and `rng "name"`. `rng_source="..."` is optional.
+- `typed_gadget_specs { … }`: port-signature **stubs** (`data`, `aux`,
+  or `rng` kinds; optional `:"name"`; type id `T<nat>`; value count
+  `:<nat>`). Typed gadget *bodies* (`VCircuit`s) are not text-
+  serialized — they live in rkyv/binary artifacts; text round-trips
+  compare anchors, bindings, and stubs only.
+
+Parsed by `volar_ir_text::typed_regions::parse_impl` helpers
+(`parse_typed_region_entries`, `parse_typed_gadget_section`,
+`parse_typed_gadget_specs`).
+
 ---
 
 ## 5. `volar-compiler` high-level IR / `.vca` format

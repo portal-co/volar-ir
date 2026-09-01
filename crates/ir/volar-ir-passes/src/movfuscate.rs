@@ -1480,7 +1480,7 @@ fn infer_stmt_result_type(
 
 // ---- Pre-pass: infer all variable types in a block (static, before emission)
 
-fn infer_block_var_types<P: Clone>(
+pub(crate) fn infer_block_var_types<P: Clone>(
     block: &IRBlock<P>,
     ir_types: &[IRType],
     bit_type_id: &IRTypeId,
@@ -2522,7 +2522,7 @@ impl SlotSig {
 /// function reverts to the simpler, cheaper `(position, type)` scheme on
 /// that basis — the architectural argument above, not just the absence of
 /// a disproven counterexample, is what makes it sound.)
-fn compute_static_slot_classes<P: Clone>(
+pub(crate) fn compute_static_slot_classes<P: Clone>(
     blocks: &IRBlocks<P>,
     ir_types: &[IRType],
     bit_type_id: &IRTypeId,
@@ -2625,7 +2625,7 @@ fn compute_static_slot_classes<P: Clone>(
 /// `Return` terminator found in the module.
 ///
 /// `Block`-typed return values are expanded to `pc_width` `Bit` slots each.
-fn compute_return_slot_types<P: Clone>(
+pub(crate) fn compute_return_slot_types<P: Clone>(
     blocks: &IRBlocks<P>,
     ir_types: &[IRType],
     bit_type_id: &IRTypeId,

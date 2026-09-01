@@ -11,6 +11,7 @@ pub mod lower_lir;
 pub mod lower_to_circuit;
 pub mod movfuscate;
 pub mod raise_to_z3;
+pub mod region_lowering;
 pub mod to_reversible;
 
 pub use apply_gadgets::{apply_gadgets, GadgetApplication};

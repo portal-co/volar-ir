@@ -129,6 +129,64 @@ pub fn try_lower_ir_to_boolar_with_lane_table<P: Clone>(
     blocks: &IRBlocks<P>,
     types: &IRTypes,
 ) -> Result<(BIrBlocks<P>, BTreeMap<LaneId, IRTypeId>), ExternalLoweringError> {
+    try_lower_ir_to_boolar_with_tables(blocks, types)
+        .map(|(blocks, tables)| (blocks, tables.lanes))
+}
+
+/// All side tables of one [`lower_ir_to_boolar`] run: the `LaneId → IRTypeId`
+/// lane table, the per-block typed-var → bit-var allocation ([`VarBitMap`]),
+/// and the per-`(StorageId, LaneId)` element-address widths. Returned as one
+/// bundle so companion metadata (region tables) is lowered from the *same*
+/// allocation the lowering itself produced.
+#[derive(Clone, Debug, Default)]
+pub struct LoweredTables {
+    /// Dense `LaneId → IRTypeId` table (same as [`lower_ir_to_boolar_with_lane_table`]).
+    pub lanes: BTreeMap<LaneId, IRTypeId>,
+    /// Per-host-block typed-var → bit-var lists (LSB-first). Params are
+    /// allocated contiguously in param order; statement `i` of block `b`
+    /// defines the var keyed at `block.params.len() + i`.
+    pub var_bits: VarBitMap,
+    /// Element-address bit width per `(StorageId, LaneId)` space, as recorded
+    /// from the lowered traffic.
+    pub addr_widths: BTreeMap<(StorageId, LaneId), usize>,
+}
+
+/// Per-block typed-var → bit-var allocation from one lowering run.
+#[derive(Clone, Debug, Default)]
+pub struct VarBitMap {
+    /// One map per host block (block `b` = `blocks[b]`).
+    pub blocks: Vec<BTreeMap<u32, Vec<IRVarId>>>,
+}
+
+impl VarBitMap {
+    /// Bit-var list of one var of one block (LSB-first), or `None`.
+    pub fn bits(&self, block: usize, var: u32) -> Option<&[IRVarId]> {
+        self.blocks.get(block)?.get(&var).map(|v| v.as_slice())
+    }
+
+    /// The Boolar param position of bit `start` of one var, or `None`.
+    /// Valid because params are allocated as contiguous ascending var ids.
+    pub fn bit_start(&self, block: usize, var: u32, start: usize) -> Option<u32> {
+        self.bits(block, var)?.get(start).map(|v| v.0)
+    }
+}
+
+/// Like [`lower_ir_to_boolar_with_lane_table`], returning the full side-table
+/// bundle ([`LoweredTables`]).
+pub fn lower_ir_to_boolar_with_tables<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+) -> (BIrBlocks<P>, LoweredTables) {
+    try_lower_ir_to_boolar_with_tables(blocks, types).unwrap_or_else(|error| {
+        panic!("lower_ir_to_boolar: invalid external primitive: {error:?}")
+    })
+}
+
+/// Fallible variant of [`lower_ir_to_boolar_with_tables`].
+pub fn try_lower_ir_to_boolar_with_tables<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+) -> Result<(BIrBlocks<P>, LoweredTables), ExternalLoweringError> {
     validate_external_sources(blocks, types)?;
     // ---- 1. Allocate lanes: dense first-use renumbering -------------------
     let mut lane_of: BTreeMap<IRTypeId, LaneId> = BTreeMap::new();
@@ -166,10 +224,21 @@ pub fn try_lower_ir_to_boolar_with_lane_table<P: Clone>(
     // ---- 2. Lower blocks, recording per-lane element-address widths -------
     let mut addr_widths: BTreeMap<(StorageId, LaneId), usize> = BTreeMap::new();
     let mut occurrence = 0u64;
+    let mut var_bits_per_block: Vec<BTreeMap<u32, Vec<IRVarId>>> = Vec::with_capacity(blocks.blocks.len());
     let out_blocks: Vec<BIrBlock<P>> = blocks
         .blocks
         .iter()
-        .map(|block| lower_block(block, types, &lane_of, &mut addr_widths, &mut occurrence))
+        .map(|block| {
+            let (b, vb) = lower_block_with_var_bits(
+                block,
+                types,
+                &lane_of,
+                &mut addr_widths,
+                &mut occurrence,
+            );
+            var_bits_per_block.push(vb);
+            b
+        })
         .collect();
 
     // ---- 3. Expand typed pre-init to bit-granular segments ---------------
@@ -184,7 +253,13 @@ pub fn try_lower_ir_to_boolar_with_lane_table<P: Clone>(
             blocks: out_blocks,
             pre_init,
         },
-        lane_table,
+        LoweredTables {
+            lanes: lane_table,
+            var_bits: VarBitMap {
+                blocks: var_bits_per_block,
+            },
+            addr_widths,
+        },
     ))
 }
 
@@ -355,13 +430,15 @@ fn stmt_result_type(stmt: &IRStmt) -> Option<IRTypeId> {
 // Block lowering
 // ============================================================================
 
-fn lower_block<P: Clone>(
+/// Lower one block, returning the lowered Boolar block together with the
+/// block's typed-var → bit-var allocation (see [`VarBitMap`]).
+fn lower_block_with_var_bits<P: Clone>(
     block: &IRBlock<P>,
     types: &IRTypes,
     lane_of: &BTreeMap<IRTypeId, LaneId>,
     addr_widths: &mut BTreeMap<(StorageId, LaneId), usize>,
     occurrence: &mut u64,
-) -> BIrBlock<P> {
+) -> (BIrBlock<P>, BTreeMap<u32, Vec<IRVarId>>) {
     // ---- 1. Expand params --------------------------------------------------
     // Each IR param of type T becomes ir_type_bits(T) consecutive Boolar params.
     // var_bits[param_idx] = slice of Boolar param IRVarIds for that param.
@@ -403,11 +480,14 @@ fn lower_block<P: Clone>(
     // ---- 3. Convert terminator --------------------------------------------
     let terminator = lower_terminator(&block.terminator, &var_bits);
 
-    BIrBlock {
-        params: total_params,
-        stmts: emitter.stmts,
-        terminator,
-    }
+    (
+        BIrBlock {
+            params: total_params,
+            stmts: emitter.stmts,
+            terminator,
+        },
+        var_bits,
+    )
 }
 
 // ============================================================================

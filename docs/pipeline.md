@@ -94,6 +94,10 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | `volar-ir` (`region.rs`, `gadget.rs`) | Input/output wire regions + gadget spec/binding types (companion metadata) |
 | `volar-ir-passes` (`apply_gadgets.rs`) | Gadget application: splice gadgets onto region-tagged boundary wires |
 | `volar-ir-text` (`regions.rs`) | Text sections for the region/gadget side tables |
+| `volar-ir` (`typed_gadget.rs`) | Typed region/gadget authoring layer (typed anchors, `VCircuit` gadget bodies, validation) |
+| `volar-ir-passes` (`region_lowering.rs`) | Typed→bit table/library lowering; region-table threading across movfuscation, unrolling, and reversible lowering |
+| `volar-ir-text` (`typed_regions.rs`) | Text sections for the typed tables (spec stubs, not bodies) |
+| `volar-vaffle-target` (`vaffle_regions.rs`) | VAFFLE-level table validation + lowering onto the Volar-IR level |
 
 ## Related documents
 
@@ -106,6 +110,7 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | VAFFLE lowering detail | [`waffle-lowering.md`](waffle-lowering.md) |
 | Fuzzing | [`fuzzing.md`](fuzzing.md) |
 | Wire regions & gadgets (plan) | [`wire-regions-gadgets-plan.md`](wire-regions-gadgets-plan.md) |
+| Typed gadgets, higher-level IR gadgets, region threading through passes (plan) | [`typed-gadgets-and-region-threading-plan.md`](typed-gadgets-and-region-threading-plan.md) |
 | Full pipeline (weaving, backends, proving) | `volar` repo's `docs/pipeline.md` |
 
 ## Retro CPU Boolar circuits (fixtures)

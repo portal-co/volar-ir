@@ -30,6 +30,7 @@ crates/fuzz/volar-fuzz/src/
     ├── ir_passes.rs    — Properties D, D2 (lower_ir_to_boolar incl. storage traffic)
     └── reversible.rs   — Property E (to_reversible XOR embedding + joint reversibility)
     └── gadgets.rs      — Property G (gadget application preserves boundary semantics)
+    └── gadgets_typed.rs — Property G′ (typed authoring → lower → translate → splice)
 
 fuzz/
 ├── Cargo.toml
@@ -187,6 +188,27 @@ Inputs tagged with both a wrap region and the `plaintext` region must stay
 *unwrapped* (`none_of` selector semantics), and wrapped storage traffic
 (read→decrypt, write→encrypt, re-encrypted/synthetic pre-init) must preserve
 the core's view of storage.
+
+### Property G′ — the typed authoring path preserves boundary semantics
+
+`gadgets_typed.rs` authors the region table, gadget library, and bindings
+at the **typed** layer (`volar_ir::typed_gadget`), then runs the full
+threading pipeline: `movfuscate_region_layout` +
+`translate_regions_movfuscate` (anchors onto the combined block's state
+slots), `movfuscate_ir`, `lower_ir_to_boolar_with_tables` +
+`lower_typed_region_table`/`lower_gadget_library`/`lower_typed_bindings`,
+`lower_to_circuit(WithTerminationFlag)` +
+`translate_regions_termination_flag`, and finally `apply_gadgets`. The
+spliced circuit must satisfy the same ciphertext-in / plaintext-core /
+ciphertext-out contract as Property G (XOR-pad gadgets, all input
+combinations), and `movfuscate_state_regions` must tag the PC bit exactly.
+
+The generator restricts hosts to `Bit`-typed block params: `movfuscate_ir`
+currently loses `Vec`-typed state slots on multi-block programs (pre-
+existing bug, unrelated to the region/gadget layers — see the plan doc
+`typed-gadgets-and-region-threading-plan.md`'s status section for the
+reproduction). Word-width typed coverage lives in the
+`region_lowering` unit tests instead.
 
 ---
 
