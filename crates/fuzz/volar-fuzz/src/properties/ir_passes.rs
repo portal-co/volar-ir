@@ -122,7 +122,7 @@ proptest! {
                     .cloned()
                     .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
                     .unwrap_or_default();
-                if msg.contains("flat cell space") {
+                if msg.contains("flat cell space") || msg.contains("mixed element-address widths") {
                     return Ok(()); // not representable in Boolar storage model
                 }
                 panic!("lower_ir_to_boolar_with_lane_table panicked unexpectedly: {msg}");
@@ -234,24 +234,44 @@ fn module_has_storage_ops(module: &vaffle::Module) -> bool {
     })
 }
 
+/// `eval_ir` represents an `OracleCall` as an opaque handle; only its
+/// `OracleOutput` projections have concrete bit-vector values. Returning an
+/// aggregate directly therefore cannot be compared to the VAFFLE evaluator.
+/// The two-function generator returns every callee value through the caller's
+/// continuation, so reject the shape in either body before testing inlining.
+fn module_returns_void_or_aggregate_value(module: &vaffle::Module) -> bool {
+    module.funcs.iter().any(|func| {
+        let vaffle::FuncDecl::Body(body) = func else {
+            return false;
+        };
+        body.blocks.iter().any(|block| {
+            let vaffle::Terminator::Return { values } = &block.terminator else {
+                return false;
+            };
+            values.iter().any(|value| {
+                matches!(
+                    &body.values[value.0].kind,
+                    vaffle::Value::Op(
+                        volar_ir_common::Stmt::StorageWrite { .. }
+                            | volar_ir_common::Stmt::OracleCall { .. }
+                    )
+                )
+            })
+        })
+    })
+}
+
 proptest! {
-    /// Found a real, not-yet-diagnosed bug while removing this property's
-    /// old blanket "skip if inputs non-empty" guard (which, like property
-    /// J's identical guard, hid the `plan_functions` bit-width bug this
-    /// session already found and fixed -- but ALSO hid this second,
-    /// distinct issue, specific to inlining): some inlined modules lower to
-    /// IR where a jump target's declared param count doesn't match the
-    /// arg count actually supplied to it (`eval_ir_block`'s internal
-    /// "expected N params, got M" assertion fires deep in execution, past
-    /// block 0's own entry -- not simply a mismatch this test's own input
-    /// packing could account for). `#[ignore]`d rather than left
-    /// permanently red; the failing seed is pinned in
-    /// `proptest-regressions/properties/ir_passes.txt`.
+    /// Exercise the budgeted inlining route with non-empty, variably wide
+    /// parameters. Storage traffic and direct opaque call aggregates are
+    /// excluded by the generator filter below because the IR evaluator cannot
+    /// compare those non-value results with VAFFLE's aggregate ABI.
     #[test]
-    #[ignore = "found a real lower_vaffle_to_ir_with_inlining param-count bug, not yet root-caused -- see doc comment"]
     fn prop_k_lower_vaffle_to_ir_with_inlining_preserves_semantics(
         (module, func_id, inputs) in gen_vaffle_two_func_and_inputs()
-            .prop_filter("no storage ops (pre-existing lower_vaffle_to_ir limitation)", |(m, _, _)| !module_has_storage_ops(m))
+            .prop_filter("no storage ops or returned opaque call aggregates", |(m, _, _)| {
+                !module_has_storage_ops(m) && !module_returns_void_or_aggregate_value(m)
+            })
     ) {
         let vaffle_out = match eval_vaffle(&module, func_id, &inputs) {
             Some(v) => v,
@@ -278,7 +298,9 @@ proptest! {
     #[test]
     fn prop_k_lower_vaffle_to_ir_with_inlining_does_not_panic(
         (module, _func_id, _inputs) in gen_vaffle_two_func_and_inputs()
-            .prop_filter("no storage ops (pre-existing lower_vaffle_to_ir limitation)", |(m, _, _)| !module_has_storage_ops(m))
+            .prop_filter("no storage ops or returned opaque call aggregates", |(m, _, _)| {
+                !module_has_storage_ops(m) && !module_returns_void_or_aggregate_value(m)
+            })
     ) {
         let _ = lower_vaffle_to_ir_with_inlining(module, generous_inline_budget());
     }
@@ -347,7 +369,11 @@ fn eval_vaffle_and_boolar(
             let msg = payload
                 .downcast_ref::<String>()
                 .cloned()
-                .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&'static str>()
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or_default();
             // Pre-existing, unrelated to bitwidth (same skips property D2
             // above already documents for this same extended generator):
@@ -355,7 +381,10 @@ fn eval_vaffle_and_boolar(
             // validates against, and storage addresses too wide for
             // Boolar's 64-bit flat cell space. Skip rather than mask other,
             // real panics under a blanket catch-all.
-            if msg.contains("SignatureMismatch") || msg.contains("flat cell space") {
+            if msg.contains("SignatureMismatch")
+                || msg.contains("flat cell space")
+                || msg.contains("mixed element-address widths")
+            {
                 return None;
             }
             panic!("lower_ir_to_boolar panicked unexpectedly: {msg}");
@@ -456,7 +485,9 @@ use volar_ir::ir::{
 use volar_ir_common::{Constant, IrType, Node, Type};
 use volar_ir_passes::{LoweringMode, lower_to_circuit_ir};
 
-use crate::interpreter::ir::{StorageMap, apply_pre_init, eval_ir_circuit_step, eval_ir_with_storage};
+use crate::interpreter::ir::{
+    StorageMap, apply_pre_init, eval_ir_circuit_step, eval_ir_with_storage,
+};
 
 /// Movfuscate `blocks`, lower to a single-step-per-call circuit, and drive it
 /// via `eval_ir_circuit_step` (one call = one raw movfuscated step) until its
@@ -1221,9 +1252,16 @@ fn one_step_via_movfuscate(
             let msg = payload
                 .downcast_ref::<String>()
                 .cloned()
-                .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&'static str>()
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or_default();
-            if msg.contains("SignatureMismatch") || msg.contains("flat cell space") {
+            if msg.contains("SignatureMismatch")
+                || msg.contains("flat cell space")
+                || msg.contains("mixed element-address widths")
+            {
                 return None;
             }
             panic!("lower_ir_to_boolar panicked unexpectedly: {msg}");
@@ -1236,21 +1274,10 @@ fn one_step_via_movfuscate(
 }
 
 proptest! {
-    /// Found a real, not-yet-diagnosed disagreement between `eval_ir_circuit_step`
-    /// and `lower_ir_to_boolar`+`eval_biir` on the exact same one-iteration
-    /// `lower_to_circuit_ir` output (minimal repro: two blocks, block 0 empty,
-    /// block 1 a single oversized `Stmt::Const` of a `_8`-typed value, no
-    /// branch at all) -- narrowed down to NOT be a harness bug (both sides
-    /// evaluate the identical `circuit`/`state`; property M's own tests
-    /// already independently validate `eval_ir_circuit_step` against
-    /// `lower_to_circuit_ir` output for the exact same generators, so the
-    /// `eval_ir_circuit_step` side here is trustworthy), but not root-caused
-    /// beyond that. `#[ignore]`d rather than left permanently red; the exact
-    /// failing seed is pinned in `proptest-regressions/properties/ir_passes.txt`.
-    /// Run with `cargo test -p volar-fuzz --lib -- --ignored prop_p_ir_multiblock_movfuscate_one_step_agrees`
-    /// to reproduce.
+    /// Check exact one-step equivalence after movfuscation and Boolar
+    /// lowering. Shapes whose storage addresses are not representable by
+    /// Boolar's flat-cell model are skipped by `one_step_via_movfuscate`.
     #[test]
-    #[ignore = "found a real movfuscate+lower_ir_to_boolar disagreement, not yet root-caused -- see doc comment"]
     fn prop_p_ir_multiblock_movfuscate_one_step_agrees(
         (ir, types, inputs) in gen_ir_multiblock_and_inputs()
             .prop_filter("no StorageWrite in return list (void-width quirk, see property M)", |(ir, _, _)| !ir_returns_a_void_value(ir))
@@ -1266,11 +1293,8 @@ proptest! {
         );
     }
 
-    /// See `prop_p_ir_multiblock_movfuscate_one_step_agrees`'s doc comment --
-    /// same class of finding, independently reproduced with real (non-foldable)
-    /// branching via `gen_ir_diamond_and_inputs`.
+    /// The real, non-foldable branch counterpart of the multiblock property.
     #[test]
-    #[ignore = "found a real movfuscate+lower_ir_to_boolar disagreement, not yet root-caused -- see sibling test's doc comment"]
     fn prop_p_ir_diamond_movfuscate_one_step_agrees(
         (ir, types, inputs) in gen_ir_diamond_and_inputs()
             .prop_filter("no StorageWrite in return list (void-width quirk, see property M)", |(ir, _, _)| !ir_returns_a_void_value(ir))

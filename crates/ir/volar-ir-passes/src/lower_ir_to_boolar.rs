@@ -129,8 +129,7 @@ pub fn try_lower_ir_to_boolar_with_lane_table<P: Clone>(
     blocks: &IRBlocks<P>,
     types: &IRTypes,
 ) -> Result<(BIrBlocks<P>, BTreeMap<LaneId, IRTypeId>), ExternalLoweringError> {
-    try_lower_ir_to_boolar_with_tables(blocks, types)
-        .map(|(blocks, tables)| (blocks, tables.lanes))
+    try_lower_ir_to_boolar_with_tables(blocks, types).map(|(blocks, tables)| (blocks, tables.lanes))
 }
 
 /// All side tables of one [`lower_ir_to_boolar`] run: the `LaneId → IRTypeId`
@@ -177,9 +176,8 @@ pub fn lower_ir_to_boolar_with_tables<P: Clone>(
     blocks: &IRBlocks<P>,
     types: &IRTypes,
 ) -> (BIrBlocks<P>, LoweredTables) {
-    try_lower_ir_to_boolar_with_tables(blocks, types).unwrap_or_else(|error| {
-        panic!("lower_ir_to_boolar: invalid external primitive: {error:?}")
-    })
+    try_lower_ir_to_boolar_with_tables(blocks, types)
+        .unwrap_or_else(|error| panic!("lower_ir_to_boolar: invalid external primitive: {error:?}"))
 }
 
 /// Fallible variant of [`lower_ir_to_boolar_with_tables`].
@@ -224,7 +222,8 @@ pub fn try_lower_ir_to_boolar_with_tables<P: Clone>(
     // ---- 2. Lower blocks, recording per-lane element-address widths -------
     let mut addr_widths: BTreeMap<(StorageId, LaneId), usize> = BTreeMap::new();
     let mut occurrence = 0u64;
-    let mut var_bits_per_block: Vec<BTreeMap<u32, Vec<IRVarId>>> = Vec::with_capacity(blocks.blocks.len());
+    let mut var_bits_per_block: Vec<BTreeMap<u32, Vec<IRVarId>>> =
+        Vec::with_capacity(blocks.blocks.len());
     let out_blocks: Vec<BIrBlock<P>> = blocks
         .blocks
         .iter()
@@ -532,9 +531,14 @@ fn lower_stmt<P: Clone>(
 
         // ---- GF(2) polynomial ----------------------------------------------
         IRStmt::Poly {
-            coeffs, constant, ..
+            ty,
+            coeffs,
+            constant,
         } => {
-            let w = infer_poly_width(coeffs, var_bits);
+            // The result type is authoritative. In particular, a pure
+            // constant polynomial has no operands from which to infer a
+            // width, but still needs one Boolar wire per bit of `ty`.
+            let w = ir_type_bits(&types.0[ty.0 as usize], types);
             let bits: Vec<IRVarId> = (0..w)
                 .map(|j| lower_poly_bit(coeffs, constant, j, var_bits, emitter, prov.clone()))
                 .collect();
@@ -915,26 +919,6 @@ fn flatten_bits(args: &[IRVarId], var_bits: &BTreeMap<u32, Vec<IRVarId>>) -> Vec
 // Polynomial lowering helpers
 // ============================================================================
 
-/// Return the bit-width of the output of a `Poly` stmt.
-///
-/// The width equals the maximum bit-count of any variable appearing in any
-/// monomial.  If the polynomial has no variables (pure constant), the width
-/// is 1 (a single GF(2) bit).
-fn infer_poly_width(
-    coeffs: &alloc::collections::BTreeMap<Vec<IRVarId>, u8>,
-    var_bits: &BTreeMap<u32, Vec<IRVarId>>,
-) -> usize {
-    let mut w = 1usize;
-    for (mono, _) in coeffs {
-        for v in mono {
-            if let Some(bits) = var_bits.get(&v.0) {
-                w = w.max(bits.len());
-            }
-        }
-    }
-    w
-}
-
 /// Lower the `j`-th output bit of a `Poly` stmt.
 ///
 /// Implements: `result[j] = constant[j] ⊕ ⊕{(mono,coeff): coeff odd} ∧(vars[j])`.
@@ -963,17 +947,32 @@ fn lower_poly_bit<P: Clone>(
         } else {
             // AND of all variable bits at position `bit`.
             let mut and_acc: Option<IRVarId> = None;
+            let mut is_zero = false;
             for v in mono {
-                if let Some(bit_var) = var_bits.get(&v.0).and_then(|bs| bs.get(bit)).cloned() {
-                    and_acc = Some(match and_acc {
-                        None => bit_var,
-                        Some(prev) => emitter.emit(BIrStmt::And(prev, bit_var), prov.clone()),
-                    });
-                }
-                // If the variable has fewer bits than `bit`, its high bits are
-                // implicitly 0 — the monomial contributes 0 for this position.
+                let Some(bits) = var_bits.get(&v.0) else {
+                    is_zero = true;
+                    break;
+                };
+                let bit_var = match bits.as_slice() {
+                    // A Bit operand is a scalar selector and broadcasts to
+                    // every lane of the wider polynomial result.
+                    [scalar] => *scalar,
+                    _ => match bits.get(bit) {
+                        Some(bit_var) => *bit_var,
+                        // A non-scalar operand with no lane here is a
+                        // zero-extended value, so this whole product is 0.
+                        None => {
+                            is_zero = true;
+                            break;
+                        }
+                    },
+                };
+                and_acc = Some(match and_acc {
+                    None => bit_var,
+                    Some(prev) => emitter.emit(BIrStmt::And(prev, bit_var), prov.clone()),
+                });
             }
-            and_acc
+            (!is_zero).then_some(and_acc).flatten()
         };
 
         if let Some(mv) = mono_var {
@@ -1450,16 +1449,82 @@ mod tests {
         }
     }
 
-    // Latent limitation worth recording for the FAEST work:
-    // `infer_poly_width` derives the output width from referenced variables'
-    // bit-counts, *not* from the Poly's `ty`. Consequently a pure-constant
-    // `Poly { ty: AES8, coeffs: {}, constant: c }` lowers to a single bit,
-    // not 8. This isn't a blocker for FAEST — pure constants always go
-    // through `IRStmt::Const` instead — but if a future weaver pass emits
-    // constant-only Polys at field types, `infer_poly_width` will need to
-    // fall back to `ir_type_bits(ty)` when `coeffs` is empty. Tracked
-    // adjacent to AES8 work; no test asserts the current (wrong-for-empty)
-    // behaviour because no code path produces it today.
+    #[test]
+    fn pure_constant_poly_uses_its_declared_width() {
+        let mut types = TypeTable::new();
+        let byte = types.primitive(PrimType::_8);
+        let block = IRBlock::<()> {
+            params: std::vec![],
+            stmts: std::vec![Node::new(
+                volar_ir::ir::IRStmt::Poly {
+                    ty: byte,
+                    coeffs: BTreeMap::new(),
+                    constant: Constant {
+                        hi: 0,
+                        lo: 0b1010_0101
+                    },
+                },
+                (),
+                None,
+            )],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)]),
+            },
+        };
+
+        let lowered = lower_ir_to_boolar(&IRBlocks::new(std::vec![block]), &types);
+        let block = &lowered.blocks[0];
+        assert_eq!(block.stmts.len(), 8);
+        assert_eq!(
+            block.terminator,
+            BIrTerminator::Jmp(BIrTarget {
+                block: IRBlockTargetId::Return,
+                args: (0..8).map(IRVarId).collect(),
+            }),
+        );
+        for (bit, node) in block.stmts.iter().enumerate() {
+            let expected = if (0b1010_0101 >> bit) & 1 == 1 {
+                BIrStmt::One
+            } else {
+                BIrStmt::Zero
+            };
+            assert_eq!(node.kind, expected, "incorrect constant bit {bit}");
+        }
+    }
+
+    #[test]
+    fn poly_broadcasts_bit_selectors_across_wider_results() {
+        let mut types = TypeTable::new();
+        let bit = types.bit();
+        let byte = types.primitive(PrimType::_8);
+        let mut coeffs = BTreeMap::new();
+        coeffs.insert(std::vec![IRVarId(0), IRVarId(1)], 1);
+        let block = IRBlock::<()> {
+            params: std::vec![bit, byte],
+            stmts: std::vec![Node::new(
+                volar_ir::ir::IRStmt::Poly {
+                    ty: byte,
+                    coeffs,
+                    constant: zero_const(),
+                },
+                (),
+                None,
+            )],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(2)]),
+            },
+        };
+
+        let lowered = lower_ir_to_boolar(&IRBlocks::new(std::vec![block]), &types);
+        let block = &lowered.blocks[0];
+        assert_eq!(block.stmts.len(), 8);
+        for (bit, node) in block.stmts.iter().enumerate() {
+            assert_eq!(
+                node.kind,
+                BIrStmt::And(IRVarId(0), IRVarId((bit + 1) as u32))
+            );
+        }
+    }
 
     // -- Provenance threading -------------------------------------------------
 
