@@ -34,6 +34,7 @@ cc = { workspace = true, optional = true }
 
 [dev-dependencies]
 wat = "1.212.0"
+volar-fuzz.workspace = true
 
 [[test]]
 name = "wasm_inlined"

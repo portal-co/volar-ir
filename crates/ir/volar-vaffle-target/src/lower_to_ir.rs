@@ -518,7 +518,19 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             };
 
             let sig = &self.module.sigs[body.sig.0];
-            let n_params = sig.params.len();
+            // Total bit-width of all params (supports multi-bit types) --
+            // `sig.params.len()` is the *count* of logical parameters (one
+            // entry per LLVM/source-level argument, e.g. 2 for `(i8, i32)`),
+            // not the bit width `n_param_words`/`unpack_words` below actually
+            // need. Mirrors `total_ret_bits`'s identical pattern just below.
+            let n_params: usize = sig
+                .params
+                .iter()
+                .map(|&vtid| {
+                    let ir_tid = self.type_map[vtid.0 as usize];
+                    ir_type_bit_width(&self.types, ir_tid)
+                })
+                .sum();
             let n_values = body.values.len();
 
             // Total bit-width of all return values (supports multi-bit types).

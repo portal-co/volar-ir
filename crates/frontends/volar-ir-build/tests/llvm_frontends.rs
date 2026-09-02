@@ -215,7 +215,7 @@ bb4:
 }
 
 #[test]
-fn llvm_switch_movfuscated_lower_to_boolar_blocked() {
+fn llvm_switch_movfuscated_lowers_to_boolar_and_fuses() {
     let src = r#"
 define i32 @poll_fsm(i8 %state, i32 %acc) {
 entry:
@@ -234,17 +234,62 @@ bb4:
   ret i32 %r
 }
 "#;
-    let path = write_temp_ll("poll_fsm_boolar_blocked", src);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Pipeline::from_llvm(&path, &["poll_fsm"])
-            .and_then(|p| p.lower_to_volar_ir())
-            .and_then(|p| p.movfuscate())
-            .and_then(|p| p.lower_to_boolar())
-            .expect("cross-block STACK spill blocked until llvm-stack-spill-boolar.md");
-    }));
+    let path = write_temp_ll("poll_fsm_boolar", src);
+    let boolar = Pipeline::from_llvm(&path, &["poll_fsm"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .and_then(|p| p.lower_to_boolar())
+        .expect("cross-block STACK spill: see docs/llvm-stack-spill-boolar.md");
+    assert!(boolar.to_boolar().blocks.len() == 1);
+
+    let path2 = write_temp_ll("poll_fsm_boolar_fuse", src);
+    let fused = Pipeline::from_llvm(&path2, &["poll_fsm"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .and_then(|p| p.lower_to_boolar())
+        .and_then(|p| p.fuse(64, volar_ir_passes::LoweringMode::Unconditional))
+        .expect("fused poll_fsm must round-trip through fuse without panicking");
+    let _ = fused.to_boolar_circuit();
+
     let _ = fs::remove_file(&path);
-    assert!(
-        result.is_err(),
-        "expected lower_to_boolar panic on STACK spill width mismatch"
-    );
+    let _ = fs::remove_file(&path2);
+}
+
+/// Regression test for a bug found while triaging
+/// `docs/llvm-stack-spill-boolar.md`: `lower_to_ir.rs`'s `plan_functions`
+/// sized a function's entry-block param unpacking off `sig.params.len()`
+/// (the *count* of logical parameters, e.g. 2 for `(i8, i32)`) instead of
+/// their total *bit width* (40) — silently leaving most parameter bits
+/// unmapped, which `translate_stmt`'s `s(vid)` fallback then substituted
+/// with a wrong-but-plausible sentinel value instead of failing loudly.
+/// This affected every function with more than one bit's worth of
+/// parameters and was never caught because prior tests only checked
+/// circuit *shape* (`is_circuit()`), never the computed *value*.
+#[test]
+fn llvm_multi_bit_params_compute_correct_value() {
+    let src = r#"
+define i32 @xor_one(i32 %x) {
+entry:
+  %y = xor i32 %x, 1
+  ret i32 %y
+}
+"#;
+    let path = write_temp_ll("xor_one_value", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["xor_one"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("register xor via LLVM→VAFFLE")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let x: u64 = 5;
+    let input_word: Vec<bool> = (0..64).map(|i| (x >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("eval terminates");
+    let y = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
+    assert_eq!(y, x ^ 1, "xor_one(5) must compute 4, not silently use garbage upper bits");
+    let _ = fs::remove_file(&path);
 }
