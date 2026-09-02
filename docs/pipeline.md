@@ -124,6 +124,8 @@ Frontend routes that feed those passes:
 - **WASM (fully inlined):** `from_wasm_inlined` = the above plus `inline_vaffle_everything`, then `lower_vaffle_to_ir`, then optional `unroll_ir` or `movfuscate`. Distinct from `volar-wasm-circuit-import` (control-free `VCircuit`, source-level call expansion).
 - **LLVM structural:** `volar-llvm-vaffle-import::import_module` preserves calls. `import_module_inlined` / `from_llvm_inlined` compose inline-everything on top. Then unroll (concrete CF) or movfuscate (symbolic CF).
 - **LLVM-direct:** `volar-llvm-ir-import` / `from_llvm_direct` is a specialized interpreter that already emits `is_circuit()` when control flow is concrete. It is not rewritten on top of unroll-everything. Structural + inline + unroll should agree with direct when both succeed; when CF is data-dependent, direct and unroll fail and structural + movfuscate still works.
+- **LLVM LTO archive:** `from_llvm` / `from_llvm_direct` accept a static library (`.a`) of clang **full-LTO** bitcode members (raw `.bc` or ELF `.llvmbc` / Mach-O `__LLVM,__bitcode`). Members are `link_in_module`'d; native-only objects and ThinLTO-only summaries fail closed. GCC LTO is not LLVM bitcode.
+- **LLVM LTO pre-build:** `from_cc` / `from_cc_inlined` / `from_cc_direct` (`cc` feature) run `cc::Build` with `-flto=full` at execute time and import the resulting `lib{name}.a`. `from_command` / `from_command_inlined` / `from_command_direct` run a user-specified command (no shell) that must write that archive.
 
 `volar-ir-build` is the std builder for these sources and passes; it terminates at VAFFLE, Volar IR, or LIR. Object emit, weaving, and `cargo:rerun-if-changed` stay in `volar`'s `volar-build`, which thin-wraps this crate.
 

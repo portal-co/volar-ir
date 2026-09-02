@@ -6,9 +6,14 @@
 //! Volar IR, saved LIR) plus the IR passes that live in this repo. Object
 //! emit and weaving stay in `volar-build`.
 
+#[cfg(feature = "llvm")]
+mod lto_archive;
 mod pipeline;
 
 pub use pipeline::{Pipeline, PipelinePass};
+
+#[cfg(feature = "llvm")]
+pub use lto_archive::{write_bitcode_archive, write_bitcode_archive_members, CommandBuild};
 
 #[cfg(feature = "vaffle")]
 pub use pipeline::serialize_vaffle_module;

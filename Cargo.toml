@@ -73,3 +73,7 @@ inkwell = { version = "0.10.0", features = [
     # `llvm`/`llvm@22` formula actually installed on dev machines — llvm-sys
     # auto-detects it via `brew --prefix llvm@22`/`brew --prefix llvm`, no
     # custom build.rs needed.
+
+ar     = "0.9"
+object = "0.36"
+cc     = "1.2"

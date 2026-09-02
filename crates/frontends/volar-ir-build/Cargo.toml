@@ -10,7 +10,8 @@ repository.workspace = true
 default = []
 vaffle = ["dep:vaffle", "dep:volar-vaffle-target"]
 wasm = ["vaffle", "dep:portal-pc-waffle-ir", "dep:portal-pc-waffle-frontend"]
-llvm = ["vaffle", "dep:inkwell", "dep:volar-llvm-vaffle-import", "dep:volar-llvm-ir-import"]
+llvm = ["vaffle", "dep:inkwell", "dep:volar-llvm-vaffle-import", "dep:volar-llvm-ir-import", "dep:ar", "dep:object"]
+cc = ["llvm", "dep:cc"]
 
 [dependencies]
 volar-ir = { workspace = true, features = ["rkyv"] }
@@ -26,6 +27,9 @@ portal-pc-waffle-frontend = { workspace = true, optional = true }
 inkwell = { workspace = true, optional = true }
 volar-llvm-vaffle-import = { workspace = true, optional = true }
 volar-llvm-ir-import = { workspace = true, optional = true }
+ar = { workspace = true, optional = true }
+object = { workspace = true, optional = true }
+cc = { workspace = true, optional = true }
 
 [dev-dependencies]
 wat = "1.212.0"
@@ -36,4 +40,8 @@ required-features = ["wasm"]
 
 [[test]]
 name = "llvm_frontends"
+required-features = ["llvm"]
+
+[[test]]
+name = "llvm_lto"
 required-features = ["llvm"]
