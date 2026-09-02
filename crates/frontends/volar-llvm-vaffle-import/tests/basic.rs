@@ -397,7 +397,7 @@ entry:
 }
 
 #[test]
-fn switch_is_named_unsupported() {
+fn switch_imports_to_table() {
     let source = r#"
 define i32 @poll(i8 %s, i32 %acc) {
 entry:
@@ -422,11 +422,54 @@ other:
             "test.ll",
         ))
         .expect("valid LLVM IR fixture");
-    let err = import_module(&module, &["poll"]).expect_err("switch must fail closed");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("switch"),
-        "expected named switch error, got {msg}"
-    );
+    let out = import_module(&module, &["poll"]).expect("switch must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let has_table = body
+        .blocks
+        .iter()
+        .any(|b| matches!(b.terminator, Terminator::Table { .. }));
+    assert!(has_table, "expected a Terminator::Table for LLVM switch");
+    let _ = context;
+}
+
+#[test]
+fn switch_with_phi_imports() {
+    // rustc `-C opt-level=1` `match` on a byte: switch + join phi, no alloca.
+    let source = r#"
+define i32 @poll_fsm(i8 %state, i32 %acc) {
+entry:
+  switch i8 %state, label %bb4 [
+    i8 0, label %bb3
+    i8 1, label %bb2
+  ]
+bb3:
+  %add = add i32 %acc, 1
+  br label %bb4
+bb2:
+  %x = xor i32 %acc, 40503
+  br label %bb4
+bb4:
+  %r = phi i32 [ %x, %bb2 ], [ %acc, %entry ], [ %add, %bb3 ]
+  ret i32 %r
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["poll_fsm"]).expect("switch+phi must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let has_table = body
+        .blocks
+        .iter()
+        .any(|b| matches!(b.terminator, Terminator::Table { .. }));
+    assert!(has_table, "expected a Terminator::Table for rustc match");
     let _ = context;
 }

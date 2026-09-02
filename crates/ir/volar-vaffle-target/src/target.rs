@@ -2202,6 +2202,17 @@ mod tests {
             }
             other => panic!("expected Terminator::Table, got {other:?}"),
         }
+
+        let (ir_blocks, _) = crate::lower_vaffle_to_ir(&t.module);
+        let jt = ir_blocks.blocks.iter().find_map(|b| match &b.terminator {
+            volar_ir::ir::IRTerminator::JumpTable { cases, .. } => Some(cases.len()),
+            _ => None,
+        });
+        assert_eq!(
+            jt,
+            Some(3),
+            "Table must lower to JumpTable with 2 cases + default, not the Return catch-all"
+        );
     }
 
     /// `dyn_jump`'s default (built on `switch`, keyed by `block_ordinal`)

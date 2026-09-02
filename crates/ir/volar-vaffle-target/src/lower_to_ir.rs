@@ -1217,6 +1217,52 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     target: IRBranchTarget::new(IRBlockTargetId::Block(callee_entry), sp_words),
                 }
             }
+            Terminator::Table {
+                index,
+                targets,
+                default_target,
+            } => {
+                // Dense positional dispatch (`targets[idx]`, else default),
+                // matching the fuzz interpreter and `VaffleTarget::switch`:
+                // the selector is `0..targets.len()-1` for an explicit case
+                // and `targets.len()` (out of bounds) for the default.
+                let sp_words = pack_bits(em, sp_bits, PACK_W);
+                let mut cases = BTreeMap::new();
+                for (i, t) in targets.iter().enumerate() {
+                    let ir_block = IRBlockId((entry_off + t.block.0) as u32);
+                    let mut args: Vec<IRVarId> = sp_words.clone();
+                    args.extend(t.args.iter().map(|v| s(v)));
+                    cases.insert(
+                        Constant {
+                            hi: 0,
+                            lo: i as u128,
+                        },
+                        IRBranchTarget {
+                            dest: IRBlockTargetId::Block(ir_block),
+                            args,
+                            reentry: t.reentry.clone(),
+                        },
+                    );
+                }
+                let default_block = IRBlockId((entry_off + default_target.block.0) as u32);
+                let mut default_args: Vec<IRVarId> = sp_words;
+                default_args.extend(default_target.args.iter().map(|v| s(v)));
+                cases.insert(
+                    Constant {
+                        hi: 0,
+                        lo: targets.len() as u128,
+                    },
+                    IRBranchTarget {
+                        dest: IRBlockTargetId::Block(default_block),
+                        args: default_args,
+                        reentry: default_target.reentry.clone(),
+                    },
+                );
+                IRTerminator::JumpTable {
+                    index: s(index),
+                    cases,
+                }
+            }
             _ => IRTerminator::Jmp {
                 target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
             },

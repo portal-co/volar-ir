@@ -125,7 +125,7 @@ Frontend routes that feed those passes:
 
 - **WASM (call-preserving):** `Pipeline::from_wasm` → WAFFLE → VAFFLE (`lower_waffle_module`). Calls stay as `Value::Call` until a later pass.
 - **WASM (fully inlined):** `from_wasm_inlined` = the above plus `inline_vaffle_everything`, then `lower_vaffle_to_ir`, then optional `unroll_ir` or `movfuscate`. Distinct from `volar-wasm-circuit-import` (control-free `VCircuit`, source-level call expansion).
-- **LLVM structural:** `volar-llvm-vaffle-import::import_module` preserves calls. `import_module_inlined` / `from_llvm_inlined` compose inline-everything on top. Then unroll (concrete CF) or movfuscate (symbolic CF). Constant-size, scalar-integer `alloca` + stack load/store/constant-GEP is supported (see [`llvm-alloca.md`](llvm-alloca.md) for what's still deferred: symbolic count, non-scalar element types, symbolic/multi-index GEP, and `import_module_inlined` combined with `alloca`); `switch`/`indirectbr` are a named error (VAFFLE `Terminator::Table` exists, ingest is deferred).
+- **LLVM structural:** `volar-llvm-vaffle-import::import_module` preserves calls. `import_module_inlined` / `from_llvm_inlined` compose inline-everything on top. Then unroll (concrete CF) or movfuscate (symbolic CF). Constant-size scalar `alloca` and `switch` import are landed ([`llvm-alloca.md`](llvm-alloca.md)). Cross-block STACK spill → Boolar is blocked ([`llvm-stack-spill-boolar.md`](llvm-stack-spill-boolar.md)).
 - **LLVM-direct:** `volar-llvm-ir-import` / `from_llvm_direct` is a specialized interpreter that already emits `is_circuit()` when control flow is concrete. It is not rewritten on top of unroll-everything. Structural + inline + unroll should agree with direct when both succeed; when CF is data-dependent, direct and unroll fail and structural + movfuscate still works.
 - **LLVM LTO archive:** `from_llvm` / `from_llvm_direct` accept a static library (`.a`) of clang **full-LTO** bitcode members (raw `.bc` or ELF `.llvmbc` / Mach-O `__LLVM,__bitcode`). Members are `link_in_module`'d; native-only objects and ThinLTO-only summaries fail closed. GCC LTO is not LLVM bitcode.
 - **LLVM LTO pre-build:** `from_cc` / `from_cc_inlined` / `from_cc_direct` (`cc` feature) run `cc::Build` with `-flto=full` at execute time and import the resulting `lib{name}.a`. `from_command` / `from_command_inlined` / `from_command_direct` run a user-specified command (no shell) that must write that archive.
@@ -146,6 +146,7 @@ Frontend routes that feed those passes:
 | Wire regions & gadgets (plan) | [`wire-regions-gadgets-plan.md`](wire-regions-gadgets-plan.md) |
 | Typed gadgets, higher-level IR gadgets, region threading through passes (plan) | [`typed-gadgets-and-region-threading-plan.md`](typed-gadgets-and-region-threading-plan.md) |
 | LLVM `alloca` → VAFFLE stack | [`llvm-alloca.md`](llvm-alloca.md) |
+| LLVM STACK spill → Boolar | [`llvm-stack-spill-boolar.md`](llvm-stack-spill-boolar.md) |
 | Full pipeline (weaving, backends, proving) | `volar` repo's `docs/pipeline.md` |
 | Textual circuit libraries (Noir, POD2) | [`circuit-source.md`](circuit-source.md) |
 

@@ -21,8 +21,8 @@
 //!
 //! Supported: integer arithmetic (`add`/`sub`/`mul`/`udiv`/`sdiv`), bitwise
 //! ops, shifts, `icmp` (all predicates), `select`, `trunc`/`zext`/`sext`,
-//! `phi` (→ block params), direct `call`, `br`/conditional `br`/`ret`, and
-//! loads/stores through **two** distinct pointer provenances, resolved at
+//! `phi` (→ block params), direct `call`, `br`/conditional `br`/`switch`/`ret`,
+//! and loads/stores through **two** distinct pointer provenances, resolved at
 //! import time and never conflated:
 //!
 //! - a global variable (optionally behind a constant-index `getelementptr`)
@@ -40,20 +40,22 @@
 //!   `docs/llvm-alloca.md`).
 //!
 //! Not yet supported (hard error): floats, vectors, aggregates, atomics,
-//! `switch`, `indirectbr`/`blockaddress` (VAFFLE's `Value::BlockAddr` +
-//! `Terminator::Table` already model this — see their doc comments — wiring
-//! up ingestion is deferred), tail calls as a distinct form (currently
+//! `indirectbr`/`blockaddress` (VAFFLE's `Value::BlockAddr` already models
+//! this — ingest is deferred), tail calls as a distinct form (currently
 //! lowered the same as an ordinary `call`), any pointer arithmetic whose
 //! base doesn't resolve to a literal global or a tracked stack pointer,
 //! `alloca` with a symbolic count or a non-integer element type, a
 //! multi-index or symbolic-index `getelementptr` into a stack pointer, and
 //! phi/select of a pointer-typed SSA value (merging two distinct pointers
-//! at a control-flow join).
+//! at a control-flow join). `switch` is supported: sparse case keys become
+//! a dense positional `Terminator::Table` via the same `bc_eq` /
+//! `bc_select_vec` selector cascade `VaffleTarget::switch` uses.
 
 use std::collections::HashMap;
 
 use inkwell::IntPredicate;
 use inkwell::basic_block::BasicBlock as LlvmBlock;
+use inkwell::llvm_sys::core::LLVMGetSwitchCaseValue;
 use inkwell::module::Module as LlvmModule;
 use inkwell::values::{
     AnyValue, AnyValueEnum, AsValueRef, BasicValueEnum, CallSiteValue, FunctionValue,
@@ -64,7 +66,9 @@ use vaffle::{
     Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target, Terminator, Value,
     ValueId,
 };
-use volar_ir_common::{Constant, Node, Stmt, StorageAllocator, StorageId, Type, TypeId, TypeTable};
+use volar_ir_common::{
+    Constant, IrType, Node, Stmt, StorageAllocator, StorageId, Type, TypeId, TypeTable,
+};
 use volar_lir::circuits::{self, BitCircuitBuilder};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
 
@@ -98,6 +102,16 @@ type IResult<T> = Result<T, ImportError>;
 /// `PTR_BITS` convention (and this crate's existing pointer-param fallback
 /// in [`llvm_bit_width`]).
 const PTR_BITS: usize = 32;
+
+/// Bits needed to represent every integer in `0..=v` (at least 1). Matches
+/// `VaffleTarget::switch`'s dense positional selector width.
+fn bits_for_max_value(v: usize) -> usize {
+    if v == 0 {
+        1
+    } else {
+        (usize::BITS - v.leading_zeros()) as usize
+    }
+}
 
 /// Import every reachable function transitively called from `entries` (by
 /// LLVM name) into a fresh `vaffle::Module`. Each entry (and every function
@@ -1085,14 +1099,111 @@ impl<'ctx> Importer<'ctx> {
                     }
                 }
             }
+            InstructionOpcode::Switch => self.translate_switch(fctx, instr, bb)?,
             other => {
                 return Err(ImportError::Unsupported(format!(
-                    "terminator {other:?} (switch/indirectbr not yet supported; alloca is docs/llvm-alloca.md)"
+                    "terminator {other:?} (indirectbr not yet supported)"
                 )));
             }
         };
         fctx.terminators[cur.0] = Some(term);
         Ok(())
+    }
+
+    /// LLVM `switch`: sparse `(key, dest)` pairs plus a default. VAFFLE
+    /// `Terminator::Table` is dense positional (`targets[idx]`, else
+    /// default), so this builds the same GF(2) selector cascade as
+    /// `VaffleTarget::switch`: the first matching case index, or
+    /// `cases.len()` (out of `targets` bounds) when nothing matches.
+    fn translate_switch(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        instr: InstructionValue<'ctx>,
+        bb: LlvmBlock<'ctx>,
+    ) -> IResult<Terminator> {
+        let cur = fctx.current;
+        let cond = instr
+            .get_operand(0)
+            .and_then(|o| o.value())
+            .ok_or_else(|| ImportError::Unsupported("switch condition must be a value".into()))?;
+        let cond_bits = self.value_bits(fctx, cond)?;
+        let default_bb = instr
+            .get_operand(1)
+            .and_then(|o| o.block())
+            .ok_or_else(|| ImportError::Unsupported("switch default must be a block".into()))?;
+        let default_target = self.target_for_dest(fctx, bb, default_bb)?;
+
+        let mut cases: Vec<(i64, Target)> = Vec::new();
+        // Operands are `[cond, default_dest, case1_dest, …]`. Case *keys*
+        // are not operands — `LLVMGetSwitchCaseValue(sw, successor_index)`
+        // (successor 0 = default, so cases start at 1). See
+        // `volar-llvm-jumpthread`'s `switch_target`.
+        let n_ops = instr.get_num_operands();
+        for i in 2..n_ops {
+            let dest = instr
+                .get_operand(i)
+                .and_then(|o| o.block())
+                .ok_or_else(|| ImportError::Unsupported("switch case dest must be a block".into()))?;
+            let case_value = unsafe {
+                IntValue::new(LLVMGetSwitchCaseValue(instr.as_value_ref(), i - 1))
+            };
+            let key = case_value.get_sign_extended_constant().ok_or_else(|| {
+                ImportError::Unsupported("switch case key must be a constant".into())
+            })?;
+            cases.push((key, self.target_for_dest(fctx, bb, dest)?));
+        }
+
+        let n = cases.len();
+        let sel_width = bits_for_max_value(n);
+        let index_width = cond_bits.len();
+        let selector = {
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block: cur,
+            };
+            let mut selector: Vec<ValueId> = (0..sel_width)
+                .map(|b| c.bc_const((n >> b) & 1 != 0))
+                .collect();
+            for (case_i, (key, _)) in cases.iter().enumerate().rev() {
+                let key_bits: Vec<ValueId> = (0..index_width)
+                    .map(|b| c.bc_const((*key as u64 >> b) & 1 != 0))
+                    .collect();
+                let matched = circuits::bc_eq(&mut c, &cond_bits, &key_bits);
+                let case_idx_bits: Vec<ValueId> = (0..sel_width)
+                    .map(|b| c.bc_const((case_i >> b) & 1 != 0))
+                    .collect();
+                selector = circuits::bc_select_vec(&mut c, matched, &case_idx_bits, &selector);
+            }
+            selector
+        };
+        let selector_val = self.compose_address(fctx, cur, &selector);
+        Ok(Terminator::Table {
+            index: selector_val,
+            targets: cases.into_iter().map(|(_, t)| t).collect(),
+            default_target,
+        })
+    }
+
+    /// Pack `bits` into a single VAFFLE value for use as a `Table` index,
+    /// matching `VaffleTarget::compose_address`.
+    fn compose_address(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        bits: &[ValueId],
+    ) -> ValueId {
+        if bits.len() == 1 {
+            return bits[0];
+        }
+        let vec_ty = self.types.intern(IrType::Vec(bits.len(), self.bit_tid));
+        fctx.emit(
+            block,
+            Value::Op(Stmt::Merge {
+                parts: bits.to_vec(),
+                ty: vec_ty,
+            }),
+        )
     }
 
     /// Build the `Target` for successor block `succ_idx` of `bb`'s
@@ -1110,17 +1221,26 @@ impl<'ctx> Importer<'ctx> {
             .get_operand(succ_idx)
             .and_then(|o| o.block())
             .ok_or_else(|| ImportError::Unsupported("branch successor must be a block".into()))?;
+        self.target_for_dest(fctx, bb, succ_bb)
+    }
+
+    fn target_for_dest(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        from: LlvmBlock<'ctx>,
+        dest: LlvmBlock<'ctx>,
+    ) -> IResult<Target> {
         let succ_vb = *fctx
             .block_of
-            .get(&succ_bb)
+            .get(&dest)
             .ok_or_else(|| ImportError::Unsupported("branch to unknown block".into()))?;
         let phis = fctx.phi_order[succ_vb.0].clone();
         let mut args = Vec::new();
         for phi in phis {
             let incoming = (0..phi.count_incoming())
                 .find_map(|i| {
-                    let (v, from) = phi.get_incoming(i)?;
-                    (from == bb).then_some(v)
+                    let (v, from_bb) = phi.get_incoming(i)?;
+                    (from_bb == from).then_some(v)
                 })
                 .ok_or_else(|| {
                     ImportError::Unsupported(

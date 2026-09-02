@@ -168,3 +168,83 @@ entry:
     assert!(blocks.is_circuit());
     let _ = fs::remove_file(&path);
 }
+
+#[test]
+fn llvm_switch_lowers_to_jump_table_and_movfuscates() {
+    let src = r#"
+define i32 @poll_fsm(i8 %state, i32 %acc) {
+entry:
+  switch i8 %state, label %bb4 [
+    i8 0, label %bb3
+    i8 1, label %bb2
+  ]
+bb3:
+  %add = add i32 %acc, 1
+  br label %bb4
+bb2:
+  %x = xor i32 %acc, 40503
+  br label %bb4
+bb4:
+  %r = phi i32 [ %x, %bb2 ], [ %acc, %entry ], [ %add, %bb3 ]
+  ret i32 %r
+}
+"#;
+    let path = write_temp_ll("poll_fsm_jt", src);
+    let (ir, _) = Pipeline::from_llvm(&path, &["poll_fsm"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .expect("switch via LLVM→VAFFLE→IR")
+        .to_volar_ir();
+    let has_jt = ir.blocks.iter().any(|b| {
+        matches!(b.terminator, volar_ir::ir::IRTerminator::JumpTable { .. })
+    });
+    assert!(
+        has_jt,
+        "VAFFLE Table must lower to IR JumpTable, not the Return catch-all"
+    );
+    let unroll = Pipeline::from_llvm(&path, &["poll_fsm"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir());
+    assert!(unroll.is_err(), "symbolic switch must fail unroll");
+    let (blocks, _) = Pipeline::from_llvm(&path, &["poll_fsm"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .expect("movfuscate accepts switch")
+        .to_volar_ir();
+    assert!(blocks.is_movfuscated());
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn llvm_switch_movfuscated_lower_to_boolar_blocked() {
+    let src = r#"
+define i32 @poll_fsm(i8 %state, i32 %acc) {
+entry:
+  switch i8 %state, label %bb4 [
+    i8 0, label %bb3
+    i8 1, label %bb2
+  ]
+bb3:
+  %add = add i32 %acc, 1
+  br label %bb4
+bb2:
+  %x = xor i32 %acc, 40503
+  br label %bb4
+bb4:
+  %r = phi i32 [ %x, %bb2 ], [ %acc, %entry ], [ %add, %bb3 ]
+  ret i32 %r
+}
+"#;
+    let path = write_temp_ll("poll_fsm_boolar_blocked", src);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Pipeline::from_llvm(&path, &["poll_fsm"])
+            .and_then(|p| p.lower_to_volar_ir())
+            .and_then(|p| p.movfuscate())
+            .and_then(|p| p.lower_to_boolar())
+            .expect("cross-block STACK spill blocked until llvm-stack-spill-boolar.md");
+    }));
+    let _ = fs::remove_file(&path);
+    assert!(
+        result.is_err(),
+        "expected lower_to_boolar panic on STACK spill width mismatch"
+    );
+}
