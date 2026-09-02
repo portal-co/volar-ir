@@ -103,6 +103,32 @@ type IResult<T> = Result<T, ImportError>;
 /// in [`llvm_bit_width`]).
 const PTR_BITS: usize = 32;
 
+/// Bit-address `FuncCtx::next_stack_slot` starts bumping from, per function.
+///
+/// `StorageId::STACK` is shared with `volar-vaffle-target/src/lower_to_ir.rs`'s
+/// own calling-convention frame (params/return/spill/cross-block-value
+/// regions, addressed as `frame_sp + offset` starting at compile-time
+/// offset 0 for a non-recursive top-level function) -- `lower_to_ir.rs`'s
+/// generic translation of `Value::StackAlloc`'s address-bit `Stmt::Const`
+/// nodes forwards them verbatim, with no rebasing against that frame at
+/// all. Starting this importer's own alloca addresses at absolute zero
+/// therefore silently aliases a real function's own return-value/spill
+/// slots. This is a separate, precautionary concern from `addr_tid` below
+/// (a genuine bug that *was* confirmed causing `spill(5)` to compute 0 --
+/// this reservation guards against a *different*, still-unverified-in-
+/// practice collision on top of that fix, not the cause of it). A fully
+/// general fix belongs in `lower_to_ir.rs` (rebase every
+/// `StorageId::STACK` access by that function's own `own_layout.size`),
+/// but nothing production-real reaches that path except this importer
+/// today (`VaffleTarget`/`CBackend` never go through `lower_to_ir.rs` for
+/// `StackAlloc` at all -- see docs/llvm-stack-spill-boolar.md's "Known
+/// risks"). Reserving a large, fixed offset here is a much smaller, purely
+/// local change: comfortably larger than any realistic `own_layout.size`
+/// (proportional to a function's own VAFFLE value count) while staying
+/// well inside `SP_BITS` (32) so `StackPtr` arithmetic elsewhere never
+/// wraps around it.
+const STACK_ALLOCA_RESERVE: u64 = 1 << 24;
+
 /// Bits needed to represent every integer in `0..=v` (at least 1). Matches
 /// `VaffleTarget::switch`'s dense positional selector width.
 fn bits_for_max_value(v: usize) -> usize {
@@ -181,6 +207,19 @@ struct Importer<'ctx> {
     storage_alloc: StorageAllocator,
     bit_tid: TypeId,
     byte_tid: TypeId,
+    /// Type stamped on `StorageId::STACK` address `Stmt::Const`s
+    /// (`stack_load`/`stack_store`). Must be wide enough to hold the
+    /// *numeric value* of a stack bit-address (up to
+    /// `STACK_ALLOCA_RESERVE` plus a function's own allocated bits) --
+    /// `self.bit_tid` (1 bit) is NOT: an interpreter evaluating
+    /// `Stmt::Const` masks the literal down to its *declared* type's
+    /// width, so a 1-bit-typed address constant silently collapses every
+    /// address to just its own low bit, aliasing almost everything onto
+    /// addresses 0/1 (confirmed root cause of `spill(5)` computing `0`
+    /// instead of `5` -- every one of `spill`'s 32 distinct bit addresses
+    /// collapsed to 0 or 1 this way). `_32` matches `PTR_BITS`/`SP_BITS`
+    /// convention used elsewhere in this pipeline for addresses.
+    addr_tid: TypeId,
 }
 
 impl<'ctx> Importer<'ctx> {
@@ -188,6 +227,7 @@ impl<'ctx> Importer<'ctx> {
         let mut types = TypeTable::new();
         let bit_tid = types.bit();
         let byte_tid = types.primitive(Type::_8);
+        let addr_tid = types.primitive(Type::_32);
         Importer {
             types,
             funcs: Vec::new(),
@@ -195,11 +235,14 @@ impl<'ctx> Importer<'ctx> {
             exports: Default::default(),
             func_ids: HashMap::new(),
             storage_for_global: HashMap::new(),
-            // Start well above any reserved range; this importer never
-            // touches StorageId::STACK/VIRT_*/memory(_) itself.
+            // Start well above any reserved range; this importer's own
+            // *global* StorageIds never touch StorageId::STACK/VIRT_*/
+            // memory(_) (stack-alloca'd data uses StorageId::STACK
+            // directly, via `stack_load`/`stack_store`, not this allocator).
             storage_alloc: StorageAllocator::new(64),
             bit_tid,
             byte_tid,
+            addr_tid,
         }
     }
 
@@ -815,24 +858,31 @@ impl<'ctx> Importer<'ctx> {
                 let elem_ty = instr
                     .get_allocated_type()
                     .map_err(|_| ImportError::Unsupported("malformed alloca".into()))?;
-                let elem_bits = match elem_ty {
-                    inkwell::types::BasicTypeEnum::IntType(t) => t.get_bit_width() as u64,
-                    _ => {
-                        return Err(ImportError::Unsupported(
-                            "alloca of non-integer type not supported".into(),
-                        ));
-                    }
-                };
+                // Flatten a (possibly nested) array type down to its
+                // innermost scalar integer element type and total element
+                // count -- `[16 x i8]` becomes (i8, 16), `[4 x [4 x i8]]`
+                // becomes (i8, 16), and a bare scalar is (ty, 1). Structs
+                // (and anything else) are a named error, not a panic --
+                // see docs/llvm-array-alloca.md item 3.
+                let (int_ty, array_count) = flatten_alloca_type(elem_ty).ok_or_else(|| {
+                    ImportError::Unsupported(
+                        "alloca of non-integer, non-array-of-integer type not supported".into(),
+                    )
+                })?;
+                let elem_bits = int_ty.get_bit_width() as u64;
                 // The array-size operand is `1` unless the source used
                 // `alloca <ty>, <n>`; either way it must be a compile-time
                 // constant (VLAs are symbolic and fail closed here, not via
                 // a panic).
-                let count: u64 = match instr.get_operand(0).and_then(|o| o.value()) {
+                let alloca_count: u64 = match instr.get_operand(0).and_then(|o| o.value()) {
                     Some(BasicValueEnum::IntValue(n)) => n.get_zero_extended_constant().ok_or_else(
                         || ImportError::Unsupported("alloca count is symbolic".into()),
                     )?,
                     _ => 1,
                 };
+                let count = array_count
+                    .checked_mul(alloca_count)
+                    .ok_or_else(|| ImportError::Unsupported("alloca size overflow".into()))?;
                 let total_slots = elem_bits
                     .checked_mul(count)
                     .ok_or_else(|| ImportError::Unsupported("alloca size overflow".into()))?;
@@ -847,7 +897,7 @@ impl<'ctx> Importer<'ctx> {
                 // required so passes that pattern-match `Value::StackAlloc`
                 // (e.g. `inline_vaffle`'s stack-slot rebase, `lower_to_ir`'s
                 // spill-avoidance) see this allocation.
-                let elem_tid = self.llvm_type_id(elem_ty);
+                let elem_tid = self.llvm_type_id(int_ty);
                 fctx.emit(
                     cur,
                     Value::StackAlloc {
@@ -906,7 +956,7 @@ impl<'ctx> Importer<'ctx> {
                         hi: 0,
                         lo: (base_slot + i) as u128,
                     },
-                    self.bit_tid,
+                    self.addr_tid,
                 )),
             );
             let bit = fctx.emit(
@@ -943,7 +993,7 @@ impl<'ctx> Importer<'ctx> {
                         hi: 0,
                         lo: (base_slot + i as u64) as u128,
                     },
-                    self.bit_tid,
+                    self.addr_tid,
                 )),
             );
             fctx.emit(
@@ -1272,6 +1322,24 @@ fn phis_of<'ctx>(bb: &LlvmBlock<'ctx>) -> Vec<PhiValue<'ctx>> {
     out
 }
 
+/// Recursively flatten a (possibly nested-array) alloca'd type down to its
+/// innermost scalar integer element type and total element count —
+/// `[16 x i8]` -> `(i8, 16)`, `[4 x [4 x i8]]` -> `(i8, 16)`, a bare scalar
+/// -> `(ty, 1)`. `None` for anything else (struct, float, vector, pointer)
+/// — callers turn that into a named "not supported" error, never a panic
+/// (see docs/llvm-array-alloca.md item 3: a struct alloca either flattens
+/// or names a clear error, both are an acceptable outcome).
+fn flatten_alloca_type(ty: inkwell::types::BasicTypeEnum<'_>) -> Option<(inkwell::types::IntType<'_>, u64)> {
+    match ty {
+        inkwell::types::BasicTypeEnum::IntType(t) => Some((t, 1)),
+        inkwell::types::BasicTypeEnum::ArrayType(a) => {
+            let (inner_ty, inner_count) = flatten_alloca_type(a.get_element_type())?;
+            inner_count.checked_mul(a.len() as u64).map(|c| (inner_ty, c))
+        }
+        _ => None,
+    }
+}
+
 fn int_result_width(instr: InstructionValue<'_>) -> IResult<usize> {
     match instr.get_type().try_into() {
         Ok(inkwell::types::BasicTypeEnum::IntType(t)) => Ok(t.get_bit_width() as usize),
@@ -1338,7 +1406,7 @@ impl<'ctx> FuncCtx<'ctx> {
             terminators: vec![None; n_blocks],
             cache: HashMap::new(),
             current: BlockId(0),
-            next_stack_slot: 0,
+            next_stack_slot: STACK_ALLOCA_RESERVE,
             stack_slot_of: HashMap::new(),
         }
     }

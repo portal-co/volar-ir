@@ -150,6 +150,71 @@ entry:
     let _ = fs::remove_file(&path);
 }
 
+/// docs/llvm-array-alloca.md item 1/2: a `[16 x i8]` byte-blob alloca,
+/// indexed as an array of i32 via a single-index, differently-typed
+/// constant GEP (the rustc `-O0` `stack_spill` shape) -- must unroll to
+/// `is_circuit()` and actually compute `x ^ (x+1)`, not just import.
+#[test]
+fn llvm_array_alloca_stack_spill_computes_x_xor_x_plus_1() {
+    let src = r#"
+define i32 @stack_spill(i32 %x) {
+entry:
+  %buf = alloca [16 x i8], align 4
+  %p0 = getelementptr i32, ptr %buf, i64 0
+  %x1 = add i32 %x, 1
+  store i32 %x, ptr %p0
+  %p1 = getelementptr i32, ptr %buf, i64 1
+  store i32 %x1, ptr %p1
+  %a = load i32, ptr %p0
+  %b = load i32, ptr %p1
+  %r = xor i32 %a, %b
+  ret i32 %r
+}
+"#;
+    let path = write_temp_ll("stack_spill", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["stack_spill"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("array alloca + typed-view GEP via LLVM→VAFFLE")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let x: u64 = 5;
+    let input_word: Vec<bool> = (0..64).map(|i| (x >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("eval terminates");
+    let r = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
+    assert_eq!(r, x ^ (x + 1), "stack_spill(5) must compute 5 ^ 6");
+    let _ = fs::remove_file(&path);
+}
+
+/// docs/llvm-array-alloca.md item 3: a struct alloca either flattens or
+/// names a clear error -- this importer chooses the latter.
+#[test]
+fn llvm_struct_alloca_is_named_unsupported() {
+    let src = r#"
+define i32 @two_field(i32 %a, i32 %b) {
+entry:
+  %s = alloca { i32, i32 }, align 4
+  %p0 = getelementptr { i32, i32 }, ptr %s, i32 0, i32 0
+  store i32 %a, ptr %p0
+  %y = load i32, ptr %p0
+  ret i32 %y
+}
+"#;
+    let path = write_temp_ll("two_field", src);
+    let err = Pipeline::from_llvm(&path, &["two_field"]).expect_err("struct alloca must fail closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("alloca"),
+        "expected a named struct-alloca error, got {msg}"
+    );
+    let _ = fs::remove_file(&path);
+}
+
 #[test]
 fn llvm_register_xor_unrolls() {
     let src = r#"

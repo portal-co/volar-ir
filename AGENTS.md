@@ -51,6 +51,7 @@ not this repo's.
 | Side tagging | `docs/agent-context/side.md`, `docs/side.md` | Working on multi-actor/multi-party value tagging |
 | WASM feature coverage | `docs/wasm-feature-support.md` | Extending `volar-vaffle-target`'s WASM operator support |
 | LLVM `alloca` import | `docs/llvm-alloca.md` | Extending `volar-llvm-vaffle-import` `alloca` / stack `load`/`store`/`gep` |
+| LLVM array/struct `alloca` | `docs/llvm-array-alloca.md` | rustc `-O0` / SLH-DSA `[N x i8]` and aggregate stack frames |
 | LLVM STACK spill → Boolar | `docs/llvm-stack-spill-boolar.md` | `lower_vaffle_to_ir` cross-block spill vs `lower_ir_to_boolar` width |
 | Text format | `docs/text-format-spec.md` | Working on `volar-lir-text`/`volar-ir-text` |
 

@@ -346,6 +346,122 @@ entry:
 }
 
 #[test]
+fn array_alloca_imports() {
+    // rustc `-O0` stack-spill shape: alloca a byte blob, index into it with a
+    // constant `getelementptr` at a *different* (wider) element type than
+    // the alloca's own declared element type -- a "typed view" of the blob.
+    let source = r#"
+define i8 @byte_blob(i8 %x) {
+entry:
+  %buf = alloca [4 x i8], align 1
+  store i8 %x, ptr %buf
+  %y = load i8, ptr %buf
+  ret i8 %y
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["byte_blob"]).expect("array alloca must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let has_alloc = body
+        .values
+        .iter()
+        .any(|v| matches!(&v.kind, Value::StackAlloc { count: 4, .. }));
+    assert!(has_alloc, "expected a 4-element Value::StackAlloc marker");
+}
+
+#[test]
+fn array_alloca_gep_typed_view_two_i32_slots() {
+    // The exact docs/llvm-array-alloca.md shape: a `[16 x i8]` blob indexed
+    // as an array of i32 via a single-index, differently-typed constant GEP.
+    let source = r#"
+define i32 @stack_spill(i32 %x) {
+entry:
+  %buf = alloca [16 x i8], align 4
+  %p0 = getelementptr i32, ptr %buf, i64 0
+  %x1 = add i32 %x, 1
+  store i32 %x, ptr %p0
+  %p1 = getelementptr i32, ptr %buf, i64 1
+  store i32 %x1, ptr %p1
+  %a = load i32, ptr %p0
+  %b = load i32, ptr %p1
+  %r = xor i32 %a, %b
+  ret i32 %r
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out =
+        import_module(&module, &["stack_spill"]).expect("typed-view GEP into array must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let stack_reads = body
+        .values
+        .iter()
+        .filter(|v| {
+            matches!(
+                &v.kind,
+                Value::Op(volar_ir_common::Stmt::StorageRead { storage, .. })
+                    if *storage == volar_ir_common::StorageId::STACK
+            )
+        })
+        .count();
+    let stack_writes = body
+        .values
+        .iter()
+        .filter(|v| {
+            matches!(
+                &v.kind,
+                Value::Op(volar_ir_common::Stmt::StorageWrite { storage, .. })
+                    if *storage == volar_ir_common::StorageId::STACK
+            )
+        })
+        .count();
+    assert_eq!(stack_reads, 64, "two 32-bit loads");
+    assert_eq!(stack_writes, 64, "two 32-bit stores");
+}
+
+#[test]
+fn struct_alloca_is_named_unsupported() {
+    let source = r#"
+define i32 @two_field(i32 %a, i32 %b) {
+entry:
+  %s = alloca { i32, i32 }, align 4
+  %p0 = getelementptr { i32, i32 }, ptr %s, i32 0, i32 0
+  store i32 %a, ptr %p0
+  %y = load i32, ptr %p0
+  ret i32 %y
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let err = import_module(&module, &["two_field"]).expect_err("struct alloca must fail closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("alloca"),
+        "expected a named struct-alloca error, got {msg}"
+    );
+}
+
+#[test]
 fn alloca_symbolic_count_is_named_unsupported() {
     let source = r#"
 define i32 @spill_n(i32 %x, i32 %n) {

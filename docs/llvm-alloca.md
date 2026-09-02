@@ -50,7 +50,8 @@ helpers). Tests: `alloca_spill_imports`,
   addressing is runtime bit arithmetic (unlike a global, which needs a
   compile-time-resolved identity) — a natural, cheap follow-up.
 - **Non-integer alloca element type** (structs, arrays, floats) and
-  **multi-index GEP** into a stack pointer — named errors.
+  **multi-index GEP** into a stack pointer — named errors. Next site
+  rustc-guest handoff: [`llvm-array-alloca.md`](llvm-array-alloca.md).
 - **phi/select of a pointer-typed SSA value** (merging two distinct
   pointers — e.g. two different allocas, or an alloca and a global — at a
   control-flow join). Falls through to `value_bits`'s existing
@@ -69,10 +70,8 @@ helpers). Tests: `alloca_spill_imports`,
   covered by the tests above. Investigate and fix `inline_vaffle.rs`
   separately before routing a real multi-function, alloca-using guest
   through `import_module_inlined`.
-- `switch` / `indirectbr` (sibling: VAFFLE `Terminator::Table` +
-  `BlockAddr`; `poll_fsm` at `-O1` is switch-only). Heap `malloc`.
-  Identity `WebProofBackend::verify`. Proving full SLH-DSA verify (hash
-  count, not alloca).
+- Heap `malloc`. Identity `WebProofBackend::verify`. Proving full SLH-DSA
+  verify (hash count, not alloca). `switch` ingest is landed.
 
 ## Corrections to the previous version of this doc
 
