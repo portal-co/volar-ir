@@ -27,8 +27,8 @@ entry:
 "#;
     let path = write_temp_ll("add", src);
     let (blocks, _types) = Pipeline::from_llvm_direct(&path, "add")
-        .to_volar_ir()
-        .expect("llvm direct");
+        .expect("llvm direct")
+        .to_volar_ir();
     assert!(blocks.is_circuit());
     let _ = fs::remove_file(&path);
 }
@@ -50,8 +50,8 @@ entry:
 "#;
     let path = write_temp_ll("caller", src);
     let module = Pipeline::from_llvm_inlined(&path, &["caller"])
-        .to_vaffle()
-        .expect("llvm inlined");
+        .expect("llvm inlined")
+        .to_vaffle();
     let caller = *module.exports.get("caller").expect("caller export");
     let vaffle::FuncDecl::Body(body) = &module.funcs[caller.0] else {
         panic!("expected caller body");
@@ -68,10 +68,10 @@ entry:
     assert!(!live_body_call);
 
     let (blocks, _) = Pipeline::from_llvm_inlined(&path, &["caller"])
-        .lower_to_volar_ir()
-        .unroll_ir()
-        .to_volar_ir()
-        .expect("llvm inlined+unroll");
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("llvm inlined+unroll")
+        .to_volar_ir();
     assert!(blocks.is_circuit());
     let _ = fs::remove_file(&path);
 }
@@ -91,21 +91,19 @@ else:
 "#;
     let path = write_temp_ll("max", src);
     let unroll = Pipeline::from_llvm(&path, &["max"])
-        .inline_vaffle_everything()
-        .lower_to_volar_ir()
-        .unroll_ir()
-        .to_volar_ir();
+        .and_then(|p| p.inline_vaffle_everything())
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir());
     assert!(unroll.is_err(), "data-dependent branch must fail unroll");
-    let direct = Pipeline::from_llvm_direct(&path, "max").to_volar_ir();
+    let direct = Pipeline::from_llvm_direct(&path, "max");
     assert!(
         direct.is_err(),
         "data-dependent branch must fail llvm-direct"
     );
     let mov = Pipeline::from_llvm(&path, &["max"])
-        .lower_to_volar_ir()
-        .movfuscate()
-        .to_volar_ir();
-    let (blocks, _) = mov.expect("movfuscate accepts symbolic CF");
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate());
+    let (blocks, _) = mov.expect("movfuscate accepts symbolic CF").to_volar_ir();
     assert!(blocks.is_movfuscated());
     let _ = fs::remove_file(&path);
 }

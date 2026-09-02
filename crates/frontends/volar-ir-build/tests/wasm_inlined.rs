@@ -29,10 +29,11 @@ fn wasm_inlined_eliminates_body_calls() {
         call $add1))
     "#;
     let path = write_temp_wasm("caller", wat);
+    // `caller` is the module's only export, so the default (every export)
+    // inline-root set is equivalent to the old explicit `&["caller"]` list.
     let module = Pipeline::from_wasm_inlined(&path)
-        .with_inline_entries(&["caller"])
-        .to_vaffle()
-        .expect("wasm inlined import");
+        .expect("wasm inlined import")
+        .to_vaffle();
     let caller = *module.exports.get("caller").expect("caller export");
     let FuncDecl::Body(body) = &module.funcs[caller.0] else {
         panic!("expected caller body");
@@ -62,11 +63,11 @@ fn wasm_inlined_then_unroll_is_circuit_for_straight_line() {
     "#;
     let path = write_temp_wasm("id", wat);
     let (blocks, _types) = Pipeline::from_wasm_inlined(&path)
-        .with_inline_entries(&["id"])
+        .expect("wasm parse+inline")
         .lower_to_volar_ir()
-        .unroll_ir()
-        .to_volar_ir()
-        .expect("straight-line wasm unrolls");
+        .and_then(|p| p.unroll_ir())
+        .expect("straight-line wasm unrolls")
+        .to_volar_ir();
     assert!(blocks.is_circuit());
     let _ = fs::remove_file(&path);
 }

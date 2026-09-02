@@ -63,8 +63,8 @@ fn archive_of_one_bitcode_direct_is_circuit() {
     let path = temp("add", "a");
     write_bitcode_archive(&path, "add.bc", &bc).expect("write archive");
     let (blocks, _) = Pipeline::from_llvm_direct(&path, "add")
-        .to_volar_ir()
-        .expect("direct import of LTO archive");
+        .expect("direct import of LTO archive")
+        .to_volar_ir();
     assert!(blocks.is_circuit());
     let _ = fs::remove_file(&path);
 }
@@ -85,8 +85,8 @@ fn two_member_archive_inlined_has_no_live_body_calls() {
     .expect("write two-member archive");
 
     let module = Pipeline::from_llvm_inlined(&path, &["caller"])
-        .to_vaffle()
-        .expect("inlined import of linked archive");
+        .expect("inlined import of linked archive")
+        .to_vaffle();
     let caller = *module.exports.get("caller").expect("caller export");
     let vaffle::FuncDecl::Body(body) = &module.funcs[caller.0] else {
         panic!("expected caller body");
@@ -109,9 +109,7 @@ fn native_only_member_is_rejected() {
     let path = temp("native", "a");
     write_bitcode_archive(&path, "empty.o", b"not bitcode and not an object")
         .expect("write junk archive");
-    let err = Pipeline::from_llvm_direct(&path, "add")
-        .to_volar_ir()
-        .expect_err("native-only member must fail");
+    let err = Pipeline::from_llvm_direct(&path, "add").expect_err("native-only member must fail");
     assert!(
         err.to_string().contains("not LLVM bitcode"),
         "unexpected error: {err}"
@@ -135,8 +133,8 @@ fn command_prebuild_copies_archive() {
         cwd: None,
     };
     let (blocks, _) = Pipeline::from_command_direct(cmd, "add")
-        .to_volar_ir()
-        .expect("command pre-build then direct import");
+        .expect("command pre-build then direct import")
+        .to_volar_ir();
     assert!(blocks.is_circuit());
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&dst);
@@ -173,10 +171,9 @@ int id(int x) { return x; }
     build.file(&c_path);
     build.opt_level(0);
     let result = Pipeline::from_cc_inlined(build, "idlib", &["id"])
-        .lower_to_volar_ir()
-        .unroll_ir()
-        .to_volar_ir();
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir());
     let _ = fs::remove_file(&c_path);
-    let (blocks, _) = result.expect("cc LTO inlined+unroll");
+    let (blocks, _) = result.expect("cc LTO inlined+unroll").to_volar_ir();
     assert!(blocks.is_circuit());
 }

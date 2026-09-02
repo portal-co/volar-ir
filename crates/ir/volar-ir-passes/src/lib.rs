@@ -12,6 +12,8 @@ pub mod lower_to_circuit;
 pub mod movfuscate;
 pub mod raise_to_z3;
 pub mod region_lowering;
+pub mod storage_to_mux_boolar;
+pub mod storage_to_mux_ir;
 pub mod to_reversible;
 pub mod unroll_ir;
 
@@ -36,6 +38,10 @@ pub use movfuscate::{
     remap_movfusc_boundaries, remap_movfusc_boundary, thread_synthetic_slots,
 };
 pub use raise_to_z3::raise_bits_to_z3;
+pub use storage_to_mux_boolar::{
+    StorageToMuxBoolarConfig, StorageToMuxBoolarError, storage_to_mux_boolar,
+};
+pub use storage_to_mux_ir::{StorageToMuxConfig, StorageToMuxError, storage_to_mux_ir};
 pub use to_reversible::{
     ReversibleMode, ToReversibleError, UnknownVar, ValueWatchlist, VarWireMap, WireWatchEntry,
     WireWatchlist, to_reversible, to_reversible_with_mode, translate_watchlist,
