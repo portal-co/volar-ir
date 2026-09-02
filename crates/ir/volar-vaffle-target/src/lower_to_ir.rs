@@ -775,10 +775,33 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     .map(IRVarId)
                     .collect();
                 let all_bits = unpack_words(&mut em, &param_word_ids, n_params, PACK_W);
-                for (pi, &bit) in all_bits.iter().enumerate() {
-                    if pi < vaffle_block.params.len() {
-                        val_map.insert(vaffle_block.params[pi].0 .0, bit);
+                // Each VAFFLE param slot is `ir_type_bit_width(its own type)`
+                // bits wide, not always exactly 1 -- both real producers
+                // (`volar-llvm-vaffle-import`, `VaffleTarget::begin_function`)
+                // happen to always emit 1-bit params, but nothing in VAFFLE's
+                // type system requires that, and `Terminator::Return`'s own
+                // handling (`explode_to_bits`, above) already treats a
+                // returned value's width generically -- entry params should
+                // too, via the same `Merge`-to-compose idiom `compose_address`
+                // already uses in this file.
+                let mut bit_offset = 0usize;
+                for &(vid, vtid) in vaffle_block.params.iter() {
+                    let ir_tid = self.type_map[vtid.0 as usize];
+                    let w = ir_type_bit_width(&self.types, ir_tid);
+                    if bit_offset + w > all_bits.len() {
+                        break;
                     }
+                    let param_bits = &all_bits[bit_offset..bit_offset + w];
+                    let composed = if w == 1 {
+                        param_bits[0]
+                    } else {
+                        em.emit(IRStmt::Merge {
+                            parts: param_bits.to_vec(),
+                            ty: ir_tid,
+                        })
+                    };
+                    val_map.insert(vid.0, composed);
+                    bit_offset += w;
                 }
             } else {
                 // Non-entry: map block params (after packed SP words).

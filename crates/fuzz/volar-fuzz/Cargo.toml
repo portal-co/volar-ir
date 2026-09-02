@@ -18,4 +18,5 @@ arbitrary = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1"
+volar-lir.workspace = true
 volar-lir-test-corpus.workspace = true
