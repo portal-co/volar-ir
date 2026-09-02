@@ -22,21 +22,33 @@
 //! Supported: integer arithmetic (`add`/`sub`/`mul`/`udiv`/`sdiv`), bitwise
 //! ops, shifts, `icmp` (all predicates), `select`, `trunc`/`zext`/`sext`,
 //! `phi` (→ block params), direct `call`, `br`/conditional `br`/`ret`, and
-//! loads/stores through a global variable (optionally behind a
-//! constant-index `getelementptr`) — each distinct LLVM global gets one
-//! `StorageId`, allocated the first time it's referenced and reused
-//! afterward, decided via [`volar_llvm_constchain`]'s constant-chain walker
-//! (the generic form of "the entire operation must be a constant load": the
-//! *storage identity* must resolve to a literal global at import time, even
-//! though the value read/written through it may be symbolic).
+//! loads/stores through **two** distinct pointer provenances, resolved at
+//! import time and never conflated:
+//!
+//! - a global variable (optionally behind a constant-index `getelementptr`)
+//!   — each distinct LLVM global gets one `StorageId`, allocated the first
+//!   time it's referenced and reused afterward, decided via
+//!   [`volar_llvm_constchain`]'s constant-chain walker (the generic form of
+//!   "the entire operation must be a constant load": the *storage identity*
+//!   must resolve to a literal global at import time, even though the value
+//!   read/written through it may be symbolic);
+//! - a constant-size `alloca` (scalar integer element type only) — or a
+//!   single constant-index `getelementptr` off one — tracked as a
+//!   compile-time-constant `StorageId::STACK` address (`Value::StackAlloc`
+//!   / `PtrLoad` / `PtrStore` / `PtrOffset`, one bit-level `StorageRead`/
+//!   `StorageWrite` per bit, mirroring `VaffleTarget`'s own convention; see
+//!   `docs/llvm-alloca.md`).
 //!
 //! Not yet supported (hard error): floats, vectors, aggregates, atomics,
 //! `switch`, `indirectbr`/`blockaddress` (VAFFLE's `Value::BlockAddr` +
 //! `Terminator::Table` already model this — see their doc comments — wiring
-//! up ingestion is deferred), `alloca` (needs its own per-function stack
-//! frame bookkeeping, deferred), tail calls as a distinct form (currently
-//! lowered the same as an ordinary `call`), and any pointer arithmetic whose
-//! base doesn't resolve to a literal global.
+//! up ingestion is deferred), tail calls as a distinct form (currently
+//! lowered the same as an ordinary `call`), any pointer arithmetic whose
+//! base doesn't resolve to a literal global or a tracked stack pointer,
+//! `alloca` with a symbolic count or a non-integer element type, a
+//! multi-index or symbolic-index `getelementptr` into a stack pointer, and
+//! phi/select of a pointer-typed SSA value (merging two distinct pointers
+//! at a control-flow join).
 
 use std::collections::HashMap;
 
@@ -81,6 +93,11 @@ impl From<ConstChainError> for ImportError {
 }
 
 type IResult<T> = Result<T, ImportError>;
+
+/// Width of a stack pointer / alloca address, matching `VaffleTarget`'s own
+/// `PTR_BITS` convention (and this crate's existing pointer-param fallback
+/// in [`llvm_bit_width`]).
+const PTR_BITS: usize = 32;
 
 /// Import every reachable function transitively called from `entries` (by
 /// LLVM name) into a fresh `vaffle::Module`. Each entry (and every function
@@ -632,25 +649,115 @@ impl<'ctx> Importer<'ctx> {
             }
             InstructionOpcode::Load => {
                 let ptr = load_store_pointer(instr, 0)?;
-                let n_bytes = int_result_width(instr)?.div_ceil(8);
-                Some(self.mem_load(fctx, ptr, n_bytes)?)
+                if let Some(&base_slot) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()) {
+                    let ptr_bits0 = fctx
+                        .cache
+                        .get(&ptr.as_any_value_enum())
+                        .and_then(|b| b.first().copied())
+                        .ok_or_else(|| {
+                            ImportError::Unsupported(
+                                "stack pointer bits missing (internal)".into(),
+                            )
+                        })?;
+                    let n_bits = int_result_width(instr)?;
+                    let pointee_tid = self.llvm_type_id(instr.get_type());
+                    Some(self.stack_load(fctx, ptr_bits0, base_slot, pointee_tid, n_bits))
+                } else {
+                    let n_bytes = int_result_width(instr)?.div_ceil(8);
+                    Some(self.mem_load(fctx, ptr, n_bytes)?)
+                }
             }
             InstructionOpcode::Store => {
                 let val = op!(0);
                 let ptr = load_store_pointer(instr, 1)?;
-                let n_bytes = val.len().div_ceil(8);
-                self.mem_store(fctx, ptr, &val, n_bytes)?;
+                if let Some(&base_slot) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()) {
+                    let ptr_bits0 = fctx
+                        .cache
+                        .get(&ptr.as_any_value_enum())
+                        .and_then(|b| b.first().copied())
+                        .ok_or_else(|| {
+                            ImportError::Unsupported(
+                                "stack pointer bits missing (internal)".into(),
+                            )
+                        })?;
+                    self.stack_store(fctx, ptr_bits0, base_slot, &val);
+                } else {
+                    let n_bytes = val.len().div_ceil(8);
+                    self.mem_store(fctx, ptr, &val, n_bytes)?;
+                }
                 None
             }
             InstructionOpcode::GetElementPtr => {
-                // Only a base global is supported; the byte offset a GEP
-                // chain would add is not yet folded in (constant-offset GEP
-                // support is a natural, separately-scoped follow-up) — for
-                // now this validates the base resolves to a literal global
-                // so `Load`/`Store` through this pointer succeed.
                 let base = load_store_pointer(instr, 0)?;
-                self.storage_for(base)?;
-                None
+                if let Some(&base_slot) = fctx.stack_slot_of.get(&base.as_any_value_enum()) {
+                    // Constant-offset GEP off a tracked stack pointer. A
+                    // symbolic index *could* be supported later (STACK
+                    // addressing is runtime bit arithmetic, unlike a
+                    // global's compile-time-resolved identity), but that's
+                    // out of scope here.
+                    if instr.get_num_operands() != 2 {
+                        return Err(ImportError::Unsupported(
+                            "multi-index GEP into stack pointer not supported".into(),
+                        ));
+                    }
+                    let elem_ty = instr
+                        .get_gep_source_element_type()
+                        .map_err(|_| ImportError::Unsupported("malformed gep".into()))?;
+                    let elem_bits = match elem_ty {
+                        inkwell::types::BasicTypeEnum::IntType(t) => t.get_bit_width() as i64,
+                        _ => {
+                            return Err(ImportError::Unsupported(
+                                "gep of non-integer element type into stack pointer not supported"
+                                    .into(),
+                            ));
+                        }
+                    };
+                    let idx: i64 = match instr.get_operand(1).and_then(|o| o.value()) {
+                        Some(BasicValueEnum::IntValue(n)) => {
+                            n.get_sign_extended_constant().ok_or_else(|| {
+                                ImportError::Unsupported(
+                                    "symbolic index into stack pointer not supported".into(),
+                                )
+                            })?
+                        }
+                        _ => {
+                            return Err(ImportError::Unsupported(
+                                "expected an integer gep index".into(),
+                            ));
+                        }
+                    };
+                    let offset = idx
+                        .checked_mul(elem_bits)
+                        .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
+                    let new_base_slot = base_slot.checked_add_signed(offset).ok_or_else(|| {
+                        ImportError::Unsupported("gep offset out of range".into())
+                    })?;
+
+                    let addr_bits = self.stack_addr_bits(fctx, cur, new_base_slot);
+                    let base_bits = fctx
+                        .cache
+                        .get(&base.as_any_value_enum())
+                        .cloned()
+                        .unwrap_or_else(|| addr_bits.clone());
+                    fctx.emit(
+                        cur,
+                        Value::PtrOffset {
+                            ptr: base_bits[0],
+                            idx: addr_bits[0], // representative, matching `VaffleTarget::ptr_offset`
+                            elem_bits: elem_bits as usize,
+                        },
+                    );
+                    fctx.stack_slot_of
+                        .insert(instr.as_any_value_enum(), new_base_slot);
+                    Some(addr_bits)
+                } else {
+                    // Only a base global is supported; the byte offset a
+                    // GEP chain would add is not yet folded in here (this
+                    // validates the base resolves to a literal global so
+                    // `Load`/`Store` through this pointer succeed).
+                    self.storage_for(base)?;
+                    None
+                }
             }
             InstructionOpcode::Call => {
                 let call = CallSiteValue::try_from(instr)
@@ -690,6 +797,57 @@ impl<'ctx> Importer<'ctx> {
                     _ => None,
                 }
             }
+            InstructionOpcode::Alloca => {
+                let elem_ty = instr
+                    .get_allocated_type()
+                    .map_err(|_| ImportError::Unsupported("malformed alloca".into()))?;
+                let elem_bits = match elem_ty {
+                    inkwell::types::BasicTypeEnum::IntType(t) => t.get_bit_width() as u64,
+                    _ => {
+                        return Err(ImportError::Unsupported(
+                            "alloca of non-integer type not supported".into(),
+                        ));
+                    }
+                };
+                // The array-size operand is `1` unless the source used
+                // `alloca <ty>, <n>`; either way it must be a compile-time
+                // constant (VLAs are symbolic and fail closed here, not via
+                // a panic).
+                let count: u64 = match instr.get_operand(0).and_then(|o| o.value()) {
+                    Some(BasicValueEnum::IntValue(n)) => n.get_zero_extended_constant().ok_or_else(
+                        || ImportError::Unsupported("alloca count is symbolic".into()),
+                    )?,
+                    _ => 1,
+                };
+                let total_slots = elem_bits
+                    .checked_mul(count)
+                    .ok_or_else(|| ImportError::Unsupported("alloca size overflow".into()))?;
+                let base_slot = fctx.next_stack_slot;
+                fctx.next_stack_slot = fctx
+                    .next_stack_slot
+                    .checked_add(total_slots)
+                    .ok_or_else(|| ImportError::Unsupported("alloca stack overflow".into()))?;
+
+                // Bookkeeping marker (unused as an operand, matching
+                // `VaffleTarget::alloca`'s own `_alloc_vid` convention) —
+                // required so passes that pattern-match `Value::StackAlloc`
+                // (e.g. `inline_vaffle`'s stack-slot rebase, `lower_to_ir`'s
+                // spill-avoidance) see this allocation.
+                let elem_tid = self.llvm_type_id(elem_ty);
+                fctx.emit(
+                    cur,
+                    Value::StackAlloc {
+                        elem_ty: elem_tid,
+                        count: count as usize,
+                        base_slot,
+                    },
+                );
+
+                let addr_bits = self.stack_addr_bits(fctx, cur, base_slot);
+                fctx.stack_slot_of
+                    .insert(instr.as_any_value_enum(), base_slot);
+                Some(addr_bits)
+            }
             other => {
                 return Err(ImportError::Unsupported(format!("{other:?}")));
             }
@@ -699,6 +857,99 @@ impl<'ctx> Importer<'ctx> {
             fctx.cache.insert(instr.as_any_value_enum(), bits);
         }
         Ok(called)
+    }
+
+    /// Bit-decompose a compile-time-constant `StorageId::STACK` address,
+    /// `PTR_BITS` wide, LSB first — the pointer *value* for an alloca or a
+    /// constant-index GEP off one. Mirrors `VaffleTarget::alloca`'s
+    /// `addr_bits` construction exactly.
+    fn stack_addr_bits(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, base_slot: u64) -> Bits {
+        (0..PTR_BITS)
+            .map(|i| self.bc_const_at(fctx, block, (base_slot >> i) & 1 != 0))
+            .collect()
+    }
+
+    /// Read `n_bits` individual bits from `StorageId::STACK` starting at
+    /// `base_slot`, one `StorageRead` per bit (matches `VaffleTarget::
+    /// ptr_load`'s per-bit granularity, but with a compile-time-constant
+    /// address per bit instead of a runtime-composed one, since this
+    /// importer only tracks compile-time-constant stack pointers).
+    fn stack_load(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        ptr_bits0: ValueId,
+        base_slot: u64,
+        pointee_ty: TypeId,
+        n_bits: usize,
+    ) -> Bits {
+        let cur = fctx.current;
+        let mut bits = Vec::with_capacity(n_bits);
+        for i in 0..n_bits as u64 {
+            let addr = fctx.emit(
+                cur,
+                Value::Op(Stmt::Const(
+                    Constant {
+                        hi: 0,
+                        lo: (base_slot + i) as u128,
+                    },
+                    self.bit_tid,
+                )),
+            );
+            let bit = fctx.emit(
+                cur,
+                Value::Op(Stmt::StorageRead {
+                    storage: StorageId::STACK,
+                    ty: self.bit_tid,
+                    addr,
+                }),
+            );
+            bits.push(bit);
+        }
+        // Bookkeeping marker (unused as an operand); the real read already
+        // happened above, matching `VaffleTarget::ptr_load`'s `_load_vid`.
+        fctx.emit(
+            cur,
+            Value::PtrLoad {
+                ptr: ptr_bits0,
+                pointee_ty,
+            },
+        );
+        bits
+    }
+
+    /// Write `val` to `StorageId::STACK` starting at `base_slot`, one
+    /// `StorageWrite` per bit. See [`Self::stack_load`].
+    fn stack_store(&mut self, fctx: &mut FuncCtx<'ctx>, ptr_bits0: ValueId, base_slot: u64, val: &Bits) {
+        let cur = fctx.current;
+        for (i, &bit) in val.iter().enumerate() {
+            let addr = fctx.emit(
+                cur,
+                Value::Op(Stmt::Const(
+                    Constant {
+                        hi: 0,
+                        lo: (base_slot + i as u64) as u128,
+                    },
+                    self.bit_tid,
+                )),
+            );
+            fctx.emit(
+                cur,
+                Value::Op(Stmt::StorageWrite {
+                    storage: StorageId::STACK,
+                    src: bit,
+                    ty: self.bit_tid,
+                    addr,
+                }),
+            );
+        }
+        let val_bits0 = val.first().copied().unwrap_or(ptr_bits0);
+        fctx.emit(
+            cur,
+            Value::PtrStore {
+                ptr: ptr_bits0,
+                val: val_bits0,
+            },
+        );
     }
 
     fn mem_load(
@@ -836,7 +1087,7 @@ impl<'ctx> Importer<'ctx> {
             }
             other => {
                 return Err(ImportError::Unsupported(format!(
-                    "terminator {other:?} (switch/indirectbr not yet supported)"
+                    "terminator {other:?} (switch/indirectbr not yet supported; alloca is docs/llvm-alloca.md)"
                 )));
             }
         };
@@ -942,6 +1193,18 @@ struct FuncCtx<'ctx> {
     terminators: Vec<Option<Terminator>>,
     cache: HashMap<AnyValueEnum<'ctx>, Bits>,
     current: BlockId,
+    /// Per-function bump allocator for `StorageId::STACK`, in *bits* (matches
+    /// `VaffleTarget`'s own `next_stack_slot`/`PTR_BITS` convention) — not
+    /// bytes like the global `storage_for`/`mem_load`/`mem_store` path,
+    /// which is a distinct storage identity and addressing convention.
+    next_stack_slot: u64,
+    /// Pointer-typed LLVM values (alloca results, or a constant-index GEP
+    /// off one) that are tracked as `StorageId::STACK` addresses, mapped to
+    /// their resolved compile-time-constant `base_slot`. This is the sole
+    /// source of truth for "is this a stack pointer" — `cache` alone is not
+    /// enough, since pointer-typed function *parameters* are also cached
+    /// there as plain (meaningless-as-an-address) bits.
+    stack_slot_of: HashMap<AnyValueEnum<'ctx>, u64>,
 }
 
 impl<'ctx> FuncCtx<'ctx> {
@@ -955,6 +1218,8 @@ impl<'ctx> FuncCtx<'ctx> {
             terminators: vec![None; n_blocks],
             cache: HashMap::new(),
             current: BlockId(0),
+            next_stack_slot: 0,
+            stack_slot_of: HashMap::new(),
         }
     }
 

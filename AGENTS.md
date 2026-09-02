@@ -50,6 +50,7 @@ not this repo's.
 | `u128` support in LIR (deferred) | `docs/agent-context/lir-u128-support.md` | Touching `LirType`/`primitive_to_lir` for wide integers |
 | Side tagging | `docs/agent-context/side.md`, `docs/side.md` | Working on multi-actor/multi-party value tagging |
 | WASM feature coverage | `docs/wasm-feature-support.md` | Extending `volar-vaffle-target`'s WASM operator support |
+| LLVM `alloca` import | `docs/llvm-alloca.md` | Extending `volar-llvm-vaffle-import` `alloca` / stack `load`/`store`/`gep` |
 | Text format | `docs/text-format-spec.md` | Working on `volar-lir-text`/`volar-ir-text` |
 
 ## Compression-aware logging

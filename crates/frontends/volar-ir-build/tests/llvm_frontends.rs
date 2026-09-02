@@ -107,3 +107,64 @@ else:
     assert!(blocks.is_movfuscated());
     let _ = fs::remove_file(&path);
 }
+
+#[test]
+fn llvm_alloca_spill_round_trips() {
+    let src = r#"
+define i32 @spill(i32 %x) {
+entry:
+  %p = alloca i32, align 4
+  store i32 %x, ptr %p
+  %y = load i32, ptr %p
+  ret i32 %y
+}
+"#;
+    let path = write_temp_ll("spill", src);
+    let (blocks, _) = Pipeline::from_llvm(&path, &["spill"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("alloca spill via LLVM→VAFFLE")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn llvm_alloca_symbolic_count_is_named_unsupported() {
+    let src = r#"
+define i32 @spill_n(i32 %x, i32 %n) {
+entry:
+  %p = alloca i32, i32 %n
+  store i32 %x, ptr %p
+  %y = load i32, ptr %p
+  ret i32 %y
+}
+"#;
+    let path = write_temp_ll("spill_n", src);
+    let err = Pipeline::from_llvm(&path, &["spill_n"]).expect_err("VLA alloca must fail closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("alloca") && msg.contains("symbolic"),
+        "expected a named symbolic-alloca error, got {msg}"
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn llvm_register_xor_unrolls() {
+    let src = r#"
+define i32 @xor_one(i32 %x) {
+entry:
+  %y = xor i32 %x, 1
+  ret i32 %y
+}
+"#;
+    let path = write_temp_ll("xor_one", src);
+    let (blocks, _) = Pipeline::from_llvm(&path, &["xor_one"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("register xor via LLVM→VAFFLE")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+    let _ = fs::remove_file(&path);
+}
