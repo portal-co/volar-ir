@@ -215,6 +215,52 @@ entry:
     let _ = fs::remove_file(&path);
 }
 
+/// A caller's `alloca` must survive a nested call uncorrupted: the callee's
+/// own frame (params/ret/spill/cont) must not be placed on top of the
+/// caller's still-live alloca storage. Regression test for
+/// `lower_to_ir.rs`'s `FuncInfo::alloca_budget` -- call-site SP advancement
+/// must skip past the caller's own alloca budget, not just the callee's
+/// own `own_layout.size` (see docs/llvm-array-alloca.md's rebasing note).
+///
+/// This can only check that lowering succeeds, not the computed value:
+/// `unroll_ir`/`movfuscate` both reject *any* call-preserving cross-function
+/// call as "not statically finite" (confirmed reproducible with zero
+/// allocas involved -- a pre-existing gap in the calling convention's own
+/// numeric-evaluation support, not something this task introduces or fixes).
+/// `volar-vaffle-target::lower_to_ir`'s own unit test
+/// `test_alloca_budget_reserved_across_nested_call` checks the actual
+/// computed budget directly against a hand-built two-function module.
+#[test]
+fn llvm_alloca_survives_nested_call_lowers_without_panicking() {
+    let src = r#"
+define i32 @helper(i32 %x) {
+  ret i32 %x
+}
+
+define i32 @caller(i32 %x) {
+entry:
+  %buf = alloca i32, align 4
+  store i32 %x, ptr %buf
+  %y = call i32 @helper(i32 %x)
+  %v = load i32, ptr %buf
+  %r = add i32 %v, %y
+  ret i32 %r
+}
+"#;
+    let path = write_temp_ll("alloca_survives_call", src);
+    let (blocks, _types) = Pipeline::from_llvm(&path, &["caller"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .expect("alloca + nested call via LLVM→VAFFLE must lower without panicking")
+        .to_volar_ir();
+    assert!(
+        blocks.blocks.len() >= 5,
+        "expected >=5 blocks (module entry + exit + caller entry + call continuation \
+         + helper entry), got {}",
+        blocks.blocks.len()
+    );
+    let _ = fs::remove_file(&path);
+}
+
 #[test]
 fn llvm_register_xor_unrolls() {
     let src = r#"

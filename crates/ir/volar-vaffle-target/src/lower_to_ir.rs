@@ -388,6 +388,13 @@ struct FuncInfo {
     /// `Bit`-typed slots at `cross_block_base + ValueId.0`.
     cross_block_values: BTreeSet<usize>,
     cross_block_base: u64,
+    /// Total `StorageId::STACK` bit-budget this function's own `alloca`s
+    /// need (see `compute_alloca_budget`), zero if it has none. Distinct
+    /// from `own_layout.size` (the calling-convention's own register
+    /// region): a caller advancing SP to make a nested call must skip past
+    /// *both* its own `own_layout.size` *and* this budget, or the callee's
+    /// frame would overlap this function's still-live alloca storage.
+    alloca_budget: u64,
 }
 
 pub(crate) struct LowerCtx<'m, P: Clone = ()> {
@@ -512,6 +519,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                         total_ret_bits: 0,
                         cross_block_values: BTreeSet::new(),
                         cross_block_base: 0,
+                        alloca_budget: 0,
                     });
                     continue;
                 }
@@ -590,6 +598,8 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 storage: StorageId::STACK,
             };
 
+            let alloca_budget = compute_alloca_budget(body, &self.types, &self.type_map);
+
             self.func_info.push(FuncInfo {
                 entry_block: block_offset,
                 callee_layout,
@@ -599,6 +609,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 cross_block_values,
                 cross_block_base,
                 total_ret_bits,
+                alloca_budget,
             });
             block_offset += body.blocks.len();
         }
@@ -729,6 +740,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         let n_param_words = info.n_param_words;
         let n_params = info.n_params;
         let cross_block_values = info.cross_block_values.clone();
+        let alloca_budget = info.alloca_budget;
 
         for (vaffle_bi, vaffle_block) in body.blocks.iter().enumerate() {
             let ir_bi = entry_block_offset + vaffle_bi;
@@ -874,19 +886,61 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 for &svid in before_call.iter() {
                     current_em.set_prov(body.values[svid.0].prov.clone());
                     match &body.values[svid.0].kind {
+                        Value::Op(Stmt::StorageRead {
+                            storage: StorageId::ALLOCA,
+                            ty,
+                            addr,
+                        }) => {
+                            let local_addr = val_map.get(&addr.0).copied().unwrap_or(IRVarId(0));
+                            let real_addr =
+                                rebase_stack_addr(&mut current_em, &current_sp_bits, local_addr);
+                            let id = current_em.emit(IRStmt::StorageRead {
+                                storage: StorageId::STACK,
+                                ty: self.type_map[ty.0 as usize],
+                                addr: real_addr,
+                            });
+                            val_map.insert(svid.0, id);
+                        }
+                        Value::Op(Stmt::StorageWrite {
+                            storage: StorageId::ALLOCA,
+                            src,
+                            ty,
+                            addr,
+                        }) => {
+                            let local_addr = val_map.get(&addr.0).copied().unwrap_or(IRVarId(0));
+                            let real_addr =
+                                rebase_stack_addr(&mut current_em, &current_sp_bits, local_addr);
+                            let ir_src = val_map.get(&src.0).copied().unwrap_or(IRVarId(0));
+                            let id = current_em.emit(IRStmt::StorageWrite {
+                                storage: StorageId::STACK,
+                                src: ir_src,
+                                ty: self.type_map[ty.0 as usize],
+                                addr: real_addr,
+                            });
+                            val_map.insert(svid.0, id);
+                        }
                         Value::Op(stmt) => {
                             let ir_stmt = translate_stmt(stmt, &val_map, &self.type_map);
                             let id = current_em.emit(ir_stmt);
                             val_map.insert(svid.0, id);
                         }
                         Value::StackAlloc { base_slot, .. } => {
-                            let addr = current_em.emit(IRStmt::Const(
+                            // `base_slot` is a genuine u64 known here (not an
+                            // operand to look up) -- stamp it as a `_32`-wide
+                            // Const first (wide enough that `extract_bit`
+                            // reads real bits, not the 1-bit-truncation bug
+                            // `addr_tid` fixed elsewhere), then rebase like
+                            // any other stack address.
+                            let base_tid = self.types.primitive(Type::_32);
+                            let base_const = current_em.emit(IRStmt::Const(
                                 Constant {
                                     hi: 0,
                                     lo: *base_slot as u128,
                                 },
-                                BIT_TID,
+                                base_tid,
                             ));
+                            let addr =
+                                rebase_stack_addr(&mut current_em, &current_sp_bits, base_const);
                             val_map.insert(svid.0, addr);
                         }
                         Value::PtrLoad { ptr, .. } => {
@@ -987,10 +1041,13 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             let callee_frame_sp = StackPtr::new(current_sp_bits.clone());
                             frame_write_cont(&mut current_em, &callee_frame_sp, &cl, cont_var);
 
-                            // 4. Advance SP by callee's own size (callee_layout + spill),
+                            // 4. Advance SP by *this* function's own alloca budget (its
+                            // still-live local storage, past `current_sp_bits`, must not be
+                            // overlapped by the callee's frame -- see `alloca_budget`'s doc
+                            // comment) plus the callee's own size (callee_layout + spill),
                             // pack, jump — args appended after SP words.
                             let mut new_sp = StackPtr::new(current_sp_bits.clone());
-                            new_sp.advance(callee_info.own_layout.size);
+                            new_sp.advance(alloca_budget + callee_info.own_layout.size);
                             let new_sp_bits = new_sp.materialize(&mut current_em);
                             let mut sp_words = pack_bits(&mut current_em, &new_sp_bits, PACK_W);
                             sp_words.extend(arg_words);
@@ -1701,6 +1758,71 @@ fn explode_to_bits<P: Clone>(
         .collect()
 }
 
+/// Total `StorageId::ALLOCA`-rebased bit-budget a function's own `alloca`s
+/// need (see `StorageId::ALLOCA`'s own doc comment for why `alloca` uses a
+/// dedicated id rather than `StorageId::STACK` directly): the highest
+/// `base_slot + count * bit_width(elem_ty)` across every `Value::StackAlloc`
+/// in this function's body; zero for a function with none. Read directly
+/// off `Value::StackAlloc`'s own fields rather than scanning `StorageRead`/
+/// `StorageWrite` address expressions -- a producer could represent an
+/// address as a single scalar `Stmt::Const` or as a `Merge` of individual
+/// bit-consts (see `rebase_stack_addr`), but every producer's `StackAlloc`
+/// marker carries its own allocation size directly, with no representation
+/// ambiguity.
+///
+/// Distinct from (and additional to) `own_layout.size`, which only covers
+/// the calling convention's own register region (params/ret/spill/cross-
+/// block-values). A caller advancing SP to make a nested call must skip
+/// past *both* -- this is `plan_functions`'s `FuncInfo::alloca_budget`,
+/// consulted at every call site (see `lower_function`).
+fn compute_alloca_budget<P: Clone>(body: &FuncBody<P>, types: &IRTypes, type_map: &[TypeId]) -> u64 {
+    let mut budget = 0u64;
+    for node in &body.values {
+        if let Value::StackAlloc {
+            elem_ty,
+            count,
+            base_slot,
+        } = &node.kind
+        {
+            let ir_ty = type_map[elem_ty.0 as usize];
+            let w = ir_type_bit_width(types, ir_ty) as u64;
+            budget = budget.max(base_slot + w * (*count as u64));
+        }
+    }
+    budget
+}
+
+/// Rebase a `StorageId::ALLOCA` address value onto this activation's real
+/// runtime frame -- `StorageId::STACK` (see that constant's own doc
+/// comment): `sp_bits + local_addr`, via the same `bc_add` machinery the
+/// calling convention's own spill/reload/param/return addressing already
+/// uses (see this file's module doc).
+///
+/// `local_addr` is whatever the producer already translated the address
+/// operand to -- a `Primitive` scalar (`volar-llvm-vaffle-import`'s single
+/// `Stmt::Const`) or a `Vec(SP_BITS, Bit)` (a `Merge`-composed bit vector,
+/// as `VaffleTarget::alloca` builds one, should a future producer route
+/// through `StorageId::ALLOCA` the same way); both decompose to individual
+/// bits the same way via `extract_bit`/`Shuffle`, so no producer-specific
+/// handling is needed. `sp_bits` is this block's own incoming SP -- exactly where this
+/// function's own `own_layout.size` bit-slots end (`frame_sp =
+/// StackPtr::new(sp_bits).retreat(own_layout.size)`, see `lower_function`)
+/// -- so a fresh alloca's storage starts right past this frame's own
+/// region. Critically, this tracks the *actual* runtime SP rather than a
+/// fixed literal: on a recursive call each activation's `sp_bits` differs,
+/// so each gets its own alloca storage instead of every recursion depth
+/// aliasing the same fixed address (which a compile-time-constant "big
+/// reserved offset" scheme could never prevent, only defer).
+fn rebase_stack_addr<P: Clone>(
+    em: &mut BlockEmitter<P>,
+    sp_bits: &[IRVarId],
+    local_addr: IRVarId,
+) -> IRVarId {
+    let local_bits: Vec<IRVarId> = (0..SP_BITS as u8).map(|i| em.extract_bit(local_addr, i)).collect();
+    let real_bits = bc_add(em, &local_bits, sp_bits, false);
+    em.compose_address(&real_bits)
+}
+
 /// Translate a VAFFLE `Stmt<ValueId>` to an `IRStmt<IRVarId>`.
 ///
 /// `val_map` maps VAFFLE `ValueId` → IR `IRVarId`.
@@ -1870,6 +1992,181 @@ mod tests {
             })
         });
         assert!(has_stack_ops, "lowered IR should contain STACK storage ops");
+    }
+
+    /// Regression test for the `alloca` / calling-convention frame collision:
+    /// a function with its own `alloca` that *also* makes a nested call must
+    /// have that call's SP advancement skip past its own alloca budget, not
+    /// just the callee's own register region -- otherwise the callee's own
+    /// frame (params/ret/spill/cont) would be placed on top of the caller's
+    /// still-live alloca storage. See `FuncInfo::alloca_budget` and its use
+    /// at the call site in `lower_function`.
+    ///
+    /// `func0` allocates 1 stack bit (`base_slot = 0`), stores its own param
+    /// there, calls `func1`, then reloads from the same address. There is no
+    /// end-to-end numeric evaluator for call-preserving cross-function Volar
+    /// IR yet (`eval_ir`/`unroll_ir`/`movfuscate` all reject *any* real
+    /// inter-function call as "not statically finite" -- a pre-existing gap,
+    /// unrelated to alloca, confirmed reproducible with zero allocas
+    /// involved), so this checks `plan_functions`'s computed budget directly
+    /// and that lowering the full call+alloca combination doesn't panic.
+    #[test]
+    fn test_alloca_budget_reserved_across_nested_call() {
+        use vaffle::*;
+        use volar_ir_common::Stmt;
+
+        let mut types = volar_ir_common::TypeTable::new();
+        let bit_tid = types.intern(volar_ir_common::IrType::Primitive(
+            volar_ir_common::Type::Bit,
+        ));
+        let addr_tid = types.intern(volar_ir_common::IrType::Primitive(
+            volar_ir_common::Type::_32,
+        ));
+
+        let sig0 = SigDecl {
+            params: vec![bit_tid],
+            results: vec![bit_tid],
+        };
+        let sig1 = SigDecl {
+            params: vec![bit_tid],
+            results: vec![bit_tid],
+        };
+
+        // func1: identity (return param).
+        let body1 = FuncBody {
+            sig: SigId(1),
+            blocks: std::vec![Block {
+                params: std::vec![(ValueId(0), bit_tid)],
+                stmts: std::vec![],
+                terminator: Terminator::Return {
+                    values: std::vec![ValueId(0)],
+                },
+            }],
+            values: std::vec![volar_ir_common::Node::new(
+                Value::Param {
+                    block: BlockId(0),
+                    ty: bit_tid,
+                    idx: 0,
+                },
+                (),
+                None,
+            )],
+            entry: BlockId(0),
+        };
+
+        // func0: alloca 1 bit at base_slot 0; store its own param there;
+        // call func1; reload from the same address; return the reloaded bit.
+        let mut vals0 = std::vec::Vec::new();
+        vals0.push(Value::Param {
+            block: BlockId(0),
+            ty: bit_tid,
+            idx: 0,
+        }); // 0
+        vals0.push(Value::StackAlloc {
+            elem_ty: bit_tid,
+            count: 1,
+            base_slot: 0,
+        }); // 1
+        vals0.push(Value::Op(Stmt::Const(
+            Constant { hi: 0, lo: 0 },
+            addr_tid,
+        ))); // 2: store address
+        vals0.push(Value::Op(Stmt::StorageWrite {
+            storage: StorageId::ALLOCA,
+            src: ValueId(0),
+            ty: bit_tid,
+            addr: ValueId(2),
+        })); // 3
+        vals0.push(Value::Call {
+            func: FuncId(1),
+            args: std::vec![ValueId(0)],
+        }); // 4
+        vals0.push(Value::Op(Stmt::Const(
+            Constant { hi: 0, lo: 0 },
+            addr_tid,
+        ))); // 5: reload address
+        vals0.push(Value::Op(Stmt::StorageRead {
+            storage: StorageId::ALLOCA,
+            ty: bit_tid,
+            addr: ValueId(5),
+        })); // 6
+        let body0 = FuncBody {
+            sig: SigId(0),
+            blocks: std::vec![Block {
+                params: std::vec![(ValueId(0), bit_tid)],
+                stmts: std::vec![
+                    ValueId(1),
+                    ValueId(2),
+                    ValueId(3),
+                    ValueId(4),
+                    ValueId(5),
+                    ValueId(6),
+                ],
+                terminator: Terminator::Return {
+                    values: std::vec![ValueId(6)],
+                },
+            }],
+            values: vals0
+                .into_iter()
+                .map(|v| volar_ir_common::Node::new(v, (), None))
+                .collect(),
+            entry: BlockId(0),
+        };
+
+        let module = vaffle::Module {
+            types,
+            oracles: std::vec![],
+            actions: std::vec![],
+            funcs: std::vec![vaffle::FuncDecl::Body(body0), vaffle::FuncDecl::Body(body1)],
+            sigs: std::vec![sig0, sig1],
+            exports: alloc::collections::BTreeMap::new(),
+            pre_init: std::vec![],
+        };
+
+        let mut ctx = LowerCtx::new(&module);
+        ctx.plan_functions();
+        assert_eq!(
+            ctx.func_info[0].alloca_budget, 1,
+            "func0's only stack access is bit address 0 -> budget 1"
+        );
+        assert_eq!(
+            ctx.func_info[1].alloca_budget, 0,
+            "func1 has no StorageId::ALLOCA access of its own"
+        );
+
+        let (ir_blocks, _ir_types) = lower_vaffle_to_ir(&module);
+        assert!(
+            ir_blocks.blocks.len() >= 4,
+            "expected >=4 blocks (entry + exit + func0 + func1), got {}",
+            ir_blocks.blocks.len()
+        );
+
+        // The lowered output must have re-tagged every `StorageId::ALLOCA`
+        // access as `StorageId::STACK` (that's genuinely where the rebased
+        // data lives) -- and must contain none of the original `ALLOCA`
+        // tag, which only exists pre-lowering as a rebasing marker.
+        let has_rebased_stack_op = ir_blocks.blocks.iter().any(|b| {
+            b.stmts.iter().any(|s| {
+                matches!(&s.kind,
+                    IRStmt::StorageRead { storage, .. } | IRStmt::StorageWrite { storage, .. }
+                    if *storage == StorageId::STACK)
+            })
+        });
+        assert!(
+            has_rebased_stack_op,
+            "expected the alloca's StorageId::ALLOCA access to be re-tagged StorageId::STACK"
+        );
+        let has_leftover_alloca_tag = ir_blocks.blocks.iter().any(|b| {
+            b.stmts.iter().any(|s| {
+                matches!(&s.kind,
+                    IRStmt::StorageRead { storage, .. } | IRStmt::StorageWrite { storage, .. }
+                    if *storage == StorageId::ALLOCA)
+            })
+        });
+        assert!(
+            !has_leftover_alloca_tag,
+            "StorageId::ALLOCA must not leak into the lowered output"
+        );
     }
 
     /// Verify that block params use packed words (PACK_TID) instead of

@@ -178,6 +178,24 @@ impl StorageId {
     /// with any realistic number of declared memories can't collide with
     /// it.
     pub const VAFFLE_SSA_SPILL: StorageId = StorageId(1_000_000);
+    /// Dedicated marker space for a frontend's `alloca` (e.g.
+    /// `volar-llvm-vaffle-import`'s `Value::StackAlloc`/`PtrLoad`/
+    /// `PtrStore`/`PtrOffset`).
+    ///
+    /// Deliberately *not* [`STACK`]: `volar-vaffle-target/src/lower_to_ir.rs`
+    /// rebases every `StorageRead`/`StorageWrite` tagged `ALLOCA` onto the
+    /// enclosing function's real runtime frame (`sp_bits + local_offset`,
+    /// re-tagged `STACK` in the lowered output — that's genuinely where the
+    /// data ends up living) before emitting it. [`STACK`] itself carries no
+    /// such contract — it is (and must stay) a plain, unrebased storage
+    /// space free for the calling convention's own internal frame *and* for
+    /// arbitrary hand-built or fuzzer-generated VAFFLE code that has no
+    /// notion of "this address is relative to some frame" (confirmed by
+    /// `volar-fuzz`'s own extended-block generator, which picks a random
+    /// `StorageId` including `STACK`'s numeric value as just another id).
+    /// Rebasing based on the numeric value of [`STACK`] instead of this
+    /// dedicated id would silently corrupt any such unrelated access.
+    pub const ALLOCA: StorageId = StorageId(1_000_001);
 }
 
 impl PreInitSegment {

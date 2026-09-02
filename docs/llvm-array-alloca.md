@@ -4,7 +4,9 @@
 `[N x i8]` as a byte blob), plus a single-index, differently-typed constant
 `getelementptr` used as a "typed view" into it (the rustc `-O0` `stack_spill`
 shape). Struct allocas are a named error (the "or names a clear error" branch
-of item 3 below — not implemented, deliberately).
+of item 3 below — not implemented, deliberately). The `StorageId::STACK`
+address collision this uncovered (below) is now fixed in general, not just
+worked around.
 
 ## Re-triage: the real blocker was not array support
 
@@ -45,23 +47,74 @@ bump allocator (`FuncCtx::next_stack_slot`, starting at 0) and
 `volar-vaffle-target/src/lower_to_ir.rs`'s calling-convention frame layout
 (params/return/spill/cross-block-value regions, *also* starting at absolute
 address 0 for a top-level function) — `lower_to_ir.rs`'s translation of
-`Value::StackAlloc` forwards its address-bit `Stmt::Const` nodes verbatim,
-with no rebasing against that frame at all. Once the `bit_tid` masking bug
-above was fixed (making 32 *genuinely distinct* addresses reach the
-interpreter instead of collapsing to 2), this became directly observable:
-address 0 aliased the function's own packed return-value slot. Worked
-around locally (not fixed generally) via `STACK_ALLOCA_RESERVE`: this
-importer's own alloca bump allocator now starts at a large, fixed offset
-(`1 << 24`) instead of 0, comfortably clear of any realistic
-`own_layout.size` while staying well inside `SP_BITS` (32) so `StackPtr`
-arithmetic elsewhere never wraps around it. A fully general fix (rebasing
-every `StorageId::STACK` access by that function's own `own_layout.size`
-inside `lower_to_ir.rs`) is still open — see `llvm-alloca.md`'s "Known
-risks" for the sibling gap this compounds (`inline_vaffle.rs` + `alloca`).
-Nothing else currently reaches this path with a real, non-trivial
-`own_layout.size` (`VaffleTarget`/`CBackend` never go through
-`lower_to_ir.rs` for `StackAlloc` at all), so the reservation is safe today,
-but it is a heuristic, not a proof.
+`Value::StackAlloc` forwarded its address-bit `Stmt::Const` nodes verbatim,
+with no rebasing against that frame at all. Initially worked around with a
+fixed `STACK_ALLOCA_RESERVE` offset (comfortably clear of any realistic
+frame size); a follow-up pass replaced that heuristic with the fully
+general fix below. **The reserve constant is gone.**
+
+## Fully-principled frame rebasing (StorageId::ALLOCA)
+
+The importer's stack addresses are now genuinely *local, per-function
+offsets* starting at 0 (`FuncCtx::next_stack_slot`'s original scheme, no
+reserved headroom needed), and `lower_to_ir.rs` rebases each one onto the
+real runtime frame at lowering time: `sp_bits + local_offset`, via the same
+`StackPtr`/`bc_add` machinery the calling convention's own spill/reload/
+param/return addressing already uses (`rebase_stack_addr` in
+`lower_to_ir.rs`). `sp_bits` is a block's own incoming SP — exactly where
+that function's own `own_layout.size` register region ends — so alloca
+storage starts right past it. Critically this is the *actual runtime* SP,
+not a compile-time literal: a recursive call's nested activation gets its
+own alloca storage automatically, rather than every recursion depth
+aliasing the same fixed address (which no fixed-offset scheme, however
+large, could ever prevent — only defer).
+
+A second, independent collision surfaced once this was implemented: a
+function that both uses `alloca` *and* makes a nested call needs its own
+call-site SP advancement to skip past its own live alloca storage, not
+just the callee's own register region — otherwise the callee's frame lands
+on top of it. Fixed via `FuncInfo::alloca_budget` (computed once in
+`plan_functions`, straight off every `Value::StackAlloc`'s own
+`base_slot`/`count`/`elem_ty` fields), added alongside `own_layout.size` at
+every call site's SP advance.
+
+**`StorageId::ALLOCA`, not `StorageId::STACK`, is the marker that gets
+rebased.** The first implementation matched on `storage: StorageId::STACK`
+directly and immediately broke `volar-fuzz`'s
+`prop_n_lower_vaffle_to_boolar_extended_preserves_semantics`: its extended
+block generator (`crates/fuzz/volar-fuzz/src/generators/vaffle.rs`) picks a
+`StorageId` from `0..4` for arbitrary storage ops, including `STACK`'s
+numeric value (1) as *just another id* with plain, unrebased semantics —
+exactly the kind of unrelated code the module doc already warned
+`StorageId::STACK`'s sharing could hit. Rebasing based on `STACK`'s numeric
+value silently shifted those addresses, breaking equivalence between the
+VAFFLE-level interpreter (no rebasing) and the lowered-to-Boolar pipeline
+(rebased). Fixed by giving alloca a dedicated, disjoint id —
+`StorageId::ALLOCA = StorageId(1_000_001)`, following `VAFFLE_SSA_SPILL`'s
+existing "far away, deliberately reserved" pattern — so `StorageId::STACK`
+stays exactly what it always was: a plain, unrebased storage space free for
+the calling convention's own frame *and* for arbitrary/fuzzer-generated
+code, with zero special handling. `lower_to_ir.rs` matches `ALLOCA` on the
+way in and re-tags the rebased result `STACK` on the way out (that's
+genuinely where the data ends up living); `StorageId::ALLOCA` never
+survives into the lowered output. `VaffleTarget::alloca` (`target.rs`, the
+`CBackend`/LIR-level producer) deliberately keeps using `StorageId::STACK`
+directly and is *not* rebased — it never goes through `lower_to_ir.rs` in
+its real pipeline, so there's nothing to rebase.
+
+Tests: `volar-vaffle-target::lower_to_ir`'s own unit test
+`test_alloca_budget_reserved_across_nested_call` (hand-built two-function
+VAFFLE module; checks the computed `alloca_budget` directly and that the
+lowered output re-tags `ALLOCA` as `STACK` with no leftover `ALLOCA`);
+`llvm_alloca_survives_nested_call_lowers_without_panicking`
+(`volar-ir-build/tests/llvm_frontends.rs`) — this one can only check that
+lowering succeeds, not the computed value: `unroll_ir`/`movfuscate` both
+reject *any* call-preserving cross-function call as "not statically
+finite," confirmed reproducible with zero allocas involved. That gap in
+numeric-evaluation support for cross-function calls is pre-existing and
+orthogonal to this work — noted under "Not this task" below, not fixed
+here. Full `volar-fuzz` property suite (78 tests, 0 ignored) re-verified
+green after this change, including the one it broke along the way.
 
 ## What landed
 
@@ -102,12 +155,18 @@ that file's existing convention); `llvm_array_alloca_stack_spill_computes_x_xor_
   this handoff took the named-error branch instead). Would need field
   layout (size/alignment) from LLVM's `TargetData` and a genuine two-index
   GEP path (`[0, field_idx]`), not just the single-index one this crate has.
-- A general fix for the `StorageId::STACK` frame/alloca address-space
-  collision described above (belongs in `lower_to_ir.rs`, affects any
-  future producer of `Value::StackAlloc` that reaches it with a non-trivial
-  `own_layout.size`, not just large allocas from this importer).
+- A general numeric evaluator for call-preserving, cross-function Volar IR:
+  `unroll_ir`/`movfuscate`/`eval_ir` all reject *any* real inter-function
+  call as "not statically finite," independent of alloca (confirmed with a
+  plain two-function call chain and zero allocas). This means the
+  `alloca`-survives-a-nested-call fix above is verified structurally
+  (`volar-vaffle-target`'s own hand-built-module unit test) but not via a
+  full LLVM→circuit→numeric round trip — that round trip doesn't exist yet
+  for *any* non-inlined multi-function program, alloca or not.
 - `import_module_inlined` + `alloca` (`llvm-alloca.md`'s existing "Not this
-  task" — orthogonal, still unverified).
+  task" — orthogonal, still unverified; `inline_vaffle.rs`'s `StackAlloc`
+  rebase looks disconnected from `VaffleTarget`'s actual addressing
+  convention, per that doc's "Known risks").
 - Symbolic/dynamic GEP index, pointer `phi`/`select`, heap `malloc`,
   identity `WebProofBackend::verify`, full SLH-DSA verify — all unchanged
   from `llvm-alloca.md`.
@@ -119,5 +178,8 @@ that file's existing convention); `llvm_array_alloca_stack_spill_computes_x_xor_
 
 `volar-llvm-vaffle-import`'s `translate_instruction` `Alloca` arm
 (`flatten_alloca_type`), `Importer::addr_tid`, `stack_load`/`stack_store`
-(the `bit_tid` → `addr_tid` fix), `FuncCtx::new`/`STACK_ALLOCA_RESERVE`
-(the frame-collision workaround). Tests listed above.
+(the `bit_tid` → `addr_tid` fix, and their `StorageId::ALLOCA` tag).
+`volar-ir-common::StorageId::ALLOCA` (the dedicated marker). `volar-vaffle-
+target/src/lower_to_ir.rs`'s `rebase_stack_addr`, `compute_alloca_budget`,
+`FuncInfo::alloca_budget`, and the call-site SP-advance that consults it.
+Tests listed above.

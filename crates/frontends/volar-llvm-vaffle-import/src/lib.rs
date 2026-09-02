@@ -34,7 +34,7 @@
 //!   read/written through it may be symbolic);
 //! - a constant-size `alloca` (scalar integer element type only) — or a
 //!   single constant-index `getelementptr` off one — tracked as a
-//!   compile-time-constant `StorageId::STACK` address (`Value::StackAlloc`
+//!   compile-time-constant `StorageId::ALLOCA` address (`Value::StackAlloc`
 //!   / `PtrLoad` / `PtrStore` / `PtrOffset`, one bit-level `StorageRead`/
 //!   `StorageWrite` per bit, mirroring `VaffleTarget`'s own convention; see
 //!   `docs/llvm-alloca.md`).
@@ -102,32 +102,6 @@ type IResult<T> = Result<T, ImportError>;
 /// `PTR_BITS` convention (and this crate's existing pointer-param fallback
 /// in [`llvm_bit_width`]).
 const PTR_BITS: usize = 32;
-
-/// Bit-address `FuncCtx::next_stack_slot` starts bumping from, per function.
-///
-/// `StorageId::STACK` is shared with `volar-vaffle-target/src/lower_to_ir.rs`'s
-/// own calling-convention frame (params/return/spill/cross-block-value
-/// regions, addressed as `frame_sp + offset` starting at compile-time
-/// offset 0 for a non-recursive top-level function) -- `lower_to_ir.rs`'s
-/// generic translation of `Value::StackAlloc`'s address-bit `Stmt::Const`
-/// nodes forwards them verbatim, with no rebasing against that frame at
-/// all. Starting this importer's own alloca addresses at absolute zero
-/// therefore silently aliases a real function's own return-value/spill
-/// slots. This is a separate, precautionary concern from `addr_tid` below
-/// (a genuine bug that *was* confirmed causing `spill(5)` to compute 0 --
-/// this reservation guards against a *different*, still-unverified-in-
-/// practice collision on top of that fix, not the cause of it). A fully
-/// general fix belongs in `lower_to_ir.rs` (rebase every
-/// `StorageId::STACK` access by that function's own `own_layout.size`),
-/// but nothing production-real reaches that path except this importer
-/// today (`VaffleTarget`/`CBackend` never go through `lower_to_ir.rs` for
-/// `StackAlloc` at all -- see docs/llvm-stack-spill-boolar.md's "Known
-/// risks"). Reserving a large, fixed offset here is a much smaller, purely
-/// local change: comfortably larger than any realistic `own_layout.size`
-/// (proportional to a function's own VAFFLE value count) while staying
-/// well inside `SP_BITS` (32) so `StackPtr` arithmetic elsewhere never
-/// wraps around it.
-const STACK_ALLOCA_RESERVE: u64 = 1 << 24;
 
 /// Bits needed to represent every integer in `0..=v` (at least 1). Matches
 /// `VaffleTarget::switch`'s dense positional selector width.
@@ -207,18 +181,21 @@ struct Importer<'ctx> {
     storage_alloc: StorageAllocator,
     bit_tid: TypeId,
     byte_tid: TypeId,
-    /// Type stamped on `StorageId::STACK` address `Stmt::Const`s
+    /// Type stamped on `StorageId::ALLOCA` address `Stmt::Const`s
     /// (`stack_load`/`stack_store`). Must be wide enough to hold the
-    /// *numeric value* of a stack bit-address (up to
-    /// `STACK_ALLOCA_RESERVE` plus a function's own allocated bits) --
-    /// `self.bit_tid` (1 bit) is NOT: an interpreter evaluating
-    /// `Stmt::Const` masks the literal down to its *declared* type's
-    /// width, so a 1-bit-typed address constant silently collapses every
-    /// address to just its own low bit, aliasing almost everything onto
-    /// addresses 0/1 (confirmed root cause of `spill(5)` computing `0`
-    /// instead of `5` -- every one of `spill`'s 32 distinct bit addresses
-    /// collapsed to 0 or 1 this way). `_32` matches `PTR_BITS`/`SP_BITS`
-    /// convention used elsewhere in this pipeline for addresses.
+    /// *numeric value* of a stack bit-address (this function's own
+    /// allocated bits, zero-based -- see `FuncCtx::next_stack_slot`;
+    /// `volar-vaffle-target/src/lower_to_ir.rs` rebases this local offset
+    /// onto the real runtime frame at lowering time, so nothing here needs
+    /// to reserve headroom against a collision) -- `self.bit_tid` (1 bit)
+    /// is NOT wide enough: an interpreter evaluating `Stmt::Const` masks
+    /// the literal down to its *declared* type's width, so a 1-bit-typed
+    /// address constant silently collapses every address to just its own
+    /// low bit, aliasing almost everything onto addresses 0/1 (confirmed
+    /// root cause of `spill(5)` computing `0` instead of `5` -- every one
+    /// of `spill`'s 32 distinct bit addresses collapsed to 0 or 1 this
+    /// way). `_32` matches `PTR_BITS`/`SP_BITS` convention used elsewhere
+    /// in this pipeline for addresses.
     addr_tid: TypeId,
 }
 
@@ -236,8 +213,8 @@ impl<'ctx> Importer<'ctx> {
             func_ids: HashMap::new(),
             storage_for_global: HashMap::new(),
             // Start well above any reserved range; this importer's own
-            // *global* StorageIds never touch StorageId::STACK/VIRT_*/
-            // memory(_) (stack-alloca'd data uses StorageId::STACK
+            // *global* StorageIds never touch StorageId::ALLOCA/STACK/
+            // VIRT_*/memory(_) (stack-alloca'd data uses StorageId::ALLOCA
             // directly, via `stack_load`/`stack_store`, not this allocator).
             storage_alloc: StorageAllocator::new(64),
             bit_tid,
@@ -923,7 +900,7 @@ impl<'ctx> Importer<'ctx> {
         Ok(called)
     }
 
-    /// Bit-decompose a compile-time-constant `StorageId::STACK` address,
+    /// Bit-decompose a compile-time-constant `StorageId::ALLOCA` address,
     /// `PTR_BITS` wide, LSB first — the pointer *value* for an alloca or a
     /// constant-index GEP off one. Mirrors `VaffleTarget::alloca`'s
     /// `addr_bits` construction exactly.
@@ -933,11 +910,13 @@ impl<'ctx> Importer<'ctx> {
             .collect()
     }
 
-    /// Read `n_bits` individual bits from `StorageId::STACK` starting at
+    /// Read `n_bits` individual bits from `StorageId::ALLOCA` starting at
     /// `base_slot`, one `StorageRead` per bit (matches `VaffleTarget::
     /// ptr_load`'s per-bit granularity, but with a compile-time-constant
     /// address per bit instead of a runtime-composed one, since this
     /// importer only tracks compile-time-constant stack pointers).
+    /// `StorageId::ALLOCA`, not `StorageId::STACK` -- see that constant's
+    /// own doc comment for why sharing `STACK` is unsafe.
     fn stack_load(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
@@ -962,7 +941,7 @@ impl<'ctx> Importer<'ctx> {
             let bit = fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageRead {
-                    storage: StorageId::STACK,
+                    storage: StorageId::ALLOCA,
                     ty: self.bit_tid,
                     addr,
                 }),
@@ -981,7 +960,7 @@ impl<'ctx> Importer<'ctx> {
         bits
     }
 
-    /// Write `val` to `StorageId::STACK` starting at `base_slot`, one
+    /// Write `val` to `StorageId::ALLOCA` starting at `base_slot`, one
     /// `StorageWrite` per bit. See [`Self::stack_load`].
     fn stack_store(&mut self, fctx: &mut FuncCtx<'ctx>, ptr_bits0: ValueId, base_slot: u64, val: &Bits) {
         let cur = fctx.current;
@@ -999,7 +978,7 @@ impl<'ctx> Importer<'ctx> {
             fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageWrite {
-                    storage: StorageId::STACK,
+                    storage: StorageId::ALLOCA,
                     src: bit,
                     ty: self.bit_tid,
                     addr,
@@ -1381,13 +1360,19 @@ struct FuncCtx<'ctx> {
     terminators: Vec<Option<Terminator>>,
     cache: HashMap<AnyValueEnum<'ctx>, Bits>,
     current: BlockId,
-    /// Per-function bump allocator for `StorageId::STACK`, in *bits* (matches
-    /// `VaffleTarget`'s own `next_stack_slot`/`PTR_BITS` convention) — not
-    /// bytes like the global `storage_for`/`mem_load`/`mem_store` path,
-    /// which is a distinct storage identity and addressing convention.
+    /// Per-function bump allocator for `StorageId::ALLOCA`, in *bits*, zero-
+    /// based (matches `VaffleTarget`'s own `next_stack_slot`/`PTR_BITS`
+    /// convention) — not bytes like the global `storage_for`/`mem_load`/
+    /// `mem_store` path, which is a distinct storage identity and
+    /// addressing convention. These are *local* offsets within this
+    /// function's own alloca region: `volar-vaffle-target/src/
+    /// lower_to_ir.rs` rebases each one onto the real runtime frame
+    /// (`sp_bits + local_offset`) at lowering time, so this bump allocator
+    /// never needs to know — or reserve headroom against — the calling
+    /// convention's own frame layout.
     next_stack_slot: u64,
     /// Pointer-typed LLVM values (alloca results, or a constant-index GEP
-    /// off one) that are tracked as `StorageId::STACK` addresses, mapped to
+    /// off one) that are tracked as `StorageId::ALLOCA` addresses, mapped to
     /// their resolved compile-time-constant `base_slot`. This is the sole
     /// source of truth for "is this a stack pointer" — `cache` alone is not
     /// enough, since pointer-typed function *parameters* are also cached
@@ -1406,7 +1391,7 @@ impl<'ctx> FuncCtx<'ctx> {
             terminators: vec![None; n_blocks],
             cache: HashMap::new(),
             current: BlockId(0),
-            next_stack_slot: STACK_ALLOCA_RESERVE,
+            next_stack_slot: 0,
             stack_slot_of: HashMap::new(),
         }
     }

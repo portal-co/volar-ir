@@ -272,21 +272,21 @@ entry:
         matches!(
             &v.kind,
             Value::Op(volar_ir_common::Stmt::StorageRead { storage, .. })
-                if *storage == volar_ir_common::StorageId::STACK
+                if *storage == volar_ir_common::StorageId::ALLOCA
         )
     });
     let has_write = body.values.iter().any(|v| {
         matches!(
             &v.kind,
             Value::Op(volar_ir_common::Stmt::StorageWrite { storage, .. })
-                if *storage == volar_ir_common::StorageId::STACK
+                if *storage == volar_ir_common::StorageId::ALLOCA
         )
     });
     assert!(has_alloc, "expected a Value::StackAlloc marker");
-    assert!(has_read, "expected a STACK StorageRead for the spill load");
+    assert!(has_read, "expected an ALLOCA StorageRead for the spill load");
     assert!(
         has_write,
-        "expected a STACK StorageWrite for the spill store"
+        "expected an ALLOCA StorageWrite for the spill store"
     );
 }
 
@@ -325,7 +325,7 @@ entry:
             matches!(
                 &v.kind,
                 Value::Op(volar_ir_common::Stmt::StorageRead { storage, .. })
-                    if *storage == volar_ir_common::StorageId::STACK
+                    if *storage == volar_ir_common::StorageId::ALLOCA
             )
         })
         .count();
@@ -336,7 +336,7 @@ entry:
             matches!(
                 &v.kind,
                 Value::Op(volar_ir_common::Stmt::StorageWrite { storage, .. })
-                    if *storage == volar_ir_common::StorageId::STACK
+                    if *storage == volar_ir_common::StorageId::ALLOCA
             )
         })
         .count();
@@ -415,7 +415,7 @@ entry:
             matches!(
                 &v.kind,
                 Value::Op(volar_ir_common::Stmt::StorageRead { storage, .. })
-                    if *storage == volar_ir_common::StorageId::STACK
+                    if *storage == volar_ir_common::StorageId::ALLOCA
             )
         })
         .count();
@@ -426,7 +426,7 @@ entry:
             matches!(
                 &v.kind,
                 Value::Op(volar_ir_common::Stmt::StorageWrite { storage, .. })
-                    if *storage == volar_ir_common::StorageId::STACK
+                    if *storage == volar_ir_common::StorageId::ALLOCA
             )
         })
         .count();
