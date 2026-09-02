@@ -1,0 +1,11 @@
+[package]
+name = "volar-circuit-source"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Generic textual source-code emitter for fused Volar/Boolar circuits"
+repository.workspace = true
+
+[dependencies]
+volar-ir.workspace = true
+volar-ir-common.workspace = true

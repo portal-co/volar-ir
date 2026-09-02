@@ -98,6 +98,9 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | `volar-wasm-circuit-import` | Control-free WASM → `VCircuit` (source-level call expansion; not the builder's VAFFLE path) |
 | `volar-ir-virt` | Virtualization (dispatch-mode block interpretation) |
 | `volar-lir` / `volar-lir-text` / `volar-lir-saved` | Mid-level IR shared with backend consumers in `volar` |
+| `volar-circuit-source` | Named-wire walker + `CircuitSourceBackend` for textual circuit libraries |
+| `volar-noir-backend` | Noir `type = "lib"` emission (bool + Volar IR); see [`circuit-source.md`](circuit-source.md) |
+| `volar-pod2-backend` | Podlang module emission (bool + Merkle array/dict storage) |
 | `volar-ir` (`region.rs`, `gadget.rs`) | Input/output wire regions + gadget spec/binding types (companion metadata) |
 | `volar-ir-passes` (`apply_gadgets.rs`) | Gadget application: splice gadgets onto region-tagged boundary wires |
 | `volar-ir-text` (`regions.rs`) | Text sections for the region/gadget side tables |
@@ -143,6 +146,7 @@ Frontend routes that feed those passes:
 | Wire regions & gadgets (plan) | [`wire-regions-gadgets-plan.md`](wire-regions-gadgets-plan.md) |
 | Typed gadgets, higher-level IR gadgets, region threading through passes (plan) | [`typed-gadgets-and-region-threading-plan.md`](typed-gadgets-and-region-threading-plan.md) |
 | Full pipeline (weaving, backends, proving) | `volar` repo's `docs/pipeline.md` |
+| Textual circuit libraries (Noir, POD2) | [`circuit-source.md`](circuit-source.md) |
 
 ## Retro CPU Boolar circuits (fixtures)
 

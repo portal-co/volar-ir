@@ -1,0 +1,16 @@
+[package]
+name = "volar-pod2-backend"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "POD2 / Podlang textual backend for volar-circuit-source"
+repository.workspace = true
+
+[dependencies]
+volar-circuit-source.workspace = true
+volar-ir.workspace = true
+volar-ir-common.workspace = true
+
+[dev-dependencies]
+volar-fuzz.workspace = true
+volar-ir-build.workspace = true

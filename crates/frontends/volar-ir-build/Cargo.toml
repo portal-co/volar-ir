@@ -18,6 +18,7 @@ volar-ir = { workspace = true, features = ["rkyv"] }
 volar-ir-common.workspace = true
 volar-ir-opt.workspace = true
 volar-ir-passes.workspace = true
+volar-circuit-source.workspace = true
 volar-lir-saved = { workspace = true, features = ["rkyv"] }
 rkyv = { workspace = true, features = ["bytecheck"] }
 vaffle = { workspace = true, features = ["rkyv"], optional = true }

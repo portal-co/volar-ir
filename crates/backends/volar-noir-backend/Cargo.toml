@@ -1,0 +1,20 @@
+[package]
+name = "volar-noir-backend"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Noir textual backend for volar-circuit-source"
+repository.workspace = true
+
+[features]
+default = []
+nargo-check = []
+
+[dependencies]
+volar-circuit-source.workspace = true
+volar-ir.workspace = true
+volar-ir-common.workspace = true
+
+[dev-dependencies]
+volar-fuzz.workspace = true
+volar-ir-build.workspace = true

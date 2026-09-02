@@ -33,3 +33,6 @@ pub use volar_vaffle_target::{WaffleImportConfig, WaffleImportKind};
 /// config types like `volar_ir_build::volar_ir_passes::StorageToMuxConfig`
 /// without an extra direct dependency.
 pub use volar_ir_passes;
+
+/// Circuit-source emission (Noir / POD2 / other textual backends).
+pub use volar_circuit_source;

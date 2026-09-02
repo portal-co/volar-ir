@@ -45,8 +45,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::marker::PhantomData;
 
+use volar_circuit_source::{
+    CircuitSourceBackend, EmitOptions, SourcePackage, emit_bool_circuit, emit_volar_circuit,
+};
 use volar_ir::boolar::BIrBlocks;
-use volar_ir::circuit::BCircuit;
+use volar_ir::circuit::{BCircuit, VCircuit};
 use volar_ir::ir::{IRBlocks, IRTypes};
 use volar_ir::rcircuit::RCircuit;
 use volar_lir_saved::{RecordingTarget, SavedLirModule};
@@ -451,6 +454,20 @@ impl Pipeline<VolarIrStage> {
     pub fn to_volar_ir(self) -> (IRBlocks, IRTypes) {
         self.into_data()
     }
+
+    /// Fuse to a [`VCircuit`] and emit a reusable source package.
+    ///
+    /// Requires a single `Jmp(Return)`-terminated block (run `unroll_ir` or
+    /// `movfuscate` first).
+    pub fn emit_source<B: CircuitSourceBackend>(
+        self,
+        backend: &B,
+        opt: &EmitOptions,
+    ) -> Result<SourcePackage, BoxError> {
+        let (blocks, types) = self.into_data();
+        let circuit = VCircuit::try_from_ir(&blocks).map_err(box_err)?;
+        emit_volar_circuit(&circuit, &types, backend, opt).map_err(box_err)
+    }
 }
 
 impl Pipeline<BoolarStage> {
@@ -496,6 +513,16 @@ impl Pipeline<BoolarCircuitStage> {
     /// Terminal: the circuit-fused Boolar IR.
     pub fn to_boolar_circuit(self) -> BCircuit {
         self.into_data()
+    }
+
+    /// Emit a reusable source package from the fused Boolar circuit.
+    pub fn emit_source<B: CircuitSourceBackend>(
+        self,
+        backend: &B,
+        opt: &EmitOptions,
+    ) -> Result<SourcePackage, BoxError> {
+        let circuit = self.into_data();
+        emit_bool_circuit(&circuit, backend, opt).map_err(box_err)
     }
 }
 
