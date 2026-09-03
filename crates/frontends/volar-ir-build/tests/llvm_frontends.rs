@@ -191,6 +191,119 @@ entry:
     let _ = fs::remove_file(&path);
 }
 
+#[test]
+fn llvm_memset_stack_spill_unrolls_and_computes_x_xor_x_plus_1() {
+    let src = r#"
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+
+define i32 @stack_spill(i32 %x) {
+entry:
+  %buf = alloca [16 x i8], align 4
+  call void @llvm.memset.p0.i64(ptr %buf, i8 0, i64 16, i1 false)
+  %p0 = getelementptr i32, ptr %buf, i64 0
+  %x1 = add i32 %x, 1
+  store i32 %x, ptr %p0
+  %p1 = getelementptr i32, ptr %buf, i64 1
+  store i32 %x1, ptr %p1
+  %a = load i32, ptr %p0
+  %b = load i32, ptr %p1
+  %r = xor i32 %a, %b
+  ret i32 %r
+}
+"#;
+    let path = write_temp_ll("stack_spill_memset", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["stack_spill"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("constant memset must lower before unroll")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let x: u64 = 5;
+    let input_word: Vec<bool> = (0..64).map(|i| (x >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("eval terminates");
+    let r = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
+    assert_eq!(r, x ^ (x + 1), "memset stack_spill(5) must compute 5 ^ 6");
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn llvm_memcpy_between_allocas_unrolls_and_preserves_value() {
+    let src = r#"
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+
+define i32 @copy(i32 %x) {
+entry:
+  %src = alloca [4 x i8], align 4
+  %dst = alloca [4 x i8], align 4
+  store i32 %x, ptr %src
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 4, i1 false)
+  %out = load i32, ptr %dst
+  ret i32 %out
+}
+"#;
+    let path = write_temp_ll("memcpy_allocas", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["copy"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("constant memcpy must lower before unroll")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let x: u64 = 0x4433_2211;
+    let input_word: Vec<bool> = (0..64).map(|i| (x >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("eval terminates");
+    let r = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
+    assert_eq!(r, x, "memcpy must preserve the source bytes");
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn llvm_memmove_same_alloca_overlap_preserves_source_bytes() {
+    let src = r#"
+declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+
+define i32 @move_overlap(i32 %x) {
+entry:
+  %buf = alloca [4 x i8], align 4
+  store i32 %x, ptr %buf
+  %dst = getelementptr i8, ptr %buf, i64 1
+  call void @llvm.memmove.p0.p0.i64(ptr %dst, ptr %buf, i64 3, i1 false)
+  %out = load i32, ptr %buf
+  ret i32 %out
+}
+"#;
+    let path = write_temp_ll("memmove_overlap", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["move_overlap"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("overlapping constant memmove must lower before unroll")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let x: u64 = 0x4433_2211;
+    let input_word: Vec<bool> = (0..64).map(|i| (x >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("eval terminates");
+    let r = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
+    assert_eq!(
+        r, 0x3322_1111,
+        "memmove must read its source before writing overlap"
+    );
+    let _ = fs::remove_file(&path);
+}
+
 /// docs/llvm-array-alloca.md item 3: a struct alloca either flattens or
 /// names a clear error -- this importer chooses the latter.
 #[test]
@@ -370,9 +483,12 @@ bb4:
 }
 
 #[test]
-fn llvm_switch_movfuscated_lowers_to_boolar_and_fuses() {
+fn llvm_dead_landingpad_movfuscates_lowers_to_boolar_and_fuses() {
     let src = r#"
-define i32 @poll_fsm(i8 %state, i32 %acc) {
+declare i32 @rust_eh_personality(...)
+declare void @cant_unwind()
+
+define i32 @poll_fsm(i8 %state, i32 %acc) personality ptr @rust_eh_personality {
 entry:
   switch i8 %state, label %bb4 [
     i8 0, label %bb3
@@ -387,23 +503,93 @@ bb2:
 bb4:
   %r = phi i32 [ %x, %bb2 ], [ %acc, %entry ], [ %add, %bb3 ]
   ret i32 %r
+terminate:
+  %lp = landingpad { ptr, i32 }
+          filter [0 x ptr] zeroinitializer
+  call void @cant_unwind()
+  unreachable
 }
 "#;
-    let path = write_temp_ll("poll_fsm_boolar", src);
+    let path = write_temp_ll("poll_fsm_dead_landingpad", src);
+    let (original, original_types) = Pipeline::from_llvm(&path, &["poll_fsm"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .expect("dead landingpad must not block structural import")
+        .to_volar_ir();
+
+    let (movfuscated, movfuscated_types) = Pipeline::from_llvm(&path, &["poll_fsm"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .expect("movfuscate accepts poll_fsm with dead landingpad")
+        .to_volar_ir();
+    assert!(movfuscated.is_movfuscated());
+
+    let pc_inputs = volar_ir_passes::pc_bits_needed(original.blocks.len());
+    for (state, acc, expected_value) in [(0u8, 7u32, 8u32), (1, 7, 7 ^ 40503), (2, 7, 7)] {
+        let packed = state as u64 | ((acc as u64) << 8);
+        let original_input: Vec<bool> = (0..64).map(|i| (packed >> i) & 1 != 0).collect();
+        let expected = volar_fuzz::interpreter::ir::eval_ir(
+            &original,
+            &original_types,
+            &[original_input.clone()],
+        )
+        .expect("original poll_fsm terminates");
+        let expected_bits = volar_fuzz::interpreter::ir::bit_flatten(&expected);
+        let expected_word = expected_bits
+            .iter()
+            .enumerate()
+            .fold(0u32, |word, (i, bit)| word | ((*bit as u32) << i));
+        assert_eq!(expected_word, expected_value);
+
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+            .params
+            .iter()
+            .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
+            .collect();
+        mov_inputs[pc_inputs] = original_input;
+        let actual =
+            volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &movfuscated_types, &mov_inputs)
+                .expect("movfuscated poll_fsm terminates");
+        assert_eq!(actual, expected, "movfuscation changed state {state}");
+    }
+
     let boolar = Pipeline::from_llvm(&path, &["poll_fsm"])
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
         .and_then(|p| p.lower_to_boolar())
-        .expect("cross-block STACK spill: see docs/llvm-stack-spill-boolar.md");
-    assert!(boolar.to_boolar().blocks.len() == 1);
+        .expect("dead landingpad poll_fsm must lower through Boolar");
+    let boolar = boolar.to_boolar();
+    assert_eq!(boolar.blocks.len(), 1);
+    for (state, acc) in [(0u8, 7u32), (1, 7), (2, 7)] {
+        let packed = state as u64 | ((acc as u64) << 8);
+        let original_input: Vec<bool> = (0..64).map(|i| (packed >> i) & 1 != 0).collect();
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+            .params
+            .iter()
+            .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
+            .collect();
+        mov_inputs[pc_inputs] = original_input.clone();
+        let boolar_output = volar_fuzz::interpreter::biir::eval_biir(
+            &boolar,
+            &volar_fuzz::interpreter::ir::bit_flatten(&mov_inputs),
+        )
+        .expect("Boolar poll_fsm terminates");
+        let expected =
+            volar_fuzz::interpreter::ir::eval_ir(&original, &original_types, &[original_input])
+                .expect("original poll_fsm terminates");
+        assert_eq!(
+            boolar_output,
+            volar_fuzz::interpreter::ir::bit_flatten(&expected),
+            "Boolar lowering changed state {state}"
+        );
+    }
 
-    let path2 = write_temp_ll("poll_fsm_boolar_fuse", src);
+    let path2 = write_temp_ll("poll_fsm_dead_landingpad_fuse", src);
     let fused = Pipeline::from_llvm(&path2, &["poll_fsm"])
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
         .and_then(|p| p.lower_to_boolar())
         .and_then(|p| p.fuse(64, volar_ir_passes::LoweringMode::Unconditional))
-        .expect("fused poll_fsm must round-trip through fuse without panicking");
+        .expect("fused dead-landingpad poll_fsm must round-trip through fuse without panicking");
     let _ = fused.to_boolar_circuit();
 
     let _ = fs::remove_file(&path);

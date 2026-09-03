@@ -51,16 +51,18 @@
 //! a dense positional `Terminator::Table` via the same `bc_eq` /
 //! `bc_select_vec` selector cascade `VaffleTarget::switch` uses.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use inkwell::IntPredicate;
 use inkwell::basic_block::BasicBlock as LlvmBlock;
-use inkwell::llvm_sys::core::LLVMGetSwitchCaseValue;
+use inkwell::llvm_sys::core::{
+    LLVMGetNumSuccessors, LLVMGetSuccessor, LLVMGetSwitchCaseValue, LLVMIsAGlobalVariable,
+};
 use inkwell::module::Module as LlvmModule;
 use inkwell::values::{
     AnyValue, AnyValueEnum, AsValueRef, BasicValueEnum, CallSiteValue, FunctionValue,
     InstructionOpcode, InstructionValue, IntValue, PhiValue, PointerValue,
 };
+use inkwell::IntPredicate;
 
 use vaffle::{
     Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target, Terminator, Value,
@@ -70,7 +72,7 @@ use volar_ir_common::{
     Constant, IrType, Node, Stmt, StorageAllocator, StorageId, Type, TypeId, TypeTable,
 };
 use volar_lir::circuits::{self, BitCircuitBuilder};
-use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
+use volar_llvm_constchain::{global_from_pointer, strip_pointer, ConstChainError};
 
 /// A structural-import failure.
 #[derive(Debug)]
@@ -170,6 +172,83 @@ pub fn import_module_inlined<'ctx>(
 /// One VAFFLE bit-typed value per LLVM bit, LSB first — mirrors
 /// `VaffleTarget::VaffleValue.bits`.
 type Bits = Vec<ValueId>;
+
+#[derive(Clone, Copy, Debug)]
+struct StackPointer {
+    /// Identity and bounds of the originating alloca, in bit-addressed
+    /// `StorageId::ALLOCA` slots.
+    allocation_base: u64,
+    allocation_bits: u64,
+    /// Current pointer position within (or potentially beyond) that alloca.
+    /// Ordinary loads/stores retain their pre-existing behavior; memory
+    /// intrinsics validate this range before emitting accesses.
+    addr: u64,
+}
+
+impl StackPointer {
+    fn intrinsic_range(self, n_bytes: usize) -> IResult<(u64, u64)> {
+        let n_bits = u64::try_from(n_bytes)
+            .ok()
+            .and_then(|n| n.checked_mul(8))
+            .ok_or_else(|| {
+                ImportError::Unsupported("memory intrinsic length is too large".into())
+            })?;
+        let allocation_end = self
+            .allocation_base
+            .checked_add(self.allocation_bits)
+            .ok_or_else(|| ImportError::Unsupported("alloca range overflow".into()))?;
+        let end = self
+            .addr
+            .checked_add(n_bits)
+            .ok_or_else(|| ImportError::Unsupported("memory intrinsic range overflow".into()))?;
+        if self.addr < self.allocation_base || self.addr > allocation_end || end > allocation_end {
+            return Err(ImportError::Unsupported(
+                "memory intrinsic range escapes its alloca provenance".into(),
+            ));
+        }
+        Ok((self.addr, end))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum IntrinsicPointer {
+    Stack {
+        ptr: StackPointer,
+        ptr_bits0: ValueId,
+    },
+    Global {
+        storage: StorageId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MemoryIntrinsic {
+    Memset,
+    Memcpy,
+    Memmove,
+}
+
+impl MemoryIntrinsic {
+    fn from_name(name: &str) -> Option<Self> {
+        if name.starts_with("llvm.memset.") {
+            Some(Self::Memset)
+        } else if name.starts_with("llvm.memcpy.") {
+            Some(Self::Memcpy)
+        } else if name.starts_with("llvm.memmove.") {
+            Some(Self::Memmove)
+        } else {
+            None
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Memset => "memset",
+            Self::Memcpy => "memcpy",
+            Self::Memmove => "memmove",
+        }
+    }
+}
 
 struct Importer<'ctx> {
     types: TypeTable,
@@ -383,8 +462,16 @@ impl<'ctx> Importer<'ctx> {
 
         let mut called = Vec::new();
 
-        // Pass B: translate every non-phi instruction, then the terminator.
+        let reachable = reachable_blocks(f)?;
+
+        // Pass B: translate every non-phi instruction, then the terminator,
+        // but only for blocks reachable through the terminators this importer
+        // supports. Pass A intentionally still assigned all block IDs and
+        // phi slots, so reachable targets retain their original identity.
         for (i, bb) in blocks.iter().enumerate() {
+            if !reachable.contains(bb) {
+                continue;
+            }
             let vb = BlockId(i);
             fctx.current = vb;
             let mut inst = bb.get_first_instruction();
@@ -411,10 +498,33 @@ impl<'ctx> Importer<'ctx> {
             _ => unreachable!("import_function called twice for the same FuncId"),
         };
 
+        // Unreachable LLVM blocks retain their Pass-A placeholder IDs so no
+        // reachable branch or phi needs remapping. They must nevertheless
+        // have a well-typed terminator when later VAFFLE lowerings inspect
+        // every block, rather than the old empty `Return` fallback (which is
+        // ill-typed for a non-void enclosing function).
+        let return_bits = f
+            .get_type()
+            .get_return_type()
+            .map(llvm_bit_width)
+            .unwrap_or(0);
+        let fallback_return_values: Vec<Vec<ValueId>> = blocks
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                (!reachable.contains(&blocks[i]))
+                    .then(|| {
+                        (0..return_bits)
+                            .map(|_| self.bc_const_at(&mut fctx, BlockId(i), false))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
         let values = core::mem::take(&mut fctx.values);
         let body = FuncBody {
             sig,
-            blocks: fctx.finish_blocks(),
+            blocks: fctx.finish_blocks(fallback_return_values),
             values,
             entry: entry_block,
         };
@@ -683,47 +793,45 @@ impl<'ctx> Importer<'ctx> {
             }
             InstructionOpcode::Load => {
                 let ptr = load_store_pointer(instr, 0)?;
-                if let Some(&base_slot) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()) {
+                if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).copied() {
                     let ptr_bits0 = fctx
                         .cache
                         .get(&ptr.as_any_value_enum())
                         .and_then(|b| b.first().copied())
                         .ok_or_else(|| {
-                            ImportError::Unsupported(
-                                "stack pointer bits missing (internal)".into(),
-                            )
+                            ImportError::Unsupported("stack pointer bits missing (internal)".into())
                         })?;
                     let n_bits = int_result_width(instr)?;
                     let pointee_tid = self.llvm_type_id(instr.get_type());
-                    Some(self.stack_load(fctx, ptr_bits0, base_slot, pointee_tid, n_bits))
+                    Some(self.stack_load(fctx, ptr_bits0, stack_ptr.addr, pointee_tid, n_bits))
                 } else {
                     let n_bytes = int_result_width(instr)?.div_ceil(8);
-                    Some(self.mem_load(fctx, ptr, n_bytes)?)
+                    let storage = self.storage_for(ptr)?;
+                    Some(self.mem_load(fctx, storage, n_bytes))
                 }
             }
             InstructionOpcode::Store => {
                 let val = op!(0);
                 let ptr = load_store_pointer(instr, 1)?;
-                if let Some(&base_slot) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()) {
+                if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).copied() {
                     let ptr_bits0 = fctx
                         .cache
                         .get(&ptr.as_any_value_enum())
                         .and_then(|b| b.first().copied())
                         .ok_or_else(|| {
-                            ImportError::Unsupported(
-                                "stack pointer bits missing (internal)".into(),
-                            )
+                            ImportError::Unsupported("stack pointer bits missing (internal)".into())
                         })?;
-                    self.stack_store(fctx, ptr_bits0, base_slot, &val);
+                    self.stack_store(fctx, ptr_bits0, stack_ptr.addr, &val);
                 } else {
                     let n_bytes = val.len().div_ceil(8);
-                    self.mem_store(fctx, ptr, &val, n_bytes)?;
+                    let storage = self.storage_for(ptr)?;
+                    self.mem_store(fctx, storage, &val, n_bytes);
                 }
                 None
             }
             InstructionOpcode::GetElementPtr => {
                 let base = load_store_pointer(instr, 0)?;
-                if let Some(&base_slot) = fctx.stack_slot_of.get(&base.as_any_value_enum()) {
+                if let Some(base_ptr) = fctx.stack_slot_of.get(&base.as_any_value_enum()).copied() {
                     // Constant-offset GEP off a tracked stack pointer. A
                     // symbolic index *could* be supported later (STACK
                     // addressing is runtime bit arithmetic, unlike a
@@ -763,11 +871,11 @@ impl<'ctx> Importer<'ctx> {
                     let offset = idx
                         .checked_mul(elem_bits)
                         .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
-                    let new_base_slot = base_slot.checked_add_signed(offset).ok_or_else(|| {
+                    let addr = base_ptr.addr.checked_add_signed(offset).ok_or_else(|| {
                         ImportError::Unsupported("gep offset out of range".into())
                     })?;
 
-                    let addr_bits = self.stack_addr_bits(fctx, cur, new_base_slot);
+                    let addr_bits = self.stack_addr_bits(fctx, cur, addr);
                     let base_bits = fctx
                         .cache
                         .get(&base.as_any_value_enum())
@@ -782,7 +890,7 @@ impl<'ctx> Importer<'ctx> {
                         },
                     );
                     fctx.stack_slot_of
-                        .insert(instr.as_any_value_enum(), new_base_slot);
+                        .insert(instr.as_any_value_enum(), StackPointer { addr, ..base_ptr });
                     Some(addr_bits)
                 } else {
                     // Only a base global is supported; the byte offset a
@@ -799,36 +907,43 @@ impl<'ctx> Importer<'ctx> {
                 let callee_fn = call
                     .get_called_fn_value()
                     .ok_or_else(|| ImportError::Unsupported("indirect call".into()))?;
-                let callee_id = self.func_id(callee_fn);
-                called.push(callee_fn);
-                let n_args = instr.get_num_operands().saturating_sub(1);
-                let mut args = Vec::new();
-                for i in 0..n_args {
-                    let v = instr
-                        .get_operand(i)
-                        .and_then(|o| o.value())
-                        .ok_or_else(|| {
-                            ImportError::Unsupported("call argument must be a value".into())
-                        })?;
-                    args.extend(self.value_bits(fctx, v)?);
-                }
-                let vid = fctx.emit(
-                    cur,
-                    Value::Call {
-                        func: callee_id,
-                        args,
-                    },
-                );
-                match instr.get_type().try_into() {
-                    Ok(inkwell::types::BasicTypeEnum::IntType(t)) => {
-                        let n = t.get_bit_width() as usize;
-                        Some(
-                            (0..n)
-                                .map(|i| fctx.emit(cur, Value::Output { value: vid, idx: i }))
-                                .collect(),
-                        )
+                if let Some(intrinsic) =
+                    MemoryIntrinsic::from_name(&callee_fn.get_name().to_string_lossy())
+                {
+                    self.translate_memory_intrinsic(fctx, instr, intrinsic)?;
+                    None
+                } else {
+                    let callee_id = self.func_id(callee_fn);
+                    called.push(callee_fn);
+                    let n_args = instr.get_num_operands().saturating_sub(1);
+                    let mut args = Vec::new();
+                    for i in 0..n_args {
+                        let v = instr
+                            .get_operand(i)
+                            .and_then(|o| o.value())
+                            .ok_or_else(|| {
+                                ImportError::Unsupported("call argument must be a value".into())
+                            })?;
+                        args.extend(self.value_bits(fctx, v)?);
                     }
-                    _ => None,
+                    let vid = fctx.emit(
+                        cur,
+                        Value::Call {
+                            func: callee_id,
+                            args,
+                        },
+                    );
+                    match instr.get_type().try_into() {
+                        Ok(inkwell::types::BasicTypeEnum::IntType(t)) => {
+                            let n = t.get_bit_width() as usize;
+                            Some(
+                                (0..n)
+                                    .map(|i| fctx.emit(cur, Value::Output { value: vid, idx: i }))
+                                    .collect(),
+                            )
+                        }
+                        _ => None,
+                    }
                 }
             }
             InstructionOpcode::Alloca => {
@@ -885,8 +1000,14 @@ impl<'ctx> Importer<'ctx> {
                 );
 
                 let addr_bits = self.stack_addr_bits(fctx, cur, base_slot);
-                fctx.stack_slot_of
-                    .insert(instr.as_any_value_enum(), base_slot);
+                fctx.stack_slot_of.insert(
+                    instr.as_any_value_enum(),
+                    StackPointer {
+                        allocation_base: base_slot,
+                        allocation_bits: total_slots,
+                        addr: base_slot,
+                    },
+                );
                 Some(addr_bits)
             }
             other => {
@@ -898,6 +1019,144 @@ impl<'ctx> Importer<'ctx> {
             fctx.cache.insert(instr.as_any_value_enum(), bits);
         }
         Ok(called)
+    }
+
+    /// Lower constant-size LLVM memory intrinsics before they can become a
+    /// declaration-only `Value::Call`. The source side of copies is emitted
+    /// completely before the destination side, which is the temporary-buffer
+    /// behavior required for a supported overlapping `memmove`.
+    fn translate_memory_intrinsic(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        instr: InstructionValue<'ctx>,
+        intrinsic: MemoryIntrinsic,
+    ) -> IResult<()> {
+        let n_args = instr.get_num_operands().saturating_sub(1);
+        let expected_args = match intrinsic {
+            MemoryIntrinsic::Memset => 4,
+            MemoryIntrinsic::Memcpy | MemoryIntrinsic::Memmove => 4,
+        };
+        if n_args != expected_args {
+            return Err(ImportError::Unsupported(format!(
+                "llvm.{} has unexpected operand count {n_args}",
+                intrinsic.name()
+            )));
+        }
+
+        let dest = self.intrinsic_pointer(fctx, load_store_pointer(instr, 0)?)?;
+        match intrinsic {
+            MemoryIntrinsic::Memset => {
+                let n_bytes = memory_intrinsic_length(instr, 2, intrinsic)?;
+                memory_intrinsic_nonvolatile(instr, 3, intrinsic)?;
+                self.validate_intrinsic_pointer(dest, n_bytes)?;
+
+                let fill = call_value_operand(instr, 1, "memset fill byte")?;
+                let mut fill_bits = self.value_bits(fctx, fill)?;
+                fill_bits.truncate(8);
+                while fill_bits.len() < 8 {
+                    fill_bits.push(self.bc_const_at(fctx, fctx.current, false));
+                }
+                let n_bits = n_bytes.checked_mul(8).ok_or_else(|| {
+                    ImportError::Unsupported("memory intrinsic length is too large".into())
+                })?;
+                let mut bytes = Vec::with_capacity(n_bits);
+                for _ in 0..n_bytes {
+                    bytes.extend_from_slice(&fill_bits);
+                }
+                self.intrinsic_store(fctx, dest, &bytes)
+            }
+            MemoryIntrinsic::Memcpy | MemoryIntrinsic::Memmove => {
+                let src = self.intrinsic_pointer(fctx, load_store_pointer(instr, 1)?)?;
+                let n_bytes = memory_intrinsic_length(instr, 2, intrinsic)?;
+                memory_intrinsic_nonvolatile(instr, 3, intrinsic)?;
+                self.validate_intrinsic_pointer(dest, n_bytes)?;
+                self.validate_intrinsic_pointer(src, n_bytes)?;
+                if intrinsic == MemoryIntrinsic::Memcpy
+                    && intrinsic_ranges_overlap(dest, src, n_bytes)?
+                {
+                    return Err(ImportError::Unsupported(
+                        "memcpy source and destination overlap".into(),
+                    ));
+                }
+
+                let bytes = self.intrinsic_load(fctx, src, n_bytes)?;
+                self.intrinsic_store(fctx, dest, &bytes)
+            }
+        }
+    }
+
+    fn intrinsic_pointer(
+        &mut self,
+        fctx: &FuncCtx<'ctx>,
+        ptr: PointerValue<'ctx>,
+    ) -> IResult<IntrinsicPointer> {
+        if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).copied() {
+            let ptr_bits0 = fctx
+                .cache
+                .get(&ptr.as_any_value_enum())
+                .and_then(|bits| bits.first().copied())
+                .ok_or_else(|| {
+                    ImportError::Unsupported("stack pointer bits missing (internal)".into())
+                })?;
+            Ok(IntrinsicPointer::Stack {
+                ptr: stack_ptr,
+                ptr_bits0,
+            })
+        } else {
+            // `storage_for` intentionally identifies a global but has no
+            // byte-offset result. For intrinsics, accept only the actual base
+            // global rather than silently applying an offset-GEP at byte 0.
+            if unsafe { LLVMIsAGlobalVariable(ptr.as_value_ref()) }.is_null() {
+                return Err(ImportError::Unsupported(
+                    "memory intrinsic global pointer must be a base global; global GEP offsets are not supported"
+                        .into(),
+                ));
+            }
+            Ok(IntrinsicPointer::Global {
+                storage: self.storage_for(ptr)?,
+            })
+        }
+    }
+
+    fn validate_intrinsic_pointer(&self, ptr: IntrinsicPointer, n_bytes: usize) -> IResult<()> {
+        if let IntrinsicPointer::Stack { ptr, .. } = ptr {
+            ptr.intrinsic_range(n_bytes)?;
+        }
+        Ok(())
+    }
+
+    fn intrinsic_load(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        ptr: IntrinsicPointer,
+        n_bytes: usize,
+    ) -> IResult<Bits> {
+        match ptr {
+            IntrinsicPointer::Stack { ptr, ptr_bits0 } => {
+                let n_bits = n_bytes.checked_mul(8).ok_or_else(|| {
+                    ImportError::Unsupported("memory intrinsic length is too large".into())
+                })?;
+                Ok(self.stack_load(fctx, ptr_bits0, ptr.addr, self.byte_tid, n_bits))
+            }
+            IntrinsicPointer::Global { storage } => Ok(self.mem_load(fctx, storage, n_bytes)),
+        }
+    }
+
+    fn intrinsic_store(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        ptr: IntrinsicPointer,
+        bytes: &Bits,
+    ) -> IResult<()> {
+        match ptr {
+            IntrinsicPointer::Stack { ptr, ptr_bits0 } => {
+                self.stack_store(fctx, ptr_bits0, ptr.addr, bytes);
+            }
+            IntrinsicPointer::Global { storage } => {
+                self.mem_store(fctx, storage, bytes, bytes.len().div_ceil(8));
+            }
+        }
+        Ok(())
     }
 
     /// Bit-decompose a compile-time-constant `StorageId::ALLOCA` address,
@@ -995,13 +1254,7 @@ impl<'ctx> Importer<'ctx> {
         );
     }
 
-    fn mem_load(
-        &mut self,
-        fctx: &mut FuncCtx<'ctx>,
-        ptr: PointerValue<'ctx>,
-        n_bytes: usize,
-    ) -> IResult<Bits> {
-        let storage = self.storage_for(ptr)?;
+    fn mem_load(&mut self, fctx: &mut FuncCtx<'ctx>, storage: StorageId, n_bytes: usize) -> Bits {
         let cur = fctx.current;
         let mut all_bits = Vec::with_capacity(n_bytes * 8);
         for byte_i in 0..n_bytes {
@@ -1034,17 +1287,16 @@ impl<'ctx> Importer<'ctx> {
                 all_bits.push(bit);
             }
         }
-        Ok(all_bits)
+        all_bits
     }
 
     fn mem_store(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
-        ptr: PointerValue<'ctx>,
+        storage: StorageId,
         val: &Bits,
         n_bytes: usize,
-    ) -> IResult<()> {
-        let storage = self.storage_for(ptr)?;
+    ) {
         let cur = fctx.current;
         for byte_i in 0..n_bytes {
             let addr = fctx.emit(
@@ -1079,7 +1331,6 @@ impl<'ctx> Importer<'ctx> {
                 }),
             );
         }
-        Ok(())
     }
 
     fn translate_terminator(
@@ -1319,6 +1570,130 @@ fn flatten_alloca_type(ty: inkwell::types::BasicTypeEnum<'_>) -> Option<(inkwell
     }
 }
 
+/// Find the blocks whose instructions the structural importer may translate.
+/// Only `br` and `switch` are traversed because they are the only LLVM
+/// terminators this frontend supports; any other reachable terminator remains
+/// visible to Pass B and therefore fails closed through `translate_terminator`.
+fn reachable_blocks<'ctx>(f: FunctionValue<'ctx>) -> IResult<HashSet<LlvmBlock<'ctx>>> {
+    let entry = f
+        .get_first_basic_block()
+        .ok_or_else(|| ImportError::Unsupported("function has no entry block".into()))?;
+    let mut reachable = HashSet::new();
+    let mut pending = vec![entry];
+
+    while let Some(bb) = pending.pop() {
+        if !reachable.insert(bb) {
+            continue;
+        }
+        let terminator = bb
+            .get_terminator()
+            .ok_or_else(|| ImportError::Unsupported("reachable block has no terminator".into()))?;
+        if !matches!(
+            terminator.get_opcode(),
+            InstructionOpcode::Br | InstructionOpcode::Switch
+        ) {
+            continue;
+        }
+        let n_successors = unsafe { LLVMGetNumSuccessors(terminator.as_value_ref()) };
+        for i in 0..n_successors {
+            let successor =
+                unsafe { LlvmBlock::new(LLVMGetSuccessor(terminator.as_value_ref(), i)) }
+                    .ok_or_else(|| {
+                        ImportError::Unsupported("terminator successor is not a basic block".into())
+                    })?;
+            pending.push(successor);
+        }
+    }
+
+    Ok(reachable)
+}
+
+fn call_value_operand<'ctx>(
+    instr: InstructionValue<'ctx>,
+    index: u32,
+    description: &str,
+) -> IResult<BasicValueEnum<'ctx>> {
+    instr
+        .get_operand(index)
+        .and_then(|operand| operand.value())
+        .ok_or_else(|| ImportError::Unsupported(format!("{description} must be a value")))
+}
+
+fn memory_intrinsic_length<'ctx>(
+    instr: InstructionValue<'ctx>,
+    index: u32,
+    intrinsic: MemoryIntrinsic,
+) -> IResult<usize> {
+    let BasicValueEnum::IntValue(length) =
+        call_value_operand(instr, index, "memory intrinsic length")?
+    else {
+        return Err(ImportError::Unsupported(format!(
+            "llvm.{} length must be a compile-time integer constant",
+            intrinsic.name()
+        )));
+    };
+    let length = length.get_zero_extended_constant().ok_or_else(|| {
+        ImportError::Unsupported(format!(
+            "llvm.{} length must be a compile-time integer constant",
+            intrinsic.name()
+        ))
+    })?;
+    usize::try_from(length).map_err(|_| {
+        ImportError::Unsupported(format!(
+            "llvm.{} length does not fit usize",
+            intrinsic.name()
+        ))
+    })
+}
+
+fn memory_intrinsic_nonvolatile<'ctx>(
+    instr: InstructionValue<'ctx>,
+    index: u32,
+    intrinsic: MemoryIntrinsic,
+) -> IResult<()> {
+    let BasicValueEnum::IntValue(volatile) =
+        call_value_operand(instr, index, "memory intrinsic volatile flag")?
+    else {
+        return Err(ImportError::Unsupported(format!(
+            "llvm.{} volatile flag must be constant false",
+            intrinsic.name()
+        )));
+    };
+    if volatile.get_zero_extended_constant() != Some(0) {
+        return Err(ImportError::Unsupported(format!(
+            "llvm.{} volatile flag must be constant false",
+            intrinsic.name()
+        )));
+    }
+    Ok(())
+}
+
+fn intrinsic_ranges_overlap(
+    dest: IntrinsicPointer,
+    src: IntrinsicPointer,
+    n_bytes: usize,
+) -> IResult<bool> {
+    match (dest, src) {
+        (IntrinsicPointer::Stack { ptr: dest, .. }, IntrinsicPointer::Stack { ptr: src, .. })
+            if dest.allocation_base == src.allocation_base
+                && dest.allocation_bits == src.allocation_bits =>
+        {
+            let (dest_start, dest_end) = dest.intrinsic_range(n_bytes)?;
+            let (src_start, src_end) = src.intrinsic_range(n_bytes)?;
+            Ok(dest_start < src_end && src_start < dest_end)
+        }
+        (
+            IntrinsicPointer::Global {
+                storage: dest_storage,
+            },
+            IntrinsicPointer::Global {
+                storage: src_storage,
+            },
+        ) => Ok(n_bytes != 0 && dest_storage == src_storage),
+        _ => Ok(false),
+    }
+}
+
 fn int_result_width(instr: InstructionValue<'_>) -> IResult<usize> {
     match instr.get_type().try_into() {
         Ok(inkwell::types::BasicTypeEnum::IntType(t)) => Ok(t.get_bit_width() as usize),
@@ -1372,12 +1747,11 @@ struct FuncCtx<'ctx> {
     /// convention's own frame layout.
     next_stack_slot: u64,
     /// Pointer-typed LLVM values (alloca results, or a constant-index GEP
-    /// off one) that are tracked as `StorageId::ALLOCA` addresses, mapped to
-    /// their resolved compile-time-constant `base_slot`. This is the sole
-    /// source of truth for "is this a stack pointer" — `cache` alone is not
-    /// enough, since pointer-typed function *parameters* are also cached
-    /// there as plain (meaningless-as-an-address) bits.
-    stack_slot_of: HashMap<AnyValueEnum<'ctx>, u64>,
+    /// off one) that are tracked as `StorageId::ALLOCA` addresses. This is
+    /// the sole source of truth for "is this a stack pointer" — `cache`
+    /// alone is not enough, since pointer-typed function *parameters* are
+    /// also cached there as plain (meaningless-as-an-address) bits.
+    stack_slot_of: HashMap<AnyValueEnum<'ctx>, StackPointer>,
 }
 
 impl<'ctx> FuncCtx<'ctx> {
@@ -1403,15 +1777,18 @@ impl<'ctx> FuncCtx<'ctx> {
         id
     }
 
-    fn finish_blocks(self) -> Vec<Block> {
+    fn finish_blocks(self, fallback_return_values: Vec<Vec<ValueId>>) -> Vec<Block> {
         self.stmts
             .into_iter()
             .zip(self.params)
             .zip(self.terminators)
-            .map(|((stmts, params), term)| Block {
+            .zip(fallback_return_values)
+            .map(|(((stmts, params), term), fallback_return_values)| Block {
                 params,
                 stmts,
-                terminator: term.unwrap_or(Terminator::Return { values: vec![] }),
+                terminator: term.unwrap_or_else(|| Terminator::Return {
+                    values: fallback_return_values.clone(),
+                }),
             })
             .collect()
     }

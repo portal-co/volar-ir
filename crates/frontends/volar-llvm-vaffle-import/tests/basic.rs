@@ -284,10 +284,7 @@ entry:
     });
     assert!(has_alloc, "expected a Value::StackAlloc marker");
     assert!(has_read, "expected an ALLOCA StorageRead for the spill load");
-    assert!(
-        has_write,
-        "expected an ALLOCA StorageWrite for the spill store"
-    );
+    assert!(has_write, "expected an ALLOCA StorageWrite for the spill store");
 }
 
 #[test]
@@ -510,6 +507,253 @@ entry:
     let err =
         import_module(&module, &["through_param"]).expect_err("param pointer must fail closed");
     let _ = err.to_string();
+}
+
+#[test]
+fn memory_intrinsics_lower_without_residual_call() {
+    let source = r#"
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+@global = global [4 x i8] zeroinitializer
+
+define i32 @copy_and_fill(i32 %x) {
+entry:
+  %src = alloca [4 x i8], align 4
+  %dst = alloca [4 x i8], align 4
+  store i32 %x, ptr %src
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 4, i1 false)
+  call void @llvm.memmove.p0.p0.i64(ptr %dst, ptr %dst, i64 4, i1 false)
+  call void @llvm.memset.p0.i64(ptr %src, i8 0, i64 4, i1 false)
+  call void @llvm.memset.p0.i64(ptr @global, i8 0, i64 4, i1 false)
+  %out = load i32, ptr %dst
+  ret i32 %out
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["copy_and_fill"]).expect("memory intrinsics must import");
+    assert_eq!(
+        out.funcs.len(),
+        1,
+        "intrinsics must not become imported callees"
+    );
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    assert!(
+        !body
+            .values
+            .iter()
+            .any(|value| matches!(value.kind, Value::Call { .. })),
+        "supported memory intrinsics must lower to storage operations"
+    );
+}
+
+#[test]
+fn memory_intrinsic_symbolic_length_is_named_unsupported() {
+    let source = r#"
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+
+define void @symbolic(i64 %n) {
+entry:
+  %buf = alloca [4 x i8], align 4
+  call void @llvm.memset.p0.i64(ptr %buf, i8 0, i64 %n, i1 false)
+  ret void
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let err = import_module(&module, &["symbolic"]).expect_err("symbolic length must fail closed");
+    assert!(
+        err.to_string().contains("length"),
+        "expected named intrinsic-length error, got {err}"
+    );
+}
+
+#[test]
+fn memory_intrinsic_volatile_is_named_unsupported() {
+    let source = r#"
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+
+define void @volatile_memset() {
+entry:
+  %buf = alloca [4 x i8], align 4
+  call void @llvm.memset.p0.i64(ptr %buf, i8 0, i64 4, i1 true)
+  ret void
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let err = import_module(&module, &["volatile_memset"]).expect_err("volatile must fail closed");
+    assert!(
+        err.to_string().contains("volatile"),
+        "expected named volatile error, got {err}"
+    );
+}
+
+#[test]
+fn overlapping_memcpy_is_named_unsupported() {
+    let source = r#"
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+
+define void @overlap() {
+entry:
+  %buf = alloca [4 x i8], align 4
+  %dst = getelementptr i8, ptr %buf, i64 1
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %buf, i64 3, i1 false)
+  ret void
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let err =
+        import_module(&module, &["overlap"]).expect_err("overlapping memcpy must fail closed");
+    assert!(
+        err.to_string().contains("overlap"),
+        "expected named overlap error, got {err}"
+    );
+}
+
+#[test]
+fn escaping_memmove_is_named_unsupported() {
+    let source = r#"
+declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+
+define void @escape() {
+entry:
+  %a = alloca [4 x i8], align 4
+  %b = alloca [4 x i8], align 4
+  %outside_a = getelementptr i8, ptr %a, i64 4
+  call void @llvm.memmove.p0.p0.i64(ptr %outside_a, ptr %b, i64 4, i1 false)
+  ret void
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let err = import_module(&module, &["escape"]).expect_err("escaping memmove must fail closed");
+    assert!(
+        err.to_string().contains("provenance"),
+        "expected named provenance error, got {err}"
+    );
+}
+
+#[test]
+fn global_gep_memory_intrinsic_is_named_unsupported() {
+    let source = r#"
+@bytes = global [4 x i8] zeroinitializer
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+
+define void @offset_global() {
+entry:
+  call void @llvm.memset.p0.i64(ptr getelementptr inbounds ([4 x i8], ptr @bytes, i64 0, i64 1), i8 0, i64 1, i1 false)
+  ret void
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let err = import_module(&module, &["offset_global"])
+        .expect_err("global GEP intrinsic pointer must fail closed");
+    assert!(
+        err.to_string().contains("global GEP"),
+        "expected named global-GEP error, got {err}"
+    );
+}
+
+#[test]
+fn dead_landingpad_is_ignored() {
+    let source = r#"
+declare i32 @rust_eh_personality(...)
+declare void @cant_unwind()
+
+define i32 @dead_lpad(i32 %x) personality ptr @rust_eh_personality {
+entry:
+  ret i32 %x
+terminate:
+  %lp = landingpad { ptr, i32 }
+          filter [0 x ptr] zeroinitializer
+  call void @cant_unwind()
+  unreachable
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["dead_lpad"]).expect("dead landingpad must be ignored");
+    assert_eq!(
+        out.funcs.len(),
+        1,
+        "dead cant_unwind call must not be imported"
+    );
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    assert_eq!(body.blocks.len(), 2, "unreachable block IDs remain stable");
+}
+
+#[test]
+fn reachable_invoke_is_named_unsupported() {
+    let source = r#"
+declare i32 @rust_eh_personality(...)
+declare void @may_unwind()
+
+define i32 @live_eh(i32 %x) personality ptr @rust_eh_personality {
+entry:
+  invoke void @may_unwind() to label %ok unwind label %terminate
+ok:
+  ret i32 %x
+terminate:
+  %lp = landingpad { ptr, i32 }
+          cleanup
+  ret i32 0
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let err = import_module(&module, &["live_eh"]).expect_err("reachable invoke must fail closed");
+    assert!(
+        err.to_string().contains("Invoke"),
+        "expected named invoke error, got {err}"
+    );
 }
 
 #[test]
