@@ -53,6 +53,7 @@ not this repo's.
 | LLVM `alloca` import | `docs/llvm-alloca.md` | Extending `volar-llvm-vaffle-import` `alloca` / stack `load`/`store`/`gep` |
 | LLVM array/struct `alloca` | `docs/llvm-array-alloca.md` | rustc `-O0` / SLH-DSA `[N x i8]` and aggregate stack frames |
 | LLVM STACK spill → Boolar | `docs/llvm-stack-spill-boolar.md` | `lower_vaffle_to_ir` cross-block spill vs `lower_ir_to_boolar` width |
+| Cross-function call numeric correctness | `docs/llvm-cross-function-calls.md` | `unroll_ir`/`movfuscate` on a non-inlined multi-function call; `lower_to_ir.rs`'s calling convention |
 | Text format | `docs/text-format-spec.md` | Working on `volar-lir-text`/`volar-ir-text` |
 
 ## Compression-aware logging

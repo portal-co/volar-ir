@@ -106,15 +106,14 @@ Tests: `volar-vaffle-target::lower_to_ir`'s own unit test
 `test_alloca_budget_reserved_across_nested_call` (hand-built two-function
 VAFFLE module; checks the computed `alloca_budget` directly and that the
 lowered output re-tags `ALLOCA` as `STACK` with no leftover `ALLOCA`);
-`llvm_alloca_survives_nested_call_lowers_without_panicking`
-(`volar-ir-build/tests/llvm_frontends.rs`) — this one can only check that
-lowering succeeds, not the computed value: `unroll_ir`/`movfuscate` both
-reject *any* call-preserving cross-function call as "not statically
-finite," confirmed reproducible with zero allocas involved. That gap in
-numeric-evaluation support for cross-function calls is pre-existing and
-orthogonal to this work — noted under "Not this task" below, not fixed
-here. Full `volar-fuzz` property suite (78 tests, 0 ignored) re-verified
-green after this change, including the one it broke along the way.
+`llvm_alloca_survives_nested_call`
+(`volar-ir-build/tests/llvm_frontends.rs`) — now a full numeric round trip
+(`unroll_ir` + `eval_ir`), not just a lowering-succeeds check: a follow-up
+pass fixed the cross-function-call numeric-evaluation gap this note used
+to describe (including a real bug in `alloca_budget` itself, only
+surfaced once a real call could be evaluated at all) — see
+`docs/llvm-cross-function-calls.md`. Full `volar-fuzz` property suite (78
+tests, 0 ignored) re-verified green after every change in both passes.
 
 ## What landed
 
@@ -155,14 +154,10 @@ that file's existing convention); `llvm_array_alloca_stack_spill_computes_x_xor_
   this handoff took the named-error branch instead). Would need field
   layout (size/alignment) from LLVM's `TargetData` and a genuine two-index
   GEP path (`[0, field_idx]`), not just the single-index one this crate has.
-- A general numeric evaluator for call-preserving, cross-function Volar IR:
-  `unroll_ir`/`movfuscate`/`eval_ir` all reject *any* real inter-function
-  call as "not statically finite," independent of alloca (confirmed with a
-  plain two-function call chain and zero allocas). This means the
-  `alloca`-survives-a-nested-call fix above is verified structurally
-  (`volar-vaffle-target`'s own hand-built-module unit test) but not via a
-  full LLVM→circuit→numeric round trip — that round trip doesn't exist yet
-  for *any* non-inlined multi-function program, alloca or not.
+- ~~A general numeric evaluator for call-preserving, cross-function Volar
+  IR~~ — fixed in a follow-up pass; see `docs/llvm-cross-function-calls.md`
+  for the four independent calling-convention bugs found (one of them in
+  `alloca_budget` itself, above).
 - `import_module_inlined` + `alloca` (`llvm-alloca.md`'s existing "Not this
   task" — orthogonal, still unverified; `inline_vaffle.rs`'s `StackAlloc`
   rebase looks disconnected from `VaffleTarget`'s actual addressing
@@ -170,9 +165,11 @@ that file's existing convention); `llvm_array_alloca_stack_spill_computes_x_xor_
 - Symbolic/dynamic GEP index, pointer `phi`/`select`, heap `malloc`,
   identity `WebProofBackend::verify`, full SLH-DSA verify — all unchanged
   from `llvm-alloca.md`.
-- Site `llvm`/`llvm-loop` canaries for rustc `-O0` `stack_spill` (item 5) —
-  cross-repo (`site`), not touched here; the fixture and its correctness are
-  now verified in *this* repo via `llvm_array_alloca_stack_spill_computes_x_xor_x_plus_1`.
+- Site `llvm`/`llvm-loop` canaries for rustc `-O0` `stack_spill` without
+  memset are in `site` (`llvm_vaffle_array_alloca_stack_spill`). The rustc
+  `-O0` leftover that still blocks *unroll* is `llvm.memset`
+  ([`llvm-memset.md`](llvm-memset.md)). Dead `landingpad` blocks rustc
+  `-O0` `poll_fsm` import ([`llvm-landingpad.md`](llvm-landingpad.md)).
 
 ## Where
 

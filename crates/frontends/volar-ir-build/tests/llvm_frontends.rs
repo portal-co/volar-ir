@@ -222,16 +222,15 @@ entry:
 /// must skip past the caller's own alloca budget, not just the callee's
 /// own `own_layout.size` (see docs/llvm-array-alloca.md's rebasing note).
 ///
-/// This can only check that lowering succeeds, not the computed value:
-/// `unroll_ir`/`movfuscate` both reject *any* call-preserving cross-function
-/// call as "not statically finite" (confirmed reproducible with zero
-/// allocas involved -- a pre-existing gap in the calling convention's own
-/// numeric-evaluation support, not something this task introduces or fixes).
-/// `volar-vaffle-target::lower_to_ir`'s own unit test
-/// `test_alloca_budget_reserved_across_nested_call` checks the actual
-/// computed budget directly against a hand-built two-function module.
+/// Also exercises (now fixed, see `llvm_register_xor_call_computes_correct_value`
+/// for the isolated regression test) the calling convention's own numeric
+/// path for a non-inlined, cross-function call: `n_params` sourced from the
+/// callee's actual entry-block params (not its declared `sig`, which
+/// `vaffle_ssa`'s SP-threading silently widens for any non-entry function)
+/// and a multi-bit call result reaching its user via `Value::Output`
+/// (previously unhandled, silently defaulting to a zero wire).
 #[test]
-fn llvm_alloca_survives_nested_call_lowers_without_panicking() {
+fn llvm_alloca_survives_nested_call() {
     let src = r#"
 define i32 @helper(i32 %x) {
   ret i32 %x
@@ -248,16 +247,61 @@ entry:
 }
 "#;
     let path = write_temp_ll("alloca_survives_call", src);
-    let (blocks, _types) = Pipeline::from_llvm(&path, &["caller"])
+    let (blocks, types) = Pipeline::from_llvm(&path, &["caller"])
         .and_then(|p| p.lower_to_volar_ir())
-        .expect("alloca + nested call via LLVM→VAFFLE must lower without panicking")
+        .and_then(|p| p.unroll_ir())
+        .expect("alloca + nested call via LLVM→VAFFLE")
         .to_volar_ir();
-    assert!(
-        blocks.blocks.len() >= 5,
-        "expected >=5 blocks (module entry + exit + caller entry + call continuation \
-         + helper entry), got {}",
-        blocks.blocks.len()
-    );
+    assert!(blocks.is_circuit());
+
+    let x: u64 = 11;
+    let input_word: Vec<bool> = (0..64).map(|i| (x >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("eval terminates");
+    let r = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
+    assert_eq!(r, x + x, "caller(11) must compute buf(11) + helper(11) = 22");
+    let _ = fs::remove_file(&path);
+}
+
+/// Isolated regression test for the two bugs `llvm_alloca_survives_nested_call`
+/// found in the calling convention's own numeric path (unrelated to alloca):
+/// a plain two-function call chain with a real multi-bit argument and
+/// return value, previously computing the wrong result (or failing to
+/// unroll at all -- see `docs/llvm-array-alloca.md`'s "Cross-function call
+/// numeric correctness" section for the full root-cause writeup).
+#[test]
+fn llvm_register_xor_call_computes_correct_value() {
+    let src = r#"
+define i32 @helper(i32 %x) {
+  ret i32 %x
+}
+define i32 @caller(i32 %x) {
+entry:
+  %y = call i32 @helper(i32 %x)
+  %r = add i32 %y, 1
+  ret i32 %r
+}
+"#;
+    let path = write_temp_ll("plain_call", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["caller"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("plain cross-function call via LLVM→VAFFLE")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let x: u64 = 123;
+    let input_word: Vec<bool> = (0..64).map(|i| (x >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("eval terminates");
+    let r = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
+    assert_eq!(r, x + 1, "caller(123) must compute helper(123) + 1 = 124");
     let _ = fs::remove_file(&path);
 }
 

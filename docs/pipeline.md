@@ -119,13 +119,19 @@ Three ways to get a single-block circuit, with different control-flow contracts:
 | `movfuscate_ir` | Arbitrary, including symbolic | One **self-looping** block (`is_movfuscated()`) | Does not fail closed on symbolic CF |
 | `lower_to_circuit` | Already-movfuscated self-loop | Budgeted MUX-unroll of that loop | Trip may exceed the budget; the circuit still exists but may not have terminated |
 
+Both `unroll_ir_everything` and `movfuscate_ir` now correctly handle a real,
+non-inlined cross-function `Value::Call`/`Terminator::ReturnCall` — see
+[`llvm-cross-function-calls.md`](llvm-cross-function-calls.md) for the four
+independent calling-convention bugs this uncovered, none of which any
+prior structural-only or inlined-path test had exercised.
+
 `unroll_ir_everything` and `movfuscate_ir` are mutually alternative shape strategies on Volar IR. Folding may run before either. Do not use `lower_to_circuit` as a substitute for unroll-everything: it assumes a symbolic-PC movfuscated loop.
 
 Frontend routes that feed those passes:
 
 - **WASM (call-preserving):** `Pipeline::from_wasm` → WAFFLE → VAFFLE (`lower_waffle_module`). Calls stay as `Value::Call` until a later pass.
 - **WASM (fully inlined):** `from_wasm_inlined` = the above plus `inline_vaffle_everything`, then `lower_vaffle_to_ir`, then optional `unroll_ir` or `movfuscate`. Distinct from `volar-wasm-circuit-import` (control-free `VCircuit`, source-level call expansion).
-- **LLVM structural:** `volar-llvm-vaffle-import::import_module` preserves calls. `import_module_inlined` / `from_llvm_inlined` compose inline-everything on top. Then unroll (concrete CF) or movfuscate (symbolic CF). Constant-size scalar and array-of-integer `alloca`, typed-view GEP, and `switch` import are landed, including a fully general fix for the alloca/calling-convention frame collision (`StorageId::ALLOCA`, rebased onto the real runtime frame in `lower_to_ir.rs`) ([`llvm-alloca.md`](llvm-alloca.md), [`llvm-array-alloca.md`](llvm-array-alloca.md)); lowering through movfuscate to Boolar now round-trips too ([`llvm-stack-spill-boolar.md`](llvm-stack-spill-boolar.md)).
+- **LLVM structural:** `volar-llvm-vaffle-import::import_module` preserves calls. `import_module_inlined` / `from_llvm_inlined` compose inline-everything on top. Then unroll (concrete CF) or movfuscate (symbolic CF). Constant-size scalar and array-of-integer `alloca`, typed-view GEP, and `switch` import are landed, including a fully general fix for the alloca/calling-convention frame collision (`StorageId::ALLOCA`, rebased onto the real runtime frame in `lower_to_ir.rs`) ([`llvm-alloca.md`](llvm-alloca.md), [`llvm-array-alloca.md`](llvm-array-alloca.md)); lowering through movfuscate to Boolar now round-trips too ([`llvm-stack-spill-boolar.md`](llvm-stack-spill-boolar.md)). rustc `-O0` leftovers: live `llvm.memset` blocks unroll ([`llvm-memset.md`](llvm-memset.md)); dead `landingpad` blocks import ([`llvm-landingpad.md`](llvm-landingpad.md)).
 - **LLVM-direct:** `volar-llvm-ir-import` / `from_llvm_direct` is a specialized interpreter that already emits `is_circuit()` when control flow is concrete. It is not rewritten on top of unroll-everything. Structural + inline + unroll should agree with direct when both succeed; when CF is data-dependent, direct and unroll fail and structural + movfuscate still works.
 - **LLVM LTO archive:** `from_llvm` / `from_llvm_direct` accept a static library (`.a`) of clang **full-LTO** bitcode members (raw `.bc` or ELF `.llvmbc` / Mach-O `__LLVM,__bitcode`). Members are `link_in_module`'d; native-only objects and ThinLTO-only summaries fail closed. GCC LTO is not LLVM bitcode.
 - **LLVM LTO pre-build:** `from_cc` / `from_cc_inlined` / `from_cc_direct` (`cc` feature) run `cc::Build` with `-flto=full` at execute time and import the resulting `lib{name}.a`. `from_command` / `from_command_inlined` / `from_command_direct` run a user-specified command (no shell) that must write that archive.
@@ -148,6 +154,9 @@ Frontend routes that feed those passes:
 | LLVM `alloca` → VAFFLE stack | [`llvm-alloca.md`](llvm-alloca.md) |
 | LLVM array/struct `alloca` | [`llvm-array-alloca.md`](llvm-array-alloca.md) |
 | LLVM STACK spill → Boolar | [`llvm-stack-spill-boolar.md`](llvm-stack-spill-boolar.md) |
+| Cross-function call numeric correctness | [`llvm-cross-function-calls.md`](llvm-cross-function-calls.md) |
+| LLVM `memset` / `memcpy` / `memmove` | [`llvm-memset.md`](llvm-memset.md) |
+| LLVM dead `landingpad` (rustc `-O0`) | [`llvm-landingpad.md`](llvm-landingpad.md) |
 | Full pipeline (weaving, backends, proving) | `volar` repo's `docs/pipeline.md` |
 | Textual circuit libraries (Noir, POD2) | [`circuit-source.md`](circuit-source.md) |
 
