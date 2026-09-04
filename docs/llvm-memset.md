@@ -8,8 +8,11 @@ spill pattern unroll to a circuit.
 
 ## Supported contract
 
-- The length must be a constant integer representable as `usize`, and the
-  volatile operand must be the constant `false`. Symbolic or oversized lengths
+- The volatile operand must be the constant `false`. A `memset` or `memmove`
+  length must be a constant integer representable as `usize`; so must a
+  `memcpy` length when a direct storage expansion is wanted. A symbolic
+  `memcpy` instead lowers to a VAFFLE byte loop that `movfuscate` can turn
+  into a step circuit. Symbolic `memset`/`memmove`, oversized constant lengths,
   and volatile calls fail with a named `ImportError::Unsupported`.
 - A statically resolved global pointer may be a bare global or a constant-GEP
   pointer with a folded byte offset. Tracked constant-GEP stack pointers use
@@ -34,15 +37,17 @@ named error rather than accessing a different allocation.
 ## Tests
 
 Structural tests cover no residual intrinsic calls or declarations, symbolic
-length and volatile rejection, disjoint `memcpy`, overlapping `memcpy`
-rejection, same-alloca overlapping `memmove`, escaping GEP provenance
-rejection. End-to-end fixtures verify that rustc-style stack `memset` unrolls
-and evaluates `stack_spill(5)` as `5 ^ 6`, and that `memcpy` / `memmove`
-produce their expected copied bytes.
+`memset` rejection, unbounded symbolic-`memcpy` CFG construction, volatile
+rejection, disjoint `memcpy`, overlapping `memcpy` rejection, same-alloca
+overlapping `memmove`, and escaping GEP provenance rejection. End-to-end
+fixtures verify that rustc-style stack `memset` unrolls and evaluates
+`stack_spill(5)` as `5 ^ 6`, constant `memcpy` / `memmove` produce their
+expected copied bytes, and symbolic `memcpy` evaluates its CFG before
+movfuscating into a step circuit.
 
 ## Out of scope
 
-- Symbolic lengths or volatile memory intrinsics.
+- Symbolic `memset` / `memmove` lengths or volatile memory intrinsics.
 - Heap and pointer forms that cannot be represented by the importer's tagged
   runtime pointer encoding.
 - Real exception handling; see [`llvm-landingpad.md`](llvm-landingpad.md).

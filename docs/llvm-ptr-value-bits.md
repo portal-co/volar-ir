@@ -39,13 +39,14 @@ pattern for any pointer resolvable via `stack_slot_of` or
 - `1` = global: bits `[30:19]` (`GLOBAL_ID_BITS` = 12) are the global's own
   `StorageId` value, reused directly as a compact candidate index rather
   than building a separate table (`StorageAllocator` already hands out
-  small sequential ids). Bits `[18:0]` (`GLOBAL_ADDR_BITS` = 19) are the byte
-  offset within it. A *constant* offset or `StorageId` that doesn't fit is a
-  checked, named error; a *dynamic* (`GlobalPtr::Symbolic`) offset that
-  doesn't fit silently truncates instead — matching this codebase's existing
-  convention for `StorageId::STACK` addresses ("addresses wrap modulo
-  2^SP_BITS and alias unrelated storage" per `lower_to_ir.rs`), not a new
-  deviation from the fail-closed norm.
+  small sequential ids). ID 0 is reserved for LLVM `null`, while importer
+  globals begin at `StorageId` 64; bits `[18:0]` (`GLOBAL_ADDR_BITS` = 19)
+  are the byte offset within it. A *constant* offset or `StorageId` that
+  doesn't fit is a checked, named error; a *dynamic* (`GlobalPtr::Symbolic`)
+  offset that doesn't fit silently truncates instead — matching this
+  codebase's existing convention for `StorageId::STACK` addresses
+  ("addresses wrap modulo 2^SP_BITS and alias unrelated storage" per
+  `lower_to_ir.rs`), not a new deviation from the fail-closed norm.
 
 Wired into `value_bits`'s fallback (`BasicValueEnum::PointerValue(p) =>
 self.ptr_value_bits(fctx, block, p)?`). No other code changed:
@@ -53,6 +54,11 @@ self.ptr_value_bits(fctx, block, p)?`). No other code changed:
 block-param mechanism both already compose correctly with same-width `Bits`
 from either provenance — the only gap was producing that `Bits` in the first
 place.
+
+LLVM `ConstantPointerNull` takes the reserved tag-1 / ID-0 / address-0
+pattern. It is materialized at each use block rather than cached across the
+function, and runtime dispatch reads it as zero and ignores writes; see
+[`llvm-const-null.md`](llvm-const-null.md).
 
 ## Tests
 

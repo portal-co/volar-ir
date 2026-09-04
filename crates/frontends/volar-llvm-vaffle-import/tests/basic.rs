@@ -1095,7 +1095,7 @@ entry:
 }
 
 #[test]
-fn memory_intrinsic_symbolic_length_is_named_unsupported() {
+fn symbolic_memset_length_is_named_unsupported() {
     let source = r#"
 declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
 
@@ -1113,11 +1113,91 @@ entry:
             "test.ll",
         ))
         .expect("valid LLVM IR fixture");
-    let err = import_module(&module, &["symbolic"]).expect_err("symbolic length must fail closed");
+    let err = import_module(&module, &["symbolic"]).expect_err("symbolic memset must fail closed");
     assert!(
-        err.to_string().contains("length"),
-        "expected named intrinsic-length error, got {err}"
+        err.to_string().contains("symbolic llvm.memset"),
+        "expected named symbolic-memset error, got {err}"
     );
+}
+
+#[test]
+fn unbounded_symbolic_memcpy_lowers_to_cfg_loop_without_residual_call() {
+    let source = r#"
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+
+define i32 @copy_prefix(i64 %n, i32 %src) {
+entry:
+  %src_buf = alloca [4 x i8], align 4
+  %dst_buf = alloca [4 x i8], align 4
+  store i32 %src, ptr %src_buf, align 4
+  store i32 0, ptr %dst_buf, align 4
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst_buf, ptr %src_buf, i64 %n, i1 false)
+  %out = load i32, ptr %dst_buf, align 4
+  ret i32 %out
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["copy_prefix"])
+        .expect("an unbounded symbolic memcpy length must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    assert!(
+        !body
+            .values
+            .iter()
+            .any(|value| matches!(value.kind, Value::Call { .. })),
+        "a supported symbolic memcpy must lower to CFG storage operations"
+    );
+    assert!(
+        body.blocks.len() >= 4,
+        "a symbolic memcpy must append header, body, and continuation blocks"
+    );
+    assert!(
+        body.blocks
+            .iter()
+            .any(|block| matches!(block.terminator, Terminator::IfNonzero { .. }))
+    );
+}
+
+#[test]
+fn null_pointer_values_flow_through_compare_and_phi() {
+    let source = r#"
+define i1 @is_null(ptr %p) {
+entry:
+  %z = icmp eq ptr %p, null
+  ret i1 %z
+}
+
+define i1 @phi_null(i1 %choose_null, ptr %p) {
+entry:
+  br i1 %choose_null, label %null, label %param
+null:
+  br label %join
+param:
+  br label %join
+join:
+  %q = phi ptr [ null, %null ], [ %p, %param ]
+  %z = icmp eq ptr %q, null
+  ret i1 %z
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["is_null", "phi_null"])
+        .expect("null pointer comparisons and phis must import");
+    assert_eq!(out.funcs.len(), 2, "both null-pointer fixtures must import");
 }
 
 #[test]

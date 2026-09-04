@@ -80,6 +80,11 @@ Both reuse existing per-candidate read/write helpers unchanged
 `mem_load_dynamic`/`mem_store_dynamic` for each global) — the only new
 machinery is the `matched`-flag cascade and the fold/RMW loop around them.
 
+An unmatched tagged-global pointer is deliberately not allowed to fall back
+to stack address zero: the stack result is gated by `NOT tag_bit` before the
+global selection cascade. This gives LLVM `null` (tag 1, global ID 0) a
+zero-read/no-op-write behavior; see [`llvm-const-null.md`](llvm-const-null.md).
+
 ## Cost
 
 Each candidate costs a full `StorageRead` (reads) or a paired

@@ -54,8 +54,9 @@ not this repo's.
 | LLVM array/struct `alloca` | `docs/llvm-array-alloca.md` | rustc `-O0` / SLH-DSA `[N x i8]` and aggregate stack frames |
 | LLVM STACK spill → Boolar | `docs/llvm-stack-spill-boolar.md` | `lower_vaffle_to_ir` cross-block spill vs `lower_ir_to_boolar` width |
 | Cross-function call numeric correctness | `docs/llvm-cross-function-calls.md` | `unroll_ir`/`movfuscate` on a non-inlined multi-function call; `lower_to_ir.rs`'s calling convention |
-| LLVM memcpy from a constant global | `docs/llvm-memcpy-global.md` | `llvm.memcpy`/`memset` of `@global` or untracked slice pointers (HMAC IV; `site-keys` `derive`) |
+| LLVM memcpy from a constant global | `docs/llvm-memcpy-global.md` | `llvm.memcpy`/`memset` of `@global` or untracked slice pointers (HMAC IV) |
 | LLVM `noalias.scope.decl` | `docs/llvm-noalias-scope-decl.md` | inkwell ICE on metadata-typed `llvm.experimental.noalias.scope.decl` (rustc guests) |
+| LLVM constant `null` pointer | `docs/llvm-const-null.md` | `icmp eq ptr %p, null` / `phi` of `null` (`site-keys` `derive` leftover) |
 | Text format | `docs/text-format-spec.md` | Working on `volar-lir-text`/`volar-ir-text` |
 
 ## Compression-aware logging

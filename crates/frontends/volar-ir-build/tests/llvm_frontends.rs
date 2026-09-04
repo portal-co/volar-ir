@@ -295,6 +295,116 @@ entry:
 }
 
 #[test]
+fn llvm_symbolic_memcpy_builds_cfg_and_step_circuit() {
+    // The length is an ordinary runtime value. The importer emits a CFG loop,
+    // which interprets directly and becomes the pipeline's step circuit when
+    // movfuscated; it is deliberately not combinationally unrolled.
+    let src = r#"
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+
+define i32 @copy_prefix(i64 %n, i32 %src) {
+entry:
+  %src_buf = alloca [4 x i8], align 4
+  %dst_buf = alloca [4 x i8], align 4
+  store i32 %src, ptr %src_buf, align 4
+  store i32 0, ptr %dst_buf, align 4
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst_buf, ptr %src_buf, i64 %n, i1 false)
+  %out = load i32, ptr %dst_buf, align 4
+  ret i32 %out
+}
+"#;
+    let path = write_temp_ll("symbolic_memcpy", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["copy_prefix"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .expect("symbolic memcpy must lower to a CFG")
+        .to_volar_ir();
+    assert!(
+        !blocks.is_circuit(),
+        "runtime copy must retain control flow"
+    );
+
+    let bits = |value: u64, width: usize| {
+        (0..width)
+            .map(|bit| (value >> bit) & 1 != 0)
+            .collect::<Vec<bool>>()
+    };
+
+    let (movfuscated, movfuscated_types) = Pipeline::from_llvm(&path, &["copy_prefix"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .expect("symbolic memcpy CFG must movfuscate into a step circuit")
+        .to_volar_ir();
+    assert!(movfuscated.is_movfuscated());
+    let pc_inputs = volar_ir_passes::pc_bits_needed(blocks.blocks.len());
+
+    for (n, expected) in [
+        (0, 0x0000_0000u32),
+        (1, 0x0000_0011),
+        (2, 0x0000_2211),
+        (3, 0x0033_2211),
+    ] {
+        let original_input = vec![bits(n, 64), bits(0x4433_2211, 32)];
+        let original_result =
+            volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &original_input)
+                .expect("symbolic memcpy evaluation terminates for an in-bounds length");
+        let value = original_result
+            .iter()
+            .enumerate()
+            .fold(0u32, |word, (bit, value)| word | ((value[0] as u32) << bit));
+        assert_eq!(value, expected, "copy_prefix({n})");
+
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+            .params
+            .iter()
+            .map(|ty| {
+                vec![
+                    false;
+                    volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)
+                ]
+            })
+            .collect();
+        for (i, input_word) in original_input.into_iter().enumerate() {
+            mov_inputs[pc_inputs + i] = input_word;
+        }
+        let movfuscated_result =
+            volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &movfuscated_types, &mov_inputs)
+                .expect("movfuscated symbolic memcpy evaluation terminates");
+        assert_eq!(
+            movfuscated_result, original_result,
+            "movfuscation changed copy_prefix({n})"
+        );
+    }
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn llvm_null_pointer_compares_without_aliasing_stack_zero() {
+    let src = r#"
+define i1 @is_null(ptr %p) {
+entry:
+  %z = icmp eq ptr %p, null
+  ret i1 %z
+}
+"#;
+    let path = write_temp_ll("const_null", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["is_null"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("null comparison must lower before unroll")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let null = (0..32).map(|bit| bit == 31).collect::<Vec<bool>>();
+    let stack_zero = vec![false; 32];
+    for (pointer, expected) in [(null, true), (stack_zero, false)] {
+        let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[pointer])
+            .expect("null comparison evaluation terminates");
+        assert_eq!(out, vec![vec![expected]]);
+    }
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn llvm_memmove_same_alloca_overlap_preserves_source_bytes() {
     let src = r#"
 declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)
