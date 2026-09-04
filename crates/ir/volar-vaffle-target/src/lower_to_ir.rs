@@ -945,10 +945,15 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     );
                 }
             }
-            let block_uses =
-                collect_uses(&body.values, &vaffle_block.stmts, &vaffle_block.terminator);
+            // Count every operand use in this block once. As source
+            // statements are translated below, their operands are consumed;
+            // at a call site the remaining counts are exactly the values used
+            // by the untranslated suffix plus the terminator. This avoids
+            // rebuilding a BTreeSet over every suffix at every call.
+            let mut future_uses =
+                collect_use_counts(&body.values, &vaffle_block.stmts, &vaffle_block.terminator);
             for &vid in &cross_block_values {
-                if block_uses.contains(&vid) && !val_map.contains_key(&vid) {
+                if future_uses.contains(vid) && !val_map.contains_key(&vid) {
                     self.spill_trace.push(alloc::format!(
                         "RELOAD(entry) vaffle_bi={vaffle_bi} vid={vid} addr={}",
                         own_layout.n_spill + vid as u64
@@ -973,6 +978,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 let (before_call, at_call, after_call) = find_call(remaining_stmts, body);
 
                 for &svid in before_call.iter() {
+                    future_uses.consume_value(&body.values[svid.0].kind);
                     current_em.set_prov(body.values[svid.0].prov.clone());
                     match &body.values[svid.0].kind {
                         Value::Op(Stmt::StorageRead {
@@ -1098,6 +1104,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
 
                 match at_call {
                     Some(call_vid) => {
+                        future_uses.consume_value(&body.values[call_vid.0].kind);
                         current_em.set_prov(body.values[call_vid.0].prov.clone());
                         if let Value::Call {
                             func: callee_fid,
@@ -1108,17 +1115,18 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             let callee_info = &self.func_info[callee_idx];
                             let cl = callee_info.callee_layout.clone();
 
-                            // 1. Selective spill: collect only values that are
-                            //    actually used after this call (in the
-                            //    remaining stmts or the block terminator).
-                            //    StackAlloc addresses are compile-time
+                            // 1. Selective spill: only values still referenced
+                            //    by the untranslated suffix or block terminator
+                            //    need to survive this call. `future_uses` was
+                            //    built once for the block and consumed through
+                            //    this call, so this check is linear across the
+                            //    whole block rather than one full use walk per
+                            //    call. StackAlloc addresses are compile-time
                             //    constants and never need to be spilled.
-                            let future_uses =
-                                collect_uses(&body.values, after_call, &vaffle_block.terminator);
                             let spill_keys: Vec<usize> = val_map
                                 .keys()
                                 .copied()
-                                .filter(|k| future_uses.contains(k))
+                                .filter(|k| future_uses.contains(*k))
                                 .filter(|k| {
                                     !matches!(&body.values[*k].kind, Value::StackAlloc { .. })
                                 })
@@ -1688,34 +1696,116 @@ pub(crate) fn collect_uses<P: Clone>(
     term: &Terminator,
 ) -> BTreeSet<usize> {
     let mut uses = BTreeSet::new();
-    for &vid in stmt_ids {
-        collect_value_uses(&values[vid.0].kind, &mut uses);
-    }
-    collect_terminator_uses(term, &mut uses);
+    collect_uses_into(values, stmt_ids, term, &mut uses);
     uses
 }
 
-fn collect_value_uses(val: &Value, out: &mut BTreeSet<usize>) {
+/// Per-value count of operand occurrences remaining in a block. This is
+/// consumed in source order by `lower_function`, making call-site liveness
+/// queries constant-time per candidate instead of rebuilding every suffix.
+struct UseCounts {
+    // ValueId is a dense index into this function's `values` arena. A flat
+    // counter vector avoids allocating one BTree node per bit-level operand
+    // in large LLVM-imported arithmetic blocks.
+    counts: Vec<usize>,
+}
+
+impl UseCounts {
+    fn new(n_values: usize) -> Self {
+        Self {
+            counts: vec![0; n_values],
+        }
+    }
+
+    fn contains(&self, value: usize) -> bool {
+        self.counts[value] != 0
+    }
+
+    fn consume_value(&mut self, value: &Value) {
+        let mut consumer = UseCountConsumer { counts: self };
+        collect_value_uses(value, &mut consumer);
+    }
+
+    fn add(&mut self, value: usize) {
+        self.counts[value] += 1;
+    }
+
+    fn remove(&mut self, value: usize) {
+        let count = &mut self.counts[value];
+        assert!(*count > 0, "consumed VAFFLE use was not counted");
+        *count -= 1;
+    }
+}
+
+trait UseSink {
+    fn add_use(&mut self, value: usize);
+}
+
+impl UseSink for BTreeSet<usize> {
+    fn add_use(&mut self, value: usize) {
+        self.insert(value);
+    }
+}
+
+impl UseSink for UseCounts {
+    fn add_use(&mut self, value: usize) {
+        self.add(value);
+    }
+}
+
+struct UseCountConsumer<'a> {
+    counts: &'a mut UseCounts,
+}
+
+impl UseSink for UseCountConsumer<'_> {
+    fn add_use(&mut self, value: usize) {
+        self.counts.remove(value);
+    }
+}
+
+fn collect_use_counts<P: Clone>(
+    values: &[volar_ir_common::Node<Value, P>],
+    stmt_ids: &[ValueId],
+    term: &Terminator,
+) -> UseCounts {
+    let mut uses = UseCounts::new(values.len());
+    collect_uses_into(values, stmt_ids, term, &mut uses);
+    uses
+}
+
+fn collect_uses_into<P: Clone, S: UseSink>(
+    values: &[volar_ir_common::Node<Value, P>],
+    stmt_ids: &[ValueId],
+    term: &Terminator,
+    uses: &mut S,
+) {
+    for &vid in stmt_ids {
+        collect_value_uses(&values[vid.0].kind, uses);
+    }
+    collect_terminator_uses(term, uses);
+}
+
+fn collect_value_uses<S: UseSink>(val: &Value, out: &mut S) {
     match val {
         Value::Op(stmt) => collect_stmt_uses(stmt, out),
         Value::Call { args, .. } => {
             for a in args {
-                out.insert(a.0);
+                out.add_use(a.0);
             }
         }
         Value::Output { value, .. } => {
-            out.insert(value.0);
+            out.add_use(value.0);
         }
         Value::PtrLoad { ptr, .. } => {
-            out.insert(ptr.0);
+            out.add_use(ptr.0);
         }
         Value::PtrStore { ptr, val } => {
-            out.insert(ptr.0);
-            out.insert(val.0);
+            out.add_use(ptr.0);
+            out.add_use(val.0);
         }
         Value::PtrOffset { ptr, idx, .. } => {
-            out.insert(ptr.0);
-            out.insert(idx.0);
+            out.add_use(ptr.0);
+            out.add_use(idx.0);
         }
         // Defining occurrences — no operands to record.
         Value::Param { .. } | Value::StackAlloc { .. } => {}
@@ -1723,49 +1813,49 @@ fn collect_value_uses(val: &Value, out: &mut BTreeSet<usize>) {
     }
 }
 
-fn collect_stmt_uses(stmt: &Stmt<ValueId>, out: &mut BTreeSet<usize>) {
+fn collect_stmt_uses<S: UseSink>(stmt: &Stmt<ValueId>, out: &mut S) {
     match stmt {
         Stmt::Const(..) | Stmt::Rng { .. } => {}
         Stmt::Poly { coeffs, .. } => {
             for vars in coeffs.keys() {
                 for v in vars {
-                    out.insert(v.0);
+                    out.add_use(v.0);
                 }
             }
         }
         Stmt::Merge { parts, .. } => {
             for p in parts {
-                out.insert(p.0);
+                out.add_use(p.0);
             }
         }
         Stmt::Splat { src, .. } => {
-            out.insert(src.0);
+            out.add_use(src.0);
         }
         Stmt::Transmute { src, .. } => {
-            out.insert(src.0);
+            out.add_use(src.0);
         }
         Stmt::Rol { src, .. } | Stmt::Ror { src, .. } => {
-            out.insert(src.0);
+            out.add_use(src.0);
         }
         Stmt::Shuffle { result_bits, .. } => {
             for (_, v) in result_bits {
-                out.insert(v.0);
+                out.add_use(v.0);
             }
         }
         Stmt::StorageRead { addr, .. } => {
-            out.insert(addr.0);
+            out.add_use(addr.0);
         }
         Stmt::StorageWrite { src, addr, .. } => {
-            out.insert(src.0);
-            out.insert(addr.0);
+            out.add_use(src.0);
+            out.add_use(addr.0);
         }
         Stmt::OracleCall { args, .. } => {
             for a in args {
-                out.insert(a.0);
+                out.add_use(a.0);
             }
         }
         Stmt::OracleOutput { call, .. } => {
-            out.insert(call.0);
+            out.add_use(call.0);
         }
         Stmt::ActionCall {
             guard,
@@ -1773,36 +1863,36 @@ fn collect_stmt_uses(stmt: &Stmt<ValueId>, out: &mut BTreeSet<usize>) {
             fallbacks,
             ..
         } => {
-            out.insert(guard.0);
+            out.add_use(guard.0);
             for a in args {
-                out.insert(a.0);
+                out.add_use(a.0);
             }
             for f in fallbacks {
-                out.insert(f.0);
+                out.add_use(f.0);
             }
         }
         Stmt::ActionOutput { call, .. } => {
-            out.insert(call.0);
+            out.add_use(call.0);
         }
         _ => {}
     }
 }
 
-fn collect_terminator_uses(term: &Terminator, out: &mut BTreeSet<usize>) {
+fn collect_terminator_uses<S: UseSink>(term: &Terminator, out: &mut S) {
     match term {
         Terminator::Return { values } => {
             for v in values {
-                out.insert(v.0);
+                out.add_use(v.0);
             }
         }
         Terminator::Jump(target) => {
             for v in &target.args {
-                out.insert(v.0);
+                out.add_use(v.0);
             }
         }
         Terminator::ReturnCall { args, .. } => {
             for a in args {
-                out.insert(a.0);
+                out.add_use(a.0);
             }
         }
         Terminator::IfNonzero {
@@ -1810,12 +1900,12 @@ fn collect_terminator_uses(term: &Terminator, out: &mut BTreeSet<usize>) {
             then_target,
             else_target,
         } => {
-            out.insert(cond.0);
+            out.add_use(cond.0);
             for v in &then_target.args {
-                out.insert(v.0);
+                out.add_use(v.0);
             }
             for v in &else_target.args {
-                out.insert(v.0);
+                out.add_use(v.0);
             }
         }
         Terminator::Table {
@@ -1823,14 +1913,14 @@ fn collect_terminator_uses(term: &Terminator, out: &mut BTreeSet<usize>) {
             targets,
             default_target,
         } => {
-            out.insert(index.0);
+            out.add_use(index.0);
             for t in targets {
                 for v in &t.args {
-                    out.insert(v.0);
+                    out.add_use(v.0);
                 }
             }
             for v in &default_target.args {
-                out.insert(v.0);
+                out.add_use(v.0);
             }
         }
         _ => {}
@@ -2186,6 +2276,64 @@ mod tests {
     use super::*;
     use crate::target::VaffleTarget;
     use volar_lir::{LirTarget, LirType, StackAllocExt};
+
+    #[test]
+    fn test_use_counts_follow_the_untranslated_suffix() {
+        let bit_tid = TypeId(0);
+        let values = vec![
+            volar_ir_common::Node::new(
+                Value::Param {
+                    block: BlockId(0),
+                    ty: bit_tid,
+                    idx: 0,
+                },
+                (),
+                None,
+            ),
+            volar_ir_common::Node::new(
+                Value::Param {
+                    block: BlockId(0),
+                    ty: bit_tid,
+                    idx: 1,
+                },
+                (),
+                None,
+            ),
+            // Use v0 twice and v1 once before the call.
+            volar_ir_common::Node::new(
+                Value::Op(Stmt::Merge {
+                    parts: vec![ValueId(0), ValueId(0), ValueId(1)],
+                    ty: bit_tid,
+                }),
+                (),
+                None,
+            ),
+            // The call itself consumes the final use of v0.
+            volar_ir_common::Node::new(
+                Value::Call {
+                    func: FuncId(0),
+                    args: vec![ValueId(0)],
+                },
+                (),
+                None,
+            ),
+        ];
+        let term = Terminator::Return {
+            values: vec![ValueId(1)],
+        };
+        let mut uses = collect_use_counts(&values, &[ValueId(2), ValueId(3)], &term);
+
+        assert_eq!(uses.counts[0], 3);
+        assert_eq!(uses.counts[1], 2);
+
+        uses.consume_value(&values[2].kind);
+        assert_eq!(uses.counts[0], 1);
+        assert_eq!(uses.counts[1], 1);
+
+        uses.consume_value(&values[3].kind);
+        assert!(!uses.contains(0));
+        assert!(uses.contains(1), "the terminator still needs v1");
+    }
 
     #[test]
     fn test_lower_vaffle_with_stack_alloc() {
