@@ -370,7 +370,12 @@ fn remap_type_id(
 
 struct FuncInfo {
     /// Index of the function's entry block in the global blocks array.
-    entry_block: usize,
+    /// Declaration-only imports have no body and therefore no entry block.
+    entry_block: Option<usize>,
+    /// Reserved abort sink for a declaration-only import. It accepts the
+    /// import's packed call arguments and returns zero-valued entry results,
+    /// rather than letting a call jump to an unreserved block index.
+    abort_block: Option<usize>,
     /// Frame layout for calls *into* this function.
     callee_layout: FrameLayout,
     /// Frame layout of this function's own frame (for spilling).
@@ -495,6 +500,45 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         self.types.intern(IrType::Block { params })
     }
 
+    fn import_func_info(&mut self, sig: &SigDecl, abort_block: usize) -> FuncInfo {
+        let n_params: usize = sig
+            .params
+            .iter()
+            .map(|&vtid| ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize]))
+            .sum();
+        let total_ret_bits: usize = sig
+            .results
+            .iter()
+            .map(|&vtid| ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize]))
+            .sum();
+        let n_param_words = n_packs(n_params);
+        let n_ret_words = n_packs(total_ret_bits);
+        let ret = (total_ret_bits > 0).then_some((0, n_ret_words as u64, PACK_TID));
+        let cont_ty = Some(self.intern_cont_block_type(total_ret_bits));
+        let callee_layout = FrameLayout {
+            params: vec![],
+            ret,
+            cont_ty,
+            spill_base: n_ret_words as u64,
+            n_spill: 0,
+            size: n_ret_words as u64,
+            storage: StorageId::STACK,
+        };
+
+        FuncInfo {
+            entry_block: None,
+            abort_block: Some(abort_block),
+            callee_layout: callee_layout.clone(),
+            own_layout: callee_layout,
+            n_param_words,
+            n_params,
+            total_ret_bits,
+            cross_block_values: BTreeSet::new(),
+            cross_block_base: 0,
+            alloca_budget: 0,
+        }
+    }
+
     // ---- Planning ----------------------------------------------------------
 
     pub(crate) fn plan_functions(&mut self) {
@@ -504,36 +548,13 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         for func_decl in &self.module.funcs {
             let body = match func_decl {
                 FuncDecl::Body(b) => b,
-                _ => {
-                    self.func_info.push(FuncInfo {
-                        entry_block: block_offset,
-                        callee_layout: FrameLayout {
-                            params: vec![],
-                            ret: None,
-                            cont_ty: None,
-                            spill_base: 0,
-                            n_spill: 0,
-                            size: 0,
-                            storage: StorageId::STACK,
-                        },
-                        own_layout: FrameLayout {
-                            params: vec![],
-                            ret: None,
-                            cont_ty: None,
-                            spill_base: 0,
-                            n_spill: 0,
-                            size: 0,
-                            storage: StorageId::STACK,
-                        },
-                        n_param_words: 0,
-                        n_params: 0,
-                        total_ret_bits: 0,
-                        cross_block_values: BTreeSet::new(),
-                        cross_block_base: 0,
-                        alloca_budget: 0,
-                    });
+                FuncDecl::Import { sig, .. } => {
+                    let import_info = self.import_func_info(&self.module.sigs[sig.0], block_offset);
+                    self.func_info.push(import_info);
+                    block_offset += 1;
                     continue;
                 }
+                _ => continue,
             };
 
             let sig = &self.module.sigs[body.sig.0];
@@ -630,7 +651,8 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             let alloca_budget = compute_alloca_budget(body, &self.types, &self.type_map);
 
             self.func_info.push(FuncInfo {
-                entry_block: block_offset,
+                entry_block: Some(block_offset),
+                abort_block: None,
                 callee_layout,
                 own_layout,
                 n_param_words,
@@ -645,6 +667,42 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         self.total_blocks = block_offset;
     }
 
+    fn entry_return_bits(&self) -> usize {
+        self.func_info
+            .first()
+            .expect("lowering a nonempty module must plan its entry function")
+            .total_ret_bits
+    }
+
+    fn append_import_abort_return_bits(&self, em: &mut BlockEmitter<P>, args: &mut Vec<IRVarId>) {
+        for _ in 0..self.entry_return_bits() {
+            args.push(em.bc_const(false));
+        }
+    }
+
+    fn lower_import_abort_sink(&mut self, func_idx: usize) {
+        let info = &self.func_info[func_idx];
+        let abort_block = info
+            .abort_block
+            .expect("only declaration-only imports have an abort sink");
+        debug_assert_eq!(self.blocks.len(), abort_block);
+
+        let sp_words = n_packs(SP_BITS);
+        let return_start = sp_words + info.n_param_words;
+        let mut params = vec![PACK_TID; return_start];
+        params.extend(vec![BIT_TID; self.entry_return_bits()]);
+        let return_args = (return_start..params.len())
+            .map(|idx| IRVarId(idx as u32))
+            .collect();
+        self.blocks.push(IRBlock {
+            params,
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, return_args),
+            },
+        });
+    }
+
     // ---- Lowering ----------------------------------------------------------
 
     fn lower_all(&mut self) {
@@ -655,11 +713,11 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         self.emit_entry_and_exit();
 
         for (func_idx, func_decl) in self.module.funcs.iter().enumerate() {
-            let body = match func_decl {
-                FuncDecl::Body(b) => b,
+            match func_decl {
+                FuncDecl::Body(body) => self.lower_function(func_idx, body),
+                FuncDecl::Import { .. } => self.lower_import_abort_sink(func_idx),
                 _ => continue,
-            };
-            self.lower_function(func_idx, body);
+            }
         }
 
         // Append extra blocks (continuations created by call splitting).
@@ -735,7 +793,10 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         let mut jump_args = pack_bits(&mut em, &new_sp_bits, PACK_W);
         jump_args.extend(param_words);
 
-        let entry_target = IRBlockId(info.entry_block as u32);
+        let entry_target = IRBlockId(
+            info.entry_block
+                .expect("the first lowered function must have a body") as u32,
+        );
         self.blocks.push(em.finish(IRTerminator::Jmp {
             target: IRBranchTarget::new(IRBlockTargetId::Block(entry_target), jump_args),
         }));
@@ -762,7 +823,9 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
 
     pub(crate) fn lower_function(&mut self, func_idx: usize, body: &FuncBody<P>) {
         let info = &self.func_info[func_idx];
-        let entry_block_offset = info.entry_block;
+        let entry_block_offset = info
+            .entry_block
+            .expect("lower_function requires a function body");
         let own_layout = info.own_layout.clone();
         let callee_layout = info.callee_layout.clone();
 
@@ -1155,10 +1218,24 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             let mut sp_words = pack_bits(&mut current_em, &new_sp_bits, PACK_W);
                             sp_words.extend(arg_words);
 
-                            let callee_entry = IRBlockId(callee_info.entry_block as u32);
+                            let callee_target = match callee_info.entry_block {
+                                Some(entry_block) => IRBlockId(entry_block as u32),
+                                None => {
+                                    self.append_import_abort_return_bits(
+                                        &mut current_em,
+                                        &mut sp_words,
+                                    );
+                                    IRBlockId(
+                                        callee_info
+                                            .abort_block
+                                            .expect("an import must reserve an abort sink")
+                                            as u32,
+                                    )
+                                }
+                            };
                             let block = current_em.finish(IRTerminator::Jmp {
                                 target: IRBranchTarget::new(
-                                    IRBlockTargetId::Block(callee_entry),
+                                    IRBlockTargetId::Block(callee_target),
                                     sp_words,
                                 ),
                             });
@@ -1316,7 +1393,9 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         em: &mut BlockEmitter<P>,
     ) -> IRTerminator {
         let s = |vid: &ValueId| val_map.get(&vid.0).copied().unwrap_or(IRVarId(0));
-        let entry_off = self.func_info[func_idx].entry_block;
+        let entry_off = self.func_info[func_idx]
+            .entry_block
+            .expect("translate_terminator requires a function body");
 
         let body = match &self.module.funcs[func_idx] {
             FuncDecl::Body(b) => b,
@@ -1406,9 +1485,6 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 args: call_args,
             } => {
                 let callee_idx = callee_fid.0;
-                // Guard: Import stubs have no entry_block — fall through to the
-                // catch-all for those (they shouldn't appear as tail calls in
-                // well-formed VAFFLE, but be safe).
                 if callee_idx >= self.func_info.len() {
                     return IRTerminator::Jmp {
                         target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
@@ -1438,9 +1514,20 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 let mut sp_words = pack_bits(em, &new_sp_bits, PACK_W);
                 sp_words.extend(arg_words);
 
-                let callee_entry = IRBlockId(callee_info.entry_block as u32);
+                let callee_target = match callee_info.entry_block {
+                    Some(entry_block) => IRBlockId(entry_block as u32),
+                    None => {
+                        self.append_import_abort_return_bits(em, &mut sp_words);
+                        IRBlockId(
+                            callee_info
+                                .abort_block
+                                .expect("an import must reserve an abort sink")
+                                as u32,
+                        )
+                    }
+                };
                 IRTerminator::Jmp {
-                    target: IRBranchTarget::new(IRBlockTargetId::Block(callee_entry), sp_words),
+                    target: IRBranchTarget::new(IRBlockTargetId::Block(callee_target), sp_words),
                 }
             }
             Terminator::Table {

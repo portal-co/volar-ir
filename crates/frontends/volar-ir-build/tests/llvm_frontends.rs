@@ -484,6 +484,100 @@ ok:
 }
 
 #[test]
+fn llvm_import_return_call_movfuscates_via_abort_sink() {
+    let src = r#"
+declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)
+declare void @panic_const_add_overflow()
+
+define i32 @add_one(i32 %x) {
+entry:
+  %pair = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %x, i32 1)
+  %value = extractvalue { i32, i1 } %pair, 0
+  %overflow = extractvalue { i32, i1 } %pair, 1
+  br i1 %overflow, label %panic, label %ok
+panic:
+  call void @panic_const_add_overflow()
+  unreachable
+ok:
+  ret i32 %value
+}
+"#;
+    let path = write_temp_ll("import_return_call", src);
+    let (original, _) = Pipeline::from_llvm(&path, &["add_one"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .expect("call; unreachable must lower through the import abort sink")
+        .to_volar_ir();
+    let (movfuscated, types) = Pipeline::from_llvm(&path, &["add_one"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .expect("movfuscate must not jump past the import abort sink")
+        .to_volar_ir();
+    assert!(movfuscated.is_movfuscated());
+
+    let pc_inputs = volar_ir_passes::pc_bits_needed(original.blocks.len());
+    let evaluate = |x: u64| {
+        let mut inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+            .params
+            .iter()
+            .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &types)])
+            .collect();
+        inputs[pc_inputs] = (0..64).map(|i| (x >> i) & 1 != 0).collect();
+        let out = volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &types, &inputs)
+            .expect("movfuscated import-return-call fixture terminates");
+        out.iter()
+            .enumerate()
+            .fold(0u64, |value, (i, bit)| value | ((bit[0] as u64) << i))
+    };
+    assert_eq!(evaluate(5), 6, "the non-abort path must still compute add_one");
+    assert_eq!(
+        evaluate(i32::MAX as u64),
+        0,
+        "the modeled abort path returns zero-valued entry results"
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn llvm_import_call_movfuscates_via_abort_sink() {
+    let src = r#"
+declare i32 @opaque(i32)
+
+define i32 @caller(i32 %x) {
+entry:
+  %result = call i32 @opaque(i32 %x)
+  %after = add i32 %result, 1
+  ret i32 %after
+}
+"#;
+    let path = write_temp_ll("import_call", src);
+    let (original, _) = Pipeline::from_llvm(&path, &["caller"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .expect("ordinary call to an import must lower to its abort sink")
+        .to_volar_ir();
+    let (movfuscated, types) = Pipeline::from_llvm(&path, &["caller"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .expect("ordinary call to an import must not jump past the abort sink")
+        .to_volar_ir();
+    assert!(movfuscated.is_movfuscated());
+
+    let pc_inputs = volar_ir_passes::pc_bits_needed(original.blocks.len());
+    let mut inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+        .params
+        .iter()
+        .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &types)])
+        .collect();
+    inputs[pc_inputs] = (0..64).map(|i| (5u64 >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &types, &inputs)
+        .expect("movfuscated import-call fixture terminates");
+    assert!(
+        out.iter().all(|bit| !bit[0]),
+        "an import sink must terminate with zero-valued entry results"
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn llvm_register_xor_unrolls() {
     let src = r#"
 define i32 @xor_one(i32 %x) {
