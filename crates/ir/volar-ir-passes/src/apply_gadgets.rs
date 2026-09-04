@@ -41,7 +41,7 @@
 //!   aux `InputRange` may not overlap any binding's selection (the `key`
 //!   region must not be encrypted by its own binding).
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -49,7 +49,9 @@ use alloc::vec::Vec;
 
 use volar_ir::boolar::{BIrPreInitSegment, BIrStmt, LaneId};
 use volar_ir::circuit::BCircuit;
-use volar_ir::gadget::{AuxSource, GadgetBinding, GadgetError, GadgetLibrary, GadgetSpec, PortKind};
+use volar_ir::gadget::{
+    AuxSource, GadgetBinding, GadgetError, GadgetLibrary, GadgetSpec, PortKind,
+};
 use volar_ir::ir::IRVarId;
 use volar_ir::region::{BoundaryWire, RegionTable};
 use volar_ir_common::StorageId;
@@ -179,7 +181,12 @@ pub fn apply_gadgets(
     for plan in &plans {
         let dw = data_width(plan.spec, plan.binding)?;
         let aux_widths = plan.binding.aux_sources.iter().map(|s| s.width());
-        check_body(plan.spec.body_for(false), dw, aux_widths.clone(), &plan.spec.name)?;
+        check_body(
+            plan.spec.body_for(false),
+            dw,
+            aux_widths.clone(),
+            &plan.spec.name,
+        )?;
         if let Some(d) = &plan.spec.decrypt {
             check_body(d, dw, aux_widths.clone(), &plan.spec.name)?;
         }
@@ -207,6 +214,10 @@ pub fn apply_gadgets(
     }
     // Static values of host vars (Some(v) = constant-folded bit).
     let mut const_val: Vec<Option<bool>> = vec![None; host.var_space() as usize];
+    // Exact host cell addresses, keyed by the numeric region-model address.
+    // Region selection deliberately remains u64-bounded, but synthesized
+    // pre-init must use the same concrete address vector as a host access.
+    let mut static_addr_bits: BTreeMap<(StorageId, LaneId, u64), Vec<bool>> = BTreeMap::new();
 
     let mut applied: Vec<String> = Vec::new();
     let mark = |applied: &mut Vec<String>, name: &str| {
@@ -217,7 +228,10 @@ pub fn apply_gadgets(
 
     // --- input splices: decrypt on entry -------------------------------
     for plan in &plans {
-        for chunk in plan.input_bits.chunks(plan.spec.data_width().unwrap_or(1) as usize) {
+        for chunk in plan
+            .input_bits
+            .chunks(plan.spec.data_width().unwrap_or(1) as usize)
+        {
             let aux = resolve_aux(&mut out, host.params, plan.binding)?;
             let body = plan.spec.body_for(true);
             let mut data_in: Vec<IRVarId> = chunk.iter().map(|&b| IRVarId(b)).collect();
@@ -254,15 +268,20 @@ pub fn apply_gadgets(
             } => {
                 // Fold on host vars (pre-substitution): decides wrapping.
                 let folded = if wrapped_spaces.contains(&(*storage, *lane)) {
-                    Some(fold_host_addr(addr, &const_val)?)
+                    let (flat, bits) = fold_host_addr_bits(addr, &const_val)?;
+                    static_addr_bits
+                        .entry((*storage, *lane, flat))
+                        .or_insert(bits);
+                    Some(flat)
                 } else {
                     None
                 };
                 let addr_out: Vec<IRVarId> = addr
                     .iter()
                     .map(|v| {
-                        subst[v.0 as usize]
-                            .ok_or_else(|| GadgetError::Internal(format!("unmapped addr var {}", v.0)))
+                        subst[v.0 as usize].ok_or_else(|| {
+                            GadgetError::Internal(format!("unmapped addr var {}", v.0))
+                        })
                     })
                     .collect::<Result<_, _>>()?;
                 let id = out.push_stmt(
@@ -281,9 +300,12 @@ pub fn apply_gadgets(
                         let mut data_in = vec![id];
                         data_in.extend(aux);
                         let plain = instantiate(&mut out, body, &data_in, &[]);
-                        replacement = *plain
-                            .first()
-                            .ok_or_else(|| GadgetError::Internal(format!("gadget {} has empty data output", plan.spec.name)))?;
+                        replacement = *plain.first().ok_or_else(|| {
+                            GadgetError::Internal(format!(
+                                "gadget {} has empty data output",
+                                plan.spec.name
+                            ))
+                        })?;
                         mark(&mut applied, &plan.spec.name);
                     }
                 }
@@ -296,13 +318,16 @@ pub fn apply_gadgets(
                 addr,
             } => {
                 let folded = if wrapped_spaces.contains(&(*storage, *lane)) {
-                    Some(fold_host_addr(addr, &const_val)?)
+                    let (flat, bits) = fold_host_addr_bits(addr, &const_val)?;
+                    static_addr_bits
+                        .entry((*storage, *lane, flat))
+                        .or_insert(bits);
+                    Some(flat)
                 } else {
                     None
                 };
-                let mut written = subst[src.0 as usize].ok_or_else(|| {
-                    GadgetError::Internal(format!("unmapped src var {}", src.0))
-                })?;
+                let mut written = subst[src.0 as usize]
+                    .ok_or_else(|| GadgetError::Internal(format!("unmapped src var {}", src.0)))?;
                 if let Some(flat) = folded {
                     if let Some(plan) = find_cell_plan(&plans, *storage, *lane, flat) {
                         let aux = resolve_aux(&mut out, host.params, plan.binding)?;
@@ -323,8 +348,9 @@ pub fn apply_gadgets(
                 let addr_out: Vec<IRVarId> = addr
                     .iter()
                     .map(|v| {
-                        subst[v.0 as usize]
-                            .ok_or_else(|| GadgetError::Internal(format!("unmapped addr var {}", v.0)))
+                        subst[v.0 as usize].ok_or_else(|| {
+                            GadgetError::Internal(format!("unmapped addr var {}", v.0))
+                        })
                     })
                     .collect::<Result<_, _>>()?;
                 out.push_stmt(
@@ -352,7 +378,10 @@ pub fn apply_gadgets(
         })
         .collect::<Result<_, _>>()?;
     for plan in &plans {
-        for chunk in plan.output_bits.chunks(plan.spec.data_width().unwrap_or(1) as usize) {
+        for chunk in plan
+            .output_bits
+            .chunks(plan.spec.data_width().unwrap_or(1) as usize)
+        {
             let aux = resolve_aux(&mut out, host.params, plan.binding)?;
             let body = plan.spec.body_for(false);
             let mut data_in: Vec<IRVarId> =
@@ -374,15 +403,20 @@ pub fn apply_gadgets(
     // start life holding *ciphertext of zero* — add a synthetic pre_init
     // segment for cells not covered by a host segment.
     let mut new_pre_init: Vec<BIrPreInitSegment> = Vec::new();
-    let mut covered = |new_pre_init: &Vec<BIrPreInitSegment>, storage: StorageId, lane: LaneId, addr: u64| -> bool {
-        new_pre_init
-            .iter()
-            .chain(host.pre_init.iter())
-            .any(|seg| {
-                seg.storage == storage
-                    && seg.lane == lane
-                    && (seg.offset..seg.offset + seg.data.len() as u64).contains(&addr)
-            })
+    let covered = |new_pre_init: &Vec<BIrPreInitSegment>,
+                   storage: StorageId,
+                   lane: LaneId,
+                   addr: &[bool]|
+     -> bool {
+        new_pre_init.iter().chain(host.pre_init.iter()).any(|seg| {
+            seg.storage == storage
+                && seg.lane == lane
+                && seg
+                    .data
+                    .iter()
+                    .enumerate()
+                    .any(|(i, _)| add_to_address(&seg.addr, i) == addr)
+        })
     };
     for plan in &plans {
         for wire in &plan.cells {
@@ -394,7 +428,23 @@ pub fn apply_gadgets(
                 } => (*storage, *lane, *addr),
                 _ => unreachable!("plan.cells holds only Cell wires"),
             };
-            if covered(&new_pre_init, storage, lane, addr) {
+            let exact_addr = static_addr_bits
+                .get(&(storage, lane, addr))
+                .cloned()
+                .or_else(|| {
+                    host.pre_init.iter().find_map(|seg| {
+                        (seg.storage == storage && seg.lane == lane)
+                            .then(|| {
+                                seg.data.iter().enumerate().find_map(|(i, _)| {
+                                    let candidate = add_to_address(&seg.addr, i);
+                                    (address_to_u64(&candidate) == Some(addr)).then_some(candidate)
+                                })
+                            })
+                            .flatten()
+                    })
+                })
+                .unwrap_or_else(|| u64_address(addr));
+            if covered(&new_pre_init, storage, lane, &exact_addr) {
                 continue;
             }
             let cipher = encrypt_constant(plan.spec, plan.binding, false).ok_or(
@@ -405,7 +455,7 @@ pub fn apply_gadgets(
             new_pre_init.push(BIrPreInitSegment {
                 storage,
                 lane,
-                offset: addr,
+                addr: exact_addr,
                 data: alloc::vec![cipher],
             });
             mark(&mut applied, &plan.spec.name);
@@ -415,8 +465,10 @@ pub fn apply_gadgets(
         let mut data = seg.data.clone();
         let mut changed = false;
         for (i, &bit) in seg.data.iter().enumerate() {
-            let flat = seg.offset + i as u64;
-            if let Some(plan) = find_cell_plan(&plans, seg.storage, seg.lane, flat) {
+            let flat = address_to_u64(&add_to_address(&seg.addr, i));
+            if let Some(plan) =
+                flat.and_then(|flat| find_cell_plan(&plans, seg.storage, seg.lane, flat))
+            {
                 let cipher = encrypt_constant(plan.spec, plan.binding, bit).ok_or(
                     GadgetError::PreInitNeedsConstantAux {
                         gadget: plan.spec.name.clone(),
@@ -431,7 +483,7 @@ pub fn apply_gadgets(
             BIrPreInitSegment {
                 storage: seg.storage,
                 lane: seg.lane,
-                offset: seg.offset,
+                addr: seg.addr.clone(),
                 data,
             }
         } else {
@@ -441,7 +493,10 @@ pub fn apply_gadgets(
 
     out.outputs = new_outputs;
     out.pre_init = new_pre_init;
-    Ok(GadgetApplication { circuit: out, applied })
+    Ok(GadgetApplication {
+        circuit: out,
+        applied,
+    })
 }
 
 // ----------------------------------------------------------------------
@@ -561,9 +616,17 @@ fn fold_gate(kind: &BIrStmt, const_val: &[Option<bool>]) -> Option<bool> {
 }
 
 /// Collapse an N-bit host address (bit 0 = index 0 = least-significant) to
-/// its flat cell address. Fails closed on any non-constant bit.
-fn fold_host_addr(addr: &[IRVarId], const_val: &[Option<bool>]) -> Result<u64, GadgetError> {
+/// the numeric region metadata address while preserving its exact bit vector.
+/// Fails closed on non-constant or unrepresentably wide bits.
+fn fold_host_addr_bits(
+    addr: &[IRVarId],
+    const_val: &[Option<bool>],
+) -> Result<(u64, Vec<bool>), GadgetError> {
+    if addr.len() > 64 {
+        return Err(GadgetError::StorageAddressTooWide { bits: addr.len() });
+    }
     let mut value = 0u64;
+    let mut bits = Vec::with_capacity(addr.len());
     for (i, v) in addr.iter().enumerate() {
         let bit = const_val
             .get(v.0 as usize)
@@ -573,8 +636,54 @@ fn fold_host_addr(addr: &[IRVarId], const_val: &[Option<bool>]) -> Result<u64, G
         if bit {
             value |= 1u64 << i;
         }
+        bits.push(bit);
     }
-    Ok(value)
+    Ok((value, bits))
+}
+
+fn u64_address(value: u64) -> Vec<bool> {
+    (0..64).map(|bit| (value >> bit) & 1 != 0).collect()
+}
+
+fn address_to_u64(addr: &[bool]) -> Option<u64> {
+    // Region metadata names static cells numerically.  It cannot faithfully
+    // select an exact Boolar address wider than 64 bits, even if the extra
+    // bits are currently zero.
+    if addr.len() > 64 {
+        return None;
+    }
+    Some(
+        addr.iter()
+            .take(64)
+            .enumerate()
+            .fold(0u64, |value, (bit, set)| value | ((*set as u64) << bit)),
+    )
+}
+
+fn add_to_address(addr: &[bool], mut addend: usize) -> Vec<bool> {
+    let mut out = addr.to_vec();
+    let mut bit = 0usize;
+    while addend != 0 {
+        if bit == out.len() {
+            out.push(false);
+        }
+        if addend & 1 != 0 {
+            let mut carry = true;
+            let mut at = bit;
+            while carry {
+                if at == out.len() {
+                    out.push(false);
+                }
+                let next = out[at] ^ carry;
+                carry &= out[at];
+                out[at] = next;
+                at += 1;
+            }
+        }
+        addend >>= 1;
+        bit += 1;
+    }
+    out
 }
 
 fn find_cell_plan<'a>(
@@ -709,7 +818,7 @@ mod tests {
     use super::*;
     use alloc::collections::{BTreeMap, BTreeSet};
     use volar_ir::boolar::LaneId;
-    use volar_ir::gadget::{selector, AuxSource, GadgetLibrary, GadgetSpec, Port, PortKind};
+    use volar_ir::gadget::{AuxSource, GadgetLibrary, GadgetSpec, Port, PortKind, selector};
     use volar_ir::region::{RegionEntry, RegionError, RegionId, RegionSelector, WireAnchor};
 
     /// Evaluate a pure-gate + storage `BCircuit` on the given params, with
@@ -719,10 +828,10 @@ mod tests {
         for (i, &b) in params.iter().enumerate() {
             vals[i] = Some(b);
         }
-        let mut storage: BTreeMap<((StorageId, LaneId), u64), bool> = BTreeMap::new();
+        let mut storage: BTreeMap<((StorageId, LaneId), Vec<bool>), bool> = BTreeMap::new();
         for seg in &circ.pre_init {
             for (i, &b) in seg.data.iter().enumerate() {
-                storage.insert(((seg.storage, seg.lane), seg.offset + i as u64), b);
+                storage.insert(((seg.storage, seg.lane), add_to_address(&seg.addr, i)), b);
             }
         }
         // Static addresses only (test circuits are static-addressed).
@@ -735,29 +844,31 @@ mod tests {
                 BIrStmt::Or(a, b) => vals[a.0 as usize].unwrap() | vals[b.0 as usize].unwrap(),
                 BIrStmt::Xor(a, b) => vals[a.0 as usize].unwrap() ^ vals[b.0 as usize].unwrap(),
                 BIrStmt::Not(a) => !vals[a.0 as usize].unwrap(),
-                BIrStmt::StorageRead { storage: s, lane, addr } => {
-                    let mut flat = 0u64;
-                    for (i, a) in addr.iter().enumerate() {
-                        if vals[a.0 as usize].unwrap() {
-                            flat |= 1 << i;
-                        }
-                    }
+                BIrStmt::StorageRead {
+                    storage: s,
+                    lane,
+                    addr,
+                } => {
+                    let flat = addr.iter().map(|a| vals[a.0 as usize].unwrap()).collect();
                     *storage.get(&((*s, *lane), flat)).unwrap_or(&false)
                 }
-                BIrStmt::StorageWrite { storage: s, lane, src, addr } => {
-                    let mut flat = 0u64;
-                    for (i, a) in addr.iter().enumerate() {
-                        if vals[a.0 as usize].unwrap() {
-                            flat |= 1 << i;
-                        }
-                    }
+                BIrStmt::StorageWrite {
+                    storage: s,
+                    lane,
+                    src,
+                    addr,
+                } => {
+                    let flat = addr.iter().map(|a| vals[a.0 as usize].unwrap()).collect();
                     storage.insert(((*s, *lane), flat), vals[src.0 as usize].unwrap());
                     false
                 }
                 other => panic!("eval_circuit: unsupported stmt {:?}", other),
             });
         }
-        circ.outputs.iter().map(|o| vals[o.0 as usize].unwrap()).collect()
+        circ.outputs
+            .iter()
+            .map(|o| vals[o.0 as usize].unwrap())
+            .collect()
     }
 
     /// A self-inverse XOR gadget: `cipher = plain ^ key`, one aux (key) bit.
@@ -772,8 +883,16 @@ mod tests {
             encrypt: body,
             decrypt: None, // self-inverse
             ports: alloc::vec![
-                Port { name: alloc::string::String::from("data"), kind: PortKind::Data, width: 1 },
-                Port { name: alloc::string::String::from("key"), kind: PortKind::Aux, width: 1 },
+                Port {
+                    name: alloc::string::String::from("data"),
+                    kind: PortKind::Data,
+                    width: 1
+                },
+                Port {
+                    name: alloc::string::String::from("key"),
+                    kind: PortKind::Aux,
+                    width: 1
+                },
             ],
         }
     }
@@ -810,9 +929,17 @@ mod tests {
     fn io_regions() -> RegionTable {
         RegionTable {
             entries: alloc::vec![
-                entry("public-in", WireAnchor::Input { start: 0, len: 4 }, &[PUBLIC]),
+                entry(
+                    "public-in",
+                    WireAnchor::Input { start: 0, len: 4 },
+                    &[PUBLIC]
+                ),
                 entry("key-in", WireAnchor::Input { start: 4, len: 1 }, &[KEY]),
-                entry("public-out", WireAnchor::Output { start: 0, len: 4 }, &[PUBLIC]),
+                entry(
+                    "public-out",
+                    WireAnchor::Output { start: 0, len: 4 },
+                    &[PUBLIC]
+                ),
             ],
             names: Default::default(),
         }
@@ -837,7 +964,10 @@ mod tests {
         // Same boundary shape.
         assert_eq!(app.circuit.params, host.params);
         assert_eq!(app.circuit.outputs.len(), host.outputs.len());
-        assert_eq!(app.applied, alloc::vec![alloc::string::String::from("xor-pad")]);
+        assert_eq!(
+            app.applied,
+            alloc::vec![alloc::string::String::from("xor-pad")]
+        );
 
         // Plaintext view through the wrapped boundary == host behavior.
         for mask in 0..16u32 {
@@ -924,7 +1054,12 @@ mod tests {
         let bad = RegionTable {
             entries: alloc::vec![entry(
                 "ghost",
-                WireAnchor::Storage { storage: StorageId(9), lane: LaneId(0), start: 0, len: 1 },
+                WireAnchor::Storage {
+                    storage: StorageId(9),
+                    lane: LaneId(0),
+                    start: 0,
+                    len: 1
+                },
                 &[PUBLIC],
             )],
             names: Default::default(),
@@ -940,7 +1075,9 @@ mod tests {
         let regions = io_regions();
         // Lookup helpers.
         assert_eq!(
-            regions.input_regions(0).map(|s| s.contains(&RegionId(PUBLIC))),
+            regions
+                .input_regions(0)
+                .map(|s| s.contains(&RegionId(PUBLIC))),
             Some(true)
         );
         assert_eq!(
@@ -987,8 +1124,16 @@ mod tests {
             encrypt: body,
             decrypt: None,
             ports: alloc::vec![
-                Port { name: alloc::string::String::from("data"), kind: PortKind::Data, width: 3 },
-                Port { name: alloc::string::String::from("key"), kind: PortKind::Aux, width: 1 },
+                Port {
+                    name: alloc::string::String::from("data"),
+                    kind: PortKind::Data,
+                    width: 3
+                },
+                Port {
+                    name: alloc::string::String::from("key"),
+                    kind: PortKind::Aux,
+                    width: 1
+                },
             ],
         };
         let bindings = alloc::vec![GadgetBinding {
@@ -1035,11 +1180,7 @@ mod tests {
         let mut regions = io_regions();
         regions.entries.insert(
             1,
-            entry(
-                "key-again",
-                WireAnchor::Input { start: 4, len: 1 },
-                &[KEY],
-            ),
+            entry("key-again", WireAnchor::Input { start: 4, len: 1 }, &[KEY]),
         );
         let bindings = alloc::vec![
             GadgetBinding {
@@ -1071,7 +1212,11 @@ mod tests {
         // must fail closed.
         let mut c = BCircuit::<()>::new(1); // p0 = address
         let read = c.push_stmt(
-            BIrStmt::StorageRead { storage: StorageId(0), lane: LaneId(0), addr: alloc::vec![IRVarId(0)] },
+            BIrStmt::StorageRead {
+                storage: StorageId(0),
+                lane: LaneId(0),
+                addr: alloc::vec![IRVarId(0)],
+            },
             (),
         );
         c.outputs = alloc::vec![read];
@@ -1080,7 +1225,12 @@ mod tests {
         let mut regions = RegionTable::new();
         regions.entries = alloc::vec![entry(
             "cell0",
-            WireAnchor::Storage { storage: StorageId(0), lane: LaneId(0), start: 0, len: 1 },
+            WireAnchor::Storage {
+                storage: StorageId(0),
+                lane: LaneId(0),
+                start: 0,
+                len: 1
+            },
             &[PUBLIC],
         )];
         let bindings = alloc::vec![GadgetBinding {
@@ -1101,7 +1251,11 @@ mod tests {
         let mut c = BCircuit::<()>::new(1); // p0 = value written to cell 0
         let a0 = c.push_stmt(BIrStmt::Zero, ());
         let read = c.push_stmt(
-            BIrStmt::StorageRead { storage: StorageId(0), lane: LaneId(0), addr: alloc::vec![a0] },
+            BIrStmt::StorageRead {
+                storage: StorageId(0),
+                lane: LaneId(0),
+                addr: alloc::vec![a0],
+            },
             (),
         );
         let out = c.push_stmt(BIrStmt::Xor(read, IRVarId(0)), ());
@@ -1120,7 +1274,12 @@ mod tests {
         let mut regions = RegionTable::new();
         regions.entries = alloc::vec![entry(
             "cell0",
-            WireAnchor::Storage { storage: StorageId(0), lane: LaneId(0), start: 0, len: 1 },
+            WireAnchor::Storage {
+                storage: StorageId(0),
+                lane: LaneId(0),
+                start: 0,
+                len: 1
+            },
             &[PUBLIC],
         )];
         let bindings = alloc::vec![GadgetBinding {
@@ -1152,14 +1311,18 @@ mod tests {
         let mut c = BCircuit::<()>::new(0);
         let a0 = c.push_stmt(BIrStmt::Zero, ());
         let read = c.push_stmt(
-            BIrStmt::StorageRead { storage: StorageId(0), lane: LaneId(0), addr: alloc::vec![a0] },
+            BIrStmt::StorageRead {
+                storage: StorageId(0),
+                lane: LaneId(0),
+                addr: alloc::vec![a0],
+            },
             (),
         );
         c.outputs = alloc::vec![read];
         c.pre_init = alloc::vec![BIrPreInitSegment {
             storage: StorageId(0),
             lane: LaneId(0),
-            offset: 0,
+            addr: alloc::vec![false],
             data: alloc::vec![true],
         }];
         let host = c;
@@ -1167,7 +1330,12 @@ mod tests {
         let mut regions = RegionTable::new();
         regions.entries = alloc::vec![entry(
             "cell0",
-            WireAnchor::Storage { storage: StorageId(0), lane: LaneId(0), start: 0, len: 1 },
+            WireAnchor::Storage {
+                storage: StorageId(0),
+                lane: LaneId(0),
+                start: 0,
+                len: 1
+            },
             &[PUBLIC],
         )];
         let bindings = alloc::vec![GadgetBinding {
@@ -1188,14 +1356,18 @@ mod tests {
         let mut c = BCircuit::<()>::new(0);
         let a0 = c.push_stmt(BIrStmt::Zero, ());
         let read = c.push_stmt(
-            BIrStmt::StorageRead { storage: StorageId(0), lane: LaneId(0), addr: alloc::vec![a0] },
+            BIrStmt::StorageRead {
+                storage: StorageId(0),
+                lane: LaneId(0),
+                addr: alloc::vec![a0],
+            },
             (),
         );
         c.outputs = alloc::vec![read];
         c.pre_init = alloc::vec![BIrPreInitSegment {
             storage: StorageId(0),
             lane: LaneId(0),
-            offset: 0,
+            addr: alloc::vec![false],
             data: alloc::vec![true],
         }];
         let host = c;
@@ -1203,7 +1375,12 @@ mod tests {
         let mut regions = RegionTable::new();
         regions.entries = alloc::vec![entry(
             "cell0",
-            WireAnchor::Storage { storage: StorageId(0), lane: LaneId(0), start: 0, len: 1 },
+            WireAnchor::Storage {
+                storage: StorageId(0),
+                lane: LaneId(0),
+                start: 0,
+                len: 1
+            },
             &[PUBLIC],
         )];
         // Key comes from a param → constants can't be re-encrypted.
@@ -1216,16 +1393,21 @@ mod tests {
         // But host has 0 params, so InputRange is out of range — that fires
         // first (fail-closed ordering), which is also acceptable behavior.
         let result = apply_gadgets(&host, &regions, &bindings, &lib());
-        assert!(matches!(
-            result,
-            Err(GadgetError::AuxInputOutOfRange { .. })
-        ) || matches!(result, Err(GadgetError::PreInitNeedsConstantAux { .. })));
+        assert!(
+            matches!(result, Err(GadgetError::AuxInputOutOfRange { .. }))
+                || matches!(result, Err(GadgetError::PreInitNeedsConstantAux { .. }))
+        );
     }
 
     #[test]
     fn unsupported_host_stmt_rejected() {
         let mut c = BCircuit::<()>::new(1);
-        let r = c.push_stmt(BIrStmt::Rng { name: alloc::string::String::from("r") }, ());
+        let r = c.push_stmt(
+            BIrStmt::Rng {
+                name: alloc::string::String::from("r"),
+            },
+            (),
+        );
         c.outputs = alloc::vec![r];
         let host = c;
 

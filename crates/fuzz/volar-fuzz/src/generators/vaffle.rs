@@ -183,6 +183,7 @@ pub fn interpret_vaffle(
     };
 
     let module = Module {
+        pointer_width: vaffle::PointerWidth::Bits64,
         types: type_table,
         oracles: vec![],
         actions: vec![],
@@ -504,6 +505,7 @@ fn interpret_vaffle_extended_inner(
     };
 
     let module = Module {
+        pointer_width: vaffle::PointerWidth::Bits64,
         types: type_table,
         oracles: oracle_decls,
         actions: vec![],
@@ -638,6 +640,7 @@ pub fn interpret_vaffle_multiblock(
     };
 
     let module = Module {
+        pointer_width: vaffle::PointerWidth::Bits64,
         types: type_table,
         oracles: vec![],
         actions: vec![],
@@ -876,6 +879,7 @@ pub fn interpret_vaffle_diamond(
     };
 
     let module = Module {
+        pointer_width: vaffle::PointerWidth::Bits64,
         types: type_table,
         oracles: oracle_decls,
         actions: vec![],
@@ -1091,6 +1095,7 @@ pub fn interpret_vaffle_two_func(
     };
 
     let module = Module {
+        pointer_width: vaffle::PointerWidth::Bits64,
         types: type_table,
         oracles: oracle_decls,
         actions: vec![],

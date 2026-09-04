@@ -600,7 +600,6 @@ fn lower_stmt<P: Clone>(
             let k = ir_type_bits(&types.0[ty.0 as usize], types);
             let lane = *lane_of.get(ty).expect("lane allocated for storage type");
             let base_addr: Vec<IRVarId> = var_bits[&addr.0].clone();
-            check_addr_budget(base_addr.len(), k);
             record_addr_width(*storage, lane, base_addr.len(), addr_widths);
             let mut bits = Vec::with_capacity(k);
             for i in 0..k {
@@ -638,7 +637,6 @@ fn lower_stmt<P: Clone>(
                 "StorageWrite source width mismatch: {} bits vs type width {k}",
                 src_bits.len()
             );
-            check_addr_budget(base_addr.len(), k);
             record_addr_width(*storage, lane, base_addr.len(), addr_widths);
             let mut sentinels = Vec::with_capacity(k);
             for (i, &b) in src_bits.iter().enumerate() {
@@ -801,7 +799,6 @@ fn lower_stmt<P: Clone>(
                     width,
                     "ActionStore fallback width mismatch"
                 );
-                check_addr_budget(base_addr.len(), width);
                 record_addr_width(target.storage, lane, base_addr.len(), addr_widths);
                 for (result_bit, fallback) in fallback_bits.iter().copied().enumerate() {
                     let mut addr = base_addr.clone();
@@ -1082,27 +1079,6 @@ impl<P: Clone> Emitter<P> {
 /// Record the element-address width of a storage space; all ops in one
 /// `(StorageId, LaneId)` must agree, since the appended-index cell layout is
 /// defined relative to it.
-/// Fail closed when an appended-index address cannot fit the `u64` flat cell
-/// space: element-address bits + ceil(log2(value bits)) must stay within 64.
-///
-/// The Boolar storage model keys cells by `u64`; silently truncating wider
-/// addresses would alias distinct cells and corrupt read/write semantics.
-fn check_addr_budget(addr_bits: usize, value_bits: usize) {
-    // Same minimal bit count `const_index_bits` emits for indices 0..k.
-    let index_bits = if value_bits <= 1 {
-        0
-    } else {
-        (u32::BITS - (value_bits as u32 - 1).leading_zeros()) as usize
-    };
-    let total = addr_bits + index_bits;
-    assert!(
-        total <= 64,
-        "lower_ir_to_boolar: storage address of {addr_bits} element bits + \
-         {index_bits} appended bit-index bits exceeds the 64-bit flat cell space \
-         (value width {value_bits})"
-    );
-}
-
 fn record_addr_width(
     storage: StorageId,
     lane: LaneId,
@@ -1145,11 +1121,11 @@ fn const_index_bits<P: Clone>(
 
 /// Expand one typed pre-init segment into bit-granular Boolar segments.
 ///
-/// Under the appended-address layout, element `e`, bit `i` lives in flat cell
-/// `offset + e + (i << N)` where `N` is the lane's recorded element-address
-/// width (0 when the lane has no runtime storage ops). Bits of one element
-/// are therefore strided, so one [`BIrPreInitSegment`] is emitted per bit
-/// index, each covering the contiguous run of elements at that bit position.
+/// Under the appended-address layout, element `e`, bit `i` lives at the
+/// LSB-first address bits for `offset + e`, followed by the bits for `i`.
+/// Bits of one element are therefore strided, so one [`BIrPreInitSegment`]
+/// is emitted per bit index, each covering the contiguous run of elements at
+/// that bit position.
 fn expand_pre_init_segment(
     seg: &volar_ir_common::PreInitSegment,
     types: &IRTypes,
@@ -1160,13 +1136,27 @@ fn expand_pre_init_segment(
     let lane = *lane_of
         .get(&seg.ty)
         .expect("lane allocated for pre-init type");
-    let n_addr = *addr_widths.get(&(seg.storage, lane)).unwrap_or(&0);
-    check_addr_budget(n_addr, k);
+    let recorded_addr_bits = *addr_widths.get(&(seg.storage, lane)).unwrap_or(&0);
+    let end = seg.offset.saturating_add(seg.data.len().saturating_sub(1));
+    let static_addr_bits = if end == 0 {
+        0
+    } else {
+        usize::BITS as usize - end.leading_zeros() as usize
+    };
+    let n_addr = recorded_addr_bits.max(static_addr_bits);
+    let index_bits = if k <= 1 {
+        0
+    } else {
+        (usize::BITS - (k - 1).leading_zeros()) as usize
+    };
     (0..k)
         .map(|i| BIrPreInitSegment {
             storage: seg.storage,
             lane,
-            offset: seg.offset as u64 + ((i as u64) << n_addr),
+            addr: (0..n_addr)
+                .map(|bit| bit < usize::BITS as usize && (seg.offset >> bit) & 1 != 0)
+                .chain((0..index_bits).map(|bit| (i >> bit) & 1 != 0))
+                .collect(),
             data: (0..seg.data.len())
                 .map(|e| constant_bit(&seg.data[e], i))
                 .collect(),
@@ -1186,7 +1176,7 @@ mod tests {
         IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRType, IRTypes, IRVarId,
         PrimType,
     };
-    use volar_ir_common::{Constant, Node, TypeTable};
+    use volar_ir_common::{Constant, Node, StorageId, TypeTable};
 
     // -- Helpers -------------------------------------------------------------
 
@@ -1303,6 +1293,64 @@ mod tests {
         let lowered = lower_ir_to_boolar::<()>(&blocks, &types);
         // One u8 param → 8 Boolar bit params.
         assert_eq!(lowered.blocks[0].params, 8);
+    }
+
+    #[test]
+    fn wide_storage_address_expands_to_exact_70_bit_reversible_cells() {
+        // A 64-bit pointer address plus the six-bit suffix that selects one
+        // bit of a 64-bit loaded value must survive the Boolar and reversible
+        // boundary intact. In particular, it must not be packed into u64.
+        let mut types = TypeTable::new();
+        let bit = types.bit();
+        let addr = types.intern(IRType::Vec(64, bit));
+        let word = types.primitive(PrimType::_64);
+        let mut block = IRBlock::<()> {
+            params: std::vec![addr],
+            stmts: std::vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![]),
+            },
+        };
+        let read = block.push_stmt(
+            volar_ir::ir::IRStmt::StorageRead {
+                storage: StorageId::ALLOCA,
+                ty: word,
+                addr: IRVarId(0),
+            },
+            (),
+        );
+        block.terminator = IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![read]),
+        };
+
+        let lowered = lower_ir_to_boolar(&IRBlocks::new(std::vec![block]), &types);
+        let reads: std::vec::Vec<_> = lowered.blocks[0]
+            .stmts
+            .iter()
+            .filter_map(|node| match &node.kind {
+                BIrStmt::StorageRead { addr, .. } => Some(addr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reads.len(), 64);
+        assert!(reads.iter().all(|addr| addr.len() == 70));
+
+        let circuit = crate::to_circuit_fused_boolar(&lowered).expect("single block fuses");
+        let (reversible, _) = crate::to_reversible(&circuit).expect("storage circuit lowers");
+        let swap_addrs: std::vec::Vec<_> = reversible
+            .gates()
+            .iter()
+            .filter_map(|gate| match gate {
+                volar_ir::rcircuit::RGate::StorageSwap { addr, .. } => Some(addr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            swap_addrs.len(),
+            128,
+            "read swaps out and restores each cell"
+        );
+        assert!(swap_addrs.iter().all(|addr| addr.len() == 70));
     }
 
     // -- Const statement ------------------------------------------------------

@@ -308,6 +308,7 @@ mod tests {
             entry: BlockId(0),
         };
         let module = Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
             types: types.clone(),
             oracles: vec![],
             actions: vec![],

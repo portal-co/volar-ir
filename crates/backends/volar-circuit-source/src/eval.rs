@@ -10,10 +10,11 @@ use volar_ir_common::StorageId;
 use crate::error::EmitError;
 use crate::named::{NamedBoolCircuit, NamedBoolOp};
 
-/// Storage map used by [`eval_named_bool`]: `((StorageId, LaneId), addr)`.
-pub type BoolStorageMap = BTreeMap<((StorageId, LaneId), u64), bool>;
+/// Storage map used by [`eval_named_bool`]: `((StorageId, LaneId), exact
+/// LSB-first address bits)`.
+pub type BoolStorageMap = BTreeMap<((StorageId, LaneId), Vec<bool>), bool>;
 
-/// Evaluate a named Boolar circuit. Address bits collapse LSB-first to `u64`.
+/// Evaluate a named Boolar circuit with exact LSB-first storage keys.
 pub fn eval_named_bool(
     circuit: &NamedBoolCircuit,
     inputs: &[bool],
@@ -75,7 +76,7 @@ pub fn bits_to_u64(bits: &[bool]) -> Result<u64, EmitError> {
 fn apply_pre_init(circuit: &NamedBoolCircuit, storage: &mut BoolStorageMap) {
     for seg in &circuit.pre_init {
         for (i, &bit) in seg.data.iter().enumerate() {
-            storage.insert(((seg.storage, seg.lane), seg.offset + i as u64), bit);
+            storage.insert(((seg.storage, seg.lane), add_to_address(&seg.addr, i)), bit);
         }
     }
 }
@@ -101,8 +102,7 @@ fn eval_op(
             addr,
         } => {
             let bits = addr_bits(addr, get)?;
-            let idx = bits_to_u64(&bits)?;
-            Ok(storage.get(&((*sid, *lane), idx)).copied().unwrap_or(false))
+            Ok(storage.get(&((*sid, *lane), bits)).copied().unwrap_or(false))
         }
         NamedBoolOp::StorageWrite {
             storage: sid,
@@ -111,8 +111,7 @@ fn eval_op(
             addr,
         } => {
             let bits = addr_bits(addr, get)?;
-            let idx = bits_to_u64(&bits)?;
-            storage.insert(((*sid, *lane), idx), get(*src)?);
+            storage.insert(((*sid, *lane), bits), get(*src)?);
             Ok(false)
         }
         NamedBoolOp::External { .. } => Err(EmitError::unsupported(
@@ -120,6 +119,33 @@ fn eval_op(
             "v1 circuit-source evaluators reject externals",
         )),
     }
+}
+
+/// Add a small contiguous-segment offset to an exact LSB-first address.
+fn add_to_address(addr: &[bool], mut addend: usize) -> Vec<bool> {
+    let mut out = addr.to_vec();
+    let mut bit = 0usize;
+    while addend != 0 {
+        if bit == out.len() {
+            out.push(false);
+        }
+        if addend & 1 != 0 {
+            let mut carry = true;
+            let mut at = bit;
+            while carry {
+                if at == out.len() {
+                    out.push(false);
+                }
+                let next = out[at] ^ carry;
+                carry &= out[at];
+                out[at] = next;
+                at += 1;
+            }
+        }
+        addend >>= 1;
+        bit += 1;
+    }
+    out
 }
 
 fn addr_bits(

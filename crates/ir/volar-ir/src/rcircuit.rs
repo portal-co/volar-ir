@@ -140,13 +140,6 @@ pub enum RCircuitError {
         gate: usize,
         table: u8,
     },
-    /// A `StorageSwap` address exceeded 64 address bits (the storage-state
-    /// model indexes cells by a `u64` cell index).
-    AddressTooWide {
-        /// Zero-based position of the offending gate in the gate list.
-        gate: usize,
-        width: usize,
-    },
     /// Wire-count mismatch when composing two circuits.
     WireCountMismatch { lhs: usize, rhs: usize },
     /// [`RCircuit::apply_pure`] was called on a circuit that references
@@ -178,9 +171,6 @@ impl core::fmt::Display for RCircuitError {
                     "gate {gate} has invalid two-input truth table {table:#04x}"
                 )
             }
-            RCircuitError::AddressTooWide { gate, width } => {
-                write!(f, "gate {gate} has a {width}-bit storage address (max 64)")
-            }
             RCircuitError::WireCountMismatch { lhs, rhs } => {
                 write!(f, "cannot compose circuits with {lhs} and {rhs} wires")
             }
@@ -201,20 +191,13 @@ impl core::fmt::Display for RCircuitError {
 }
 
 /// Simple storage model for evaluating [`RCircuit`]s containing
-/// [`RGate::StorageSwap`]: maps `((storage space, lane), cell index)` to one
-/// bit, matching the fuzz interpreter's keyed Boolar storage model.
-pub type StorageState = BTreeMap<((StorageId, LaneId), u64), bool>;
+/// [`RGate::StorageSwap`]: maps `((storage space, lane), exact LSB-first cell
+/// address)` to one bit, matching the Boolar storage model.
+pub type StorageState = BTreeMap<((StorageId, LaneId), Vec<bool>), bool>;
 
-/// Compute the flat cell index for a storage address given its address-bit
-/// wires. LSB-first per the Boolar convention.
-fn addr_cell_index(addr_wires: &[usize], wires: &[bool]) -> u64 {
-    let mut idx: u64 = 0;
-    for (bit, w) in addr_wires.iter().enumerate() {
-        if wires[*w] {
-            idx |= 1u64 << bit;
-        }
-    }
-    idx
+/// Materialize an exact LSB-first cell address from its address wires.
+fn addr_cell_index(addr_wires: &[usize], wires: &[bool]) -> Vec<bool> {
+    addr_wires.iter().map(|wire| wires[*wire]).collect()
 }
 
 /// A reversible circuit: a bijection on `{0,1}^num_wires` (jointly with any
@@ -227,7 +210,6 @@ fn addr_cell_index(addr_wires: &[usize], wires: &[bool]) -> u64 {
 ///   distinct from both controls; `XorLut2`: three distinct wires;
 ///   `StorageSwap`: `target` not among the address wires);
 /// - `XorLut2` truth tables fit in four bits;
-/// - `StorageSwap` addresses are at most 64 bits wide.
 ///
 /// There are no SSA values here and no provenance annotation (see the plan
 /// document: wire-mutation form does not fit `Node<Stmt, P>`; revisit on
@@ -333,12 +315,6 @@ impl RCircuit {
                         return Err(RCircuitError::TargetAliased { gate: i, wire: *w });
                     }
                 }
-                if addr.len() > 64 {
-                    return Err(RCircuitError::AddressTooWide {
-                        gate: i,
-                        width: addr.len(),
-                    });
-                }
                 Ok(())
             }
             RGate::ExternalXor { args, target, .. } => {
@@ -365,12 +341,6 @@ impl RCircuit {
                 check(*fallback)?;
                 for wire in args.iter().chain(addr) {
                     check(*wire)?;
-                }
-                if addr.len() > 64 {
-                    return Err(RCircuitError::AddressTooWide {
-                        gate: i,
-                        width: addr.len(),
-                    });
                 }
                 Ok(())
             }
@@ -730,20 +700,57 @@ mod tests {
         // LSB-first address over wires [0, 1]: wires[1]=1 selects cell 2.
         let mut wires = vec![false, true, false]; // target wire starts 0
         let mut storage = StorageState::new();
-        storage.insert(((sid, LaneId(0)), 2), true); // cell 2 holds 1
+        storage.insert(((sid, LaneId(0)), vec![false, true]), true); // cell 2 holds 1
         c.apply(&mut wires, &mut storage);
         // Wire picked up the stored bit; the cell now holds the old wire bit.
         assert_eq!(wires[2], true);
-        assert_eq!(storage.get(&((sid, LaneId(0)), 2)), Some(&false));
+        assert_eq!(
+            storage.get(&((sid, LaneId(0)), vec![false, true])),
+            Some(&false)
+        );
         // Applying again restores both (involution).
         c.apply(&mut wires, &mut storage);
         assert_eq!(wires[2], false);
-        assert_eq!(storage.get(&((sid, LaneId(0)), 2)), Some(&true));
+        assert_eq!(
+            storage.get(&((sid, LaneId(0)), vec![false, true])),
+            Some(&true)
+        );
         // apply_pure rejects storage-using circuits.
         assert_eq!(
             c.apply_pure(&mut vec![false; 3]).unwrap_err(),
             RCircuitError::StorageOpsUnsupported
         );
+    }
+
+    #[test]
+    fn storage_keys_do_not_alias_above_u64_width() {
+        let sid = StorageId::DEFAULT;
+        let c = RCircuit::new(
+            71,
+            vec![RGate::StorageSwap {
+                storage: sid,
+                lane: LaneId(0),
+                addr: (0..70).collect(),
+                target: 70,
+            }],
+        )
+        .unwrap();
+        let low = vec![false; 70];
+        let mut high = low.clone();
+        high[64] = true;
+        let mut storage = StorageState::new();
+        storage.insert(((sid, LaneId(0)), low.clone()), false);
+        storage.insert(((sid, LaneId(0)), high.clone()), true);
+
+        let mut wires = vec![false; 71];
+        c.apply(&mut wires, &mut storage);
+        assert!(!wires[70], "the all-zero key holds false");
+        wires[64] = true;
+        c.apply(&mut wires, &mut storage);
+        assert!(wires[70], "bit 64 selects a distinct exact storage key");
+        assert_eq!(storage.len(), 2);
+        assert_eq!(storage.get(&((sid, LaneId(0)), low)), Some(&false));
+        assert_eq!(storage.get(&((sid, LaneId(0)), high)), Some(&false));
     }
 
     #[test]

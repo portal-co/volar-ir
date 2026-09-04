@@ -5,9 +5,11 @@
 
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
-use vaffle::{FuncDecl, Terminator, Value};
-use volar_ir_common::{StorageId, Stmt};
-use volar_llvm_vaffle_import::{import_module, import_module_inlined};
+use vaffle::{FuncDecl, PointerWidth, Terminator, Value};
+use volar_ir_common::{Stmt, StorageId};
+use volar_llvm_vaffle_import::{
+    LlvmImportConfig, import_module, import_module_inlined, import_module_with_config,
+};
 
 fn parse(source: &str) -> Context {
     let context = Context::create();
@@ -38,6 +40,11 @@ entry:
         .expect("valid LLVM IR fixture");
 
     let out = import_module(&module, &["add"]).expect("import succeeds");
+    assert_eq!(
+        out.pointer_width,
+        PointerWidth::Bits64,
+        "an absent LLVM data layout uses LLVM's 64-bit default"
+    );
     assert_eq!(out.funcs.len(), 1);
     let FuncDecl::Body(body) = &out.funcs[0] else {
         panic!("expected a function body, got an import declaration");
@@ -52,6 +59,161 @@ entry:
         other => panic!("expected Return terminator, got {other:?}"),
     }
     let _ = context;
+}
+
+#[test]
+fn pointer_load_uses_the_64_bit_layout_width() {
+    let source = r#"
+target datalayout = "e-p:64:64"
+
+define i64 @pointer_spill(i64 %x) {
+entry:
+  %value = alloca i64, align 8
+  %slot = alloca ptr, align 8
+  store i64 %x, ptr %value, align 8
+  store ptr %value, ptr %slot, align 8
+  %loaded_ptr = load ptr, ptr %slot, align 8
+  %result = load i64, ptr %loaded_ptr, align 8
+  ret i64 %result
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+
+    let out = import_module(&module, &["pointer_spill"]).expect("64-bit pointer spill imports");
+    assert_eq!(out.pointer_width, PointerWidth::Bits64);
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let Terminator::Return { values } = &body.blocks[0].terminator else {
+        panic!("expected return");
+    };
+    assert_eq!(values.len(), 64, "i64 return remains 64 bits");
+    let stack_alloc_widths: Vec<_> = body
+        .values
+        .iter()
+        .filter_map(|value| match &value.kind {
+            Value::StackAlloc { elem_ty, .. } => Some(*elem_ty),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stack_alloc_widths.len(), 2);
+    assert!(stack_alloc_widths.iter().all(|&ty| {
+        out.types.0[ty.0 as usize] == volar_ir_common::IrType::Primitive(volar_ir_common::Type::_64)
+    }));
+    let stack_reads = body
+        .values
+        .iter()
+        .filter(|value| {
+            matches!(
+                &value.kind,
+                Value::Op(Stmt::StorageRead { storage, .. }) if *storage == StorageId::ALLOCA
+            )
+        })
+        .count();
+    // `load ptr` + `load i64`: both are 64-bit accesses.
+    assert_eq!(stack_reads, 128);
+}
+
+#[test]
+fn pointer_layout_configuration_is_checked_and_32_bit_remains_supported() {
+    let source = r#"
+target datalayout = "e-p:32:32"
+
+define i32 @pointer_array(i32 %x) {
+entry:
+  %value = alloca i32, align 4
+  %slots = alloca [2 x ptr], align 4
+  %slot = getelementptr ptr, ptr %slots, i32 1
+  store i32 %x, ptr %value, align 4
+  store ptr %value, ptr %slot, align 4
+  %loaded_ptr = load ptr, ptr %slot, align 4
+  %result = load i32, ptr %loaded_ptr, align 4
+  ret i32 %result
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module_with_config(
+        &module,
+        &["pointer_array"],
+        LlvmImportConfig {
+            pointer_width: Some(PointerWidth::Bits32),
+        },
+    )
+    .expect("matching 32-bit layout imports");
+    assert_eq!(out.pointer_width, PointerWidth::Bits32);
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    assert!(
+        body.values
+            .iter()
+            .any(|value| { matches!(value.kind, Value::StackAlloc { count: 2, .. }) }),
+        "pointer arrays retain their two pointer-sized stack elements"
+    );
+
+    let err = import_module_with_config(
+        &module,
+        &["pointer_array"],
+        LlvmImportConfig {
+            pointer_width: Some(PointerWidth::Bits64),
+        },
+    )
+    .expect_err("an incompatible pointer ABI must not be silently overridden");
+    assert!(err.to_string().contains("does not match"));
+}
+
+#[test]
+fn unsupported_pointer_layouts_and_address_spaces_fail_closed() {
+    let source = r#"
+target datalayout = "e-p:16:16"
+define i16 @f(i16 %x) { ret i16 %x }
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    assert!(
+        import_module(&module, &["f"])
+            .expect_err("16-bit pointers are intentionally unsupported")
+            .to_string()
+            .contains("16")
+    );
+
+    let source = r#"
+define i8 @f(ptr addrspace(1) %p) {
+entry:
+  %v = load i8, ptr addrspace(1) %p
+  ret i8 %v
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    assert!(
+        import_module(&module, &["f"])
+            .expect_err("non-default address space must fail closed")
+            .to_string()
+            .contains("address space")
+    );
 }
 
 #[test]
@@ -559,8 +721,14 @@ entry:
         )
     });
     assert!(has_alloc, "expected a Value::StackAlloc marker");
-    assert!(has_read, "expected an ALLOCA StorageRead for the spill load");
-    assert!(has_write, "expected an ALLOCA StorageWrite for the spill store");
+    assert!(
+        has_read,
+        "expected an ALLOCA StorageRead for the spill load"
+    );
+    assert!(
+        has_write,
+        "expected an ALLOCA StorageWrite for the spill store"
+    );
 }
 
 #[test]
@@ -589,8 +757,8 @@ entry:
             "test.ll",
         ))
         .expect("valid LLVM IR fixture");
-    let out =
-        import_module(&module, &["dynamic_gep"]).expect("symbolic-index GEP into alloca must import");
+    let out = import_module(&module, &["dynamic_gep"])
+        .expect("symbolic-index GEP into alloca must import");
     let FuncDecl::Body(body) = &out.funcs[0] else {
         panic!("expected a function body");
     };
@@ -1660,10 +1828,10 @@ ok:
         "noreturn declaration must remain an import"
     );
     assert!(
-        !body.blocks[1].stmts.iter().any(|value| matches!(
-            body.values[value.0].kind,
-            Value::Call { .. }
-        )),
+        !body.blocks[1]
+            .stmts
+            .iter()
+            .any(|value| matches!(body.values[value.0].kind, Value::Call { .. })),
         "noreturn call must not leave a Value::Call behind"
     );
 }

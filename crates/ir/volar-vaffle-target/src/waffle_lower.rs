@@ -546,7 +546,7 @@ pub fn lower_waffle_function(
                 ValueDef::PickOutput(from_val, idx, ty) => {
                     if let Some(call_vv) = resolve_wval(body, &val_map, *from_val) {
                         let lir_ty = waffle_ty(*ty)?;
-                        let n = bits_for_lir_type(&lir_ty, &[]);
+                        let n = bits_for_lir_type(&lir_ty, &[], target.pointer_width().bits());
                         // Compute correct bit offset using the source op's result types.
                         let start = compute_pick_offset(body, from_val, *idx as usize);
                         let end = (start + n).min(call_vv.bits.len());
@@ -599,7 +599,10 @@ fn compute_pick_offset(body: &FunctionBody, from_val: &WValue, idx: usize) -> us
             .iter()
             .take(idx)
             .filter_map(|&t| waffle_ty(t).ok())
-            .map(|ty| bits_for_lir_type(&ty, &[]))
+            // Waffle's own values do not currently include pointers; retain
+            // its 32-bit ABI if that ever changes before this helper gains a
+            // target argument.
+            .map(|ty| bits_for_lir_type(&ty, &[], 32))
             .sum(),
         _ => 0,
     }
@@ -1412,7 +1415,7 @@ fn lower_mem_load(
     let loaded = mem_load_bytes(tgt, mem_idx, &addr, load_bytes, config);
 
     // Extend to the target width if needed.
-    let target_bits = bits_for_lir_type(&result_ty, &[]);
+    let target_bits = bits_for_lir_type(&result_ty, &[], tgt.pointer_width().bits());
     if loaded.bits.len() == target_bits {
         VaffleValue {
             bits: loaded.bits,

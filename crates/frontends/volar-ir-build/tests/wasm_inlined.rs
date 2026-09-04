@@ -1,7 +1,7 @@
 //! WASM fully-inlined frontend via [`volar_ir_build::Pipeline`].
 
 use std::fs;
-use vaffle::{FuncDecl, Value};
+use vaffle::{FuncDecl, PointerWidth, Value};
 use volar_ir_build::Pipeline;
 
 fn write_temp_wasm(name: &str, wat: &str) -> std::path::PathBuf {
@@ -34,6 +34,7 @@ fn wasm_inlined_eliminates_body_calls() {
     let module = Pipeline::from_wasm_inlined(&path)
         .expect("wasm inlined import")
         .to_vaffle();
+    assert_eq!(module.pointer_width, PointerWidth::Bits32);
     let caller = *module.exports.get("caller").expect("caller export");
     let FuncDecl::Body(body) = &module.funcs[caller.0] else {
         panic!("expected caller body");

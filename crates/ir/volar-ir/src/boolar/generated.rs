@@ -53,7 +53,7 @@ impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<LaneId, D>
 pub struct BIrPreInitSegment {
     pub storage: volar_ir_common::StorageId,
     pub lane: LaneId,
-    pub offset: u64,
+    pub addr: alloc::vec::Vec<bool>,
     pub data: alloc::vec::Vec<bool>,
 }
 
@@ -64,7 +64,7 @@ pub struct BIrPreInitSegment {
 pub struct ArchivedBIrPreInitSegment {
     pub storage: <volar_ir_common::StorageId as rkyv::Archive>::Archived,
     pub lane: <LaneId as rkyv::Archive>::Archived,
-    pub offset: <u64 as rkyv::Archive>::Archived,
+    pub addr: <alloc::vec::Vec<bool> as rkyv::Archive>::Archived,
     pub data: <alloc::vec::Vec<bool> as rkyv::Archive>::Archived,
 }
 
@@ -73,7 +73,7 @@ pub struct ArchivedBIrPreInitSegment {
 pub struct BIrPreInitSegmentResolver {
     storage: <volar_ir_common::StorageId as rkyv::Archive>::Resolver,
     lane: <LaneId as rkyv::Archive>::Resolver,
-    offset: <u64 as rkyv::Archive>::Resolver,
+    addr: <alloc::vec::Vec<bool> as rkyv::Archive>::Resolver,
     data: <alloc::vec::Vec<bool> as rkyv::Archive>::Resolver,
 }
 
@@ -82,7 +82,7 @@ unsafe impl rkyv::Portable for ArchivedBIrPreInitSegment
 where
     <volar_ir_common::StorageId as rkyv::Archive>::Archived: rkyv::Portable,
     <LaneId as rkyv::Archive>::Archived: rkyv::Portable,
-    <u64 as rkyv::Archive>::Archived: rkyv::Portable,
+    <alloc::vec::Vec<bool> as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<bool> as rkyv::Archive>::Archived: rkyv::Portable,
 {}
 
@@ -98,9 +98,9 @@ impl rkyv::Archive for BIrPreInitSegment {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).lane) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.lane, resolver.lane, field_out);
-        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).offset) };
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).addr) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.offset, resolver.offset, field_out);
+        rkyv::Archive::resolve(&self.addr, resolver.addr, field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).data) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.data, resolver.data, field_out);
@@ -112,14 +112,14 @@ impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for BIrPreInitSegmen
 where
     volar_ir_common::StorageId: rkyv::Serialize<S>,
     LaneId: rkyv::Serialize<S>,
-    u64: rkyv::Serialize<S>,
+    alloc::vec::Vec<bool>: rkyv::Serialize<S>,
     alloc::vec::Vec<bool>: rkyv::Serialize<S>,
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(BIrPreInitSegmentResolver {
             storage: rkyv::Serialize::serialize(&self.storage, serializer)?,
             lane: rkyv::Serialize::serialize(&self.lane, serializer)?,
-            offset: rkyv::Serialize::serialize(&self.offset, serializer)?,
+            addr: rkyv::Serialize::serialize(&self.addr, serializer)?,
             data: rkyv::Serialize::serialize(&self.data, serializer)?,
         })
     }
@@ -131,14 +131,14 @@ impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<BIrPreInitSegment, D>
 where
     <volar_ir_common::StorageId as rkyv::Archive>::Archived: rkyv::Deserialize<volar_ir_common::StorageId, D>,
     <LaneId as rkyv::Archive>::Archived: rkyv::Deserialize<LaneId, D>,
-    <u64 as rkyv::Archive>::Archived: rkyv::Deserialize<u64, D>,
+    <alloc::vec::Vec<bool> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<bool>, D>,
     <alloc::vec::Vec<bool> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<bool>, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<BIrPreInitSegment, D::Error> {
         Ok(BIrPreInitSegment {
             storage: rkyv::Deserialize::deserialize(&self.storage, deserializer)?,
             lane: rkyv::Deserialize::deserialize(&self.lane, deserializer)?,
-            offset: rkyv::Deserialize::deserialize(&self.offset, deserializer)?,
+            addr: rkyv::Deserialize::deserialize(&self.addr, deserializer)?,
             data: rkyv::Deserialize::deserialize(&self.data, deserializer)?,
         })
     }

@@ -242,11 +242,22 @@
         "fields": [
           { "name": "storage", "ty": "volar_ir_common::StorageId" },
           { "name": "lane", "ty": "LaneId" },
-          { "name": "offset", "ty": "u64" },
+          { "name": "addr", "ty": "alloc::vec::Vec<bool>" },
           { "name": "data", "ty": "alloc::vec::Vec<bool>" }
         ]
       },
       "typescript": "BIrPreInitSegment"
+    },
+    {
+      "id": "pointer-width",
+      "doc": "The pointer ABI width carried by a VAFFLE module.",
+      "rust": {
+        "output": "crates/ir/vaffle/src/generated.rs",
+        "name": "PointerWidth",
+        "kind": "unit-enum",
+        "variants": ["Bits32", "Bits64"]
+      },
+      "typescript": "PointerWidth"
     },
     {
       "id": "vaffle-sig-id",
@@ -731,6 +742,7 @@
         ],
         "derives": ["Debug"],
         "fields": [
+          { "name": "pointer_width", "ty": "crate::PointerWidth" },
           { "name": "types", "ty": "volar_ir_common::TypeTable" },
           { "name": "oracles", "ty": "alloc::vec::Vec<volar_ir_common::OracleDecl>" },
           { "name": "actions", "ty": "alloc::vec::Vec<volar_ir_common::ActionDecl>" },

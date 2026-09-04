@@ -1274,7 +1274,7 @@ mod tests {
         assert_eq!(wires[map.y_base()..map.y_base() + 2], [false, true]);
         // guarded action bit 0 is lookup(0) XOR occurrence parity = 1.
         assert_eq!(
-            storage.get(&((sid, lane), 1)).copied().unwrap_or(false),
+            storage.get(&((sid, lane), vec![true])).copied().unwrap_or(false),
             true
         );
         rc.inverse()
@@ -1443,7 +1443,7 @@ mod tests {
             for stored in [false, true] {
                 let mut storage = StorageState::new();
                 if stored {
-                    storage.insert(((sid, lane), addr_bit as u64), true);
+                    storage.insert(((sid, lane), vec![addr_bit]), true);
                 }
                 let mut wires = vec![false; rc.num_wires];
                 wires[map.wire(IRVarId(0)).unwrap()] = addr_bit;
@@ -1453,7 +1453,7 @@ mod tests {
                 assert_eq!(wires[y_base], stored, "read at addr={addr_bit}");
                 // Cell restored by the swap-back pair.
                 let got = storage
-                    .get(&((sid, lane), addr_bit as u64))
+                    .get(&((sid, lane), vec![addr_bit]))
                     .copied()
                     .unwrap_or(false);
                 assert_eq!(got, stored, "cell must hold its original value");
@@ -1480,7 +1480,7 @@ mod tests {
             wires[0] = x;
             rcw.apply(&mut wires, &mut storage);
             assert_eq!(
-                storage.get(&((sid, lane), 0)).copied().unwrap_or(false),
+                storage.get(&((sid, lane), vec![false])).copied().unwrap_or(false),
                 x,
                 "cell[0] must hold written bit"
             );

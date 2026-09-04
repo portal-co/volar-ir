@@ -7,8 +7,23 @@ extern crate alloc;
 
 mod generated;
 pub use generated::{
-    Block, BlockId, FuncBody, FuncId, Module, SigDecl, SigId, Target, ValueId,
+    Block, BlockId, FuncBody, FuncId, Module, PointerWidth, SigDecl, SigId, Target, ValueId,
 };
+
+impl PointerWidth {
+    pub const fn bits(self) -> usize {
+        match self {
+            Self::Bits32 => 32,
+            Self::Bits64 => 64,
+        }
+    }
+}
+
+impl Default for PointerWidth {
+    fn default() -> Self {
+        Self::Bits64
+    }
+}
 
 #[derive(Debug)]
 #[cfg_attr(

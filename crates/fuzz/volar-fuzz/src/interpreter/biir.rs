@@ -11,7 +11,6 @@
 //!   `None` is returned.
 
 use crate::generators::oracle::hash_oracle;
-use crate::interpreter::ir::bits_to_u64;
 use std::collections::BTreeMap;
 
 use volar_ir::boolar::{
@@ -20,13 +19,12 @@ use volar_ir::boolar::{
 use volar_ir::ir::{IRBlockTargetId, IRVarId, StorageId};
 
 /// Storage map for BIR evaluation: keyed by
-/// `((StorageId, LaneId), address_as_u64)`.
+/// `((StorageId, LaneId), exact_lsb_first_address_bits)`.
 ///
 /// Every BIR storage cell holds exactly one bit. The `addr: Vec<IRVarId>` in
-/// `StorageRead`/`StorageWrite` is an N-bit address (already including the
-/// appended bit-index bits produced by lowering) collapsed to a `u64` via
-/// `bits_to_u64`.
-pub type BIrStorageMap = BTreeMap<((StorageId, LaneId), u64), bool>;
+/// `StorageRead`/`StorageWrite` is an exact LSB-first address (already
+/// including the appended bit-index bits produced by lowering).
+pub type BIrStorageMap = BTreeMap<((StorageId, LaneId), Vec<bool>), bool>;
 
 /// Maximum number of times block 0 may be re-entered (loop guard for
 /// movfuscated / iterating circuits).
@@ -81,10 +79,37 @@ pub fn eval_biir_with_limit(
 pub fn apply_pre_init(storage: &mut BIrStorageMap, pre_init: &[BIrPreInitSegment]) {
     for seg in pre_init {
         for (i, &b) in seg.data.iter().enumerate() {
-            let addr = seg.offset + i as u64;
+            let addr = add_to_address(&seg.addr, i);
             storage.insert(((seg.storage, seg.lane), addr), b);
         }
     }
+}
+
+/// Add a small contiguous-segment offset to an exact LSB-first address.
+fn add_to_address(addr: &[bool], mut addend: usize) -> Vec<bool> {
+    let mut out = addr.to_vec();
+    let mut bit = 0usize;
+    while addend != 0 {
+        if bit == out.len() {
+            out.push(false);
+        }
+        if addend & 1 != 0 {
+            let mut carry = true;
+            let mut at = bit;
+            while carry {
+                if at == out.len() {
+                    out.push(false);
+                }
+                let next = out[at] ^ carry;
+                carry &= out[at];
+                out[at] = next;
+                at += 1;
+            }
+        }
+        addend >>= 1;
+        bit += 1;
+    }
+    out
 }
 
 /// Result of executing a single block to its terminator.
@@ -206,9 +231,8 @@ fn eval_stmt(
             addr,
         } => {
             let addr_bits: Vec<bool> = addr.iter().map(|v| get(vars, v)).collect();
-            let addr_u64 = bits_to_u64(&addr_bits);
             storage
-                .get(&((*store_id, *lane), addr_u64))
+                .get(&((*store_id, *lane), addr_bits))
                 .copied()
                 .unwrap_or(false)
         }
@@ -220,8 +244,7 @@ fn eval_stmt(
         } => {
             let src_val = get(vars, src);
             let addr_bits: Vec<bool> = addr.iter().map(|v| get(vars, v)).collect();
-            let addr_u64 = bits_to_u64(&addr_bits);
-            storage.insert(((*store_id, *lane), addr_u64), src_val);
+            storage.insert(((*store_id, *lane), addr_bits), src_val);
             false // dummy zero bit
         }
         _ => panic!("eval_biir: unhandled BIrStmt variant — add evaluation for this variant"),

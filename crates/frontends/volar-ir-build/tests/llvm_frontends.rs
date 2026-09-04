@@ -158,6 +158,63 @@ entry:
 }
 
 #[test]
+fn llvm_64_bit_pointer_spill_loads_through_boolar_and_reversible() {
+    // `load ptr` is not an integer cast: this fixture stores an address in a
+    // stack slot, reloads the 64-bit pointer, and dereferences it. It covers
+    // the VAFFLE call-frame address ABI as well as Boolar/reversible storage.
+    let src = r#"
+target datalayout = "e-p:64:64"
+
+define i64 @pointer_spill(i64 %x) {
+entry:
+  %value = alloca i64, align 8
+  %slot = alloca ptr, align 8
+  store i64 %x, ptr %value, align 8
+  store ptr %value, ptr %slot, align 8
+  %loaded_ptr = load ptr, ptr %slot, align 8
+  %result = load i64, ptr %loaded_ptr, align 8
+  ret i64 %result
+}
+"#;
+    let path = write_temp_ll("pointer_spill_64", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["pointer_spill"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("64-bit pointer spill must lower to a circuit")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let x = 0x8877_6655_4433_2211u64;
+    let input = (0..64).map(|bit| (x >> bit) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input])
+        .expect("64-bit pointer spill evaluation terminates");
+    let value = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |word, (bit, value)| word | ((value[0] as u64) << bit));
+    assert_eq!(value, x, "dereference through reloaded pointer preserves x");
+
+    let reversible = Pipeline::from_llvm(&path, &["pointer_spill"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .and_then(|p| p.lower_to_boolar())
+        .and_then(|p| p.fuse(1, volar_ir_passes::LoweringMode::Unconditional))
+        .and_then(|p| p.to_reversible())
+        .expect("64-bit pointer spill reaches reversible lowering")
+        .to_rcircuit();
+    assert!(
+        reversible.gates().iter().any(|gate| {
+            matches!(
+                gate,
+                volar_ir::rcircuit::RGate::StorageSwap { addr, .. } if addr.len() == 70
+            )
+        }),
+        "a 64-bit storage value must retain its 64-bit address plus 6-bit cell suffix"
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn llvm_alloca_symbolic_count_is_named_unsupported() {
     let src = r#"
 define i32 @spill_n(i32 %x, i32 %n) {
@@ -356,12 +413,7 @@ entry:
         let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
             .params
             .iter()
-            .map(|ty| {
-                vec![
-                    false;
-                    volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)
-                ]
-            })
+            .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
             .collect();
         for (i, input_word) in original_input.into_iter().enumerate() {
             mov_inputs[pc_inputs + i] = input_word;
@@ -416,11 +468,7 @@ entry:
             .collect::<Vec<bool>>()
     };
     let pc_inputs = volar_ir_passes::pc_bits_needed(original.blocks.len());
-    for (index, src) in [
-        (0u64, 0x4433_2211u32),
-        (17, 0xBBAA_9988),
-        (60, 0xDEAD_BEEF),
-    ] {
+    for (index, src) in [(0u64, 0x4433_2211u32), (17, 0xBBAA_9988), (60, 0xDEAD_BEEF)] {
         let original_input = vec![bits(index, 64), bits(src as u64, 32)];
         let original_result =
             volar_fuzz::interpreter::ir::eval_ir(&original, &original_types, &original_input)
@@ -434,12 +482,7 @@ entry:
         let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
             .params
             .iter()
-            .map(|ty| {
-                vec![
-                    false;
-                    volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)
-                ]
-            })
+            .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
             .collect();
         for (i, input_word) in original_input.into_iter().enumerate() {
             mov_inputs[pc_inputs + i] = input_word;
@@ -472,8 +515,11 @@ entry:
         .to_volar_ir();
     assert!(blocks.is_circuit());
 
-    let null = (0..32).map(|bit| bit == 31).collect::<Vec<bool>>();
-    let stack_zero = vec![false; 32];
+    // An LLVM module without a data layout uses the importer's 64-bit
+    // default address-space ABI.  Null is the unmatched tagged-global
+    // pattern, so its provenance bit is the top ABI bit.
+    let null = (0..64).map(|bit| bit == 63).collect::<Vec<bool>>();
+    let stack_zero = vec![false; 64];
     for (pointer, expected) in [(null, true), (stack_zero, false)] {
         let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[pointer])
             .expect("null comparison evaluation terminates");
@@ -535,7 +581,8 @@ entry:
 }
 "#;
     let path = write_temp_ll("two_field", src);
-    let err = Pipeline::from_llvm(&path, &["two_field"]).expect_err("struct alloca must fail closed");
+    let err =
+        Pipeline::from_llvm(&path, &["two_field"]).expect_err("struct alloca must fail closed");
     let msg = err.to_string();
     assert!(
         msg.contains("alloca"),
@@ -591,7 +638,11 @@ entry:
         .iter()
         .enumerate()
         .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
-    assert_eq!(r, x + x, "caller(11) must compute buf(11) + helper(11) = 22");
+    assert_eq!(
+        r,
+        x + x,
+        "caller(11) must compute buf(11) + helper(11) = 22"
+    );
     let _ = fs::remove_file(&path);
 }
 
@@ -744,7 +795,11 @@ ok:
             .enumerate()
             .fold(0u64, |value, (i, bit)| value | ((bit[0] as u64) << i))
     };
-    assert_eq!(evaluate(5), 6, "the non-abort path must still compute add_one");
+    assert_eq!(
+        evaluate(5),
+        6,
+        "the non-abort path must still compute add_one"
+    );
     assert_eq!(
         evaluate(i32::MAX as u64),
         0,
@@ -919,9 +974,10 @@ bb4:
         .and_then(|p| p.lower_to_volar_ir())
         .expect("switch via LLVM→VAFFLE→IR")
         .to_volar_ir();
-    let has_jt = ir.blocks.iter().any(|b| {
-        matches!(b.terminator, volar_ir::ir::IRTerminator::JumpTable { .. })
-    });
+    let has_jt = ir
+        .blocks
+        .iter()
+        .any(|b| matches!(b.terminator, volar_ir::ir::IRTerminator::JumpTable { .. }));
     assert!(
         has_jt,
         "VAFFLE Table must lower to IR JumpTable, not the Return catch-all"
@@ -1088,7 +1144,11 @@ entry:
         .iter()
         .enumerate()
         .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
-    assert_eq!(y, x ^ 1, "xor_one(5) must compute 4, not silently use garbage upper bits");
+    assert_eq!(
+        y,
+        x ^ 1,
+        "xor_one(5) must compute 4, not silently use garbage upper bits"
+    );
     let _ = fs::remove_file(&path);
 }
 

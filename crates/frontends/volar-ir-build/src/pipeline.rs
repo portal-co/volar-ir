@@ -576,7 +576,11 @@ impl Pipeline<VaffleStage> {
             &portal_pc_waffle_frontend::FrontendOptions::default(),
         )
         .map_err(|e| format!("WAFFLE parse failed: {e}"))?;
-        let mut target = volar_vaffle_target::VaffleTarget::new();
+        // WASM linear-memory addresses remain a 32-bit ABI even though the
+        // generic VAFFLE target defaults to the host-friendly 64-bit ABI.
+        let mut target = volar_vaffle_target::VaffleTarget::with_pointer_width(
+            vaffle::PointerWidth::Bits32,
+        );
         volar_vaffle_target::lower_waffle_module(&waffle_module, &mut target, &import_config);
         Ok(Self::from_data(target.module))
     }
@@ -592,7 +596,26 @@ impl Pipeline<VaffleStage> {
     /// library (`.a` / `.lib`) via the call-preserving structural importer.
     #[cfg(feature = "llvm")]
     pub fn from_llvm(path: impl AsRef<Path2>, entries: &[&str]) -> Result<Self, BoxError> {
-        Self::from_llvm_origin(LlvmLibOrigin::Path(as_path_buf(path.as_ref())), entries)
+        Self::from_llvm_with_config(
+            path,
+            entries,
+            volar_llvm_vaffle_import::LlvmImportConfig::default(),
+        )
+    }
+
+    /// Configured structural LLVM import. The configuration may assert the
+    /// expected pointer ABI but cannot override LLVM's data layout.
+    #[cfg(feature = "llvm")]
+    pub fn from_llvm_with_config(
+        path: impl AsRef<Path2>,
+        entries: &[&str],
+        config: volar_llvm_vaffle_import::LlvmImportConfig,
+    ) -> Result<Self, BoxError> {
+        Self::from_llvm_origin_with_config(
+            LlvmLibOrigin::Path(as_path_buf(path.as_ref())),
+            entries,
+            config,
+        )
     }
 
     /// Structural LLVM import plus [`InlineVaffleEverything`] over `entries`.
@@ -638,11 +661,28 @@ impl Pipeline<VaffleStage> {
 
     #[cfg(feature = "llvm")]
     fn from_llvm_origin(origin: LlvmLibOrigin, entries: &[&str]) -> Result<Self, BoxError> {
+        Self::from_llvm_origin_with_config(
+            origin,
+            entries,
+            volar_llvm_vaffle_import::LlvmImportConfig::default(),
+        )
+    }
+
+    #[cfg(feature = "llvm")]
+    fn from_llvm_origin_with_config(
+        origin: LlvmLibOrigin,
+        entries: &[&str],
+        config: volar_llvm_vaffle_import::LlvmImportConfig,
+    ) -> Result<Self, BoxError> {
         let path = materialize_llvm_lib(origin)?;
         let context = inkwell::context::Context::create();
         let llvm_module = load_llvm_module(&context, &path)?;
         let entry_refs: Vec<&str> = entries.iter().copied().collect();
-        let module = volar_llvm_vaffle_import::import_module(&llvm_module, &entry_refs)?;
+        let module = volar_llvm_vaffle_import::import_module_with_config(
+            &llvm_module,
+            &entry_refs,
+            config,
+        )?;
         Ok(Self::from_data(module))
     }
 

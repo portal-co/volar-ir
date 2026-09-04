@@ -99,6 +99,7 @@ Schema: `volar-ir-schema` v1.
 | `ir-var-id` | `IRVarId` | `IRVarId` |
 | `lane-id` | `LaneId` | `LaneId` |
 | `boolar-pre-init-segment` | `BIrPreInitSegment` | `BIrPreInitSegment` |
+| `pointer-width` | `PointerWidth` | `PointerWidth` |
 | `vaffle-sig-id` | `SigId` | `SigId` |
 | `vaffle-func-id` | `FuncId` | `FuncId` |
 | `vaffle-block-id` | `BlockId` | `BlockId` |

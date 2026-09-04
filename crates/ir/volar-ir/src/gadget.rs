@@ -229,6 +229,9 @@ pub enum GadgetError {
     /// A storage statement in a wrapped `(StorageId, LaneId)` space has a
     /// non-constant address; v1 storage wrapping is static-address only.
     DynamicStorageAddress,
+    /// A static storage address cannot be represented by the numeric region
+    /// metadata used by the v1 gadget planner.
+    StorageAddressTooWide { bits: usize },
     /// A `pre_init` segment inside a selected storage range could not be
     /// re-encrypted: the owning binding's aux sources are not all `Const`.
     PreInitNeedsConstantAux { gadget: String },

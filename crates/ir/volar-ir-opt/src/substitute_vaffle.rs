@@ -398,6 +398,7 @@ fn rewrite_body_r<R: Clone>(
 
 fn map_module_prov<P: Clone, R: Clone>(module: Module<P>, f: impl Fn(&P) -> R) -> Module<R> {
     Module {
+        pointer_width: module.pointer_width,
         types: module.types,
         oracles: module.oracles,
         actions: module.actions,
@@ -414,6 +415,7 @@ fn map_module_prov<P: Clone, R: Clone>(module: Module<P>, f: impl Fn(&P) -> R) -
 
 fn clone_map_module_prov<Q: Clone, R: Clone>(module: &Module<Q>, f: impl Fn(&Q) -> R) -> Module<R> {
     Module {
+        pointer_width: module.pointer_width,
         types: module.types.clone(),
         oracles: module.oracles.clone(),
         actions: module.actions.clone(),
@@ -669,6 +671,7 @@ mod tests {
 
     fn empty_module_with_types() -> Module {
         Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
             types: TypeTable::new(),
             oracles: vec![],
             actions: vec![],

@@ -343,7 +343,7 @@ fn lanes_to_bir_pre_init(lanes: BTreeMap<StorageId, Vec<bool>>) -> Vec<BIrPreIni
         .map(|(storage, data)| BIrPreInitSegment {
             storage,
             lane: LaneId(0),
-            offset: 0,
+            addr: vec![],
             data,
         })
         .collect()
@@ -353,9 +353,39 @@ fn bir_segments_overlap(a: &BIrPreInitSegment, b: &BIrPreInitSegment) -> bool {
     if a.storage != b.storage || a.lane != b.lane {
         return false;
     }
-    let a_end = a.offset + a.data.len() as u64;
-    let b_end = b.offset + b.data.len() as u64;
-    a.offset < b_end && b.offset < a_end
+    a.data.iter().enumerate().any(|(i, _)| {
+        let ai = add_to_address(&a.addr, i);
+        b.data
+            .iter()
+            .enumerate()
+            .any(|(j, _)| ai == add_to_address(&b.addr, j))
+    })
+}
+
+fn add_to_address(addr: &[bool], mut addend: usize) -> Vec<bool> {
+    let mut out = addr.to_vec();
+    let mut bit = 0usize;
+    while addend != 0 {
+        if bit == out.len() {
+            out.push(false);
+        }
+        if addend & 1 != 0 {
+            let mut carry = true;
+            let mut at = bit;
+            while carry {
+                if at == out.len() {
+                    out.push(false);
+                }
+                let next = out[at] ^ carry;
+                carry &= out[at];
+                out[at] = next;
+                at += 1;
+            }
+        }
+        addend >>= 1;
+        bit += 1;
+    }
+    out
 }
 
 /// Append virt segments after input `pre_init`, asserting no cell overlap

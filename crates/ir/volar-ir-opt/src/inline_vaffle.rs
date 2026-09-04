@@ -845,6 +845,7 @@ mod tests {
 
     fn empty_module() -> Module {
         Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
             types: TypeTable::new(),
             oracles: vec![],
             actions: vec![],

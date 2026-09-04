@@ -62,6 +62,9 @@ pub enum StorageToMuxBoolarError {
     /// A read/write's address vector is too short to address `num_cells`
     /// distinct cells.
     AddressTooNarrow { addr_bits: usize, num_cells: usize },
+    /// A static pre-init address cannot fit this numeric register-file
+    /// selection pass's `usize` cell index.
+    PreInitAddressTooWide { addr_bits: usize },
 }
 
 impl core::fmt::Display for StorageToMuxBoolarError {
@@ -80,6 +83,10 @@ impl core::fmt::Display for StorageToMuxBoolarError {
             } => write!(
                 f,
                 "storage_to_mux_boolar: address is {addr_bits} bits wide, too narrow to address {num_cells} cells"
+            ),
+            StorageToMuxBoolarError::PreInitAddressTooWide { addr_bits } => write!(
+                f,
+                "storage_to_mux_boolar: pre-init address is {addr_bits} bits wide and cannot be represented by a numeric cell index"
             ),
         }
     }
@@ -109,13 +116,15 @@ pub fn storage_to_mux_boolar<P: Clone + Default>(
     };
     let mut remap: Vec<u32> = (0..old_block.params).collect();
 
-    let mut cells = init_cells(&mut new_block, blocks, cfg);
+    let mut cells = init_cells(&mut new_block, blocks, cfg)?;
 
     for node in old_block.stmts.iter() {
         match &node.kind {
-            BIrStmt::StorageRead { storage, lane, addr }
-                if *storage == cfg.storage && *lane == cfg.lane =>
-            {
+            BIrStmt::StorageRead {
+                storage,
+                lane,
+                addr,
+            } if *storage == cfg.storage && *lane == cfg.lane => {
                 if (1usize << addr.len().min(usize::BITS as usize - 1)) < cfg.num_cells
                     || (addr.is_empty() && cfg.num_cells > 1)
                 {
@@ -144,7 +153,13 @@ pub fn storage_to_mux_boolar<P: Clone + Default>(
                 }
                 let addr_new: Vec<u32> = addr.iter().map(|v| remap[v.0 as usize]).collect();
                 let src_new = remap[src.0 as usize];
-                cells = mux_write(&mut new_block, &cells, &addr_new, src_new, node.prov.clone());
+                cells = mux_write(
+                    &mut new_block,
+                    &cells,
+                    &addr_new,
+                    src_new,
+                    node.prov.clone(),
+                );
                 // `StorageWrite` "produces a dummy zero bit (no useful value)".
                 let dummy = push(&mut new_block, BIrStmt::Zero, node.prov.clone());
                 remap.push(dummy.0);
@@ -209,7 +224,12 @@ fn eq_const<P: Clone>(block: &mut BIrBlock<P>, addr: &[u32], index: usize, prov:
 /// `MUX(cond, a, b) = AND(cond, XOR(a, b)) XOR b`.
 fn mux<P: Clone>(block: &mut BIrBlock<P>, cond: u32, a: u32, b: u32, prov: P) -> u32 {
     let xor_ab = push(block, BIrStmt::Xor(IRVarId(a), IRVarId(b)), prov.clone()).0;
-    let and_c = push(block, BIrStmt::And(IRVarId(cond), IRVarId(xor_ab)), prov.clone()).0;
+    let and_c = push(
+        block,
+        BIrStmt::And(IRVarId(cond), IRVarId(xor_ab)),
+        prov.clone(),
+    )
+    .0;
     push(block, BIrStmt::Xor(IRVarId(and_c), IRVarId(b)), prov).0
 }
 
@@ -224,7 +244,13 @@ fn mux_read<P: Clone>(block: &mut BIrBlock<P>, cells: &[u32], addr: &[u32], prov
 }
 
 /// Oblivious write: demux `src` into every cell via a per-cell MUX.
-fn mux_write<P: Clone>(block: &mut BIrBlock<P>, cells: &[u32], addr: &[u32], src: u32, prov: P) -> Vec<u32> {
+fn mux_write<P: Clone>(
+    block: &mut BIrBlock<P>,
+    cells: &[u32],
+    addr: &[u32],
+    src: u32,
+    prov: P,
+) -> Vec<u32> {
     cells
         .iter()
         .enumerate()
@@ -239,7 +265,7 @@ fn init_cells<P: Clone + Default>(
     block: &mut BIrBlock<P>,
     blocks: &BIrBlocks<P>,
     cfg: &StorageToMuxBoolarConfig,
-) -> Vec<u32> {
+) -> Result<Vec<u32>, StorageToMuxBoolarError> {
     let mut values = vec![false; cfg.num_cells];
     let mut set = vec![false; cfg.num_cells];
     for seg in &blocks.pre_init {
@@ -247,20 +273,66 @@ fn init_cells<P: Clone + Default>(
             continue;
         }
         for (k, &bit) in seg.data.iter().enumerate() {
-            let idx = seg.offset as usize + k;
+            let addr = add_to_address(&seg.addr, k);
+            let idx =
+                address_to_usize(&addr).ok_or(StorageToMuxBoolarError::PreInitAddressTooWide {
+                    addr_bits: addr.len(),
+                })?;
             if idx < cfg.num_cells {
                 values[idx] = bit;
                 set[idx] = true;
             }
         }
     }
-    values
+    Ok(values
         .iter()
         .map(|&bit| {
             let stmt = if bit { BIrStmt::One } else { BIrStmt::Zero };
             push(block, stmt, P::default()).0
         })
-        .collect()
+        .collect())
+}
+
+fn address_to_usize(addr: &[bool]) -> Option<usize> {
+    // This pass encodes the selected storage cell as a host `usize`.  An
+    // exact Boolar address wider than that is not representable here even
+    // when its high bits happen to be zero: accepting it would silently
+    // collapse distinct exact storage keys.
+    if addr.len() > usize::BITS as usize {
+        return None;
+    }
+    Some(
+        addr.iter()
+            .take(usize::BITS as usize)
+            .enumerate()
+            .fold(0usize, |value, (bit, set)| value | ((*set as usize) << bit)),
+    )
+}
+
+fn add_to_address(addr: &[bool], mut addend: usize) -> Vec<bool> {
+    let mut out = addr.to_vec();
+    let mut bit = 0usize;
+    while addend != 0 {
+        if bit == out.len() {
+            out.push(false);
+        }
+        if addend & 1 != 0 {
+            let mut carry = true;
+            let mut at = bit;
+            while carry {
+                if at == out.len() {
+                    out.push(false);
+                }
+                let next = out[at] ^ carry;
+                carry &= out[at];
+                out[at] = next;
+                at += 1;
+            }
+        }
+        addend >>= 1;
+        bit += 1;
+    }
+    out
 }
 
 fn remap_terminator(term: &BIrTerminator, remap: &[u32]) -> BIrTerminator {
@@ -291,7 +363,7 @@ fn remap_terminator(term: &BIrTerminator, remap: &[u32]) -> BIrTerminator {
 mod tests {
     use super::*;
     use alloc::collections::BTreeMap;
-    use volar_ir::boolar::BIrTarget;
+    use volar_ir::boolar::{BIrPreInitSegment, BIrTarget};
     use volar_ir::ir::IRBlockTargetId;
     use volar_ir_common::Node;
 
@@ -450,6 +522,27 @@ mod tests {
         assert_eq!(
             storage_to_mux_boolar(&blocks, &cfg).unwrap_err(),
             StorageToMuxBoolarError::ZeroCells
+        );
+    }
+
+    #[test]
+    fn rejects_wide_exact_pre_init_address() {
+        let mut blocks = build_fixture();
+        let addr_bits = usize::BITS as usize + 1;
+        blocks.pre_init = alloc::vec![BIrPreInitSegment {
+            storage: StorageId(0),
+            lane: LaneId(0),
+            addr: alloc::vec![false; addr_bits],
+            data: alloc::vec![true],
+        }];
+        let cfg = StorageToMuxBoolarConfig {
+            storage: StorageId(0),
+            lane: LaneId(0),
+            num_cells: 2,
+        };
+        assert_eq!(
+            storage_to_mux_boolar(&blocks, &cfg).unwrap_err(),
+            StorageToMuxBoolarError::PreInitAddressTooWide { addr_bits }
         );
     }
 }

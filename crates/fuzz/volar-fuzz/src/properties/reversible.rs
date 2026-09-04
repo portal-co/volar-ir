@@ -27,6 +27,10 @@ use crate::interpreter::biir::eval_biir_with_limit;
 
 use super::biir_passes::{LOWER_LIMIT, movfuscated_inputs};
 
+fn u64_address(value: u64) -> Vec<bool> {
+    (0..u64::BITS as usize).map(|bit| (value >> bit) & 1 != 0).collect()
+}
+
 /// Evaluate a pure-gate fused circuit (Zero/One/And/Or/Xor/Not only) on
 /// parameter bits; returns `None` if it contains any other statement.
 fn eval_fused_pure(circ: &BCircuit, params: &[bool]) -> Option<Vec<bool>> {
@@ -123,8 +127,14 @@ proptest! {
         // against non-trivial cell contents.
         let mut storage = StorageState::new();
         for cell in 0..16u64 {
-            storage.insert(((StorageId(0), LaneId(0)), cell), (ymask >> (cell % 31)) & 1 == 1);
-            storage.insert(((StorageId(3), LaneId(0)), cell), (ymask >> (cell % 17)) & 1 == 1);
+            storage.insert(
+                ((StorageId(0), LaneId(0)), u64_address(cell)),
+                (ymask >> (cell % 31)) & 1 == 1,
+            );
+            storage.insert(
+                ((StorageId(3), LaneId(0)), u64_address(cell)),
+                (ymask >> (cell % 17)) & 1 == 1,
+            );
         }
         let storage_before = storage.clone();
 

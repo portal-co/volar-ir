@@ -100,6 +100,7 @@ fn build_sibling_module() -> Module<()> {
     exports.insert("vmain".to_string(), FuncId(0));
 
     Module {
+        pointer_width: vaffle::PointerWidth::Bits64,
         types,
         oracles: vec![],
         actions: vec![],
@@ -192,6 +193,7 @@ fn build_switch_module() -> Module<()> {
     exports.insert("classify".to_string(), FuncId(0));
 
     Module {
+        pointer_width: vaffle::PointerWidth::Bits64,
         types,
         oracles: vec![],
         actions: vec![],
@@ -275,6 +277,7 @@ fn build_dyn_jump_module() -> Module<()> {
     exports.insert("dispatch".to_string(), FuncId(0));
 
     Module {
+        pointer_width: vaffle::PointerWidth::Bits64,
         types,
         oracles: vec![],
         actions: vec![],

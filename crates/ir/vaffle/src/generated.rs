@@ -5,6 +5,69 @@
 // rkyv_derive's `#[repr(C)]` scalar-newtype layout, so pinned-rkyv binary
 // artifacts remain byte-compatible.
 
+/// The pointer ABI width carried by a VAFFLE module.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum PointerWidth {
+    Bits32,
+    Bits64,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, rkyv::bytecheck::CheckBytes)]
+#[bytecheck(crate = rkyv::bytecheck)]
+#[repr(u8)]
+pub enum ArchivedPointerWidth {
+    Bits32,
+    Bits64,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(Clone, Copy, Debug)]
+pub enum PointerWidthResolver {
+    Bits32,
+    Bits64,
+}
+
+#[cfg(feature = "rkyv")]
+unsafe impl rkyv::Portable for ArchivedPointerWidth {}
+
+#[cfg(feature = "rkyv")]
+impl rkyv::Archive for PointerWidth {
+    type Archived = ArchivedPointerWidth;
+    type Resolver = PointerWidthResolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let archived = match resolver {
+            PointerWidthResolver::Bits32 => ArchivedPointerWidth::Bits32,
+            PointerWidthResolver::Bits64 => ArchivedPointerWidth::Bits64,
+        };
+        // SAFETY: `archived` is a fully initialized repr(u8) discriminant.
+        unsafe { out.write_unchecked(archived) }
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for PointerWidth {
+    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(match self {
+            PointerWidth::Bits32 => PointerWidthResolver::Bits32,
+            PointerWidth::Bits64 => PointerWidthResolver::Bits64,
+        })
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<PointerWidth, D>
+    for ArchivedPointerWidth
+{
+    fn deserialize(&self, _: &mut D) -> Result<PointerWidth, D::Error> {
+        Ok(match self {
+            ArchivedPointerWidth::Bits32 => PointerWidth::Bits32,
+            ArchivedPointerWidth::Bits64 => PointerWidth::Bits64,
+        })
+    }
+}
+
 /// Opaque index of a VAFFLE function signature.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SigId(pub usize);
@@ -339,6 +402,7 @@ where
 /// A VAFFLE module containing types, declarations, functions, signatures, exports, and storage initialization.
 #[derive(Debug)]
 pub struct Module<P: Clone = ()> {
+    pub pointer_width: crate::PointerWidth,
     pub types: volar_ir_common::TypeTable,
     pub oracles: alloc::vec::Vec<volar_ir_common::OracleDecl>,
     pub actions: alloc::vec::Vec<volar_ir_common::ActionDecl>,
@@ -353,6 +417,7 @@ pub struct Module<P: Clone = ()> {
 #[bytecheck(crate = rkyv::bytecheck)]
 #[repr(C)]
 pub struct ArchivedModule<P: Clone + rkyv::Archive = ()> {
+    pub pointer_width: <crate::PointerWidth as rkyv::Archive>::Archived,
     pub types: <volar_ir_common::TypeTable as rkyv::Archive>::Archived,
     pub oracles: <alloc::vec::Vec<volar_ir_common::OracleDecl> as rkyv::Archive>::Archived,
     pub actions: <alloc::vec::Vec<volar_ir_common::ActionDecl> as rkyv::Archive>::Archived,
@@ -365,6 +430,7 @@ pub struct ArchivedModule<P: Clone + rkyv::Archive = ()> {
 #[cfg(feature = "rkyv")]
 #[allow(dead_code)]
 pub struct ModuleResolver<P: Clone + rkyv::Archive = ()> {
+    pointer_width: <crate::PointerWidth as rkyv::Archive>::Resolver,
     types: <volar_ir_common::TypeTable as rkyv::Archive>::Resolver,
     oracles: <alloc::vec::Vec<volar_ir_common::OracleDecl> as rkyv::Archive>::Resolver,
     actions: <alloc::vec::Vec<volar_ir_common::ActionDecl> as rkyv::Archive>::Resolver,
@@ -377,6 +443,7 @@ pub struct ModuleResolver<P: Clone + rkyv::Archive = ()> {
 #[cfg(feature = "rkyv")]
 unsafe impl<P: Clone + rkyv::Archive> rkyv::Portable for ArchivedModule<P>
 where
+    <crate::PointerWidth as rkyv::Archive>::Archived: rkyv::Portable,
     <volar_ir_common::TypeTable as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<volar_ir_common::OracleDecl> as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<volar_ir_common::ActionDecl> as rkyv::Archive>::Archived: rkyv::Portable,
@@ -392,6 +459,9 @@ impl<P: Clone + rkyv::Archive> rkyv::Archive for Module<P> {
     type Resolver = ModuleResolver<P>;
 
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).pointer_width) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.pointer_width, resolver.pointer_width, field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).types) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.types, resolver.types, field_out);
@@ -419,6 +489,7 @@ impl<P: Clone + rkyv::Archive> rkyv::Archive for Module<P> {
 #[cfg(feature = "rkyv")]
 impl<P: Clone + rkyv::Archive, S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for Module<P>
 where
+    crate::PointerWidth: rkyv::Serialize<S>,
     volar_ir_common::TypeTable: rkyv::Serialize<S>,
     alloc::vec::Vec<volar_ir_common::OracleDecl>: rkyv::Serialize<S>,
     alloc::vec::Vec<volar_ir_common::ActionDecl>: rkyv::Serialize<S>,
@@ -429,6 +500,7 @@ where
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(ModuleResolver {
+            pointer_width: rkyv::Serialize::serialize(&self.pointer_width, serializer)?,
             types: rkyv::Serialize::serialize(&self.types, serializer)?,
             oracles: rkyv::Serialize::serialize(&self.oracles, serializer)?,
             actions: rkyv::Serialize::serialize(&self.actions, serializer)?,
@@ -444,6 +516,7 @@ where
 impl<P: Clone + rkyv::Archive, D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Module<P>, D>
     for ArchivedModule<P>
 where
+    <crate::PointerWidth as rkyv::Archive>::Archived: rkyv::Deserialize<crate::PointerWidth, D>,
     <volar_ir_common::TypeTable as rkyv::Archive>::Archived: rkyv::Deserialize<volar_ir_common::TypeTable, D>,
     <alloc::vec::Vec<volar_ir_common::OracleDecl> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<volar_ir_common::OracleDecl>, D>,
     <alloc::vec::Vec<volar_ir_common::ActionDecl> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<volar_ir_common::ActionDecl>, D>,
@@ -454,6 +527,7 @@ where
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<Module<P>, D::Error> {
         Ok(Module {
+            pointer_width: rkyv::Deserialize::deserialize(&self.pointer_width, deserializer)?,
             types: rkyv::Deserialize::deserialize(&self.types, deserializer)?,
             oracles: rkyv::Deserialize::deserialize(&self.oracles, deserializer)?,
             actions: rkyv::Deserialize::deserialize(&self.actions, deserializer)?,

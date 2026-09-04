@@ -28,8 +28,8 @@ use volar_lir::{
 };
 
 use vaffle::{
-    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target, Terminator, Value,
-    ValueId,
+    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, PointerWidth, SigDecl, SigId, Target,
+    Terminator, Value, ValueId,
 };
 
 use crate::vc::VcLoweringState;
@@ -168,10 +168,16 @@ pub struct VaffleTarget {
 
 impl VaffleTarget {
     pub fn new() -> Self {
+        Self::with_pointer_width(PointerWidth::Bits64)
+    }
+
+    /// Construct a target for an explicit pointer ABI.
+    pub fn with_pointer_width(pointer_width: PointerWidth) -> Self {
         let mut types = TypeTable::new();
         types.intern(IrType::Primitive(Type::Bit)); // bit_tid always at index 0
         VaffleTarget {
             module: Module {
+                pointer_width,
                 types,
                 oracles: vec![],
                 actions: vec![],
@@ -186,6 +192,11 @@ impl VaffleTarget {
             pending_funcs: BTreeMap::new(),
             vc: None,
         }
+    }
+
+    /// The pointer ABI used by the module being assembled.
+    pub fn pointer_width(&self) -> PointerWidth {
+        self.module.pointer_width
     }
 
     /// Enable the optimized stack-based ABI for large parameters.
@@ -260,7 +271,7 @@ impl VaffleTarget {
     }
 
     fn bits_for(&self, ty: &LirType) -> usize {
-        bits_for_lir_type(ty, &self.struct_widths)
+        bits_for_lir_type(ty, &self.struct_widths, self.module.pointer_width.bits())
     }
 
     pub(crate) fn fb(&mut self) -> &mut FuncBuilder {
@@ -416,13 +427,14 @@ impl VaffleTarget {
         }
     }
 
-    /// Pad or truncate a `VaffleValue` to exactly `PTR_BITS` bits.
+    /// Pad or truncate a `VaffleValue` to exactly this module's pointer width.
     pub(crate) fn pad_to_ptr_bits(&mut self, val: VaffleValue) -> Vec<ValueId> {
         let mut bits = val.bits;
-        while bits.len() < PTR_BITS {
+        let pointer_bits = self.module.pointer_width.bits();
+        while bits.len() < pointer_bits {
             bits.push(self.bc_const(false));
         }
-        bits.truncate(PTR_BITS);
+        bits.truncate(pointer_bits);
         bits
     }
 
@@ -474,7 +486,7 @@ impl VaffleTarget {
                 let base_slot = self.fb().next_stack_slot;
                 self.fb().next_stack_slot += arg.bits.len() as u64;
 
-                let addr_const: Vec<ValueId> = (0..PTR_BITS)
+                let addr_const: Vec<ValueId> = (0..self.module.pointer_width.bits())
                     .map(|i| self.bc_const((base_slot >> i) & 1 != 0))
                     .collect();
 
@@ -503,7 +515,7 @@ impl VaffleTarget {
         match ret_ty {
             None => vec![],
             Some(ty) => {
-                let n = bits_for_lir_type(&ty, &self.struct_widths);
+                let n = self.bits_for(&ty);
                 let bits: Vec<ValueId> = (0..n)
                     .map(|i| {
                         self.fb().emit_value(Value::Output {
@@ -677,11 +689,7 @@ impl LirTarget for VaffleTarget {
 
     fn define_struct(&mut self, def: StructDef) -> StructId {
         let id = self.struct_widths.len() as StructId;
-        let total: usize = def
-            .fields
-            .iter()
-            .map(|f| bits_for_lir_type(&f.ty, &self.struct_widths))
-            .sum();
+        let total: usize = def.fields.iter().map(|f| self.bits_for(&f.ty)).sum();
         self.struct_widths.push(total);
         id
     }
@@ -695,20 +703,21 @@ impl LirTarget for VaffleTarget {
         let bit_tid = self.bit_tid();
         let threshold = self.abi().aggregate_byval_limit;
 
-        // Decide per-param: direct (N block params) or ptr (PTR_BITS block params).
+        let pointer_bits = self.module.pointer_width.bits();
+        // Decide per-param: direct (N block params) or ptr (pointer-width block params).
         let param_infos: Vec<(usize, bool)> = params
             .iter()
             .map(|ty| {
-                let n = bits_for_lir_type(ty, &self.struct_widths);
+                let n = self.bits_for(ty);
                 (n, self.optimized_abi && n > threshold)
             })
             .collect();
 
         // Build signature: direct params contribute N Bit slots,
-        // ptr params contribute PTR_BITS Bit slots.
+        // ptr params contribute pointer-width Bit slots.
         let sig_params: Vec<TypeId> = param_infos
             .iter()
-            .map(|&(n, is_ptr)| if is_ptr { PTR_BITS } else { n })
+            .map(|&(n, is_ptr)| if is_ptr { pointer_bits } else { n })
             .flat_map(|count| (0..count).map(|_| bit_tid))
             .collect();
         // Return type: N Bit slots (direct return-by-value), matching the
@@ -724,7 +733,7 @@ impl LirTarget for VaffleTarget {
         let sig_results: Vec<TypeId> = ret
             .iter()
             .flat_map(|ty| {
-                let n = bits_for_lir_type(ty, &self.struct_widths);
+                let n = self.bits_for(ty);
                 (0..n).map(|_| bit_tid)
             })
             .collect();
@@ -742,7 +751,7 @@ impl LirTarget for VaffleTarget {
         for (pi, ty) in params.iter().enumerate() {
             let (n, is_ptr) = param_infos[pi];
             if is_ptr {
-                let bits: Vec<ValueId> = (0..PTR_BITS)
+                let bits: Vec<ValueId> = (0..pointer_bits)
                     .map(|_| fb.emit_block_param(0, bit_tid))
                     .collect();
                 deferred.push((pi, bits, ty.clone(), n));
@@ -837,7 +846,7 @@ impl LirTarget for VaffleTarget {
     /// still operates bit-by-bit via `BitCircuitBuilder` — is completely
     /// unaffected. See `docs/agent-context/boolar-ir-conflicts.md`.
     fn add_block_param(&mut self, block: VaffleBlock, ty: LirType) -> VaffleValue {
-        let n = bits_for_lir_type(&ty, &self.struct_widths);
+        let n = self.bits_for(&ty);
         let bit_tid = self.bit_tid();
         let param_tid = if n <= 1 {
             bit_tid
@@ -866,7 +875,7 @@ impl LirTarget for VaffleTarget {
             let id = self.emit_const(val as u128, type_id);
             return VaffleValue { bits: vec![id], ty };
         }
-        let n = bits_for_lir_type(&ty, &self.struct_widths);
+        let n = self.bits_for(&ty);
         let bit_tid = self.bit_tid();
         let bits: Vec<ValueId> = (0..n)
             .map(|i| self.emit_const(((val >> i) & 1) as u128, bit_tid))
@@ -998,7 +1007,7 @@ impl LirTarget for VaffleTarget {
 
     // ---- Conversions -------------------------------------------------------
     fn zext(&mut self, val: VaffleValue, dst_ty: LirType) -> VaffleValue {
-        let dst_n = bits_for_lir_type(&dst_ty, &self.struct_widths);
+        let dst_n = self.bits_for(&dst_ty);
         let mut bits = val.bits;
         while bits.len() < dst_n {
             bits.push(self.bc_const(false));
@@ -1006,14 +1015,14 @@ impl LirTarget for VaffleTarget {
         VaffleValue { bits, ty: dst_ty }
     }
     fn sext(&mut self, val: VaffleValue, dst_ty: LirType) -> VaffleValue {
-        let dst_n = bits_for_lir_type(&dst_ty, &self.struct_widths);
+        let dst_n = self.bits_for(&dst_ty);
         let sign = *val.bits.last().expect("sext of empty value");
         let mut bits = val.bits;
         bits.resize(dst_n, sign);
         VaffleValue { bits, ty: dst_ty }
     }
     fn trunc(&mut self, val: VaffleValue, dst_ty: LirType) -> VaffleValue {
-        let dst_n = bits_for_lir_type(&dst_ty, &self.struct_widths);
+        let dst_n = self.bits_for(&dst_ty);
         VaffleValue {
             bits: val.bits[..dst_n].to_vec(),
             ty: dst_ty,
@@ -1375,7 +1384,7 @@ impl VaffleTarget {
         let mut results = Vec::with_capacity(ret_tys.len());
         let mut bit_offset = 0usize;
         for ty in ret_tys {
-            let n = bits_for_lir_type(ty, &self.struct_widths);
+            let n = self.bits_for(ty);
             let bits: Vec<ValueId> = (bit_offset..bit_offset + n)
                 .map(|i| {
                     self.fb().emit_value(Value::Output {
@@ -1402,7 +1411,7 @@ impl StackAllocExt for VaffleTarget {
     type Value = VaffleValue;
 
     fn alloca(&mut self, elem_ty: LirType, count: usize) -> VaffleValue {
-        let elem_bits = bits_for_lir_type(&elem_ty, &self.struct_widths);
+        let elem_bits = self.bits_for(&elem_ty);
         let total_slots = (elem_bits * count) as u64;
         let base_slot = self.fb().next_stack_slot;
         self.fb().next_stack_slot += total_slots;
@@ -1419,7 +1428,7 @@ impl StackAllocExt for VaffleTarget {
         let _alloc_vid = self.fb().emit_value(alloc_val);
 
         // The pointer is the constant address `base_slot`, bit-decomposed.
-        let addr_bits: Vec<ValueId> = (0..PTR_BITS)
+        let addr_bits: Vec<ValueId> = (0..self.module.pointer_width.bits())
             .map(|i| self.bc_const((base_slot >> i) & 1 != 0))
             .collect();
         VaffleValue {
@@ -1429,7 +1438,7 @@ impl StackAllocExt for VaffleTarget {
     }
 
     fn ptr_load(&mut self, ptr: VaffleValue, ty: LirType) -> VaffleValue {
-        let n = bits_for_lir_type(&ty, &self.struct_widths);
+        let n = self.bits_for(&ty);
         let bit_tid = self.bit_tid();
         let storage = StorageId::STACK;
 
@@ -1486,7 +1495,7 @@ impl StackAllocExt for VaffleTarget {
             LirType::Ptr(inner) => inner.as_ref().clone(),
             other => other.clone(),
         };
-        let elem_bits = bits_for_lir_type(&pointee_ty, &self.struct_widths);
+        let elem_bits = self.bits_for(&pointee_ty);
 
         // offset_slots = idx * elem_bits
         let scale = self.iconst(LirType::U32, elem_bits as i64);
@@ -1515,14 +1524,11 @@ impl StackAllocExt for VaffleTarget {
 // Helpers
 // ============================================================================
 
-/// Width of a stack pointer / alloca address in bits.
-///
-/// This determines how many `ValueId` bits a `LirType::Ptr(_)` value carries.
-/// 32 bits allows addressing up to 4 billion storage slots per function frame,
-/// which is more than enough for any realistic circuit.
-pub const PTR_BITS: usize = 32;
-
-pub(crate) fn bits_for_lir_type(ty: &LirType, struct_widths: &[usize]) -> usize {
+pub(crate) fn bits_for_lir_type(
+    ty: &LirType,
+    struct_widths: &[usize],
+    pointer_bits: usize,
+) -> usize {
     match ty {
         LirType::Bool => 1,
         LirType::I8 | LirType::U8 => 8,
@@ -1530,10 +1536,10 @@ pub(crate) fn bits_for_lir_type(ty: &LirType, struct_widths: &[usize]) -> usize 
         LirType::I32 | LirType::U32 => 32,
         LirType::I64 | LirType::U64 => 64,
         LirType::I128 | LirType::U128 => 128,
-        LirType::Arr(elem, n) => n * bits_for_lir_type(elem, struct_widths),
+        LirType::Arr(elem, n) => n * bits_for_lir_type(elem, struct_widths, pointer_bits),
         LirType::Struct(id) => struct_widths[*id as usize],
         LirType::Native(_) => 1,
-        LirType::Ptr(_) => PTR_BITS,
+        LirType::Ptr(_) => pointer_bits,
         _ => panic!("bits_for_lir_type: unhandled LirType variant — add bit-width calculation"),
     }
 }
@@ -1547,6 +1553,15 @@ mod tests {
     extern crate std;
     use super::*;
     use volar_ir_common::Stmt;
+
+    #[test]
+    fn pointer_width_defaults_to_64_and_can_be_explicitly_32() {
+        assert_eq!(VaffleTarget::new().pointer_width(), PointerWidth::Bits64);
+        assert_eq!(
+            VaffleTarget::with_pointer_width(PointerWidth::Bits32).pointer_width(),
+            PointerWidth::Bits32
+        );
+    }
 
     #[test]
     fn test_stack_alloc_ext_available() {
@@ -1568,8 +1583,8 @@ mod tests {
 
         let ptr = t.alloca(LirType::U32, 4);
 
-        // The returned value should be a Ptr type with PTR_BITS bits.
-        assert_eq!(ptr.bits.len(), PTR_BITS);
+        // The returned value should use the target's pointer ABI width.
+        assert_eq!(ptr.bits.len(), t.pointer_width().bits());
         assert!(matches!(ptr.ty, LirType::Ptr(_)));
 
         t.ret(&[]);
@@ -1642,7 +1657,7 @@ mod tests {
 
         // The offset pointer should still be a Ptr type.
         assert!(matches!(offset_ptr.ty, LirType::Ptr(_)));
-        assert_eq!(offset_ptr.bits.len(), PTR_BITS);
+        assert_eq!(offset_ptr.bits.len(), t.pointer_width().bits());
 
         // There should be a PtrOffset value in the body.
         t.ret(&[]);
@@ -1699,8 +1714,8 @@ mod tests {
     #[test]
     fn test_bits_for_lir_type_ptr() {
         assert_eq!(
-            bits_for_lir_type(&LirType::Ptr(alloc::boxed::Box::new(LirType::U32)), &[]),
-            PTR_BITS
+            bits_for_lir_type(&LirType::Ptr(alloc::boxed::Box::new(LirType::U32)), &[], 64,),
+            64
         );
     }
 
@@ -1753,7 +1768,7 @@ mod tests {
         t.end_function();
     }
 
-    /// With `optimized_abi = true`, a 128-bit param produces PTR_BITS block
+    /// With `optimized_abi = true`, a 128-bit param produces pointer-width block
     /// params (the address) and StorageRead stmts to load the actual bits.
     #[test]
     fn test_begin_function_optimized_abi_wide_param() {
@@ -1763,13 +1778,13 @@ mod tests {
         t.switch_to_block(entry);
 
         // Optimized ABI: callee still gets 128 bits (loaded from stack),
-        // but block params are only PTR_BITS wide.
+        // but block params are only pointer-width wide.
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0][0].bits.len(), 128);
 
-        // Block params should be PTR_BITS, not 128.
+        // Block params should be pointer-width, not 128.
         let body = t.func.as_ref().unwrap();
-        assert_eq!(body.blocks[0].params.len(), PTR_BITS);
+        assert_eq!(body.blocks[0].params.len(), t.pointer_width().bits());
 
         // There should be StorageRead ops for loading the bits.
         let has_stack_read = body.all_values.iter().any(|v| matches!(
@@ -1801,7 +1816,7 @@ mod tests {
     }
 
     /// call_extern with optimized ABI writes large args to stack and passes
-    /// the address (PTR_BITS bits) instead.
+    /// the address (pointer-width bits) instead.
     #[test]
     fn test_call_extern_optimized_abi_writes_stack() {
         let mut t = VaffleTarget::new().with_optimized_abi();
@@ -1832,7 +1847,7 @@ mod tests {
             "optimized call_extern should write large args to STACK"
         );
 
-        // The Call node's arg count should be PTR_BITS (the address),
+        // The Call node's arg count should be pointer-width (the address),
         // NOT 128 (the raw bits).
         let call_arg_count = body.all_values.iter().find_map(|v| match &v.kind {
             Value::Call { args, .. } => Some(args.len()),
@@ -1840,8 +1855,8 @@ mod tests {
         });
         assert_eq!(
             call_arg_count,
-            Some(PTR_BITS),
-            "call should pass PTR_BITS address bits"
+            Some(t.pointer_width().bits()),
+            "call should pass a pointer-width address"
         );
 
         t.ret(&[]);

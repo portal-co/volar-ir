@@ -54,6 +54,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use inkwell::AddressSpace;
+use inkwell::IntPredicate;
 use inkwell::basic_block::BasicBlock as LlvmBlock;
 use inkwell::llvm_sys::core::{
     LLVMGetConstOpcode, LLVMGetGEPSourceElementType, LLVMGetNumOperands, LLVMGetNumSuccessors,
@@ -67,17 +69,16 @@ use inkwell::values::{
     AnyValue, AnyValueEnum, AsValueRef, BasicValueEnum, CallSiteValue, FunctionValue,
     InstructionOpcode, InstructionValue, IntValue, PhiValue, PointerValue,
 };
-use inkwell::IntPredicate;
 
 use vaffle::{
-    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target, Terminator, Value,
-    ValueId,
+    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, PointerWidth, SigDecl, SigId, Target,
+    Terminator, Value, ValueId,
 };
 use volar_ir_common::{
     Constant, IrType, Node, Stmt, StorageAllocator, StorageId, Type, TypeId, TypeTable,
 };
 use volar_lir::circuits::{self, BitCircuitBuilder};
-use volar_llvm_constchain::{global_from_pointer, strip_pointer, ConstChainError};
+use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
 
 /// A structural-import failure.
 #[derive(Debug)]
@@ -105,13 +106,8 @@ impl From<ConstChainError> for ImportError {
 
 type IResult<T> = Result<T, ImportError>;
 
-/// Width of a stack pointer / alloca address, matching `VaffleTarget`'s own
-/// `PTR_BITS` convention (and this crate's existing pointer-param fallback
-/// in [`llvm_bit_width`]).
-const PTR_BITS: usize = 32;
-
 /// Bits reserved for a global's `StorageId` within `Importer::ptr_value_bits`'s
-/// tagged pointer-*value* encoding (bit 31 = provenance tag, 0 = stack;
+/// tagged pointer-*value* encoding (most-significant bit = provenance tag, 0 = stack;
 /// remaining bits for a global split `GLOBAL_ID_BITS`:`GLOBAL_ADDR_BITS`,
 /// high:low). Reused directly as a compact, already-dense candidate index
 /// rather than building a separate table -- `StorageAllocator::new(64)`
@@ -119,7 +115,6 @@ const PTR_BITS: usize = 32;
 /// realistic module's global count (up to ~4000).
 const GLOBAL_ID_BITS: usize = 12;
 /// Bits reserved for a global's byte offset within the same encoding.
-const GLOBAL_ADDR_BITS: usize = PTR_BITS - 1 - GLOBAL_ID_BITS;
 
 /// First `StorageId` this importer's own `storage_alloc` hands out to a
 /// global -- below any reserved range (`StorageId::ALLOCA`/`STACK`/
@@ -145,12 +140,71 @@ fn bits_for_max_value(v: usize) -> usize {
     }
 }
 
+/// Optional ABI constraints for structural LLVM import.
+///
+/// When unset, the default-address-space pointer width is read from the LLVM
+/// data layout (or LLVM's 64-bit default when the module has no layout).
+/// Supplying a width is useful to make a caller's ABI expectation explicit;
+/// it never overrides an incompatible LLVM layout.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LlvmImportConfig {
+    pub pointer_width: Option<PointerWidth>,
+}
+
+fn pointer_width_from_layout<'ctx>(
+    llvm_module: &LlvmModule<'ctx>,
+    config: LlvmImportConfig,
+) -> IResult<PointerWidth> {
+    let data_layout = llvm_module.get_data_layout();
+    let layout = data_layout
+        .as_str()
+        .to_str()
+        .map_err(|_| ImportError::Unsupported("LLVM data layout is not UTF-8".into()))?;
+    // LLVM uses a 64-bit default pointer layout when no default `p` entry is
+    // present. Address-space-specific entries (`p270`, etc.) do not affect
+    // this choice.
+    let declared_bits = layout.split('-').find_map(|entry| {
+        let rest = entry
+            .strip_prefix("p:")
+            .or_else(|| entry.strip_prefix("p0:"))?;
+        rest.split(':').next()?.parse::<usize>().ok()
+    });
+    let width = match declared_bits.unwrap_or(64) {
+        32 => PointerWidth::Bits32,
+        64 => PointerWidth::Bits64,
+        bits => {
+            return Err(ImportError::Unsupported(format!(
+                "default LLVM pointer width {bits} is unsupported (only 32 and 64 bits are supported)"
+            )));
+        }
+    };
+    if let Some(explicit) = config.pointer_width {
+        if explicit != width {
+            return Err(ImportError::Unsupported(format!(
+                "configured pointer width {} does not match LLVM data layout width {}",
+                explicit.bits(),
+                width.bits()
+            )));
+        }
+    }
+    Ok(width)
+}
+
 /// Import every reachable function transitively called from `entries` (by
 /// LLVM name) into a fresh `vaffle::Module`. Each entry (and every function
 /// it directly or indirectly calls) becomes its own `vaffle::Func`; direct
 /// calls are preserved, never inlined.
 pub fn import_module<'ctx>(llvm_module: &LlvmModule<'ctx>, entries: &[&str]) -> IResult<Module> {
-    let mut importer = Importer::new();
+    import_module_with_config(llvm_module, entries, LlvmImportConfig::default())
+}
+
+/// Configured variant of [`import_module`].
+pub fn import_module_with_config<'ctx>(
+    llvm_module: &LlvmModule<'ctx>,
+    entries: &[&str],
+    config: LlvmImportConfig,
+) -> IResult<Module> {
+    let mut importer = Importer::new(pointer_width_from_layout(llvm_module, config)?);
     // Eagerly assign every module global its `StorageId` before walking any
     // function body, so `dispatch_read`/`dispatch_write` (runtime
     // storage-identity dispatch for a pointer whose provenance isn't
@@ -163,7 +217,7 @@ pub fn import_module<'ctx>(llvm_module: &LlvmModule<'ctx>, entries: &[&str]) -> 
         let f = llvm_module.get_function(name).ok_or_else(|| {
             ImportError::Unsupported(format!("entry function `{name}` does not exist"))
         })?;
-        importer.func_id(f);
+        importer.func_id(f)?;
         worklist.push(f);
     }
     let mut done: std::collections::HashSet<PointerValue<'ctx>> = Default::default();
@@ -189,7 +243,16 @@ pub fn import_module_inlined<'ctx>(
     llvm_module: &LlvmModule<'ctx>,
     entries: &[&str],
 ) -> IResult<Module> {
-    let mut module = import_module(llvm_module, entries)?;
+    import_module_inlined_with_config(llvm_module, entries, LlvmImportConfig::default())
+}
+
+/// Configured variant of [`import_module_inlined`].
+pub fn import_module_inlined_with_config<'ctx>(
+    llvm_module: &LlvmModule<'ctx>,
+    entries: &[&str],
+    config: LlvmImportConfig,
+) -> IResult<Module> {
+    let mut module = import_module_with_config(llvm_module, entries, config)?;
     let ids: Vec<FuncId> = entries
         .iter()
         .map(|name| {
@@ -200,9 +263,8 @@ pub fn import_module_inlined<'ctx>(
             })
         })
         .collect::<IResult<Vec<FuncId>>>()?;
-    volar_ir_opt::inline_vaffle::inline_vaffle_everything(&mut module, &ids).map_err(|e| {
-        ImportError::Unsupported(e.to_string())
-    })?;
+    volar_ir_opt::inline_vaffle::inline_vaffle_everything(&mut module, &ids)
+        .map_err(|e| ImportError::Unsupported(e.to_string()))?;
     Ok(module)
 }
 
@@ -292,7 +354,10 @@ struct GlobalPointer {
 #[derive(Clone, Debug)]
 enum GlobalPtr {
     Const(GlobalPointer),
-    Symbolic { storage: StorageId, offset_bits: Bits },
+    Symbolic {
+        storage: StorageId,
+        offset_bits: Bits,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -309,7 +374,9 @@ enum IntrinsicPointer {
     /// tagged runtime representation. Constant-size memory intrinsics can
     /// lower through the same complete candidate dispatch used by ordinary
     /// loads and stores.
-    Dispatch { ptr_bits: Bits },
+    Dispatch {
+        ptr_bits: Bits,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -392,6 +459,8 @@ enum TailCallEnd {
 }
 
 struct Importer<'ctx> {
+    pointer_width: PointerWidth,
+    pointer_bits: usize,
     types: TypeTable,
     funcs: Vec<FuncDecl>,
     sigs: Vec<SigDecl>,
@@ -414,18 +483,23 @@ struct Importer<'ctx> {
     /// low bit, aliasing almost everything onto addresses 0/1 (confirmed
     /// root cause of `spill(5)` computing `0` instead of `5` -- every one
     /// of `spill`'s 32 distinct bit addresses collapsed to 0 or 1 this
-    /// way). `_32` matches `PTR_BITS`/`SP_BITS` convention used elsewhere
-    /// in this pipeline for addresses.
+    /// way). Its integer width matches the LLVM module's pointer ABI.
     addr_tid: TypeId,
 }
 
 impl<'ctx> Importer<'ctx> {
-    fn new() -> Self {
+    fn new(pointer_width: PointerWidth) -> Self {
+        let pointer_bits = pointer_width.bits();
         let mut types = TypeTable::new();
         let bit_tid = types.bit();
         let byte_tid = types.primitive(Type::_8);
-        let addr_tid = types.primitive(Type::_32);
+        let addr_tid = types.primitive(match pointer_width {
+            PointerWidth::Bits32 => Type::_32,
+            PointerWidth::Bits64 => Type::_64,
+        });
         Importer {
+            pointer_width,
+            pointer_bits,
             types,
             funcs: Vec::new(),
             sigs: Vec::new(),
@@ -445,6 +519,7 @@ impl<'ctx> Importer<'ctx> {
 
     fn finish(self) -> Module {
         Module {
+            pointer_width: self.pointer_width,
             types: self.types,
             oracles: Vec::new(),
             actions: Vec::new(),
@@ -455,10 +530,122 @@ impl<'ctx> Importer<'ctx> {
         }
     }
 
-    fn func_id(&mut self, f: FunctionValue<'ctx>) -> FuncId {
+    fn global_addr_bits(&self) -> usize {
+        self.pointer_bits - 1 - GLOBAL_ID_BITS
+    }
+
+    /// The byte size of an LLVM element type the importer can address. Pointer
+    /// elements use the module ABI, rather than the host's pointer size.
+    fn memory_byte_size(&self, ty: BasicTypeEnum<'ctx>) -> IResult<u64> {
+        match ty {
+            BasicTypeEnum::IntType(int_ty) => Ok((int_ty.get_bit_width() as u64).div_ceil(8)),
+            BasicTypeEnum::PointerType(ptr_ty) => self
+                .llvm_bit_width(ptr_ty)
+                .map(|bits| (bits as u64).div_ceil(8)),
+            BasicTypeEnum::ArrayType(array) => self
+                .memory_byte_size(array.get_element_type())?
+                .checked_mul(array.len() as u64)
+                .ok_or_else(|| ImportError::Unsupported("LLVM aggregate size overflow".into())),
+            _ => Err(ImportError::Unsupported(
+                "expected an integer, pointer, or array element type".into(),
+            )),
+        }
+    }
+
+    /// Fold constant GEP indices into a byte offset. The first index steps
+    /// through the source element type; later indices descend arrays.
+    fn constant_gep_byte_offset(
+        &self,
+        source_ty: BasicTypeEnum<'ctx>,
+        indices: &[i64],
+    ) -> IResult<u64> {
+        let [first, rest @ ..] = indices else {
+            return Err(ImportError::Unsupported("gep has no index operands".into()));
+        };
+        let whole_size = self.memory_byte_size(source_ty)?;
+        let mut offset = first
+            .checked_mul(whole_size as i64)
+            .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
+        let mut cur_ty = source_ty;
+        for &idx in rest {
+            let BasicTypeEnum::ArrayType(array) = cur_ty else {
+                return Err(ImportError::Unsupported(
+                    "gep of non-array aggregate type not supported".into(),
+                ));
+            };
+            let elem_ty = array.get_element_type();
+            let step = idx
+                .checked_mul(self.memory_byte_size(elem_ty)? as i64)
+                .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
+            offset = offset
+                .checked_add(step)
+                .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
+            cur_ty = elem_ty;
+        }
+        u64::try_from(offset)
+            .map_err(|_| ImportError::Unsupported("gep offset out of range".into()))
+    }
+
+    /// As [`Self::constant_gep_byte_offset`], but leave a symbolic GEP index
+    /// for the dynamic GEP path instead of prematurely rejecting it.
+    fn gep_instr_constant_offset(&self, instr: InstructionValue<'ctx>) -> IResult<Option<u64>> {
+        let source_ty = instr
+            .get_gep_source_element_type()
+            .map_err(|_| ImportError::Unsupported("malformed gep".into()))?;
+        let n_ops = instr.get_num_operands();
+        let mut indices = Vec::with_capacity(n_ops.saturating_sub(1) as usize);
+        for i in 1..n_ops {
+            match instr.get_operand(i).and_then(|o| o.value()) {
+                Some(BasicValueEnum::IntValue(n)) => match n.get_sign_extended_constant() {
+                    Some(v) => indices.push(v),
+                    None => return Ok(None),
+                },
+                _ => {
+                    return Err(ImportError::Unsupported(
+                        "expected an integer gep index".into(),
+                    ));
+                }
+            }
+        }
+        self.constant_gep_byte_offset(source_ty, &indices).map(Some)
+    }
+
+    fn llvm_bit_width<T: TryInto<BasicTypeEnum<'ctx>>>(&self, ty: T) -> IResult<usize> {
+        let ty = ty.try_into().map_err(|_| {
+            ImportError::Unsupported(
+                "expected an integer or default-address-space pointer value".into(),
+            )
+        })?;
+        match ty {
+            BasicTypeEnum::IntType(ty) => Ok(ty.get_bit_width() as usize),
+            BasicTypeEnum::PointerType(ty) => {
+                if ty.get_address_space() != AddressSpace::default() {
+                    return Err(ImportError::Unsupported(
+                        "non-default LLVM pointer address spaces are unsupported".into(),
+                    ));
+                }
+                Ok(self.pointer_bits)
+            }
+            _ => Err(ImportError::Unsupported(
+                "expected an integer or default-address-space pointer value".into(),
+            )),
+        }
+    }
+
+    fn ensure_default_address_space(&self, ptr: PointerValue<'ctx>) -> IResult<()> {
+        if ptr.get_type().get_address_space() == AddressSpace::default() {
+            Ok(())
+        } else {
+            Err(ImportError::Unsupported(
+                "non-default LLVM pointer address spaces are unsupported".into(),
+            ))
+        }
+    }
+
+    fn func_id(&mut self, f: FunctionValue<'ctx>) -> IResult<FuncId> {
         let key = f.as_global_value().as_pointer_value();
         if let Some(&id) = self.func_ids.get(&key) {
-            return id;
+            return Ok(id);
         }
         let id = FuncId(self.funcs.len());
         // Reserve a placeholder; `import_function` overwrites it once the
@@ -469,9 +656,9 @@ impl<'ctx> Importer<'ctx> {
             .get_params()
             .iter()
             .map(|p| self.llvm_type_id(p.get_type()))
-            .collect();
+            .collect::<IResult<_>>()?;
         let results: Vec<TypeId> = match f.get_type().get_return_type() {
-            Some(t) => vec![self.llvm_type_id(t)],
+            Some(t) => vec![self.llvm_type_id(t)?],
             None => vec![],
         };
         let sig = SigId(self.sigs.len());
@@ -484,15 +671,18 @@ impl<'ctx> Importer<'ctx> {
         });
         self.func_ids.insert(key, id);
         self.exports.entry(name).or_insert(id);
-        id
+        Ok(id)
     }
 
-    fn llvm_type_id<T: TryInto<inkwell::types::BasicTypeEnum<'ctx>>>(&mut self, ty: T) -> TypeId {
+    fn llvm_type_id<T: TryInto<inkwell::types::BasicTypeEnum<'ctx>>>(
+        &mut self,
+        ty: T,
+    ) -> IResult<TypeId> {
         use inkwell::types::BasicTypeEnum;
         let ty = ty
             .try_into()
             .unwrap_or_else(|_| panic!("expected a basic type"));
-        match ty {
+        Ok(match ty {
             BasicTypeEnum::IntType(i) => {
                 let t = match i.get_bit_width() {
                     1 => Type::Bit,
@@ -505,11 +695,18 @@ impl<'ctx> Importer<'ctx> {
                 };
                 self.types.primitive(t)
             }
-            // Pointers/anything else are represented as 32-bit integers in
-            // this importer (matching VaffleTarget's PTR_BITS convention),
-            // not a distinct IrType.
+            // Pointer values use the module ABI width. Other unsupported
+            // types retain the historical best-effort integer fallback.
+            BasicTypeEnum::PointerType(ptr) => {
+                if ptr.get_address_space() != AddressSpace::default() {
+                    return Err(ImportError::Unsupported(
+                        "non-default LLVM pointer address spaces are unsupported".into(),
+                    ));
+                }
+                self.addr_tid
+            }
             _ => self.types.primitive(Type::_32),
-        }
+        })
     }
 
     /// Assign (allocating on first reference) the `StorageId` for a global
@@ -518,6 +715,7 @@ impl<'ctx> Importer<'ctx> {
     /// constant load" rule, applied to every memory reference this importer
     /// emits.
     fn storage_for(&mut self, ptr: PointerValue<'ctx>) -> IResult<StorageId> {
+        self.ensure_default_address_space(ptr)?;
         let raw = strip_pointer(ptr.as_value_ref(), "memory reference base")?;
         let global = global_from_pointer(raw, "memory reference base")?;
         let key = global.as_pointer_value();
@@ -582,12 +780,12 @@ impl<'ctx> Importer<'ctx> {
         for i in 1..n_ops {
             let op = unsafe { LLVMGetOperand(raw, i as u32) };
             let iv = unsafe { IntValue::new(op) };
-            let v = iv.get_sign_extended_constant().ok_or_else(|| {
-                ImportError::Unsupported("expected a constant gep index".into())
-            })?;
+            let v = iv
+                .get_sign_extended_constant()
+                .ok_or_else(|| ImportError::Unsupported("expected a constant gep index".into()))?;
             indices.push(v);
         }
-        let gep_offset = constant_gep_byte_offset(source_ty, &indices)?;
+        let gep_offset = self.constant_gep_byte_offset(source_ty, &indices)?;
         let offset = base_offset
             .checked_add(gep_offset)
             .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
@@ -599,16 +797,23 @@ impl<'ctx> Importer<'ctx> {
     /// instruction result -- constant or symbolic offset alike) before
     /// falling back to `storage_for_with_offset` (a bare global or a
     /// constant-index GEP constant expression, always constant).
-    fn resolve_global_ptr(&mut self, fctx: &FuncCtx<'ctx>, ptr: PointerValue<'ctx>) -> IResult<GlobalPtr> {
+    fn resolve_global_ptr(
+        &mut self,
+        fctx: &FuncCtx<'ctx>,
+        ptr: PointerValue<'ctx>,
+    ) -> IResult<GlobalPtr> {
         if let Some(gp) = fctx.global_ptr_of.get(&ptr.as_any_value_enum()) {
             return Ok(gp.clone());
         }
         let (storage, byte_offset) = self.storage_for_with_offset(ptr)?;
-        Ok(GlobalPtr::Const(GlobalPointer { storage, byte_offset }))
+        Ok(GlobalPtr::Const(GlobalPointer {
+            storage,
+            byte_offset,
+        }))
     }
 
     fn import_function(&mut self, f: FunctionValue<'ctx>) -> IResult<Vec<FunctionValue<'ctx>>> {
-        let id = self.func_id(f);
+        let id = self.func_id(f)?;
         if f.count_basic_blocks() == 0 {
             // Declaration only; already recorded as FuncDecl::Import above.
             return Ok(vec![]);
@@ -635,7 +840,7 @@ impl<'ctx> Importer<'ctx> {
         // wide-typed value.
         let mut next_bit_idx = 0usize;
         for param in f.get_params().iter() {
-            let width = llvm_bit_width(param.get_type());
+            let width = self.llvm_bit_width(param.get_type())?;
             let mut bits = Vec::with_capacity(width);
             for _ in 0..width {
                 let vid = fctx.emit(
@@ -660,7 +865,7 @@ impl<'ctx> Importer<'ctx> {
             let mut idx = if vb == entry_block { next_bit_idx } else { 0 };
             let phis = fctx.phi_order[i].clone();
             for phi in phis.iter() {
-                let width = llvm_bit_width(phi.as_instruction().get_type());
+                let width = self.llvm_bit_width(phi.as_instruction().get_type())?;
                 let mut bits = Vec::with_capacity(width);
                 for _ in 0..width {
                     let vid = fctx.emit(
@@ -722,11 +927,10 @@ impl<'ctx> Importer<'ctx> {
         // have a well-typed terminator when later VAFFLE lowerings inspect
         // every block, rather than the old empty `Return` fallback (which is
         // ill-typed for a non-void enclosing function).
-        let return_bits = f
-            .get_type()
-            .get_return_type()
-            .map(llvm_bit_width)
-            .unwrap_or(0);
+        let return_bits = match f.get_type().get_return_type() {
+            Some(ty) => self.llvm_bit_width(ty)?,
+            None => 0,
+        };
         let mut fallback_return_values: Vec<Vec<ValueId>> = blocks
             .iter()
             .enumerate()
@@ -774,6 +978,7 @@ impl<'ctx> Importer<'ctx> {
         // function-wide. Caching a block-local `Stmt::Const` for a sibling
         // arm would violate VAFFLE dominance.
         if let BasicValueEnum::PointerValue(p) = v {
+            self.ensure_default_address_space(p)?;
             if p.is_null() {
                 return Ok(self.null_ptr_bits(fctx, fctx.current));
             }
@@ -1041,6 +1246,9 @@ impl<'ctx> Importer<'ctx> {
             }
             InstructionOpcode::Load => {
                 let ptr = load_store_pointer(instr, 0)?;
+                self.ensure_default_address_space(ptr)?;
+                let n_bits = self.llvm_bit_width(instr.get_type())?;
+                let n_bytes = n_bits.div_ceil(8);
                 if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
                     let ptr_bits0 = fctx
                         .cache
@@ -1049,25 +1257,28 @@ impl<'ctx> Importer<'ctx> {
                         .ok_or_else(|| {
                             ImportError::Unsupported("stack pointer bits missing (internal)".into())
                         })?;
-                    let n_bits = int_result_width(instr)?;
-                    let pointee_tid = self.llvm_type_id(instr.get_type());
+                    let pointee_tid = self.llvm_type_id(instr.get_type())?;
                     Some(match stack_ptr {
                         StackPtr::Const(sp) => {
                             self.stack_load(fctx, ptr_bits0, sp.addr, pointee_tid, n_bits)
                         }
-                        StackPtr::Symbolic { addr_bits, .. } => {
-                            self.stack_load_dynamic(fctx, ptr_bits0, &addr_bits, pointee_tid, n_bits)
-                        }
+                        StackPtr::Symbolic { addr_bits, .. } => self.stack_load_dynamic(
+                            fctx,
+                            ptr_bits0,
+                            &addr_bits,
+                            pointee_tid,
+                            n_bits,
+                        ),
                     })
                 } else {
-                    let n_bytes = int_result_width(instr)?.div_ceil(8);
                     match self.resolve_global_ptr(fctx, ptr) {
                         Ok(GlobalPtr::Const(g)) => {
                             Some(self.mem_load(fctx, g.storage, g.byte_offset, n_bytes))
                         }
-                        Ok(GlobalPtr::Symbolic { storage, offset_bits }) => {
-                            Some(self.mem_load_dynamic(fctx, storage, &offset_bits, n_bytes))
-                        }
+                        Ok(GlobalPtr::Symbolic {
+                            storage,
+                            offset_bits,
+                        }) => Some(self.mem_load_dynamic(fctx, storage, &offset_bits, n_bytes)),
                         Err(_) => {
                             // Neither a tracked stack pointer nor a
                             // statically resolvable global -- e.g. a
@@ -1076,8 +1287,9 @@ impl<'ctx> Importer<'ctx> {
                             // compile-time constant. Fall back to runtime
                             // storage-identity dispatch instead of failing
                             // closed.
-                            let pointee_tid = self.llvm_type_id(instr.get_type());
-                            let ptr_bits = self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
+                            let pointee_tid = self.llvm_type_id(instr.get_type())?;
+                            let ptr_bits =
+                                self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
                             Some(self.dispatch_read(fctx, &ptr_bits, pointee_tid, n_bytes)?)
                         }
                     }
@@ -1086,6 +1298,7 @@ impl<'ctx> Importer<'ctx> {
             InstructionOpcode::Store => {
                 let val = op!(0);
                 let ptr = load_store_pointer(instr, 1)?;
+                self.ensure_default_address_space(ptr)?;
                 if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
                     let ptr_bits0 = fctx
                         .cache
@@ -1106,11 +1319,13 @@ impl<'ctx> Importer<'ctx> {
                         Ok(GlobalPtr::Const(g)) => {
                             self.mem_store(fctx, g.storage, g.byte_offset, &val, n_bytes)
                         }
-                        Ok(GlobalPtr::Symbolic { storage, offset_bits }) => {
-                            self.mem_store_dynamic(fctx, storage, &offset_bits, &val, n_bytes)
-                        }
+                        Ok(GlobalPtr::Symbolic {
+                            storage,
+                            offset_bits,
+                        }) => self.mem_store_dynamic(fctx, storage, &offset_bits, &val, n_bytes),
                         Err(_) => {
-                            let ptr_bits = self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
+                            let ptr_bits =
+                                self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
                             self.dispatch_write(fctx, &ptr_bits, &val)?;
                         }
                     }
@@ -1119,6 +1334,7 @@ impl<'ctx> Importer<'ctx> {
             }
             InstructionOpcode::GetElementPtr => {
                 let base = load_store_pointer(instr, 0)?;
+                self.ensure_default_address_space(base)?;
                 if let Some(base_ptr) = fctx.stack_slot_of.get(&base.as_any_value_enum()).cloned() {
                     // Offset GEP off a tracked stack pointer. A constant
                     // index against a `Const` base takes the original
@@ -1136,18 +1352,19 @@ impl<'ctx> Importer<'ctx> {
                     let elem_ty = instr
                         .get_gep_source_element_type()
                         .map_err(|_| ImportError::Unsupported("malformed gep".into()))?;
-                    let elem_bits = match elem_ty {
-                        inkwell::types::BasicTypeEnum::IntType(t) => t.get_bit_width() as i64,
-                        _ => {
-                            return Err(ImportError::Unsupported(
-                                "gep of non-integer element type into stack pointer not supported"
-                                    .into(),
-                            ));
-                        }
-                    };
-                    let idx_val = instr.get_operand(1).and_then(|o| o.value()).ok_or_else(|| {
-                        ImportError::Unsupported("expected an integer gep index".into())
-                    })?;
+                    let elem_bits = self.llvm_bit_width(elem_ty).map_err(|_| {
+                        ImportError::Unsupported(
+                            "gep of non-integer/pointer element type into stack pointer not supported"
+                                .into(),
+                        )
+                    })? as i64;
+                    let idx_val =
+                        instr
+                            .get_operand(1)
+                            .and_then(|o| o.value())
+                            .ok_or_else(|| {
+                                ImportError::Unsupported("expected an integer gep index".into())
+                            })?;
                     let BasicValueEnum::IntValue(idx_int) = idx_val else {
                         return Err(ImportError::Unsupported(
                             "expected an integer gep index".into(),
@@ -1175,14 +1392,14 @@ impl<'ctx> Importer<'ctx> {
                             };
                             let base_bits = self.stack_ptr_addr_bits(fctx, cur, &base_ptr);
                             let idx_bits = self.value_bits(fctx, idx_val)?;
-                            let idx_bits = resize_bits_signed(&idx_bits, PTR_BITS);
+                            let idx_bits = resize_bits_signed(&idx_bits, self.pointer_bits);
                             let new_addr_bits = {
                                 let mut c = Ctx {
                                     fctx,
                                     bit_tid: self.bit_tid,
                                     block: cur,
                                 };
-                                let elem_bits_const: Vec<ValueId> = (0..PTR_BITS)
+                                let elem_bits_const: Vec<ValueId> = (0..self.pointer_bits)
                                     .map(|b| c.bc_const((elem_bits as u64 >> b) & 1 != 0))
                                     .collect();
                                 let scaled = circuits::bc_mul(&mut c, &idx_bits, &elem_bits_const);
@@ -1218,16 +1435,17 @@ impl<'ctx> Importer<'ctx> {
                     // constant expression, or a previously-tracked
                     // `GlobalPtr` from a chained GEP instruction -- constant
                     // or already-dynamic offset alike).
-                    let const_offset = gep_instr_constant_offset(instr)?;
+                    let const_offset = self.gep_instr_constant_offset(instr)?;
 
                     let new_gp = if let (GlobalPtr::Const(g), Some(gep_offset)) =
                         (&base_gp, const_offset)
                     {
                         // Fast path: everything resolves at compile time
                         // (multi-index, nested-array GEPs included).
-                        let byte_offset = g.byte_offset.checked_add(gep_offset).ok_or_else(|| {
-                            ImportError::Unsupported("gep offset overflow".into())
-                        })?;
+                        let byte_offset =
+                            g.byte_offset.checked_add(gep_offset).ok_or_else(|| {
+                                ImportError::Unsupported("gep offset overflow".into())
+                            })?;
                         Some(GlobalPtr::Const(GlobalPointer {
                             storage: g.storage,
                             byte_offset,
@@ -1244,8 +1462,9 @@ impl<'ctx> Importer<'ctx> {
                             .get_gep_source_element_type()
                             .map_err(|_| ImportError::Unsupported("malformed gep".into()))?;
                         match elem_ty {
-                            inkwell::types::BasicTypeEnum::IntType(t) => {
-                                let elem_bytes = (t.get_bit_width() as u64).div_ceil(8);
+                            inkwell::types::BasicTypeEnum::IntType(_)
+                            | inkwell::types::BasicTypeEnum::PointerType(_) => {
+                                let elem_bytes = (self.llvm_bit_width(elem_ty)? as u64).div_ceil(8);
                                 match instr.get_operand(1).and_then(|o| o.value()) {
                                     Some(idx_bv @ BasicValueEnum::IntValue(_)) => {
                                         let storage = match &base_gp {
@@ -1255,19 +1474,29 @@ impl<'ctx> Importer<'ctx> {
                                         let base_offset_bits =
                                             self.global_ptr_offset_bits(fctx, cur, &base_gp);
                                         let idx_bits = self.value_bits(fctx, idx_bv)?;
-                                        let idx_bits = resize_bits_signed(&idx_bits, PTR_BITS);
+                                        let idx_bits =
+                                            resize_bits_signed(&idx_bits, self.pointer_bits);
                                         let new_offset_bits = {
                                             let mut c = Ctx {
                                                 fctx,
                                                 bit_tid: self.bit_tid,
                                                 block: cur,
                                             };
-                                            let elem_bytes_const: Vec<ValueId> = (0..PTR_BITS)
+                                            let elem_bytes_const: Vec<ValueId> = (0..self
+                                                .pointer_bits)
                                                 .map(|b| c.bc_const((elem_bytes >> b) & 1 != 0))
                                                 .collect();
-                                            let scaled =
-                                                circuits::bc_mul(&mut c, &idx_bits, &elem_bytes_const);
-                                            circuits::bc_add(&mut c, &base_offset_bits, &scaled, false)
+                                            let scaled = circuits::bc_mul(
+                                                &mut c,
+                                                &idx_bits,
+                                                &elem_bytes_const,
+                                            );
+                                            circuits::bc_add(
+                                                &mut c,
+                                                &base_offset_bits,
+                                                &scaled,
+                                                false,
+                                            )
                                         };
                                         Some(GlobalPtr::Symbolic {
                                             storage,
@@ -1314,20 +1543,25 @@ impl<'ctx> Importer<'ctx> {
                         .get_gep_source_element_type()
                         .map_err(|_| ImportError::Unsupported("malformed gep".into()))?;
                     let elem_bytes = match elem_ty {
-                        inkwell::types::BasicTypeEnum::IntType(t) => {
-                            (t.get_bit_width() as u64).div_ceil(8)
+                        inkwell::types::BasicTypeEnum::IntType(_)
+                        | inkwell::types::BasicTypeEnum::PointerType(_) => {
+                            (self.llvm_bit_width(elem_ty)? as u64).div_ceil(8)
                         }
                         _ => {
                             return Err(ImportError::Unsupported(
-                                "gep of non-integer element type into an unresolved pointer not \
+                                "gep of non-integer/pointer element type into an unresolved pointer not \
                                  supported"
                                     .into(),
                             ));
                         }
                     };
-                    let idx_val = instr.get_operand(1).and_then(|o| o.value()).ok_or_else(|| {
-                        ImportError::Unsupported("expected an integer gep index".into())
-                    })?;
+                    let idx_val =
+                        instr
+                            .get_operand(1)
+                            .and_then(|o| o.value())
+                            .ok_or_else(|| {
+                                ImportError::Unsupported("expected an integer gep index".into())
+                            })?;
                     if !matches!(idx_val, BasicValueEnum::IntValue(_)) {
                         return Err(ImportError::Unsupported(
                             "expected an integer gep index".into(),
@@ -1335,14 +1569,14 @@ impl<'ctx> Importer<'ctx> {
                     }
                     let base_bits = self.value_bits(fctx, BasicValueEnum::PointerValue(base))?;
                     let idx_bits = self.value_bits(fctx, idx_val)?;
-                    let idx_bits = resize_bits_signed(&idx_bits, PTR_BITS);
+                    let idx_bits = resize_bits_signed(&idx_bits, self.pointer_bits);
                     let new_bits = {
                         let mut c = Ctx {
                             fctx,
                             bit_tid: self.bit_tid,
                             block: cur,
                         };
-                        let elem_bytes_const: Vec<ValueId> = (0..PTR_BITS)
+                        let elem_bytes_const: Vec<ValueId> = (0..self.pointer_bits)
                             .map(|b| c.bc_const((elem_bytes >> b) & 1 != 0))
                             .collect();
                         let scaled = circuits::bc_mul(&mut c, &idx_bits, &elem_bytes_const);
@@ -1390,7 +1624,7 @@ impl<'ctx> Importer<'ctx> {
                     let is_tail_call = matches!(tail_end, Some(TailCallEnd::Unreachable))
                         || (matches!(tail_end, Some(TailCallEnd::Return))
                             && callee_fn.get_first_basic_block().is_some());
-                    let callee_id = self.func_id(callee_fn);
+                    let callee_id = self.func_id(callee_fn)?;
                     called.push(callee_fn);
                     if is_tail_call {
                         fctx.terminators[cur.0] = Some(Terminator::ReturnCall {
@@ -1407,8 +1641,9 @@ impl<'ctx> Importer<'ctx> {
                             },
                         );
                         match instr.get_type().try_into() {
-                            Ok(inkwell::types::BasicTypeEnum::IntType(t)) => {
-                                let n = t.get_bit_width() as usize;
+                            Ok(inkwell::types::BasicTypeEnum::IntType(_))
+                            | Ok(inkwell::types::BasicTypeEnum::PointerType(_)) => {
+                                let n = self.llvm_bit_width(instr.get_type())?;
                                 Some(
                                     (0..n)
                                         .map(|i| {
@@ -1423,29 +1658,34 @@ impl<'ctx> Importer<'ctx> {
                 }
             }
             InstructionOpcode::Alloca => {
+                // LLVM permits an explicit alloca address space. This
+                // importer only models the default pointer address space.
+                self.llvm_bit_width(instr.get_type())?;
                 let elem_ty = instr
                     .get_allocated_type()
                     .map_err(|_| ImportError::Unsupported("malformed alloca".into()))?;
                 // Flatten a (possibly nested) array type down to its
-                // innermost scalar integer element type and total element
-                // count -- `[16 x i8]` becomes (i8, 16), `[4 x [4 x i8]]`
-                // becomes (i8, 16), and a bare scalar is (ty, 1). Structs
+                // innermost scalar integer or pointer element type and total
+                // element count -- `[16 x i8]` becomes (i8, 16), `[4 x [4 x
+                // i8]]` becomes (i8, 16), and a bare scalar is (ty, 1). Structs
                 // (and anything else) are a named error, not a panic --
                 // see docs/llvm-array-alloca.md item 3.
-                let (int_ty, array_count) = flatten_alloca_type(elem_ty).ok_or_else(|| {
+                let (scalar_ty, array_count) = flatten_alloca_type(elem_ty).ok_or_else(|| {
                     ImportError::Unsupported(
-                        "alloca of non-integer, non-array-of-integer type not supported".into(),
+                        "alloca of non-integer/pointer, non-array-of-integer/pointer type not supported".into(),
                     )
                 })?;
-                let elem_bits = int_ty.get_bit_width() as u64;
+                let elem_bits = self.llvm_bit_width(scalar_ty)? as u64;
                 // The array-size operand is `1` unless the source used
                 // `alloca <ty>, <n>`; either way it must be a compile-time
                 // constant (VLAs are symbolic and fail closed here, not via
                 // a panic).
                 let alloca_count: u64 = match instr.get_operand(0).and_then(|o| o.value()) {
-                    Some(BasicValueEnum::IntValue(n)) => n.get_zero_extended_constant().ok_or_else(
-                        || ImportError::Unsupported("alloca count is symbolic".into()),
-                    )?,
+                    Some(BasicValueEnum::IntValue(n)) => {
+                        n.get_zero_extended_constant().ok_or_else(|| {
+                            ImportError::Unsupported("alloca count is symbolic".into())
+                        })?
+                    }
                     _ => 1,
                 };
                 let count = array_count
@@ -1463,7 +1703,7 @@ impl<'ctx> Importer<'ctx> {
                 // encoding as the stack-vs-global tag (0 = stack); a local
                 // ALLOCA offset that set it would be indistinguishable from
                 // a global-provenance value.
-                if fctx.next_stack_slot >= (1u64 << (PTR_BITS - 1)) {
+                if fctx.next_stack_slot >= (1u64 << (self.pointer_bits - 1)) {
                     return Err(ImportError::Unsupported(
                         "alloca stack region too large for the pointer-value encoding".into(),
                     ));
@@ -1474,7 +1714,7 @@ impl<'ctx> Importer<'ctx> {
                 // required so passes that pattern-match `Value::StackAlloc`
                 // (e.g. `inline_vaffle`'s stack-slot rebase, `lower_to_ir`'s
                 // spill-avoidance) see this allocation.
-                let elem_tid = self.llvm_type_id(int_ty);
+                let elem_tid = self.llvm_type_id(scalar_ty)?;
                 fctx.emit(
                     cur,
                     Value::StackAlloc {
@@ -1688,11 +1928,11 @@ impl<'ctx> Importer<'ctx> {
         index: &Bits,
     ) -> Bits {
         let mut index = index.clone();
-        index.truncate(PTR_BITS);
-        while index.len() < PTR_BITS {
+        index.truncate(self.pointer_bits);
+        while index.len() < self.pointer_bits {
             index.push(self.bc_const_at(fctx, block, false));
         }
-        let stack_scale: Bits = (0..PTR_BITS)
+        let stack_scale: Bits = (0..self.pointer_bits)
             .map(|bit| self.bc_const_at(fctx, block, bit == 3))
             .collect();
         let stack_offset = {
@@ -1703,7 +1943,7 @@ impl<'ctx> Importer<'ctx> {
             };
             circuits::bc_mul(&mut c, &index, &stack_scale)
         };
-        let tag = base[PTR_BITS - 1];
+        let tag = base[self.pointer_bits - 1];
         let offset = {
             let mut c = Ctx {
                 fctx,
@@ -1988,13 +2228,7 @@ impl<'ctx> Importer<'ctx> {
                 let n_bits = n_bytes.checked_mul(8).ok_or_else(|| {
                     ImportError::Unsupported("memory intrinsic length is too large".into())
                 })?;
-                Ok(self.stack_load_dynamic(
-                    fctx,
-                    *ptr_bits0,
-                    addr_bits,
-                    self.byte_tid,
-                    n_bits,
-                ))
+                Ok(self.stack_load_dynamic(fctx, *ptr_bits0, addr_bits, self.byte_tid, n_bits))
             }
             IntrinsicPointer::Global {
                 storage,
@@ -2041,8 +2275,13 @@ impl<'ctx> Importer<'ctx> {
     /// identical, just a plain unsigned integer), `PTR_BITS` wide, LSB
     /// first. Mirrors `VaffleTarget::alloca`'s `addr_bits` construction
     /// exactly.
-    fn stack_addr_bits(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, base_slot: u64) -> Bits {
-        (0..PTR_BITS)
+    fn stack_addr_bits(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        base_slot: u64,
+    ) -> Bits {
+        (0..self.pointer_bits)
             .map(|i| self.bc_const_at(fctx, block, (base_slot >> i) & 1 != 0))
             .collect()
     }
@@ -2099,7 +2338,13 @@ impl<'ctx> Importer<'ctx> {
 
     /// Write `val` to `StorageId::ALLOCA` starting at `base_slot`, one
     /// `StorageWrite` per bit. See [`Self::stack_load`].
-    fn stack_store(&mut self, fctx: &mut FuncCtx<'ctx>, ptr_bits0: ValueId, base_slot: u64, val: &Bits) {
+    fn stack_store(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        ptr_bits0: ValueId,
+        base_slot: u64,
+        val: &Bits,
+    ) {
         let cur = fctx.current;
         for (i, &bit) in val.iter().enumerate() {
             let addr = fctx.emit(
@@ -2136,7 +2381,12 @@ impl<'ctx> Importer<'ctx> {
     /// `Bits`, LSB first, regardless of whether it's a compile-time constant
     /// (`StackPtr::Const`, via `stack_addr_bits`) or already
     /// runtime-computed (`StackPtr::Symbolic`, returned as-is).
-    fn stack_ptr_addr_bits(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, ptr: &StackPtr) -> Bits {
+    fn stack_ptr_addr_bits(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        ptr: &StackPtr,
+    ) -> Bits {
         match ptr {
             StackPtr::Const(sp) => self.stack_addr_bits(fctx, block, sp.addr),
             StackPtr::Symbolic { addr_bits, .. } => addr_bits.clone(),
@@ -2146,7 +2396,12 @@ impl<'ctx> Importer<'ctx> {
     /// Bit-decompose a `GlobalPtr`'s current byte offset into a
     /// `PTR_BITS`-wide `Bits`, LSB first — the `GlobalPtr` counterpart of
     /// `stack_ptr_addr_bits`.
-    fn global_ptr_offset_bits(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, ptr: &GlobalPtr) -> Bits {
+    fn global_ptr_offset_bits(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        ptr: &GlobalPtr,
+    ) -> Bits {
         match ptr {
             GlobalPtr::Const(g) => self.stack_addr_bits(fctx, block, g.byte_offset),
             GlobalPtr::Symbolic { offset_bits, .. } => offset_bits.clone(),
@@ -2210,15 +2465,16 @@ impl<'ctx> Importer<'ctx> {
             ));
         }
         if let GlobalPtr::Const(g) = &gp {
-            if g.byte_offset >= (1u64 << GLOBAL_ADDR_BITS) {
+            if g.byte_offset >= (1u64 << self.global_addr_bits()) {
                 return Err(ImportError::Unsupported(
                     "global byte offset too large for the pointer-value encoding".into(),
                 ));
             }
         }
         let offset_bits = self.global_ptr_offset_bits(fctx, block, &gp);
-        let mut bits = Vec::with_capacity(PTR_BITS);
-        bits.extend_from_slice(&offset_bits[..GLOBAL_ADDR_BITS]);
+        let global_addr_bits = self.global_addr_bits();
+        let mut bits = Vec::with_capacity(self.pointer_bits);
+        bits.extend_from_slice(&offset_bits[..global_addr_bits]);
         for b in 0..GLOBAL_ID_BITS {
             bits.push(self.bc_const_at(fctx, block, (storage.0 >> b) & 1 != 0));
         }
@@ -2233,7 +2489,7 @@ impl<'ctx> Importer<'ctx> {
     /// `dispatch_write` leaves every candidate untouched; it can therefore
     /// never alias stack slot zero.
     fn null_ptr_bits(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId) -> Bits {
-        let mut bits: Bits = (0..PTR_BITS - 1)
+        let mut bits: Bits = (0..self.pointer_bits - 1)
             .map(|_| self.bc_const_at(fctx, block, false))
             .collect();
         bits.push(self.bc_const_at(fctx, block, true));
@@ -2540,8 +2796,9 @@ impl<'ctx> Importer<'ctx> {
         ptr_bits: &Bits,
         candidates: &[StorageId],
     ) -> Vec<ValueId> {
-        let tag_bit = ptr_bits[PTR_BITS - 1];
-        let id_bits = &ptr_bits[GLOBAL_ADDR_BITS..GLOBAL_ADDR_BITS + GLOBAL_ID_BITS];
+        let global_addr_bits = self.global_addr_bits();
+        let tag_bit = ptr_bits[self.pointer_bits - 1];
+        let id_bits = &ptr_bits[global_addr_bits..global_addr_bits + GLOBAL_ID_BITS];
         let mut c = Ctx {
             fctx,
             bit_tid: self.bit_tid,
@@ -2562,10 +2819,15 @@ impl<'ctx> Importer<'ctx> {
     /// Zero-extend `ptr_bits`'s low `GLOBAL_ADDR_BITS` (the ADDR sub-field
     /// of `ptr_value_bits`'s encoding) to a full `PTR_BITS`-wide `Bits`, for
     /// use as `mem_load_dynamic`/`mem_store_dynamic`'s base-offset operand.
-    fn dispatch_global_addr_bits(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, ptr_bits: &Bits) -> Bits {
+    fn dispatch_global_addr_bits(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        ptr_bits: &Bits,
+    ) -> Bits {
         let zero = self.bc_const_at(fctx, block, false);
-        let mut bits: Bits = ptr_bits[..GLOBAL_ADDR_BITS].to_vec();
-        bits.resize(PTR_BITS, zero);
+        let mut bits: Bits = ptr_bits[..self.global_addr_bits()].to_vec();
+        bits.resize(self.pointer_bits, zero);
         bits
     }
 
@@ -2603,7 +2865,7 @@ impl<'ctx> Importer<'ctx> {
         // begin at `GLOBAL_STORAGE_BASE`) must read as zero rather than
         // accidentally falling through to stack address zero.
         let stack = self.stack_load_dynamic(fctx, ptr_bits[0], ptr_bits, pointee_ty, n_bits);
-        let tag_bit = ptr_bits[PTR_BITS - 1];
+        let tag_bit = ptr_bits[self.pointer_bits - 1];
         let not_tag = {
             let mut c = Ctx {
                 fctx,
@@ -2653,14 +2915,19 @@ impl<'ctx> Importer<'ctx> {
     /// write is a semantic no-op. Direct generalization of
     /// `storage_to_mux_ir::mux_write`'s existing "N addresses in one
     /// storage" technique to "N storages, one address."
-    fn dispatch_write(&mut self, fctx: &mut FuncCtx<'ctx>, ptr_bits: &Bits, val: &Bits) -> IResult<()> {
+    fn dispatch_write(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        ptr_bits: &Bits,
+        val: &Bits,
+    ) -> IResult<()> {
         let n_bits = val.len();
         let n_bytes = n_bits.div_ceil(8);
         let candidates = self.dispatch_candidates()?;
         let cur = fctx.current;
         let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
         let global_addr_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
-        let tag_bit = ptr_bits[PTR_BITS - 1];
+        let tag_bit = ptr_bits[self.pointer_bits - 1];
         let not_tag = {
             let mut c = Ctx {
                 fctx,
@@ -2806,10 +3073,11 @@ impl<'ctx> Importer<'ctx> {
             let dest = instr
                 .get_operand(i)
                 .and_then(|o| o.block())
-                .ok_or_else(|| ImportError::Unsupported("switch case dest must be a block".into()))?;
-            let case_value = unsafe {
-                IntValue::new(LLVMGetSwitchCaseValue(instr.as_value_ref(), i - 1))
-            };
+                .ok_or_else(|| {
+                    ImportError::Unsupported("switch case dest must be a block".into())
+                })?;
+            let case_value =
+                unsafe { IntValue::new(LLVMGetSwitchCaseValue(instr.as_value_ref(), i - 1)) };
             let key = case_value.get_sign_extended_constant().ok_or_else(|| {
                 ImportError::Unsupported("switch case key must be a constant".into())
             })?;
@@ -2959,99 +3227,20 @@ fn resize_bits_signed(bits: &[ValueId], width: usize) -> Bits {
     out
 }
 
-fn flatten_alloca_type(ty: inkwell::types::BasicTypeEnum<'_>) -> Option<(inkwell::types::IntType<'_>, u64)> {
+fn flatten_alloca_type(
+    ty: inkwell::types::BasicTypeEnum<'_>,
+) -> Option<(inkwell::types::BasicTypeEnum<'_>, u64)> {
     match ty {
-        inkwell::types::BasicTypeEnum::IntType(t) => Some((t, 1)),
+        ty @ (inkwell::types::BasicTypeEnum::IntType(_)
+        | inkwell::types::BasicTypeEnum::PointerType(_)) => Some((ty, 1)),
         inkwell::types::BasicTypeEnum::ArrayType(a) => {
             let (inner_ty, inner_count) = flatten_alloca_type(a.get_element_type())?;
-            inner_count.checked_mul(a.len() as u64).map(|c| (inner_ty, c))
+            inner_count
+                .checked_mul(a.len() as u64)
+                .map(|c| (inner_ty, c))
         }
         _ => None,
     }
-}
-
-/// Total byte size of a (possibly nested) array-of-integer type, or a bare
-/// integer type -- the same shape `flatten_alloca_type` supports. Integer
-/// byte width rounds up (`i1` occupies one byte in memory, matching
-/// `int_result_width(..).div_ceil(8)`'s convention used elsewhere in this
-/// file for the same reason).
-fn int_or_array_byte_size(ty: inkwell::types::BasicTypeEnum<'_>) -> Option<u64> {
-    let (int_ty, count) = flatten_alloca_type(ty)?;
-    let byte_width = (int_ty.get_bit_width() as u64).div_ceil(8);
-    byte_width.checked_mul(count)
-}
-
-/// Total byte offset a GEP's constant index operands select, given its
-/// source element type. `indices[0]` steps through "array of `source_ty`"
-/// (offset = `indices[0] * sizeof(source_ty)`); each subsequent index
-/// descends one level into a nested array (offset += `idx * sizeof(elem)`).
-/// Only integer and (possibly nested) array-of-integer types are supported,
-/// matching `flatten_alloca_type`'s existing scope -- struct/aggregate
-/// element types are a named error, not a panic.
-fn constant_gep_byte_offset(source_ty: inkwell::types::BasicTypeEnum<'_>, indices: &[i64]) -> IResult<u64> {
-    let [first, rest @ ..] = indices else {
-        return Err(ImportError::Unsupported(
-            "gep has no index operands".into(),
-        ));
-    };
-    let whole_size = int_or_array_byte_size(source_ty).ok_or_else(|| {
-        ImportError::Unsupported(
-            "gep of non-integer, non-array-of-integer source element type not supported".into(),
-        )
-    })?;
-    let mut offset: i64 = first
-        .checked_mul(whole_size as i64)
-        .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
-    let mut cur_ty = source_ty;
-    for &idx in rest {
-        let inkwell::types::BasicTypeEnum::ArrayType(arr) = cur_ty else {
-            return Err(ImportError::Unsupported(
-                "gep of non-array aggregate type not supported".into(),
-            ));
-        };
-        let elem_ty = arr.get_element_type();
-        let elem_size = int_or_array_byte_size(elem_ty).ok_or_else(|| {
-            ImportError::Unsupported(
-                "gep of non-integer, non-array-of-integer element type not supported".into(),
-            )
-        })?;
-        let step = idx
-            .checked_mul(elem_size as i64)
-            .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
-        offset = offset
-            .checked_add(step)
-            .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
-        cur_ty = elem_ty;
-    }
-    u64::try_from(offset).map_err(|_| ImportError::Unsupported("gep offset out of range".into()))
-}
-
-/// Fold a `getelementptr` *instruction*'s index operands into a constant
-/// byte offset, per `constant_gep_byte_offset`. Returns `Ok(None)` (not an
-/// error) the moment any index operand is symbolic -- deferred to a later
-/// stage, not this one; the caller leaves the GEP's result untracked so a
-/// later `Load`/`Store` through it still fails closed instead of silently
-/// misresolving.
-fn gep_instr_constant_offset(instr: InstructionValue<'_>) -> IResult<Option<u64>> {
-    let source_ty = instr
-        .get_gep_source_element_type()
-        .map_err(|_| ImportError::Unsupported("malformed gep".into()))?;
-    let n_ops = instr.get_num_operands();
-    let mut indices = Vec::with_capacity(n_ops.saturating_sub(1) as usize);
-    for i in 1..n_ops {
-        match instr.get_operand(i).and_then(|o| o.value()) {
-            Some(BasicValueEnum::IntValue(n)) => match n.get_sign_extended_constant() {
-                Some(v) => indices.push(v),
-                None => return Ok(None),
-            },
-            _ => {
-                return Err(ImportError::Unsupported(
-                    "expected an integer gep index".into(),
-                ))
-            }
-        }
-    }
-    constant_gep_byte_offset(source_ty, &indices).map(Some)
 }
 
 /// Find the blocks whose instructions the structural importer may translate.
@@ -3201,9 +3390,8 @@ fn intrinsic_ranges_overlap(
                 ptr: StackPtr::Const(src),
                 ..
             },
-        )
-            if dest.allocation_base == src.allocation_base
-                && dest.allocation_bits == src.allocation_bits =>
+        ) if dest.allocation_base == src.allocation_base
+            && dest.allocation_bits == src.allocation_bits =>
         {
             let (dest_start, dest_end) = (*dest).intrinsic_range(n_bytes)?;
             let (src_start, src_end) = (*src).intrinsic_range(n_bytes)?;
@@ -3240,17 +3428,6 @@ fn int_result_width(instr: InstructionValue<'_>) -> IResult<usize> {
         _ => Err(ImportError::Unsupported(
             "expected an integer-typed instruction result".into(),
         )),
-    }
-}
-
-/// Bit width used for this importer's per-bit `Value::Param` decomposition.
-/// Integers use their real width; pointers (and anything else) use the
-/// PTR_BITS(=32) convention `VaffleTarget` also uses.
-fn llvm_bit_width<'ctx, T: TryInto<inkwell::types::BasicTypeEnum<'ctx>>>(ty: T) -> usize {
-    use inkwell::types::BasicTypeEnum;
-    match ty.try_into() {
-        Ok(BasicTypeEnum::IntType(i)) => i.get_bit_width() as usize,
-        _ => 32,
     }
 }
 

@@ -101,8 +101,8 @@ fn eval_op(
             lane,
             addr,
         } => {
-            let idx = addr_u64(addr, vals)?;
-            Ok(storage.get(&((*sid, *lane), idx)).copied().unwrap_or(false))
+            let addr = addr_bits(addr, vals)?;
+            Ok(storage.get(&((*sid, *lane), addr)).copied().unwrap_or(false))
         }
         NamedBoolOp::StorageWrite {
             storage: sid,
@@ -110,8 +110,8 @@ fn eval_op(
             src,
             addr,
         } => {
-            let idx = addr_u64(addr, vals)?;
-            storage.insert(((*sid, *lane), idx), get(*src)?);
+            let addr = addr_bits(addr, vals)?;
+            storage.insert(((*sid, *lane), addr), get(*src)?);
             Ok(false)
         }
         NamedBoolOp::External { .. } => Err(EmitError::unsupported(
@@ -140,8 +140,8 @@ fn gate_holds(
             lane,
             addr,
         } => {
-            let idx = addr_u64(addr, vals)?;
-            storage.get(&((*sid, *lane), idx)).copied().unwrap_or(false) == out
+            let addr = addr_bits(addr, vals)?;
+            storage.get(&((*sid, *lane), addr)).copied().unwrap_or(false) == out
         }
         NamedBoolOp::StorageWrite { src, .. } => {
             // Dummy result is 0; the write itself is a ContainerUpdate.
@@ -151,12 +151,11 @@ fn gate_holds(
     })
 }
 
-fn addr_u64(addr: &[IRVarId], vals: &BTreeMap<IRVarId, bool>) -> Result<u64, EmitError> {
-    let bits: Result<Vec<bool>, EmitError> = addr
+fn addr_bits(addr: &[IRVarId], vals: &BTreeMap<IRVarId, bool>) -> Result<Vec<bool>, EmitError> {
+    addr
         .iter()
         .map(|id| vals.get(id).copied().ok_or(EmitError::UnknownVar { id: *id }))
-        .collect();
-    bits_to_u64(&bits?)
+        .collect()
 }
 
 /// Fold a storage address when every bit is a `Zero`/`One` statement.

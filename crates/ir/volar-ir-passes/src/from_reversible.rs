@@ -564,10 +564,8 @@ mod tests {
             .collect()
     }
 
-    fn address(addr: &[IRVarId], values: &[bool]) -> u64 {
-        addr.iter().enumerate().fold(0, |result, (bit, value)| {
-            result | ((values[value.0 as usize] as u64) << bit)
-        })
+    fn address(addr: &[IRVarId], values: &[bool]) -> Vec<bool> {
+        addr.iter().map(|value| values[value.0 as usize]).collect()
     }
 
     fn assert_pure_equivalent(source: RCircuit) {
@@ -679,8 +677,8 @@ mod tests {
         for mask in 0..16 {
             let input = (0..4).map(|bit| (mask >> bit) & 1 == 1).collect::<Vec<_>>();
             let mut source_storage = StorageState::new();
-            source_storage.insert(((storage, lane), 0), mask & 1 != 0);
-            source_storage.insert(((storage, lane), 1), mask & 2 != 0);
+            source_storage.insert(((storage, lane), vec![false]), mask & 1 != 0);
+            source_storage.insert(((storage, lane), vec![true]), mask & 2 != 0);
             let mut lowered_storage = source_storage.clone();
             let mut source_wires = input.clone();
             source.apply_with_externals(&mut source_wires, &mut source_storage, &mut TestSources);
@@ -701,7 +699,7 @@ mod tests {
     fn logical_storage(storage: &StorageState) -> StorageState {
         storage
             .iter()
-            .filter_map(|(key, value)| value.then_some((*key, true)))
+            .filter_map(|(key, value)| value.then_some((key.clone(), true)))
             .collect()
     }
 

@@ -880,6 +880,21 @@ mod tests {
         }
     }
 
+    fn add_to_address(addr: &[bool], mut addend: usize) -> Vec<bool> {
+        let mut result = addr.to_vec();
+        let mut bit = 0;
+        while addend != 0 {
+            if bit == result.len() {
+                result.push(false);
+            }
+            let sum = result[bit] as usize + (addend & 1);
+            result[bit] = sum & 1 != 0;
+            addend = (addend >> 1) + (sum >> 1);
+            bit += 1;
+        }
+        result
+    }
+
     /// Evaluate a pure-gate + storage `BCircuit` (static addresses only).
     fn eval_circuit(circ: &BCircuit<()>, params: &[bool]) -> Vec<bool> {
         use volar_ir::boolar::{BIrPreInitSegment, BIrStmt};
@@ -888,10 +903,10 @@ mod tests {
         for (i, &b) in params.iter().enumerate() {
             vals[i] = Some(b);
         }
-        let mut storage: BTreeMap<((StorageId, LaneId), u64), bool> = BTreeMap::new();
+        let mut storage: BTreeMap<((StorageId, LaneId), Vec<bool>), bool> = BTreeMap::new();
         for seg in &circ.pre_init {
             for (i, &b) in seg.data.iter().enumerate() {
-                storage.insert(((seg.storage, seg.lane), seg.offset + i as u64), b);
+                storage.insert(((seg.storage, seg.lane), add_to_address(&seg.addr, i)), b);
             }
         }
         for (i, node) in circ.stmts.iter().enumerate() {
@@ -904,21 +919,11 @@ mod tests {
                 BIrStmt::Xor(a, b) => vals[a.0 as usize].unwrap() ^ vals[b.0 as usize].unwrap(),
                 BIrStmt::Not(a) => !vals[a.0 as usize].unwrap(),
                 BIrStmt::StorageRead { storage: s, lane, addr } => {
-                    let mut flat = 0u64;
-                    for (i, a) in addr.iter().enumerate() {
-                        if vals[a.0 as usize].unwrap() {
-                            flat |= 1 << i;
-                        }
-                    }
+                    let flat = addr.iter().map(|a| vals[a.0 as usize].unwrap()).collect();
                     *storage.get(&((*s, *lane), flat)).unwrap_or(&false)
                 }
                 BIrStmt::StorageWrite { storage: s, lane, src, addr } => {
-                    let mut flat = 0u64;
-                    for (i, a) in addr.iter().enumerate() {
-                        if vals[a.0 as usize].unwrap() {
-                            flat |= 1 << i;
-                        }
-                    }
+                    let flat = addr.iter().map(|a| vals[a.0 as usize].unwrap()).collect();
                     storage.insert(((*s, *lane), flat), vals[src.0 as usize].unwrap());
                     false
                 }

@@ -29,16 +29,31 @@ use volar_ir_common::StorageId;
 
 use volar_ir_passes::apply_gadgets;
 
+fn add_to_address(addr: &[bool], mut addend: usize) -> Vec<bool> {
+    let mut result = addr.to_vec();
+    let mut bit = 0;
+    while addend != 0 {
+        if bit == result.len() {
+            result.push(false);
+        }
+        let sum = result[bit] as usize + (addend & 1);
+        result[bit] = sum & 1 != 0;
+        addend = (addend >> 1) + (sum >> 1);
+        bit += 1;
+    }
+    result
+}
+
 /// Evaluate a pure-gate + static-storage `BCircuit`.
 fn eval_fused(circ: &BCircuit<()>, params: &[bool]) -> Vec<bool> {
     let mut vals: Vec<Option<bool>> = vec![None; circ.var_space() as usize];
     for (i, &b) in params.iter().enumerate() {
         vals[i] = Some(b);
     }
-    let mut storage = std::collections::BTreeMap::<((StorageId, LaneId), u64), bool>::new();
+    let mut storage = std::collections::BTreeMap::<((StorageId, LaneId), Vec<bool>), bool>::new();
     for seg in &circ.pre_init {
         for (i, &b) in seg.data.iter().enumerate() {
-            storage.insert(((seg.storage, seg.lane), seg.offset + i as u64), b);
+            storage.insert(((seg.storage, seg.lane), add_to_address(&seg.addr, i)), b);
         }
     }
     for (i, node) in circ.stmts.iter().enumerate() {
@@ -51,21 +66,11 @@ fn eval_fused(circ: &BCircuit<()>, params: &[bool]) -> Vec<bool> {
             BIrStmt::Xor(a, b) => vals[a.0 as usize].unwrap() ^ vals[b.0 as usize].unwrap(),
             BIrStmt::Not(a) => !vals[a.0 as usize].unwrap(),
             BIrStmt::StorageRead { storage: s, lane, addr } => {
-                let mut flat = 0u64;
-                for (i, a) in addr.iter().enumerate() {
-                    if vals[a.0 as usize].unwrap() {
-                        flat |= 1 << i;
-                    }
-                }
+                let flat = addr.iter().map(|a| vals[a.0 as usize].unwrap()).collect();
                 *storage.get(&((*s, *lane), flat)).unwrap_or(&false)
             }
             BIrStmt::StorageWrite { storage: s, lane, src, addr } => {
-                let mut flat = 0u64;
-                for (i, a) in addr.iter().enumerate() {
-                    if vals[a.0 as usize].unwrap() {
-                        flat |= 1 << i;
-                    }
-                }
+                let flat = addr.iter().map(|a| vals[a.0 as usize].unwrap()).collect();
                 storage.insert(((*s, *lane), flat), vals[src.0 as usize].unwrap());
                 false
             }

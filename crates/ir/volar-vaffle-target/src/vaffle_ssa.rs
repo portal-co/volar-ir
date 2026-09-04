@@ -213,6 +213,7 @@ pub fn ssa_ify_module<P: Clone>(module: &Module<P>) -> Module<P> {
         .collect();
 
     Module {
+        pointer_width: module.pointer_width,
         types,
         oracles: module.oracles.clone(),
         actions: module.actions.clone(),
@@ -871,6 +872,7 @@ mod tests {
             types.intern(IrType::Primitive(volar_ir_common::Type::Bit));
         }
         Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
             types,
             oracles: Vec::new(),
             actions: Vec::new(),

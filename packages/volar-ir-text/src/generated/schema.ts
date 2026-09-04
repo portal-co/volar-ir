@@ -76,9 +76,13 @@ export type LaneId = bigint;
 export interface BIrPreInitSegment {
   readonly storage: StorageId;
   readonly lane: LaneId;
-  readonly offset: bigint;
+  readonly addr: ReadonlyArray<boolean>;
   readonly data: ReadonlyArray<boolean>;
 }
+export type PointerWidth =
+  | "Bits32"
+  | "Bits64"
+;
 export type SigId = bigint;
 export type FuncId = bigint;
 export type BlockId = bigint;
@@ -204,6 +208,7 @@ export interface BStmtChunk<P = unknown> {
   readonly stmts: ReadonlyArray<IrNode<unknown, P>>;
 }
 export interface VaffleModule<P = unknown> {
+  readonly pointer_width: PointerWidth;
   readonly types: unknown;
   readonly oracles: ReadonlyArray<OracleDecl>;
   readonly actions: ReadonlyArray<ActionDecl>;

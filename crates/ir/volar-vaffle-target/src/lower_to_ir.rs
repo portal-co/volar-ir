@@ -8,8 +8,8 @@
 //! Individual GF(2) bits are packed into `Vec(PACK_W, Bit)` words (default
 //! `PACK_W = 64`) at every boundary:
 //!
-//! * **Block parameters**: `ceil(SP_BITS / PACK_W)` packed words instead of
-//!   `SP_BITS` individual `Bit` params.
+//! * **Block parameters**: `ceil(pointer_bits / PACK_W)` packed words instead
+//!   of `pointer_bits` individual `Bit` params.
 //! * **Spill / reload**: `ceil(N / PACK_W)` `StorageWrite` / `StorageRead`
 //!   ops instead of `N`.
 //! * **Frame arguments / return**: packed word slots.
@@ -66,26 +66,6 @@ use volar_lir::circuits::{
     bc_add, frame_read_cont, frame_reload, frame_spill, frame_write_cont, frame_write_ret, n_packs,
     pack_bits, unpack_words, BitCircuitBuilder, FrameLayout, StackPtr, StorageEmitter, PACK_W,
 };
-
-/// Width of the stack-pointer address in bits.
-///
-/// Must be wide enough to hold not just `own_size` (a function's own
-/// frame size, i.e. the SP value once its own body starts executing --
-/// see `emit_entry_and_exit`'s `new_sp.advance(own_size)`) but `own_size`
-/// *plus* the largest offset addressable within that same frame (every
-/// cross-block spill/reload address is `SP + offset`, `offset` up to
-/// `own_size - 1`) -- i.e. on the order of `2 * own_size`, not
-/// `own_size` alone. 16 bits (max ~65535) silently overflows for any
-/// function whose own `own_size` exceeds roughly half that (~32768):
-/// addresses wrap modulo `2^SP_BITS` and alias unrelated storage, with
-/// no panic or other visible signal -- confirmed as the root cause of a
-/// real interpreter's wrong-answer bug (a 120-block RISC-V interpreter
-/// with `own_size` = 44995, i.e. `SP` alone already exceeded the usable
-/// per-offset headroom `65536 - 44995 = 20541`). 32 bits costs nothing
-/// extra in practice: `n_packs(SP_BITS)` (the packed-word count for SP
-/// at every block boundary/spill site) is `ceil(SP_BITS / PACK_W)`, and
-/// `PACK_W = 64`, so 16→32 doesn't even change the packed word count.
-pub const SP_BITS: usize = 32;
 
 /// Number of bits packed into a single `Vec(PACK_W, Bit)` word at block
 /// boundaries, spill/reload slots, and frame argument slots.
@@ -174,7 +154,7 @@ pub fn lower_vaffle_to_ir_with_spill_trace<P: Clone>(
 // ============================================================================
 
 const BIT_TID: TypeId = TypeId(0);
-const ADDR_TID: TypeId = TypeId(1); // Vec(SP_BITS, Bit)
+const ADDR_TID: TypeId = TypeId(1); // Vec(module.pointer_width, Bit)
 /// `Vec(PACK_W, Bit)` — the packed word type.  Index 2 in the type table.
 const PACK_TID: TypeId = TypeId(2);
 
@@ -404,6 +384,7 @@ struct FuncInfo {
 
 pub(crate) struct LowerCtx<'m, P: Clone = ()> {
     module: &'m Module<P>,
+    pointer_bits: usize,
     types: IRTypes,
     /// Maps VAFFLE TypeId → IR TypeId (index = VAFFLE TypeId.0).
     type_map: Vec<TypeId>,
@@ -437,9 +418,10 @@ pub(crate) struct LowerCtx<'m, P: Clone = ()> {
 
 impl<'m, P: Clone> LowerCtx<'m, P> {
     pub(crate) fn new(module: &'m Module<P>) -> Self {
+        let pointer_bits = module.pointer_width.bits();
         let mut types = IRTypes::new();
         types.push(IrType::Primitive(Type::Bit)); // index 0 = BIT_TID
-        types.push(IrType::Vec(SP_BITS, BIT_TID)); // index 1 = ADDR_TID
+        types.push(IrType::Vec(pointer_bits, BIT_TID)); // index 1 = ADDR_TID
         types.push(IrType::Vec(PACK_W, BIT_TID)); // index 2 = PACK_TID
 
         // Build a mapping from VAFFLE TypeId → IR TypeId by interning each
@@ -471,6 +453,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
 
         LowerCtx {
             module,
+            pointer_bits,
             types,
             type_map,
             func_info: Vec::new(),
@@ -494,7 +477,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     /// Intern a Block type for a continuation that receives packed
     /// `[sp_words…, ret_words…]`.
     fn intern_cont_block_type(&mut self, n_ret_bits: usize) -> TypeId {
-        let sp_words = n_packs(SP_BITS);
+        let sp_words = n_packs(self.pointer_bits);
         let ret_words = n_packs(n_ret_bits);
         let params = vec![PACK_TID; sp_words + ret_words];
         self.types.intern(IrType::Block { params })
@@ -687,7 +670,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             .expect("only declaration-only imports have an abort sink");
         debug_assert_eq!(self.blocks.len(), abort_block);
 
-        let sp_words = n_packs(SP_BITS);
+        let sp_words = n_packs(self.pointer_bits);
         let return_start = sp_words + info.n_param_words;
         let mut params = vec![PACK_TID; return_start];
         params.extend(vec![BIT_TID; self.entry_return_bits()]);
@@ -760,7 +743,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
 
         let param_words: Vec<IRVarId> = (0..n_param_words as u32).map(IRVarId).collect();
 
-        let sp = StackPtr::<IRVarId>::from_const(&mut em, 0, SP_BITS);
+        let sp = StackPtr::<IRVarId>::from_const(&mut em, 0, self.pointer_bits);
 
         let info = &self.func_info[0];
         let callee_layout = &info.callee_layout;
@@ -804,7 +787,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         // Block 1: exit continuation.  Packed params: [sp_words, ret_words].
         // Use the actual total bit-width of the function's return values.
         let total_ret_bits = self.func_info[0].total_ret_bits;
-        let sp_packs = n_packs(SP_BITS);
+        let sp_packs = n_packs(self.pointer_bits);
         let ret_packs = n_packs(total_ret_bits);
         let exit_params: Vec<IRTypeId> = vec![PACK_TID; sp_packs + ret_packs];
         let mut exit_em = BlockEmitter::new(exit_params);
@@ -829,7 +812,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         let own_layout = info.own_layout.clone();
         let callee_layout = info.callee_layout.clone();
 
-        let sp_packs = n_packs(SP_BITS);
+        let sp_packs = n_packs(self.pointer_bits);
         let n_param_words = info.n_param_words;
         let n_params = info.n_params;
         let cross_block_values = info.cross_block_values.clone();
@@ -866,7 +849,8 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
 
             // Unpack SP from packed words.
             let sp_word_ids: Vec<IRVarId> = (0..sp_packs as u32).map(IRVarId).collect();
-            let sp_bits: Vec<IRVarId> = unpack_words(&mut em, &sp_word_ids, SP_BITS, PACK_W);
+            let sp_bits: Vec<IRVarId> =
+                unpack_words(&mut em, &sp_word_ids, self.pointer_bits, PACK_W);
 
             let mut frame_sp = StackPtr::new(sp_bits.clone());
             frame_sp.retreat(own_layout.size);
@@ -998,7 +982,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                         }) => {
                             let local_addr = val_map.get(&addr.0).copied().unwrap_or(IRVarId(0));
                             let real_addr =
-                                rebase_stack_addr(&mut current_em, &current_sp_bits, local_addr);
+                                rebase_stack_addr(
+                                    &mut current_em,
+                                    &current_sp_bits,
+                                    local_addr,
+                                    self.pointer_bits,
+                                );
                             let id = current_em.emit(IRStmt::StorageRead {
                                 storage: StorageId::STACK,
                                 ty: self.type_map[ty.0 as usize],
@@ -1014,7 +1003,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                         }) => {
                             let local_addr = val_map.get(&addr.0).copied().unwrap_or(IRVarId(0));
                             let real_addr =
-                                rebase_stack_addr(&mut current_em, &current_sp_bits, local_addr);
+                                rebase_stack_addr(
+                                    &mut current_em,
+                                    &current_sp_bits,
+                                    local_addr,
+                                    self.pointer_bits,
+                                );
                             let ir_src = val_map.get(&src.0).copied().unwrap_or(IRVarId(0));
                             let id = current_em.emit(IRStmt::StorageWrite {
                                 storage: StorageId::STACK,
@@ -1031,12 +1025,17 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                         }
                         Value::StackAlloc { base_slot, .. } => {
                             // `base_slot` is a genuine u64 known here (not an
-                            // operand to look up) -- stamp it as a `_32`-wide
+                            // operand to look up) -- stamp it at the module's
+                            // pointer width
                             // Const first (wide enough that `extract_bit`
                             // reads real bits, not the 1-bit-truncation bug
                             // `addr_tid` fixed elsewhere), then rebase like
                             // any other stack address.
-                            let base_tid = self.types.primitive(Type::_32);
+                            let base_tid = self.types.primitive(match self.pointer_bits {
+                                32 => Type::_32,
+                                64 => Type::_64,
+                                _ => unreachable!("VAFFLE pointer width is validated by its ABI"),
+                            });
                             let base_const = current_em.emit(IRStmt::Const(
                                 Constant {
                                     hi: 0,
@@ -1045,7 +1044,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                 base_tid,
                             ));
                             let addr =
-                                rebase_stack_addr(&mut current_em, &current_sp_bits, base_const);
+                                rebase_stack_addr(
+                                    &mut current_em,
+                                    &current_sp_bits,
+                                    base_const,
+                                    self.pointer_bits,
+                                );
                             val_map.insert(svid.0, addr);
                         }
                         Value::PtrLoad { ptr, .. } => {
@@ -1257,7 +1261,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             let cont_sp_word_ids: Vec<IRVarId> =
                                 (0..sp_packs as u32).map(IRVarId).collect();
                             let cont_sp_bits =
-                                unpack_words(&mut cont_em, &cont_sp_word_ids, SP_BITS, PACK_W);
+                                unpack_words(
+                                    &mut cont_em,
+                                    &cont_sp_word_ids,
+                                    self.pointer_bits,
+                                    PACK_W,
+                                );
 
                             // Unpack return value.
                             if n_ret_bits_orig > 0 {
@@ -2021,7 +2030,7 @@ fn compute_alloca_budget<P: Clone>(body: &FuncBody<P>, types: &IRTypes, type_map
 ///
 /// `local_addr` is whatever the producer already translated the address
 /// operand to -- a `Primitive` scalar (`volar-llvm-vaffle-import`'s single
-/// `Stmt::Const`) or a `Vec(SP_BITS, Bit)` (a `Merge`-composed bit vector,
+/// `Stmt::Const`) or a `Vec(pointer_bits, Bit)` (a `Merge`-composed bit vector,
 /// as `VaffleTarget::alloca` builds one, should a future producer route
 /// through `StorageId::ALLOCA` the same way); both decompose to individual
 /// bits the same way via `extract_bit`/`Shuffle`, so no producer-specific
@@ -2038,8 +2047,11 @@ fn rebase_stack_addr<P: Clone>(
     em: &mut BlockEmitter<P>,
     sp_bits: &[IRVarId],
     local_addr: IRVarId,
+    pointer_bits: usize,
 ) -> IRVarId {
-    let local_bits: Vec<IRVarId> = (0..SP_BITS as u8).map(|i| em.extract_bit(local_addr, i)).collect();
+    let local_bits: Vec<IRVarId> = (0..pointer_bits as u8)
+        .map(|i| em.extract_bit(local_addr, i))
+        .collect();
     let real_bits = bc_add(em, &local_bits, sp_bits, false);
     em.compose_address(&real_bits)
 }
@@ -2335,6 +2347,7 @@ mod tests {
         };
 
         let module = vaffle::Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
             types,
             oracles: std::vec![],
             actions: std::vec![],
@@ -2404,7 +2417,7 @@ mod tests {
 
         // Block 0 is the module trampoline: packed entry-function params
         // (circuit inputs). Block 2 is the function's entry block.  Its
-        // params should be ceil(SP_BITS / PACK_W) packed SP words +
+        // params should be ceil(pointer_bits / PACK_W) packed SP words +
         // ceil(1 / PACK_W) param words (Bool = 1 bit, packed into 1 PACK_TID
         // word). The trampoline jump must pass SP + those same param words.
         assert!(ir_blocks.blocks.len() >= 3);
@@ -2424,7 +2437,7 @@ mod tests {
             other => panic!("expected trampoline Jmp, got {other:?}"),
         }
         let func_entry = &ir_blocks.blocks[2];
-        let sp_packs = (SP_BITS + PACK_W - 1) / PACK_W;
+        let sp_packs = (t.pointer_width().bits() + PACK_W - 1) / PACK_W;
         let bool_packs = 1_usize; // ceil(1 bit / PACK_W) = 1
         assert_eq!(
             func_entry.params.len(),
@@ -2560,6 +2573,7 @@ mod tests {
         };
 
         let module = vaffle::Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
             types,
             oracles: std::vec![],
             actions: std::vec![],
@@ -2711,6 +2725,7 @@ mod tests {
         };
 
         let module = vaffle::Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
             types,
             oracles: std::vec![],
             actions: std::vec![],
@@ -2832,6 +2847,7 @@ mod tests {
         };
 
         let module = vaffle::Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
             types,
             oracles: std::vec![],
             actions: std::vec![],
@@ -2948,6 +2964,7 @@ mod tests {
         };
 
         let module = vaffle::Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
             types,
             oracles: std::vec![],
             actions: std::vec![],

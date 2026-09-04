@@ -277,6 +277,7 @@ mod tests {
         };
 
         let module = Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
             types,
             oracles: alloc::vec![],
             actions: alloc::vec![],

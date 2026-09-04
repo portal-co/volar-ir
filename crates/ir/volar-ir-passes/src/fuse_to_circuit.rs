@@ -115,7 +115,7 @@ mod tests {
         let pre_init = vec![BIrPreInitSegment {
             storage: StorageId(9),
             lane: volar_ir::boolar::LaneId(2),
-            offset: 3,
+            addr: vec![true, true],
             data: vec![true, false, true],
         }];
         let blocks = BIrBlocks {
