@@ -173,8 +173,9 @@ stay agnostic to it.
   the fix: a tail call reuses the caller's own, already-written
   continuation and its own frame becomes dead once the tail call happens,
   so the callee's frame safely overlapping the tail-calling function's own
-  now-dead alloca region is correct, not a bug. Not otherwise exercised by
-  a new test here.
+  now-dead alloca region is correct, not a bug.
+  `llvm_direct_tail_call_return_computes_correct_value` exercises the
+  importer-generated form end to end.
 
 ## Tests
 
@@ -182,8 +183,9 @@ stay agnostic to it.
 `llvm_register_xor_call_computes_correct_value`
 (`volar-ir-build/tests/llvm_frontends.rs`) -- both now assert the actual
 computed value via `unroll_ir` + `volar_fuzz::interpreter::ir::eval_ir`,
-not just that lowering succeeds. Full `volar-fuzz` property suite (78
-tests) and the broader `vaffle`/`volar-ir-opt`/`volar-ir-passes`/
+not just that lowering succeeds. The tail-call test additionally checks a
+direct `call; ret` pair that imports as `ReturnCall`. Full `volar-fuzz`
+property suite (78 tests) and the broader `vaffle`/`volar-ir-opt`/`volar-ir-passes`/
 `volar-c-backend`/`volar-wasm-backend`/`volar-llvm-backend` regression
 suites re-verified green after each of the four fixes.
 

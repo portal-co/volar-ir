@@ -21,7 +21,8 @@
 //!
 //! Supported: integer arithmetic (`add`/`sub`/`mul`/`udiv`/`sdiv`), bitwise
 //! ops, shifts, `icmp` (all predicates), `select`, `trunc`/`zext`/`sext`,
-//! `phi` (→ block params), direct `call`, `br`/conditional `br`/`switch`/`ret`,
+//! `phi` (→ block params), direct `call`, direct tail calls (→
+//! `Terminator::ReturnCall`), `br`/conditional `br`/`switch`/`ret`,
 //! and loads/stores through **two** distinct pointer provenances, resolved at
 //! import time and never conflated:
 //!
@@ -41,8 +42,8 @@
 //!
 //! Not yet supported (hard error): floats, vectors, aggregates, atomics,
 //! `indirectbr`/`blockaddress` (VAFFLE's `Value::BlockAddr` already models
-//! this — ingest is deferred), tail calls as a distinct form (currently
-//! lowered the same as an ordinary `call`), any pointer arithmetic whose
+//! this — ingest is deferred), reachable `unreachable` not immediately
+//! preceded by a direct call, any pointer arithmetic whose
 //! base doesn't resolve to a literal global or a tracked stack pointer,
 //! `alloca` with a symbolic count or a non-integer element type, a
 //! multi-index or symbolic-index `getelementptr` into a stack pointer, and
@@ -248,6 +249,48 @@ impl MemoryIntrinsic {
             Self::Memmove => "memmove",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverflowIntrinsic {
+    SAdd,
+    UAdd,
+    SSub,
+    USub,
+    SMul,
+    UMul,
+}
+
+impl OverflowIntrinsic {
+    fn from_name(name: &str) -> Option<Self> {
+        [
+            ("llvm.sadd.with.overflow.", Self::SAdd),
+            ("llvm.uadd.with.overflow.", Self::UAdd),
+            ("llvm.ssub.with.overflow.", Self::SSub),
+            ("llvm.usub.with.overflow.", Self::USub),
+            ("llvm.smul.with.overflow.", Self::SMul),
+            ("llvm.umul.with.overflow.", Self::UMul),
+        ]
+        .into_iter()
+        .find_map(|(prefix, intrinsic)| name.starts_with(prefix).then_some(intrinsic))
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::SAdd => "llvm.sadd.with.overflow",
+            Self::UAdd => "llvm.uadd.with.overflow",
+            Self::SSub => "llvm.ssub.with.overflow",
+            Self::USub => "llvm.usub.with.overflow",
+            Self::SMul => "llvm.smul.with.overflow",
+            Self::UMul => "llvm.umul.with.overflow",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TailCallEnd {
+    Return,
+    Unreachable,
 }
 
 struct Importer<'ctx> {
@@ -767,6 +810,7 @@ impl<'ctx> Importer<'ctx> {
                     &e,
                 ))
             }
+            InstructionOpcode::ExtractValue => Some(self.extract_overflow_field(fctx, instr)?),
             InstructionOpcode::Trunc => {
                 let src = op!(0);
                 let dst_n = int_result_width(instr)?;
@@ -907,42 +951,56 @@ impl<'ctx> Importer<'ctx> {
                 let callee_fn = call
                     .get_called_fn_value()
                     .ok_or_else(|| ImportError::Unsupported("indirect call".into()))?;
-                if let Some(intrinsic) =
-                    MemoryIntrinsic::from_name(&callee_fn.get_name().to_string_lossy())
-                {
+                let callee_name = callee_fn.get_name().to_string_lossy();
+                if let Some(intrinsic) = MemoryIntrinsic::from_name(&callee_name) {
                     self.translate_memory_intrinsic(fctx, instr, intrinsic)?;
                     None
+                } else if let Some(intrinsic) = OverflowIntrinsic::from_name(&callee_name) {
+                    let fields = self.translate_overflow_intrinsic(fctx, instr, intrinsic)?;
+                    fctx.aggregate_fields
+                        .insert(instr.as_any_value_enum(), fields);
+                    None
                 } else {
+                    let tail_end = tail_call_end(instr);
+                    // A `ReturnCall` has no continuation, so it can only
+                    // target a defined function when it represents LLVM's
+                    // ordinary `call; ret` shape. A body-less declaration is
+                    // nevertheless meaningful for `call; unreachable`: it
+                    // models an aborting direct call and never returns into
+                    // the enclosing function.
+                    let is_tail_call = matches!(tail_end, Some(TailCallEnd::Unreachable))
+                        || (matches!(tail_end, Some(TailCallEnd::Return))
+                            && callee_fn.get_first_basic_block().is_some());
                     let callee_id = self.func_id(callee_fn);
                     called.push(callee_fn);
-                    let n_args = instr.get_num_operands().saturating_sub(1);
-                    let mut args = Vec::new();
-                    for i in 0..n_args {
-                        let v = instr
-                            .get_operand(i)
-                            .and_then(|o| o.value())
-                            .ok_or_else(|| {
-                                ImportError::Unsupported("call argument must be a value".into())
-                            })?;
-                        args.extend(self.value_bits(fctx, v)?);
-                    }
-                    let vid = fctx.emit(
-                        cur,
-                        Value::Call {
+                    let args = self.call_arg_bits(fctx, instr)?;
+                    if is_tail_call {
+                        fctx.terminators[cur.0] = Some(Terminator::ReturnCall {
                             func: callee_id,
                             args,
-                        },
-                    );
-                    match instr.get_type().try_into() {
-                        Ok(inkwell::types::BasicTypeEnum::IntType(t)) => {
-                            let n = t.get_bit_width() as usize;
-                            Some(
-                                (0..n)
-                                    .map(|i| fctx.emit(cur, Value::Output { value: vid, idx: i }))
-                                    .collect(),
-                            )
+                        });
+                        None
+                    } else {
+                        let vid = fctx.emit(
+                            cur,
+                            Value::Call {
+                                func: callee_id,
+                                args,
+                            },
+                        );
+                        match instr.get_type().try_into() {
+                            Ok(inkwell::types::BasicTypeEnum::IntType(t)) => {
+                                let n = t.get_bit_width() as usize;
+                                Some(
+                                    (0..n)
+                                        .map(|i| {
+                                            fctx.emit(cur, Value::Output { value: vid, idx: i })
+                                        })
+                                        .collect(),
+                                )
+                            }
+                            _ => None,
                         }
-                        _ => None,
                     }
                 }
             }
@@ -1083,6 +1141,170 @@ impl<'ctx> Importer<'ctx> {
                 self.intrinsic_store(fctx, dest, &bytes)
             }
         }
+    }
+
+    fn call_arg_bits(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        instr: InstructionValue<'ctx>,
+    ) -> IResult<Bits> {
+        let n_args = instr.get_num_operands().saturating_sub(1);
+        let mut args = Vec::new();
+        for i in 0..n_args {
+            let value = instr
+                .get_operand(i)
+                .and_then(|operand| operand.value())
+                .ok_or_else(|| {
+                    ImportError::Unsupported("call argument must be a value".into())
+                })?;
+            args.extend(self.value_bits(fctx, value)?);
+        }
+        Ok(args)
+    }
+
+    /// Lower LLVM's fixed two-field arithmetic-overflow aggregates. They are
+    /// never materialized as first-class aggregate values: the result and its
+    /// overflow bit are kept under the call instruction until an
+    /// `extractvalue` projects one of them.
+    fn translate_overflow_intrinsic(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        instr: InstructionValue<'ctx>,
+        intrinsic: OverflowIntrinsic,
+    ) -> IResult<Vec<Bits>> {
+        let n_args = instr.get_num_operands().saturating_sub(1);
+        if n_args != 2 {
+            return Err(ImportError::Unsupported(format!(
+                "{} has unexpected operand count {n_args}",
+                intrinsic.name()
+            )));
+        }
+
+        let a = overflow_integer_operand(instr, 0, intrinsic)?;
+        let b = overflow_integer_operand(instr, 1, intrinsic)?;
+        if a.get_type().get_bit_width() != b.get_type().get_bit_width() {
+            return Err(ImportError::Unsupported(format!(
+                "{} operands must have the same integer width",
+                intrinsic.name()
+            )));
+        }
+
+        let a = self.value_bits(fctx, BasicValueEnum::IntValue(a))?;
+        let b = self.value_bits(fctx, BasicValueEnum::IntValue(b))?;
+        let n_bits = a.len();
+        if n_bits == 0 {
+            return Err(ImportError::Unsupported(format!(
+                "{} operands must not be empty",
+                intrinsic.name()
+            )));
+        }
+        let cur = fctx.current;
+        let mut c = Ctx {
+            fctx,
+            bit_tid: self.bit_tid,
+            block: cur,
+        };
+
+        let (result, overflow) = match intrinsic {
+            OverflowIntrinsic::SAdd => {
+                let result = circuits::bc_add(&mut c, &a, &b, false);
+                let input_signs_differ = c.bc_xor(a[n_bits - 1], b[n_bits - 1]);
+                let input_signs_match = c.bc_not(input_signs_differ);
+                let result_sign_changed = c.bc_xor(result[n_bits - 1], a[n_bits - 1]);
+                let overflow = c.bc_and(input_signs_match, result_sign_changed);
+                (result, overflow)
+            }
+            OverflowIntrinsic::UAdd => {
+                let result = circuits::bc_add(&mut c, &a, &b, false);
+                let overflow = circuits::bc_ult(&mut c, &result, &a);
+                (result, overflow)
+            }
+            OverflowIntrinsic::SSub => {
+                let result = circuits::bc_sub(&mut c, &a, &b);
+                let input_signs_differ = c.bc_xor(a[n_bits - 1], b[n_bits - 1]);
+                let result_sign_changed = c.bc_xor(result[n_bits - 1], a[n_bits - 1]);
+                let overflow = c.bc_and(input_signs_differ, result_sign_changed);
+                (result, overflow)
+            }
+            OverflowIntrinsic::USub => {
+                let result = circuits::bc_sub(&mut c, &a, &b);
+                let overflow = circuits::bc_ult(&mut c, &a, &b);
+                (result, overflow)
+            }
+            OverflowIntrinsic::SMul => {
+                let result = circuits::bc_mul(&mut c, &a, &b);
+                let wide_bits = n_bits.checked_mul(2).ok_or_else(|| {
+                    ImportError::Unsupported(format!(
+                        "{} operand width is too large",
+                        intrinsic.name()
+                    ))
+                })?;
+                let a_sign = a[n_bits - 1];
+                let b_sign = b[n_bits - 1];
+                let result_sign = result[n_bits - 1];
+                let mut a_wide = a.clone();
+                let mut b_wide = b.clone();
+                let mut result_wide = result.clone();
+                while a_wide.len() < wide_bits {
+                    a_wide.push(a_sign);
+                    b_wide.push(b_sign);
+                    result_wide.push(result_sign);
+                }
+                let full = circuits::bc_mul(&mut c, &a_wide, &b_wide);
+                let overflow = circuits::bc_ne(&mut c, &full, &result_wide);
+                (result, overflow)
+            }
+            OverflowIntrinsic::UMul => {
+                let wide_bits = n_bits.checked_mul(2).ok_or_else(|| {
+                    ImportError::Unsupported(format!(
+                        "{} operand width is too large",
+                        intrinsic.name()
+                    ))
+                })?;
+                let mut a_wide = a.clone();
+                let mut b_wide = b.clone();
+                while a_wide.len() < wide_bits {
+                    a_wide.push(c.bc_const(false));
+                    b_wide.push(c.bc_const(false));
+                }
+                let full = circuits::bc_mul(&mut c, &a_wide, &b_wide);
+                let result = full[..n_bits].to_vec();
+                let mut overflow = c.bc_const(false);
+                for bit in &full[n_bits..] {
+                    overflow = c.bc_or(overflow, *bit);
+                }
+                (result, overflow)
+            }
+        };
+
+        Ok(vec![result, vec![overflow]])
+    }
+
+    fn extract_overflow_field(
+        &self,
+        fctx: &FuncCtx<'ctx>,
+        instr: InstructionValue<'ctx>,
+    ) -> IResult<Bits> {
+        let aggregate = call_value_operand(instr, 0, "extractvalue aggregate")?;
+        let fields = fctx
+            .aggregate_fields
+            .get(&aggregate.as_any_value_enum())
+            .ok_or_else(|| {
+                ImportError::Unsupported(
+                    "extractvalue of an untracked aggregate is not supported".into(),
+                )
+            })?;
+        let indices = instr.get_indices();
+        let [field] = indices.as_slice() else {
+            return Err(ImportError::Unsupported(
+                "extractvalue must select exactly one aggregate field".into(),
+            ));
+        };
+        fields.get(*field as usize).cloned().ok_or_else(|| {
+            ImportError::Unsupported(format!(
+                "extractvalue field {field} is outside the tracked aggregate"
+            ))
+        })
     }
 
     fn intrinsic_pointer(
@@ -1340,6 +1562,13 @@ impl<'ctx> Importer<'ctx> {
         bb: LlvmBlock<'ctx>,
     ) -> IResult<()> {
         let cur = fctx.current;
+        // A preceding direct call may already have consumed this LLVM
+        // terminator as a VAFFLE `ReturnCall`. This is how both ordinary
+        // `call; ret` TCO and noreturn-style `call; unreachable` avoid
+        // introducing an IR-wide Unreachable variant.
+        if fctx.terminators[cur.0].is_some() {
+            return Ok(());
+        }
         let term = match instr.get_opcode() {
             InstructionOpcode::Return => {
                 let values = match instr.get_operand(0) {
@@ -1380,9 +1609,12 @@ impl<'ctx> Importer<'ctx> {
                 }
             }
             InstructionOpcode::Switch => self.translate_switch(fctx, instr, bb)?,
+            InstructionOpcode::Unreachable => {
+                return Err(ImportError::Unsupported("reachable unreachable".into()));
+            }
             other => {
                 return Err(ImportError::Unsupported(format!(
-                    "terminator {other:?} (indirectbr not yet supported)"
+                    "terminator {other:?} is not supported"
                 )));
             }
         };
@@ -1619,6 +1851,24 @@ fn call_value_operand<'ctx>(
         .ok_or_else(|| ImportError::Unsupported(format!("{description} must be a value")))
 }
 
+/// Detect the exact LLVM shapes that can use VAFFLE's `ReturnCall` without
+/// materializing a call result or creating a continuation. The caller has
+/// already established that this is a direct call.
+fn tail_call_end(instr: InstructionValue<'_>) -> Option<TailCallEnd> {
+    let terminator = instr.get_next_instruction()?;
+    match terminator.get_opcode() {
+        InstructionOpcode::Unreachable => Some(TailCallEnd::Unreachable),
+        InstructionOpcode::Return => match terminator.get_operand(0).and_then(|op| op.value()) {
+            Some(value) if value.as_any_value_enum() == instr.as_any_value_enum() => {
+                Some(TailCallEnd::Return)
+            }
+            None if instr.get_type().is_void_type() => Some(TailCallEnd::Return),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn memory_intrinsic_length<'ctx>(
     instr: InstructionValue<'ctx>,
     index: u32,
@@ -1666,6 +1916,20 @@ fn memory_intrinsic_nonvolatile<'ctx>(
         )));
     }
     Ok(())
+}
+
+fn overflow_integer_operand<'ctx>(
+    instr: InstructionValue<'ctx>,
+    index: u32,
+    intrinsic: OverflowIntrinsic,
+) -> IResult<IntValue<'ctx>> {
+    match call_value_operand(instr, index, "overflow intrinsic operand")? {
+        BasicValueEnum::IntValue(value) => Ok(value),
+        _ => Err(ImportError::Unsupported(format!(
+            "{} operands must be integers",
+            intrinsic.name()
+        ))),
+    }
 }
 
 fn intrinsic_ranges_overlap(
@@ -1734,6 +1998,11 @@ struct FuncCtx<'ctx> {
     stmts: Vec<Vec<ValueId>>,
     terminators: Vec<Option<Terminator>>,
     cache: HashMap<AnyValueEnum<'ctx>, Bits>,
+    /// Fields of the fixed `{ integer, i1 }` values returned by LLVM's
+    /// arithmetic-overflow intrinsics. LLVM only lets the importer observe
+    /// these through `extractvalue`, so they stay out of the general value
+    /// cache and arbitrary aggregate handling remains unsupported.
+    aggregate_fields: HashMap<AnyValueEnum<'ctx>, Vec<Bits>>,
     current: BlockId,
     /// Per-function bump allocator for `StorageId::ALLOCA`, in *bits*, zero-
     /// based (matches `VaffleTarget`'s own `next_stack_slot`/`PTR_BITS`
@@ -1764,6 +2033,7 @@ impl<'ctx> FuncCtx<'ctx> {
             stmts: vec![Vec::new(); n_blocks],
             terminators: vec![None; n_blocks],
             cache: HashMap::new(),
+            aggregate_fields: HashMap::new(),
             current: BlockId(0),
             next_stack_slot: 0,
             stack_slot_of: HashMap::new(),

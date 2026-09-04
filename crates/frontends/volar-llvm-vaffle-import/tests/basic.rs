@@ -65,7 +65,8 @@ entry:
 define i32 @caller(i32 %x) {
 entry:
   %r = call i32 @callee(i32 %x)
-  ret i32 %r
+  %out = add i32 %r, 0
+  ret i32 %out
 }
 "#;
     let context = Context::create();
@@ -99,6 +100,51 @@ entry:
         "callee should also be imported as its own function body"
     );
     let _ = context;
+}
+
+#[test]
+fn direct_call_return_becomes_return_call() {
+    let source = r#"
+define i32 @callee(i32 %x) {
+entry:
+  %r = add i32 %x, 1
+  ret i32 %r
+}
+
+define i32 @caller(i32 %x) {
+entry:
+  %r = call i32 @callee(i32 %x)
+  ret i32 %r
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+
+    let out = import_module(&module, &["caller"]).expect("tail call must import");
+    let caller_id = *out.exports.get("caller").expect("caller exported");
+    let callee_id = *out.exports.get("callee").expect("callee exported");
+    let FuncDecl::Body(caller_body) = &out.funcs[caller_id.0] else {
+        panic!("expected caller body");
+    };
+    assert!(
+        !caller_body
+            .values
+            .iter()
+            .any(|value| matches!(value.kind, Value::Call { .. })),
+        "a call returned directly must not materialize Value::Call"
+    );
+    assert!(
+        matches!(
+            caller_body.blocks[0].terminator,
+            Terminator::ReturnCall { func, .. } if func == callee_id
+        ),
+        "call followed by return must become ReturnCall"
+    );
 }
 
 #[test]
@@ -687,6 +733,159 @@ entry:
     assert!(
         err.to_string().contains("global GEP"),
         "expected named global-GEP error, got {err}"
+    );
+}
+
+#[test]
+fn overflow_intrinsics_lower_without_residual_call() {
+    let source = r#"
+declare { i8, i1 } @llvm.sadd.with.overflow.i8(i8, i8)
+declare { i8, i1 } @llvm.uadd.with.overflow.i8(i8, i8)
+declare { i8, i1 } @llvm.ssub.with.overflow.i8(i8, i8)
+declare { i8, i1 } @llvm.usub.with.overflow.i8(i8, i8)
+declare { i8, i1 } @llvm.smul.with.overflow.i8(i8, i8)
+declare { i8, i1 } @llvm.umul.with.overflow.i8(i8, i8)
+
+define i8 @all_overflow(i8 %x) {
+entry:
+  %sadd = call { i8, i1 } @llvm.sadd.with.overflow.i8(i8 %x, i8 1)
+  %sadd_value = extractvalue { i8, i1 } %sadd, 0
+  %sadd_overflow = extractvalue { i8, i1 } %sadd, 1
+  %uadd = call { i8, i1 } @llvm.uadd.with.overflow.i8(i8 %x, i8 1)
+  %uadd_value = extractvalue { i8, i1 } %uadd, 0
+  %uadd_overflow = extractvalue { i8, i1 } %uadd, 1
+  %ssub = call { i8, i1 } @llvm.ssub.with.overflow.i8(i8 %x, i8 1)
+  %ssub_value = extractvalue { i8, i1 } %ssub, 0
+  %ssub_overflow = extractvalue { i8, i1 } %ssub, 1
+  %usub = call { i8, i1 } @llvm.usub.with.overflow.i8(i8 %x, i8 1)
+  %usub_value = extractvalue { i8, i1 } %usub, 0
+  %usub_overflow = extractvalue { i8, i1 } %usub, 1
+  %smul = call { i8, i1 } @llvm.smul.with.overflow.i8(i8 %x, i8 2)
+  %smul_value = extractvalue { i8, i1 } %smul, 0
+  %smul_overflow = extractvalue { i8, i1 } %smul, 1
+  %umul = call { i8, i1 } @llvm.umul.with.overflow.i8(i8 %x, i8 2)
+  %umul_value = extractvalue { i8, i1 } %umul, 0
+  %umul_overflow = extractvalue { i8, i1 } %umul, 1
+  ret i8 %sadd_value
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["all_overflow"]).expect("overflow intrinsics must import");
+    assert_eq!(
+        out.funcs.len(),
+        1,
+        "overflow intrinsics must not become imported callees"
+    );
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    assert!(
+        !body
+            .values
+            .iter()
+            .any(|value| matches!(value.kind, Value::Call { .. })),
+        "supported overflow intrinsics must lower to bit operations"
+    );
+}
+
+#[test]
+fn extractvalue_of_untracked_aggregate_is_named_unsupported() {
+    let source = r#"
+declare { i8, i1 } @ordinary_pair(i8)
+
+define i8 @untracked(i8 %x) {
+entry:
+  %pair = call { i8, i1 } @ordinary_pair(i8 %x)
+  %value = extractvalue { i8, i1 } %pair, 0
+  ret i8 %value
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let err = import_module(&module, &["untracked"])
+        .expect_err("arbitrary aggregate extractvalue must fail closed");
+    assert!(
+        err.to_string().contains("untracked aggregate"),
+        "expected named untracked-aggregate error, got {err}"
+    );
+}
+
+#[test]
+fn reachable_call_unreachable_becomes_return_call() {
+    let source = r#"
+declare void @panic_abort()
+
+define i32 @abort_on_flag(i1 %flag, i32 %x) {
+entry:
+  br i1 %flag, label %panic, label %ok
+panic:
+  call void @panic_abort()
+  unreachable
+ok:
+  ret i32 %x
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+
+    let out = import_module(&module, &["abort_on_flag"])
+        .expect("reachable call; unreachable must import as ReturnCall");
+    let caller_id = *out.exports.get("abort_on_flag").expect("caller exported");
+    let FuncDecl::Body(body) = &out.funcs[caller_id.0] else {
+        panic!("expected caller body");
+    };
+    let Terminator::ReturnCall { func, .. } = &body.blocks[1].terminator else {
+        panic!("panic block must end with ReturnCall");
+    };
+    assert!(
+        matches!(&out.funcs[func.0], FuncDecl::Import { name, .. } if name == "panic_abort"),
+        "noreturn declaration must remain an import"
+    );
+    assert!(
+        !body.blocks[1].stmts.iter().any(|value| matches!(
+            body.values[value.0].kind,
+            Value::Call { .. }
+        )),
+        "noreturn call must not leave a Value::Call behind"
+    );
+}
+
+#[test]
+fn reachable_unreachable_without_call_is_named_unsupported() {
+    let source = r#"
+define void @abort() {
+entry:
+  unreachable
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let err = import_module(&module, &["abort"])
+        .expect_err("reachable standalone unreachable must fail closed");
+    assert!(
+        err.to_string().contains("reachable unreachable"),
+        "expected named reachable-unreachable error, got {err}"
     );
 }
 

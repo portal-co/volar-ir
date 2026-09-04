@@ -419,6 +419,71 @@ entry:
 }
 
 #[test]
+fn llvm_direct_tail_call_return_computes_correct_value() {
+    let src = r#"
+define i32 @helper(i32 %x) {
+entry:
+  %r = add i32 %x, 1
+  ret i32 %r
+}
+
+define i32 @caller(i32 %x) {
+entry:
+  %r = call i32 @helper(i32 %x)
+  ret i32 %r
+}
+"#;
+    let path = write_temp_ll("tail_call", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["caller"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("call returned directly must lower as a tail call")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let input_word: Vec<bool> = (0..64).map(|i| (5u64 >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("tail-call evaluation terminates");
+    let value = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |word, (i, bit)| word | ((bit[0] as u64) << i));
+    assert_eq!(value, 6, "caller(5) must tail-call helper(5) and return 6");
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn llvm_overflow_panic_unreachable_imports_but_unroll_fails_closed() {
+    let src = r#"
+declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)
+declare void @panic_const_add_overflow()
+
+define i32 @add_one(i32 %x) {
+entry:
+  %pair = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %x, i32 1)
+  %value = extractvalue { i32, i1 } %pair, 0
+  %overflow = extractvalue { i32, i1 } %pair, 1
+  br i1 %overflow, label %panic, label %ok
+panic:
+  call void @panic_const_add_overflow()
+  unreachable
+ok:
+  ret i32 %value
+}
+"#;
+    let path = write_temp_ll("overflow_panic_unreachable", src);
+    let lowered = Pipeline::from_llvm(&path, &["add_one"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .expect("reachable call; unreachable must lower through ReturnCall");
+    let unroll = lowered.unroll_ir();
+    assert!(
+        unroll.is_err(),
+        "symbolic overflow branch must remain non-finite for unroll"
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn llvm_register_xor_unrolls() {
     let src = r#"
 define i32 @xor_one(i32 %x) {
@@ -632,5 +697,115 @@ entry:
         .enumerate()
         .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
     assert_eq!(y, x ^ 1, "xor_one(5) must compute 4, not silently use garbage upper bits");
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn llvm_overflow_extractvalue_result_unrolls_and_computes() {
+    let src = r#"
+declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)
+
+define i32 @add_one(i32 %x) {
+entry:
+  %pair = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %x, i32 1)
+  %value = extractvalue { i32, i1 } %pair, 0
+  ret i32 %value
+}
+"#;
+    let path = write_temp_ll("overflow_result", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["add_one"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("overflow result extraction must lower before unroll")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let input_word: Vec<bool> = (0..64).map(|i| (5u64 >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("overflow result evaluation terminates");
+    let value = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |word, (i, bit)| word | ((bit[0] as u64) << i));
+    assert_eq!(
+        value, 6,
+        "sadd.with.overflow result field must be wrapping x + 1"
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn llvm_overflow_extractvalue_flags_are_correct() {
+    let src = r#"
+declare { i8, i1 } @llvm.sadd.with.overflow.i8(i8, i8)
+declare { i8, i1 } @llvm.uadd.with.overflow.i8(i8, i8)
+declare { i8, i1 } @llvm.ssub.with.overflow.i8(i8, i8)
+declare { i8, i1 } @llvm.usub.with.overflow.i8(i8, i8)
+declare { i8, i1 } @llvm.smul.with.overflow.i8(i8, i8)
+declare { i8, i1 } @llvm.umul.with.overflow.i8(i8, i8)
+
+define i1 @sadd_flag(i8 %x) {
+entry:
+  %pair = call { i8, i1 } @llvm.sadd.with.overflow.i8(i8 %x, i8 1)
+  %overflow = extractvalue { i8, i1 } %pair, 1
+  ret i1 %overflow
+}
+
+define i1 @uadd_flag(i8 %x) {
+entry:
+  %pair = call { i8, i1 } @llvm.uadd.with.overflow.i8(i8 %x, i8 1)
+  %overflow = extractvalue { i8, i1 } %pair, 1
+  ret i1 %overflow
+}
+
+define i1 @ssub_flag(i8 %x) {
+entry:
+  %pair = call { i8, i1 } @llvm.ssub.with.overflow.i8(i8 %x, i8 1)
+  %overflow = extractvalue { i8, i1 } %pair, 1
+  ret i1 %overflow
+}
+
+define i1 @usub_flag(i8 %x) {
+entry:
+  %pair = call { i8, i1 } @llvm.usub.with.overflow.i8(i8 %x, i8 1)
+  %overflow = extractvalue { i8, i1 } %pair, 1
+  ret i1 %overflow
+}
+
+define i1 @smul_flag(i8 %x) {
+entry:
+  %pair = call { i8, i1 } @llvm.smul.with.overflow.i8(i8 %x, i8 2)
+  %overflow = extractvalue { i8, i1 } %pair, 1
+  ret i1 %overflow
+}
+
+define i1 @umul_flag(i8 %x) {
+entry:
+  %pair = call { i8, i1 } @llvm.umul.with.overflow.i8(i8 %x, i8 16)
+  %overflow = extractvalue { i8, i1 } %pair, 1
+  ret i1 %overflow
+}
+"#;
+    let path = write_temp_ll("overflow_flags", src);
+    for (entry, input, expected) in [
+        ("sadd_flag", 5u64, false),
+        ("sadd_flag", 127, true),
+        ("uadd_flag", 255, true),
+        ("ssub_flag", 128, true),
+        ("usub_flag", 0, true),
+        ("smul_flag", 64, true),
+        ("umul_flag", 16, true),
+    ] {
+        let (blocks, types) = Pipeline::from_llvm(&path, &[entry])
+            .and_then(|p| p.lower_to_volar_ir())
+            .and_then(|p| p.unroll_ir())
+            .unwrap_or_else(|err| panic!("{entry} must lower: {err}"))
+            .to_volar_ir();
+        assert!(blocks.is_circuit());
+        let input_word: Vec<bool> = (0..64).map(|i| (input >> i) & 1 != 0).collect();
+        let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+            .expect("overflow flag evaluation must terminate");
+        assert_eq!(out, vec![vec![expected]], "{entry}({input})");
+    }
     let _ = fs::remove_file(&path);
 }
