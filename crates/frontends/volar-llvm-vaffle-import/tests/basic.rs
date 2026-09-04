@@ -828,11 +828,16 @@ entry:
 }
 
 #[test]
-fn stack_pointer_param_is_not_mistaken_for_alloca() {
-    // A pointer *parameter* is also bit-decomposed and cached like an
-    // alloca'd stack pointer would be, but it is not one — it must still
-    // fail closed (regression test for the `stack_slot_of`-vs-`cache`
-    // provenance distinction).
+fn stack_pointer_param_dispatches_at_runtime() {
+    // A pointer *parameter* is bit-decomposed and cached like an alloca'd
+    // stack pointer would be, but it is not one -- it must never be
+    // mistaken for a tracked alloca with a known, fixed address (regression
+    // test for the `stack_slot_of`-vs-`cache` provenance distinction).
+    // Before runtime storage-identity dispatch (stage 4 of the
+    // ConstChain-fallback plan), this meant the subsequent load simply
+    // failed closed. Now it succeeds via genuine runtime dispatch
+    // (`dispatch_read`) instead -- every candidate's address is computed
+    // from the parameter's own raw bits, never a compile-time constant.
     let source = r#"
 define i32 @through_param(ptr %p) {
 entry:
@@ -847,9 +852,133 @@ entry:
             "test.ll",
         ))
         .expect("valid LLVM IR fixture");
-    let err =
-        import_module(&module, &["through_param"]).expect_err("param pointer must fail closed");
-    let _ = err.to_string();
+    let out = import_module(&module, &["through_param"])
+        .expect("param pointer now dispatches at runtime instead of failing closed");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let alloca_reads: Vec<usize> = body
+        .values
+        .iter()
+        .filter_map(|v| match &v.kind {
+            Value::Op(Stmt::StorageRead {
+                storage: volar_ir_common::StorageId::ALLOCA,
+                addr,
+                ..
+            }) => Some(addr.0),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !alloca_reads.is_empty(),
+        "expected the dispatch cascade's stack-candidate StorageReads"
+    );
+    for id in alloca_reads {
+        assert!(
+            !matches!(&body.values[id].kind, Value::Op(Stmt::Const(..))),
+            "a pointer parameter must never resolve to a compile-time-constant stack address, \
+             got {:?}",
+            body.values[id].kind
+        );
+    }
+    let _ = context;
+}
+
+#[test]
+fn slice_get_dispatches_through_pointer_parameter() {
+    // The exact motivating shape of the ConstChain-fallback plan: a pointer
+    // *parameter* GEP'd with a *symbolic* index, then loaded through --
+    // `fn slice_get(xs: &[i32], i: usize) -> i32 { xs[i] }`. Previously
+    // named ConstChain (`docs/llvm-const-cache-dominance.md`'s own
+    // "Measured" table: "rustc `-O0` `xs[i]` pointer-param GEP"). Now
+    // succeeds end-to-end: the GEP computes an offset pointer via ordinary
+    // bit-circuit arithmetic on `%xs`'s own raw bits (ptr_value_bits's
+    // encoding), and the load dispatches on the result at runtime.
+    let source = r#"
+define i32 @slice_get(ptr %xs, i64 %i) {
+entry:
+  %p = getelementptr i32, ptr %xs, i64 %i
+  %v = load i32, ptr %p
+  ret i32 %v
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["slice_get"])
+        .expect("xs[i] through a pointer parameter must import via runtime dispatch");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let has_alloca_read = body.values.iter().any(|v| {
+        matches!(
+            &v.kind,
+            Value::Op(Stmt::StorageRead {
+                storage: volar_ir_common::StorageId::ALLOCA,
+                ..
+            })
+        )
+    });
+    assert!(
+        has_alloca_read,
+        "expected the dispatch cascade's stack-candidate StorageRead"
+    );
+    let _ = context;
+}
+
+#[test]
+fn dispatch_write_through_pointer_parameter_reaches_every_candidate() {
+    // `store` through an unresolved pointer parameter, in a module that
+    // also has a global -- confirms the write side (`dispatch_write`)
+    // reaches *every* candidate, not just the stack: a read-modify-write
+    // per candidate (`storage_to_mux_ir::mux_write`'s technique,
+    // generalized from "N addresses in one storage" to "N storages, one
+    // address"), so both the stack candidate and `@g`'s candidate get a
+    // paired StorageRead (the "old" value) and StorageWrite.
+    let source = r#"
+@g = global i32 0
+
+define void @store_through_param(ptr %p, i32 %x) {
+entry:
+  store i32 %x, ptr %p
+  ret void
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["store_through_param"])
+        .expect("store through an unresolved pointer must dispatch at runtime");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let (mut alloca_writes, mut global_writes) = (0usize, 0usize);
+    for v in &body.values {
+        if let Value::Op(Stmt::StorageWrite { storage, .. }) = &v.kind {
+            if *storage == volar_ir_common::StorageId::ALLOCA {
+                alloca_writes += 1;
+            } else {
+                global_writes += 1;
+            }
+        }
+    }
+    assert!(
+        alloca_writes >= 32,
+        "expected a full 32-bit read-modify-write against the stack candidate, got {alloca_writes}"
+    );
+    assert!(
+        global_writes >= 4,
+        "expected a full 4-byte read-modify-write against @g's candidate, got {global_writes}"
+    );
+    let _ = context;
 }
 
 #[test]

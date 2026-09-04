@@ -121,6 +121,20 @@ const GLOBAL_ID_BITS: usize = 12;
 /// Bits reserved for a global's byte offset within the same encoding.
 const GLOBAL_ADDR_BITS: usize = PTR_BITS - 1 - GLOBAL_ID_BITS;
 
+/// First `StorageId` this importer's own `storage_alloc` hands out to a
+/// global -- below any reserved range (`StorageId::ALLOCA`/`STACK`/
+/// `VIRT_*`/`memory(_)`).
+const GLOBAL_STORAGE_BASE: u32 = 64;
+
+/// Cap on the number of distinct globals a single runtime pointer-dispatch
+/// site (`Importer::dispatch_read`/`dispatch_write`) will build a mux/demux
+/// cascade over. Each candidate costs a full `StorageRead` (and, for a
+/// write, a paired `StorageRead`+`StorageWrite`) per accessed bit, so this
+/// bounds worst-case circuit blowup -- fail closed with a named error past
+/// it rather than silently emitting an enormous circuit. Well under
+/// `2^GLOBAL_ID_BITS` (the encoding's own, much larger, capacity limit).
+const MAX_DISPATCH_CANDIDATES: usize = 64;
+
 /// Bits needed to represent every integer in `0..=v` (at least 1). Matches
 /// `VaffleTarget::switch`'s dense positional selector width.
 fn bits_for_max_value(v: usize) -> usize {
@@ -137,6 +151,13 @@ fn bits_for_max_value(v: usize) -> usize {
 /// calls are preserved, never inlined.
 pub fn import_module<'ctx>(llvm_module: &LlvmModule<'ctx>, entries: &[&str]) -> IResult<Module> {
     let mut importer = Importer::new();
+    // Eagerly assign every module global its `StorageId` before walking any
+    // function body, so `dispatch_read`/`dispatch_write` (runtime
+    // storage-identity dispatch for a pointer whose provenance isn't
+    // statically resolvable) always sees the complete, stable candidate set
+    // -- never just whichever globals happened to be referenced by earlier
+    // functions' own direct loads/stores/GEPs.
+    importer.register_all_globals(llvm_module)?;
     let mut worklist: Vec<FunctionValue<'ctx>> = Vec::new();
     for &name in entries {
         let f = llvm_module.get_function(name).ok_or_else(|| {
@@ -399,7 +420,7 @@ impl<'ctx> Importer<'ctx> {
             // *global* StorageIds never touch StorageId::ALLOCA/STACK/
             // VIRT_*/memory(_) (stack-alloca'd data uses StorageId::ALLOCA
             // directly, via `stack_load`/`stack_store`, not this allocator).
-            storage_alloc: StorageAllocator::new(64),
+            storage_alloc: StorageAllocator::new(GLOBAL_STORAGE_BASE),
             bit_tid,
             byte_tid,
             addr_tid,
@@ -490,6 +511,29 @@ impl<'ctx> Importer<'ctx> {
         let id = self.storage_alloc.alloc();
         self.storage_for_global.insert(key, id);
         Ok(id)
+    }
+
+    /// Assign every global *variable* in the module its `StorageId` up
+    /// front (via `storage_for`, trivially resolved -- `strip_pointer`
+    /// succeeds immediately on a bare global). Registers the whole module's
+    /// globals, not just ones reachable from the entry points being
+    /// imported: a runtime-dispatched pointer's caller may pass any
+    /// address-taken global regardless of which function directly
+    /// references it syntactically, so the dispatch candidate set must be
+    /// conservative, not just "whatever's been seen so far."
+    fn register_all_globals(&mut self, llvm_module: &LlvmModule<'ctx>) -> IResult<()> {
+        let mut count = 0usize;
+        for global in llvm_module.get_globals() {
+            self.storage_for(global.as_pointer_value())?;
+            count += 1;
+        }
+        if count > MAX_DISPATCH_CANDIDATES {
+            return Err(ImportError::Unsupported(format!(
+                "module has {count} globals, exceeding the {MAX_DISPATCH_CANDIDATES}-candidate \
+                 limit for runtime pointer dispatch"
+            )));
+        }
+        Ok(())
     }
 
     /// Like `storage_for`, but also folds in a constant-index `getelementptr`
@@ -988,12 +1032,26 @@ impl<'ctx> Importer<'ctx> {
                     })
                 } else {
                     let n_bytes = int_result_width(instr)?.div_ceil(8);
-                    Some(match self.resolve_global_ptr(fctx, ptr)? {
-                        GlobalPtr::Const(g) => self.mem_load(fctx, g.storage, g.byte_offset, n_bytes),
-                        GlobalPtr::Symbolic { storage, offset_bits } => {
-                            self.mem_load_dynamic(fctx, storage, &offset_bits, n_bytes)
+                    match self.resolve_global_ptr(fctx, ptr) {
+                        Ok(GlobalPtr::Const(g)) => {
+                            Some(self.mem_load(fctx, g.storage, g.byte_offset, n_bytes))
                         }
-                    })
+                        Ok(GlobalPtr::Symbolic { storage, offset_bits }) => {
+                            Some(self.mem_load_dynamic(fctx, storage, &offset_bits, n_bytes))
+                        }
+                        Err(_) => {
+                            // Neither a tracked stack pointer nor a
+                            // statically resolvable global -- e.g. a
+                            // pointer function parameter, or a
+                            // `phi`/`select`-merged value whose tag isn't a
+                            // compile-time constant. Fall back to runtime
+                            // storage-identity dispatch instead of failing
+                            // closed.
+                            let pointee_tid = self.llvm_type_id(instr.get_type());
+                            let ptr_bits = self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
+                            Some(self.dispatch_read(fctx, &ptr_bits, pointee_tid, n_bytes)?)
+                        }
+                    }
                 }
             }
             InstructionOpcode::Store => {
@@ -1015,10 +1073,16 @@ impl<'ctx> Importer<'ctx> {
                     }
                 } else {
                     let n_bytes = val.len().div_ceil(8);
-                    match self.resolve_global_ptr(fctx, ptr)? {
-                        GlobalPtr::Const(g) => self.mem_store(fctx, g.storage, g.byte_offset, &val, n_bytes),
-                        GlobalPtr::Symbolic { storage, offset_bits } => {
+                    match self.resolve_global_ptr(fctx, ptr) {
+                        Ok(GlobalPtr::Const(g)) => {
+                            self.mem_store(fctx, g.storage, g.byte_offset, &val, n_bytes)
+                        }
+                        Ok(GlobalPtr::Symbolic { storage, offset_bits }) => {
                             self.mem_store_dynamic(fctx, storage, &offset_bits, &val, n_bytes)
+                        }
+                        Err(_) => {
+                            let ptr_bits = self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
+                            self.dispatch_write(fctx, &ptr_bits, &val)?;
                         }
                     }
                 }
@@ -1120,12 +1184,11 @@ impl<'ctx> Importer<'ctx> {
                     fctx.stack_slot_of
                         .insert(instr.as_any_value_enum(), new_stack_ptr);
                     Some(addr_bits)
-                } else {
+                } else if let Ok(base_gp) = self.resolve_global_ptr(fctx, base) {
                     // Base is a global (directly, a constant-index GEP
                     // constant expression, or a previously-tracked
                     // `GlobalPtr` from a chained GEP instruction -- constant
                     // or already-dynamic offset alike).
-                    let base_gp = self.resolve_global_ptr(fctx, base)?;
                     let const_offset = gep_instr_constant_offset(instr)?;
 
                     let new_gp = if let (GlobalPtr::Const(g), Some(gep_offset)) =
@@ -1195,6 +1258,68 @@ impl<'ctx> Importer<'ctx> {
                         fctx.global_ptr_of.insert(instr.as_any_value_enum(), gp);
                     }
                     None
+                } else {
+                    // Base has genuinely unknown provenance (e.g. a pointer
+                    // function parameter) -- neither a tracked stack
+                    // pointer nor resolvable to any known global. Compute
+                    // the offset as ordinary bit-circuit arithmetic
+                    // directly on the base's own uniform tagged `Bits`
+                    // (`ptr_value_bits`'s encoding, already available for
+                    // any pointer via `value_bits` -- a parameter's raw
+                    // bits are cached from entry-block setup regardless of
+                    // provenance). This is correct for whichever concrete
+                    // storage the pointer turns out to name at runtime: the
+                    // offset lives in the low ADDR bits either way (every
+                    // bit, for a stack destination; the low
+                    // `GLOBAL_ADDR_BITS`, for a global one), with the
+                    // tag+ID bits above untouched by an in-bounds add. The
+                    // result stays provenance-unresolved; a later
+                    // `Load`/`Store` decodes and dispatches on it at
+                    // runtime (`dispatch_read`/`dispatch_write`).
+                    if instr.get_num_operands() != 2 {
+                        return Err(ImportError::Unsupported(
+                            "multi-index GEP into an unresolved pointer not supported".into(),
+                        ));
+                    }
+                    let elem_ty = instr
+                        .get_gep_source_element_type()
+                        .map_err(|_| ImportError::Unsupported("malformed gep".into()))?;
+                    let elem_bytes = match elem_ty {
+                        inkwell::types::BasicTypeEnum::IntType(t) => {
+                            (t.get_bit_width() as u64).div_ceil(8)
+                        }
+                        _ => {
+                            return Err(ImportError::Unsupported(
+                                "gep of non-integer element type into an unresolved pointer not \
+                                 supported"
+                                    .into(),
+                            ));
+                        }
+                    };
+                    let idx_val = instr.get_operand(1).and_then(|o| o.value()).ok_or_else(|| {
+                        ImportError::Unsupported("expected an integer gep index".into())
+                    })?;
+                    if !matches!(idx_val, BasicValueEnum::IntValue(_)) {
+                        return Err(ImportError::Unsupported(
+                            "expected an integer gep index".into(),
+                        ));
+                    }
+                    let base_bits = self.value_bits(fctx, BasicValueEnum::PointerValue(base))?;
+                    let idx_bits = self.value_bits(fctx, idx_val)?;
+                    let idx_bits = resize_bits_signed(&idx_bits, PTR_BITS);
+                    let new_bits = {
+                        let mut c = Ctx {
+                            fctx,
+                            bit_tid: self.bit_tid,
+                            block: cur,
+                        };
+                        let elem_bytes_const: Vec<ValueId> = (0..PTR_BITS)
+                            .map(|b| c.bc_const((elem_bytes >> b) & 1 != 0))
+                            .collect();
+                        let scaled = circuits::bc_mul(&mut c, &idx_bits, &elem_bytes_const);
+                        circuits::bc_add(&mut c, &base_bits, &scaled, false)
+                    };
+                    Some(new_bits)
                 }
             }
             InstructionOpcode::Call => {
@@ -2105,6 +2230,180 @@ impl<'ctx> Importer<'ctx> {
                 }),
             );
         }
+    }
+
+    /// The closed candidate set every runtime pointer dispatch considers:
+    /// every `StorageId` `register_all_globals` (or any later lazy
+    /// `storage_for` call) has handed out to a global so far. Always
+    /// complete by the time any function body is walked, since
+    /// `import_module` registers every module global up front.
+    fn dispatch_candidates(&self) -> IResult<Vec<StorageId>> {
+        let candidates: Vec<StorageId> = (GLOBAL_STORAGE_BASE..self.storage_alloc.next)
+            .map(StorageId)
+            .collect();
+        if candidates.len() > MAX_DISPATCH_CANDIDATES {
+            return Err(ImportError::Unsupported(format!(
+                "{} candidate globals exceeds the {MAX_DISPATCH_CANDIDATES}-candidate limit for \
+                 runtime pointer dispatch",
+                candidates.len()
+            )));
+        }
+        Ok(candidates)
+    }
+
+    /// Per-candidate `matched` flags for `ptr_bits` against `candidates`:
+    /// `tag_bit AND (id_bits == candidate's StorageId)` — `false` whenever
+    /// `tag_bit` is 0 (a stack pointer), which is exactly what lets
+    /// `dispatch_read` use the stack read as a bare default with no
+    /// separate `NOT tag_bit` case of its own.
+    fn dispatch_matches(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        ptr_bits: &Bits,
+        candidates: &[StorageId],
+    ) -> Vec<ValueId> {
+        let tag_bit = ptr_bits[PTR_BITS - 1];
+        let id_bits = &ptr_bits[GLOBAL_ADDR_BITS..GLOBAL_ADDR_BITS + GLOBAL_ID_BITS];
+        let mut c = Ctx {
+            fctx,
+            bit_tid: self.bit_tid,
+            block,
+        };
+        candidates
+            .iter()
+            .map(|sid| {
+                let id_const: Vec<ValueId> = (0..GLOBAL_ID_BITS)
+                    .map(|b| c.bc_const((sid.0 >> b) & 1 != 0))
+                    .collect();
+                let id_eq = circuits::bc_eq(&mut c, id_bits, &id_const);
+                c.bc_and(tag_bit, id_eq)
+            })
+            .collect()
+    }
+
+    /// Zero-extend `ptr_bits`'s low `GLOBAL_ADDR_BITS` (the ADDR sub-field
+    /// of `ptr_value_bits`'s encoding) to a full `PTR_BITS`-wide `Bits`, for
+    /// use as `mem_load_dynamic`/`mem_store_dynamic`'s base-offset operand.
+    fn dispatch_global_addr_bits(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, ptr_bits: &Bits) -> Bits {
+        let zero = self.bc_const_at(fctx, block, false);
+        let mut bits: Bits = ptr_bits[..GLOBAL_ADDR_BITS].to_vec();
+        bits.resize(PTR_BITS, zero);
+        bits
+    }
+
+    /// Runtime storage-identity dispatch for a `Load` through a pointer
+    /// whose provenance isn't statically resolvable (neither
+    /// `stack_slot_of` nor `global_ptr_of`/`storage_for_with_offset` could
+    /// pin it down -- e.g. a pointer function parameter, or a
+    /// `phi`/`select`-merged value whose tag isn't a compile-time
+    /// constant). Reads *every* candidate in the closed set (the stack,
+    /// `StorageId::ALLOCA`, plus every module global) and muxes the one
+    /// `ptr_bits` actually names, decoding `ptr_bits` per
+    /// `ptr_value_bits`'s own tag+ID+ADDR encoding -- the uniform encoding
+    /// every pointer *value* this importer produces already uses (see
+    /// `docs/llvm-ptr-value-bits.md`), which is what makes decode-by-bits
+    /// sufficient here without any provenance analysis. Mirrors
+    /// `translate_switch`'s `bc_eq`/`bc_select_vec` cascade, applied to
+    /// data bits instead of a jump-table index.
+    fn dispatch_read(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        ptr_bits: &Bits,
+        pointee_ty: TypeId,
+        n_bytes: usize,
+    ) -> IResult<Bits> {
+        let n_bits = n_bytes
+            .checked_mul(8)
+            .ok_or_else(|| ImportError::Unsupported("dispatch read length too large".into()))?;
+        let candidates = self.dispatch_candidates()?;
+        let cur = fctx.current;
+        let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
+        let global_addr_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
+
+        // Default/base: the stack candidate. Correct even when `ptr_bits`
+        // actually names a global -- see `dispatch_matches`'s doc comment.
+        let mut result = self.stack_load_dynamic(fctx, ptr_bits[0], ptr_bits, pointee_ty, n_bits);
+
+        for (candidate_idx, &sid) in candidates.iter().enumerate() {
+            let global_bits = self.mem_load_dynamic(fctx, sid, &global_addr_bits, n_bytes);
+            let matched = matches[candidate_idx];
+            let mut new_result = Vec::with_capacity(n_bits);
+            {
+                let mut c = Ctx {
+                    fctx,
+                    bit_tid: self.bit_tid,
+                    block: cur,
+                };
+                for i in 0..n_bits {
+                    new_result.push(c.bc_select(matched, global_bits[i], result[i]));
+                }
+            }
+            result = new_result;
+        }
+        Ok(result)
+    }
+
+    /// Runtime storage-identity dispatch for a `Store` through a pointer
+    /// whose provenance isn't statically resolvable. Since
+    /// `Stmt::StorageWrite`'s `storage` field isn't itself
+    /// runtime-selectable, every candidate is written unconditionally on
+    /// every call -- read-modify-write, muxing each candidate's *old* value
+    /// against `val` by its own `matched` flag, so an unmatched candidate's
+    /// write is a semantic no-op. Direct generalization of
+    /// `storage_to_mux_ir::mux_write`'s existing "N addresses in one
+    /// storage" technique to "N storages, one address."
+    fn dispatch_write(&mut self, fctx: &mut FuncCtx<'ctx>, ptr_bits: &Bits, val: &Bits) -> IResult<()> {
+        let n_bits = val.len();
+        let n_bytes = n_bits.div_ceil(8);
+        let candidates = self.dispatch_candidates()?;
+        let cur = fctx.current;
+        let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
+        let global_addr_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
+        let tag_bit = ptr_bits[PTR_BITS - 1];
+        let not_tag = {
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block: cur,
+            };
+            c.bc_not(tag_bit)
+        };
+
+        // Stack candidate.
+        let bit_tid = self.bit_tid;
+        let stack_old = self.stack_load_dynamic(fctx, ptr_bits[0], ptr_bits, bit_tid, n_bits);
+        let mut stack_new = Vec::with_capacity(n_bits);
+        {
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block: cur,
+            };
+            for i in 0..n_bits {
+                stack_new.push(c.bc_select(not_tag, val[i], stack_old[i]));
+            }
+        }
+        self.stack_store_dynamic(fctx, ptr_bits[0], ptr_bits, &stack_new);
+
+        // Every global candidate.
+        for (candidate_idx, &sid) in candidates.iter().enumerate() {
+            let old = self.mem_load_dynamic(fctx, sid, &global_addr_bits, n_bytes);
+            let matched = matches[candidate_idx];
+            let mut new_val = Vec::with_capacity(n_bits);
+            {
+                let mut c = Ctx {
+                    fctx,
+                    bit_tid: self.bit_tid,
+                    block: cur,
+                };
+                for i in 0..n_bits {
+                    new_val.push(c.bc_select(matched, val[i], old[i]));
+                }
+            }
+            self.mem_store_dynamic(fctx, sid, &global_addr_bits, &new_val, n_bytes);
+        }
+        Ok(())
     }
 
     fn translate_terminator(

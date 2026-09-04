@@ -109,6 +109,34 @@ else:
 }
 
 #[test]
+fn llvm_slice_get_pointer_param_gep_movfuscates() {
+    // The exact motivating shape of the ConstChain-fallback plan: a pointer
+    // *parameter* GEP'd with a *symbolic* index, then loaded through --
+    // `fn slice_get(xs: &[i32], i: usize) -> i32 { xs[i] }`. Previously
+    // named ConstChain (`docs/llvm-const-cache-dominance.md`'s own
+    // "Measured" table: "rustc `-O0` `xs[i]` pointer-param GEP"). Confirms
+    // the full import -> lower_to_volar_ir -> movfuscate pipeline accepts
+    // the runtime-dispatch shape this now produces, end to end.
+    let src = r#"
+define i32 @slice_get(ptr %xs, i64 %i) {
+entry:
+  %p = getelementptr i32, ptr %xs, i64 %i
+  %v = load i32, ptr %p
+  ret i32 %v
+}
+"#;
+    let path = write_temp_ll("slice_get", src);
+    let mov = Pipeline::from_llvm(&path, &["slice_get"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate());
+    let (blocks, _) = mov
+        .expect("xs[i] through a pointer parameter must movfuscate")
+        .to_volar_ir();
+    assert!(blocks.is_movfuscated());
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn llvm_alloca_spill_round_trips() {
     let src = r#"
 define i32 @spill(i32 %x) {
