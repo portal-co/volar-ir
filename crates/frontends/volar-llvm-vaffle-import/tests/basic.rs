@@ -1263,7 +1263,7 @@ entry:
 }
 
 #[test]
-fn symbolic_memset_length_is_named_unsupported() {
+fn symbolic_memset_lowers_to_cfg_loop_without_residual_call() {
     let source = r#"
 declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
 
@@ -1281,10 +1281,26 @@ entry:
             "test.ll",
         ))
         .expect("valid LLVM IR fixture");
-    let err = import_module(&module, &["symbolic"]).expect_err("symbolic memset must fail closed");
+    let out = import_module(&module, &["symbolic"])
+        .expect("an unbounded symbolic memset length must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
     assert!(
-        err.to_string().contains("symbolic llvm.memset"),
-        "expected named symbolic-memset error, got {err}"
+        !body
+            .values
+            .iter()
+            .any(|value| matches!(value.kind, Value::Call { .. })),
+        "a supported symbolic memset must lower to CFG storage operations"
+    );
+    assert!(
+        body.blocks.len() >= 4,
+        "a symbolic memset must append header, body, and continuation blocks"
+    );
+    assert!(
+        body.blocks
+            .iter()
+            .any(|block| matches!(block.terminator, Terminator::IfNonzero { .. }))
     );
 }
 

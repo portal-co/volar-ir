@@ -430,6 +430,81 @@ entry:
 }
 
 #[test]
+fn llvm_symbolic_memset_builds_cfg_and_step_circuit() {
+    // Like memcpy, a runtime memset length remains an actual CFG loop until
+    // movfuscation turns it into a reversible step circuit.
+    let src = r#"
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+
+define i32 @zero_prefix(i64 %n, i32 %src) {
+entry:
+  %buf = alloca [4 x i8], align 4
+  store i32 %src, ptr %buf, align 4
+  call void @llvm.memset.p0.i64(ptr %buf, i8 0, i64 %n, i1 false)
+  %out = load i32, ptr %buf, align 4
+  ret i32 %out
+}
+"#;
+    let path = write_temp_ll("symbolic_memset", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["zero_prefix"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .expect("symbolic memset must lower to a CFG")
+        .to_volar_ir();
+    assert!(
+        !blocks.is_circuit(),
+        "runtime memset must retain control flow"
+    );
+
+    let bits = |value: u64, width: usize| {
+        (0..width)
+            .map(|bit| (value >> bit) & 1 != 0)
+            .collect::<Vec<bool>>()
+    };
+
+    let (movfuscated, movfuscated_types) = Pipeline::from_llvm(&path, &["zero_prefix"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .expect("symbolic memset CFG must movfuscate into a step circuit")
+        .to_volar_ir();
+    assert!(movfuscated.is_movfuscated());
+    let pc_inputs = volar_ir_passes::pc_bits_needed(blocks.blocks.len());
+
+    for (n, expected) in [
+        (0, 0x4433_2211u32),
+        (1, 0x4433_2200),
+        (2, 0x4433_0000),
+        (3, 0x4400_0000),
+    ] {
+        let original_input = vec![bits(n, 64), bits(0x4433_2211, 32)];
+        let original_result =
+            volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &original_input)
+                .expect("symbolic memset evaluation terminates for an in-bounds length");
+        let value = original_result
+            .iter()
+            .enumerate()
+            .fold(0u32, |word, (bit, value)| word | ((value[0] as u32) << bit));
+        assert_eq!(value, expected, "zero_prefix({n})");
+
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+            .params
+            .iter()
+            .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
+            .collect();
+        for (i, input_word) in original_input.into_iter().enumerate() {
+            mov_inputs[pc_inputs + i] = input_word;
+        }
+        let movfuscated_result =
+            volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &movfuscated_types, &mov_inputs)
+                .expect("movfuscated symbolic memset evaluation terminates");
+        assert_eq!(
+            movfuscated_result, original_result,
+            "movfuscation changed zero_prefix({n})"
+        );
+    }
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn llvm_constant_memcpy_through_symbolic_stack_gep_preserves_value() {
     let src = r#"
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
