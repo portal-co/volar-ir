@@ -110,6 +110,17 @@ type IResult<T> = Result<T, ImportError>;
 /// in [`llvm_bit_width`]).
 const PTR_BITS: usize = 32;
 
+/// Bits reserved for a global's `StorageId` within `Importer::ptr_value_bits`'s
+/// tagged pointer-*value* encoding (bit 31 = provenance tag, 0 = stack;
+/// remaining bits for a global split `GLOBAL_ID_BITS`:`GLOBAL_ADDR_BITS`,
+/// high:low). Reused directly as a compact, already-dense candidate index
+/// rather than building a separate table -- `StorageAllocator::new(64)`
+/// already hands out small sequential ids. 12 bits comfortably covers any
+/// realistic module's global count (up to ~4000).
+const GLOBAL_ID_BITS: usize = 12;
+/// Bits reserved for a global's byte offset within the same encoding.
+const GLOBAL_ADDR_BITS: usize = PTR_BITS - 1 - GLOBAL_ID_BITS;
+
 /// Bits needed to represent every integer in `0..=v` (at least 1). Matches
 /// `VaffleTarget::switch`'s dense positional selector width.
 fn bits_for_max_value(v: usize) -> usize {
@@ -699,6 +710,10 @@ impl<'ctx> Importer<'ctx> {
         }
         let bits = match v {
             BasicValueEnum::IntValue(i) => self.int_const_bits(fctx, i)?,
+            BasicValueEnum::PointerValue(p) => {
+                let block = fctx.current;
+                self.ptr_value_bits(fctx, block, p)?
+            }
             _ => {
                 return Err(ImportError::Unsupported(
                     "unsupported value kind (only integers and pointers-into-globals are supported)".into(),
@@ -1278,6 +1293,15 @@ impl<'ctx> Importer<'ctx> {
                     .next_stack_slot
                     .checked_add(total_slots)
                     .ok_or_else(|| ImportError::Unsupported("alloca stack overflow".into()))?;
+                // `ptr_value_bits` reserves bit 31 of a pointer *value*'s
+                // encoding as the stack-vs-global tag (0 = stack); a local
+                // ALLOCA offset that set it would be indistinguishable from
+                // a global-provenance value.
+                if fctx.next_stack_slot >= (1u64 << (PTR_BITS - 1)) {
+                    return Err(ImportError::Unsupported(
+                        "alloca stack region too large for the pointer-value encoding".into(),
+                    ));
+                }
 
                 // Bookkeeping marker (unused as an operand, matching
                 // `VaffleTarget::alloca`'s own `_alloc_vid` convention) —
@@ -1742,6 +1766,76 @@ impl<'ctx> Importer<'ctx> {
             GlobalPtr::Const(g) => self.stack_addr_bits(fctx, block, g.byte_offset),
             GlobalPtr::Symbolic { offset_bits, .. } => offset_bits.clone(),
         }
+    }
+
+    /// Compute a uniform, `PTR_BITS`-wide tagged bit pattern for any LLVM
+    /// pointer this importer can resolve to a known provenance at import
+    /// time (a tracked stack pointer, or a global -- directly, via a
+    /// constant-index GEP constant expression, or via a previously-tracked
+    /// `GlobalPtr`, constant or already-dynamic offset alike).
+    ///
+    /// Bit 31 (MSB) is the provenance tag: `0` = stack (bits `[30:0]` are
+    /// the ALLOCA-local address, matching `stack_ptr_addr_bits` exactly --
+    /// `Alloca`'s own bump allocator refuses to ever set this bit, see its
+    /// `next_stack_slot` check); `1` = global (bits `[GLOBAL_ADDR_BITS+
+    /// GLOBAL_ID_BITS-1 : GLOBAL_ADDR_BITS]` are this global's own
+    /// `StorageId` value, bits `[GLOBAL_ADDR_BITS-1:0]` are the byte offset
+    /// within it).
+    ///
+    /// This is purely a *value* representation: it doesn't change how
+    /// `Load`/`Store` resolve a pointer (still `stack_slot_of`/
+    /// `global_ptr_of`-tracked, unchanged) -- only how a pointer *value*
+    /// used generically (a `phi`/`select` operand, a function argument,
+    /// anything not immediately dereferenced) is represented, instead of
+    /// hard-erroring. `Select`'s existing generic `bc_select_vec` handling
+    /// and `phi`'s existing generic block-param mechanism both already
+    /// compose correctly with same-width `Bits` from either provenance, so
+    /// wiring this into `value_bits`'s fallback is the only change needed
+    /// to let a `phi`/`select` merging two differently-provenanced (or
+    /// distinct same-provenance) pointers import successfully.
+    ///
+    /// A dynamic (`GlobalPtr::Symbolic`) byte offset that doesn't fit
+    /// `GLOBAL_ADDR_BITS` truncates rather than erroring -- silent
+    /// wraparound on overflow, matching this codebase's existing convention
+    /// for `StorageId::STACK` addresses (`lower_to_ir.rs`'s own doc:
+    /// "addresses wrap modulo 2^SP_BITS and alias unrelated storage"), not
+    /// a new deviation from the fail-closed norm; a *constant* offset that
+    /// doesn't fit is checked and errors, since that case is always
+    /// statically decidable.
+    fn ptr_value_bits(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        ptr: PointerValue<'ctx>,
+    ) -> IResult<Bits> {
+        if let Some(sp) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
+            return Ok(self.stack_ptr_addr_bits(fctx, block, &sp));
+        }
+        let gp = self.resolve_global_ptr(fctx, ptr)?;
+        let storage = match &gp {
+            GlobalPtr::Const(g) => g.storage,
+            GlobalPtr::Symbolic { storage, .. } => *storage,
+        };
+        if storage.0 >= (1u32 << GLOBAL_ID_BITS) {
+            return Err(ImportError::Unsupported(
+                "too many distinct globals for the pointer-value encoding".into(),
+            ));
+        }
+        if let GlobalPtr::Const(g) = &gp {
+            if g.byte_offset >= (1u64 << GLOBAL_ADDR_BITS) {
+                return Err(ImportError::Unsupported(
+                    "global byte offset too large for the pointer-value encoding".into(),
+                ));
+            }
+        }
+        let offset_bits = self.global_ptr_offset_bits(fctx, block, &gp);
+        let mut bits = Vec::with_capacity(PTR_BITS);
+        bits.extend_from_slice(&offset_bits[..GLOBAL_ADDR_BITS]);
+        for b in 0..GLOBAL_ID_BITS {
+            bits.push(self.bc_const_at(fctx, block, (storage.0 >> b) & 1 != 0));
+        }
+        bits.push(self.bc_const_at(fctx, block, true)); // tag = 1 (global)
+        Ok(bits)
     }
 
     /// Compute `base_addr_bits + i` as a single `addr_tid`-typed value, via

@@ -853,6 +853,73 @@ entry:
 }
 
 #[test]
+fn select_between_stack_and_global_pointer_imports() {
+    // `select` merging two *individually* statically-resolved but
+    // differently-provenanced pointers (one stack, one global) -- until
+    // now, a bare global reference used directly as a generic value (not
+    // immediately loaded/stored through) had no `Bits` representation at
+    // all and hard-errored ("unsupported value kind"). The stack arm
+    // already had one via `Alloca`'s own cached `addr_bits`; only the
+    // global arm was the gap. Not loading through the merged result here --
+    // that still requires runtime storage-identity dispatch, a later stage.
+    let source = r#"
+@g = global i32 42
+
+define ptr @select_ptr(i1 %cond, i32 %x) {
+entry:
+  %p = alloca i32, align 4
+  store i32 %x, ptr %p
+  %sel = select i1 %cond, ptr %p, ptr @g
+  ret ptr %sel
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    import_module(&module, &["select_ptr"])
+        .expect("select between a stack pointer and a global pointer must import");
+    let _ = context;
+}
+
+#[test]
+fn phi_between_stack_and_global_pointer_imports() {
+    // Same shape as `select_between_stack_and_global_pointer_imports`, but
+    // via a control-flow-join `phi` instead of `select` -- exercises the
+    // block-param merge path instead of `bc_select_vec`.
+    let source = r#"
+@g = global i32 42
+
+define ptr @phi_ptr(i1 %cond, i32 %x) {
+entry:
+  %p = alloca i32, align 4
+  store i32 %x, ptr %p
+  br i1 %cond, label %use_stack, label %use_global
+use_stack:
+  br label %join
+use_global:
+  br label %join
+join:
+  %res = phi ptr [ %p, %use_stack ], [ @g, %use_global ]
+  ret ptr %res
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    import_module(&module, &["phi_ptr"])
+        .expect("phi between a stack pointer and a global pointer must import");
+    let _ = context;
+}
+
+#[test]
 fn memory_intrinsics_lower_without_residual_call() {
     let source = r#"
 declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
