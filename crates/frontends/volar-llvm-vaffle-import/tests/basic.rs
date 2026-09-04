@@ -422,10 +422,12 @@ entry:
 }
 
 #[test]
-fn global_gep_symbolic_index_still_deferred() {
-    // A GEP *instruction* with a symbolic (non-constant) index off a global
-    // -- a dynamic offset, deferred to a later stage, not this one. Must
-    // still fail closed, not silently misresolve to offset 0.
+fn global_gep_multi_index_symbolic_still_deferred() {
+    // A *multi*-index GEP instruction with a symbolic index off a global --
+    // a single-index dynamic offset is supported (see
+    // `global_gep_dynamic_index_imports`), but the multi-index (array/
+    // nested-aggregate-descending) case remains deferred. Must still fail
+    // closed, not silently misresolve to offset 0.
     let source = r#"
 @arr = global [4 x i8] zeroinitializer
 
@@ -444,9 +446,75 @@ entry:
         ))
         .expect("valid LLVM IR fixture");
     let err = import_module(&module, &["get_byte"]).expect_err(
-        "symbolic GEP index into a global must still fail closed (deferred, not yet supported)",
+        "multi-index symbolic GEP into a global must still fail closed (deferred, not yet supported)",
     );
     let _ = err.to_string();
+    let _ = context;
+}
+
+#[test]
+fn global_gep_dynamic_index_imports() {
+    // A single-index `getelementptr` with a *symbolic* (non-constant) index
+    // off a global -- previously deferred (left untracked, so the
+    // subsequent load/store failed closed). Now emits real bit-circuit
+    // address arithmetic, the same shape
+    // `dynamic_gep_index_into_alloca_imports` exercises for the stack side.
+    // This is the exact `xs[i]` shape the ConstChain-fallback plan targets.
+    let source = r#"
+@arr = global [4 x i32] zeroinitializer
+
+define i32 @dynamic_global_gep(i32 %x, i32 %i) {
+entry:
+  %p = getelementptr i32, ptr @arr, i32 %i
+  store i32 %x, ptr %p
+  %y = load i32, ptr %p
+  ret i32 %y
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["dynamic_global_gep"])
+        .expect("symbolic-index GEP into a global must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+
+    // Every non-ALLOCA StorageRead/StorageWrite address must be a
+    // *computed* value (a `Stmt::Merge` of bit-circuit-adder output), not a
+    // `Stmt::Const` -- confirming the address is genuinely runtime.
+    let addr_ids: Vec<usize> = body
+        .values
+        .iter()
+        .filter_map(|v| match &v.kind {
+            Value::Op(Stmt::StorageRead {
+                storage: volar_ir_common::StorageId(id),
+                addr,
+                ..
+            })
+            | Value::Op(Stmt::StorageWrite {
+                storage: volar_ir_common::StorageId(id),
+                addr,
+                ..
+            }) if *id != volar_ir_common::StorageId::ALLOCA.0 => Some(addr.0),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !addr_ids.is_empty(),
+        "expected global StorageRead/StorageWrite operations"
+    );
+    for id in addr_ids {
+        assert!(
+            !matches!(&body.values[id].kind, Value::Op(Stmt::Const(..))),
+            "expected a computed (non-constant) address for the dynamic GEP, got {:?}",
+            body.values[id].kind
+        );
+    }
     let _ = context;
 }
 

@@ -246,6 +246,21 @@ struct GlobalPointer {
     byte_offset: u64,
 }
 
+/// Tracking for a pointer-typed LLVM value known (at import time) to be
+/// global-provenance. `Const` is the pre-existing, common case: a
+/// compile-time-constant byte offset (`GlobalPointer`). `Symbolic` is
+/// produced by a single-index `getelementptr` whose index isn't a
+/// compile-time constant (or whose base is itself already `Symbolic`): a
+/// genuinely runtime-computed byte offset, `PTR_BITS` wide, LSB first --
+/// the same shape as `StackPtr::Symbolic`, and safe for the same reason:
+/// `Stmt::StorageRead`/`StorageWrite`'s `addr` is a plain `Var` with no
+/// dependency on being a compile-time constant.
+#[derive(Clone, Debug)]
+enum GlobalPtr {
+    Const(GlobalPointer),
+    Symbolic { storage: StorageId, offset_bits: Bits },
+}
+
 #[derive(Clone, Copy, Debug)]
 enum IntrinsicPointer {
     Stack {
@@ -506,6 +521,19 @@ impl<'ctx> Importer<'ctx> {
             .checked_add(gep_offset)
             .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
         Ok((storage, offset))
+    }
+
+    /// Resolve a pointer to its `GlobalPtr` (constant or already-dynamic),
+    /// checking `FuncCtx::global_ptr_of` (a previously-tracked GEP
+    /// instruction result -- constant or symbolic offset alike) before
+    /// falling back to `storage_for_with_offset` (a bare global or a
+    /// constant-index GEP constant expression, always constant).
+    fn resolve_global_ptr(&mut self, fctx: &FuncCtx<'ctx>, ptr: PointerValue<'ctx>) -> IResult<GlobalPtr> {
+        if let Some(gp) = fctx.global_ptr_of.get(&ptr.as_any_value_enum()) {
+            return Ok(gp.clone());
+        }
+        let (storage, byte_offset) = self.storage_for_with_offset(ptr)?;
+        Ok(GlobalPtr::Const(GlobalPointer { storage, byte_offset }))
     }
 
     fn import_function(&mut self, f: FunctionValue<'ctx>) -> IResult<Vec<FunctionValue<'ctx>>> {
@@ -945,11 +973,12 @@ impl<'ctx> Importer<'ctx> {
                     })
                 } else {
                     let n_bytes = int_result_width(instr)?.div_ceil(8);
-                    let (storage, offset) = match fctx.global_ptr_of.get(&ptr.as_any_value_enum()) {
-                        Some(gp) => (gp.storage, gp.byte_offset),
-                        None => self.storage_for_with_offset(ptr)?,
-                    };
-                    Some(self.mem_load(fctx, storage, offset, n_bytes))
+                    Some(match self.resolve_global_ptr(fctx, ptr)? {
+                        GlobalPtr::Const(g) => self.mem_load(fctx, g.storage, g.byte_offset, n_bytes),
+                        GlobalPtr::Symbolic { storage, offset_bits } => {
+                            self.mem_load_dynamic(fctx, storage, &offset_bits, n_bytes)
+                        }
+                    })
                 }
             }
             InstructionOpcode::Store => {
@@ -971,11 +1000,12 @@ impl<'ctx> Importer<'ctx> {
                     }
                 } else {
                     let n_bytes = val.len().div_ceil(8);
-                    let (storage, offset) = match fctx.global_ptr_of.get(&ptr.as_any_value_enum()) {
-                        Some(gp) => (gp.storage, gp.byte_offset),
-                        None => self.storage_for_with_offset(ptr)?,
-                    };
-                    self.mem_store(fctx, storage, offset, &val, n_bytes);
+                    match self.resolve_global_ptr(fctx, ptr)? {
+                        GlobalPtr::Const(g) => self.mem_store(fctx, g.storage, g.byte_offset, &val, n_bytes),
+                        GlobalPtr::Symbolic { storage, offset_bits } => {
+                            self.mem_store_dynamic(fctx, storage, &offset_bits, &val, n_bytes)
+                        }
+                    }
                 }
                 None
             }
@@ -1076,28 +1106,78 @@ impl<'ctx> Importer<'ctx> {
                         .insert(instr.as_any_value_enum(), new_stack_ptr);
                     Some(addr_bits)
                 } else {
-                    // Base is a global (directly, or via a constant-index GEP
-                    // constant expression -- `storage_for_with_offset` walks
-                    // that), or a previously-tracked `GlobalPointer` from a
-                    // chained GEP instruction. Fold this GEP's own constant
-                    // index operands into a running byte offset. A symbolic
-                    // index is deferred, not an error here: the GEP's result
-                    // is simply left untracked, so a later `Load`/`Store`
-                    // through it still fails closed via `storage_for`
-                    // (matching today's behavior) instead of misresolving.
-                    let (storage, base_offset) =
-                        match fctx.global_ptr_of.get(&base.as_any_value_enum()) {
-                            Some(gp) => (gp.storage, gp.byte_offset),
-                            None => self.storage_for_with_offset(base)?,
-                        };
-                    if let Some(gep_offset) = gep_instr_constant_offset(instr)? {
-                        let byte_offset = base_offset.checked_add(gep_offset).ok_or_else(|| {
+                    // Base is a global (directly, a constant-index GEP
+                    // constant expression, or a previously-tracked
+                    // `GlobalPtr` from a chained GEP instruction -- constant
+                    // or already-dynamic offset alike).
+                    let base_gp = self.resolve_global_ptr(fctx, base)?;
+                    let const_offset = gep_instr_constant_offset(instr)?;
+
+                    let new_gp = if let (GlobalPtr::Const(g), Some(gep_offset)) =
+                        (&base_gp, const_offset)
+                    {
+                        // Fast path: everything resolves at compile time
+                        // (multi-index, nested-array GEPs included).
+                        let byte_offset = g.byte_offset.checked_add(gep_offset).ok_or_else(|| {
                             ImportError::Unsupported("gep offset overflow".into())
                         })?;
-                        fctx.global_ptr_of.insert(
-                            instr.as_any_value_enum(),
-                            GlobalPointer { storage, byte_offset },
-                        );
+                        Some(GlobalPtr::Const(GlobalPointer {
+                            storage: g.storage,
+                            byte_offset,
+                        }))
+                    } else if instr.get_num_operands() == 2 {
+                        // Dynamic path: a single index (constant or
+                        // symbolic) into a scalar-integer element type --
+                        // reached when the base is already `Symbolic`, or
+                        // this GEP's own index is symbolic. The same shape
+                        // the stack arm supports, and what the `xs[i]`
+                        // motivating case needs. Multi-index dynamic GEPs
+                        // remain deferred (left untracked below).
+                        let elem_ty = instr
+                            .get_gep_source_element_type()
+                            .map_err(|_| ImportError::Unsupported("malformed gep".into()))?;
+                        match elem_ty {
+                            inkwell::types::BasicTypeEnum::IntType(t) => {
+                                let elem_bytes = (t.get_bit_width() as u64).div_ceil(8);
+                                match instr.get_operand(1).and_then(|o| o.value()) {
+                                    Some(idx_bv @ BasicValueEnum::IntValue(_)) => {
+                                        let storage = match &base_gp {
+                                            GlobalPtr::Const(g) => g.storage,
+                                            GlobalPtr::Symbolic { storage, .. } => *storage,
+                                        };
+                                        let base_offset_bits =
+                                            self.global_ptr_offset_bits(fctx, cur, &base_gp);
+                                        let idx_bits = self.value_bits(fctx, idx_bv)?;
+                                        let idx_bits = resize_bits_signed(&idx_bits, PTR_BITS);
+                                        let new_offset_bits = {
+                                            let mut c = Ctx {
+                                                fctx,
+                                                bit_tid: self.bit_tid,
+                                                block: cur,
+                                            };
+                                            let elem_bytes_const: Vec<ValueId> = (0..PTR_BITS)
+                                                .map(|b| c.bc_const((elem_bytes >> b) & 1 != 0))
+                                                .collect();
+                                            let scaled =
+                                                circuits::bc_mul(&mut c, &idx_bits, &elem_bytes_const);
+                                            circuits::bc_add(&mut c, &base_offset_bits, &scaled, false)
+                                        };
+                                        Some(GlobalPtr::Symbolic {
+                                            storage,
+                                            offset_bits: new_offset_bits,
+                                        })
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(gp) = new_gp {
+                        fctx.global_ptr_of.insert(instr.as_any_value_enum(), gp);
                     }
                     None
                 }
@@ -1547,10 +1627,11 @@ impl<'ctx> Importer<'ctx> {
         Ok(())
     }
 
-    /// Bit-decompose a compile-time-constant `StorageId::ALLOCA` address,
-    /// `PTR_BITS` wide, LSB first — the pointer *value* for an alloca or a
-    /// constant-index GEP off one. Mirrors `VaffleTarget::alloca`'s
-    /// `addr_bits` construction exactly.
+    /// Bit-decompose a compile-time-constant `u64` (a `StorageId::ALLOCA`
+    /// address, *or* a global's constant byte offset — the encoding is
+    /// identical, just a plain unsigned integer), `PTR_BITS` wide, LSB
+    /// first. Mirrors `VaffleTarget::alloca`'s `addr_bits` construction
+    /// exactly.
     fn stack_addr_bits(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, base_slot: u64) -> Bits {
         (0..PTR_BITS)
             .map(|i| self.bc_const_at(fctx, block, (base_slot >> i) & 1 != 0))
@@ -1650,6 +1731,16 @@ impl<'ctx> Importer<'ctx> {
         match ptr {
             StackPtr::Const(sp) => self.stack_addr_bits(fctx, block, sp.addr),
             StackPtr::Symbolic { addr_bits, .. } => addr_bits.clone(),
+        }
+    }
+
+    /// Bit-decompose a `GlobalPtr`'s current byte offset into a
+    /// `PTR_BITS`-wide `Bits`, LSB first — the `GlobalPtr` counterpart of
+    /// `stack_ptr_addr_bits`.
+    fn global_ptr_offset_bits(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, ptr: &GlobalPtr) -> Bits {
+        match ptr {
+            GlobalPtr::Const(g) => self.stack_addr_bits(fctx, block, g.byte_offset),
+            GlobalPtr::Symbolic { offset_bits, .. } => offset_bits.clone(),
         }
     }
 
@@ -1824,6 +1915,80 @@ impl<'ctx> Importer<'ctx> {
                     self.addr_tid,
                 )),
             );
+            let base = (byte_i * 8) as usize;
+            let zero = self.bc_const_at(fctx, cur, false);
+            let bits: Vec<ValueId> = (0..8)
+                .map(|j| *val.get(base + j).unwrap_or(&zero))
+                .collect();
+            let byte_var = fctx.emit(
+                cur,
+                Value::Op(Stmt::Merge {
+                    parts: bits,
+                    ty: self.byte_tid,
+                }),
+            );
+            fctx.emit(
+                cur,
+                Value::Op(Stmt::StorageWrite {
+                    storage,
+                    src: byte_var,
+                    ty: self.byte_tid,
+                    addr,
+                }),
+            );
+        }
+    }
+
+    /// Like `mem_load`, but the base byte offset is a runtime-computed
+    /// `Bits` (`GlobalPtr::Symbolic`) rather than a compile-time constant:
+    /// each byte needs its own `addr = base_offset_bits + byte_i`, via
+    /// [`Self::dynamic_addr`] (the same helper `stack_load_dynamic` uses).
+    fn mem_load_dynamic(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        storage: StorageId,
+        base_offset_bits: &Bits,
+        n_bytes: usize,
+    ) -> Bits {
+        let cur = fctx.current;
+        let mut all_bits = Vec::with_capacity(n_bytes * 8);
+        for byte_i in 0..n_bytes as u64 {
+            let addr = self.dynamic_addr(fctx, cur, base_offset_bits, byte_i);
+            let byte_var = fctx.emit(
+                cur,
+                Value::Op(Stmt::StorageRead {
+                    storage,
+                    ty: self.byte_tid,
+                    addr,
+                }),
+            );
+            for bit_j in 0..8u8 {
+                let bit = fctx.emit(
+                    cur,
+                    Value::Op(Stmt::Shuffle {
+                        result_bits: vec![(bit_j, byte_var)],
+                        ty: self.bit_tid,
+                    }),
+                );
+                all_bits.push(bit);
+            }
+        }
+        all_bits
+    }
+
+    /// Write `n_bytes` bytes of `val` to `storage` at a runtime-computed
+    /// base byte offset. See [`Self::mem_load_dynamic`].
+    fn mem_store_dynamic(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        storage: StorageId,
+        base_offset_bits: &Bits,
+        val: &Bits,
+        n_bytes: usize,
+    ) {
+        let cur = fctx.current;
+        for byte_i in 0..n_bytes as u64 {
+            let addr = self.dynamic_addr(fctx, cur, base_offset_bits, byte_i);
             let base = (byte_i * 8) as usize;
             let zero = self.bc_const_at(fctx, cur, false);
             let bits: Vec<ValueId> = (0..8)
@@ -2418,7 +2583,7 @@ struct FuncCtx<'ctx> {
     /// Pointer-typed LLVM values that are the result of a constant-index
     /// `getelementptr` *instruction* off a global (directly, or chained off
     /// another tracked entry here). See `GlobalPointer`.
-    global_ptr_of: HashMap<AnyValueEnum<'ctx>, GlobalPointer>,
+    global_ptr_of: HashMap<AnyValueEnum<'ctx>, GlobalPtr>,
 }
 
 impl<'ctx> FuncCtx<'ctx> {
