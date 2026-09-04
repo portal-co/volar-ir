@@ -1203,14 +1203,18 @@ entry:
 }
 
 #[test]
-fn global_gep_memory_intrinsic_is_named_unsupported() {
+fn memcpy_from_global_and_offset_gep_lower_without_residual_call() {
     let source = r#"
-@bytes = global [4 x i8] zeroinitializer
-declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+@iv = private unnamed_addr constant [32 x i8] zeroinitializer
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
 
-define void @offset_global() {
+define void @copy_iv() {
 entry:
-  call void @llvm.memset.p0.i64(ptr getelementptr inbounds ([4 x i8], ptr @bytes, i64 0, i64 1), i8 0, i64 1, i1 false)
+  %buf = alloca [64 x i8], align 8
+  call void @llvm.memcpy.p0.p0.i64(ptr %buf, ptr @iv, i64 32, i1 false)
+  %dst = getelementptr i8, ptr %buf, i64 32
+  %src = getelementptr [32 x i8], ptr @iv, i64 0, i64 7
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 8, i1 false)
   ret void
 }
 "#;
@@ -1221,11 +1225,170 @@ entry:
             "test.ll",
         ))
         .expect("valid LLVM IR fixture");
-    let err = import_module(&module, &["offset_global"])
-        .expect_err("global GEP intrinsic pointer must fail closed");
+    let out = import_module(&module, &["copy_iv"])
+        .expect("constant global memcpy and constant-offset GEP must import");
+    assert_eq!(out.funcs.len(), 1, "intrinsics must not become callees");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
     assert!(
-        err.to_string().contains("global GEP"),
-        "expected named global-GEP error, got {err}"
+        !body
+            .values
+            .iter()
+            .any(|value| matches!(value.kind, Value::Call { .. })),
+        "supported global memcpy intrinsics must lower to storage operations"
+    );
+    // The two copies read `@iv` at `[0, 32)` and `[7, 15)`, respectively.
+    // Inspecting the address constants makes an offset-zero regression
+    // observable even though both copies' data happen to be zero here.
+    let global_read_offsets: Vec<u64> = body
+        .values
+        .iter()
+        .filter_map(|node| match &node.kind {
+            Value::Op(Stmt::StorageRead { storage, addr, .. })
+                if *storage != volar_ir_common::StorageId::ALLOCA =>
+            {
+                match &body.values[addr.0].kind {
+                    Value::Op(Stmt::Const(constant, _)) => u64::try_from(constant.lo).ok(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        global_read_offsets.len(),
+        40,
+        "expected 32-byte and 8-byte global reads"
+    );
+    assert!(
+        global_read_offsets.contains(&0) && global_read_offsets.contains(&31),
+        "base-global memcpy must read the full [0, 32) range: {global_read_offsets:?}"
+    );
+    assert!(
+        global_read_offsets.contains(&7) && global_read_offsets.contains(&14),
+        "GEP memcpy must preserve its nonzero [7, 15) base offset: {global_read_offsets:?}"
+    );
+}
+
+#[test]
+fn constant_size_memcpy_through_pointer_params_dispatches() {
+    // A constant size is enough to lower a memcpy through untracked slice
+    // pointers. The source materializes through `dispatch_read` before the
+    // destination `dispatch_write`, exactly as for the direct paths.
+    let source = r#"
+@g = global [4 x i8] zeroinitializer
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+
+define void @copy_param(ptr %out, ptr %in) {
+entry:
+  call void @llvm.memcpy.p0.p0.i64(ptr %out, ptr %in, i64 4, i1 false)
+  ret void
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["copy_param"])
+        .expect("constant-size pointer-param memcpy must dispatch instead of becoming a call");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    assert!(
+        !body
+            .values
+            .iter()
+            .any(|value| matches!(value.kind, Value::Call { .. })),
+        "dispatched memcpy must not leave a Value::Call"
+    );
+    assert!(
+        body.values.iter().any(|value| matches!(
+            value.kind,
+            Value::Op(Stmt::StorageRead { storage, .. })
+                if storage == volar_ir_common::StorageId::ALLOCA
+        )),
+        "the read side must include the stack candidate in the runtime dispatch"
+    );
+}
+
+#[test]
+fn noalias_and_lifetime_intrinsics_are_skipped() {
+    let source = r#"
+declare void @llvm.experimental.noalias.scope.decl(metadata)
+declare void @llvm.lifetime.start.p0(i64 immarg, ptr nocapture)
+declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture)
+
+define i32 @xor_one(i32 %x) {
+entry:
+  %slot = alloca i32, align 4
+  call void @llvm.experimental.noalias.scope.decl(metadata !0)
+  call void @llvm.lifetime.start.p0(i64 4, ptr %slot)
+  %y = xor i32 %x, 1
+  call void @llvm.lifetime.end.p0(i64 4, ptr %slot)
+  ret i32 %y
+}
+
+!0 = !{!0}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["xor_one"])
+        .expect("metadata, noalias, and lifetime intrinsics must be skipped");
+    assert_eq!(
+        out.funcs.len(),
+        1,
+        "skipped intrinsics must not become callees"
+    );
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    assert!(
+        !body
+            .values
+            .iter()
+            .any(|value| matches!(value.kind, Value::Call { .. })),
+        "ignored LLVM intrinsics must not survive as Value::Call"
+    );
+}
+
+#[test]
+fn unsupported_metadata_call_is_a_named_error_not_a_panic() {
+    let source = r#"
+declare void @takes_metadata(metadata)
+
+define void @caller() {
+entry:
+  call void @takes_metadata(metadata !0)
+  ret void
+}
+
+!0 = !{!0}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let imported = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        import_module(&module, &["caller"])
+    }));
+    let err = imported
+        .expect("metadata on a non-skipped call must not panic")
+        .expect_err("metadata on a non-skipped call must fail closed");
+    assert!(
+        err.to_string().contains("metadata"),
+        "expected a named metadata-call error, got {err}"
     );
 }
 

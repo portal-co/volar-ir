@@ -56,8 +56,9 @@ LLVM only constant-folds a GEP into a `ConstantExpr` when every index is
 already a compile-time constant.)
 
 The memory-intrinsic pointer path (`Importer::intrinsic_pointer`,
-`docs/llvm-memset.md`) is unchanged and intentionally still rejects any
-GEP-offset global pointer — that restriction is independent of this fix.
+[`llvm-memset.md`](llvm-memset.md)) now reuses the same folded global offset,
+so a constant-size intrinsic through this GEP accesses its actual byte range
+rather than rejecting the pointer or silently using byte zero.
 
 ## Tests
 

@@ -57,10 +57,10 @@ use std::collections::{HashMap, HashSet};
 use inkwell::basic_block::BasicBlock as LlvmBlock;
 use inkwell::llvm_sys::core::{
     LLVMGetConstOpcode, LLVMGetGEPSourceElementType, LLVMGetNumOperands, LLVMGetNumSuccessors,
-    LLVMGetOperand, LLVMGetSuccessor, LLVMGetSwitchCaseValue, LLVMIsAConstantExpr,
-    LLVMIsAGlobalVariable,
+    LLVMGetOperand, LLVMGetSuccessor, LLVMGetSwitchCaseValue, LLVMGetTypeKind, LLVMIsAConstantExpr,
+    LLVMTypeOf,
 };
-use inkwell::llvm_sys::LLVMOpcode;
+use inkwell::llvm_sys::{LLVMOpcode, LLVMTypeKind};
 use inkwell::module::Module as LlvmModule;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{
@@ -293,7 +293,7 @@ enum GlobalPtr {
     Symbolic { storage: StorageId, offset_bits: Bits },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum IntrinsicPointer {
     Stack {
         ptr: StackPointer,
@@ -301,7 +301,13 @@ enum IntrinsicPointer {
     },
     Global {
         storage: StorageId,
+        byte_offset: u64,
     },
+    /// A pointer whose storage identity is only available in the importer's
+    /// tagged runtime representation. Constant-size memory intrinsics can
+    /// lower through the same complete candidate dispatch used by ordinary
+    /// loads and stores.
+    Dispatch { ptr_bits: Bits },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1329,7 +1335,14 @@ impl<'ctx> Importer<'ctx> {
                     .get_called_fn_value()
                     .ok_or_else(|| ImportError::Unsupported("indirect call".into()))?;
                 let callee_name = callee_fn.get_name().to_string_lossy();
-                if let Some(intrinsic) = MemoryIntrinsic::from_name(&callee_name) {
+                if is_ignored_llvm_intrinsic(&callee_name) {
+                    // Debug, lifetime, and alias-analysis intrinsics carry
+                    // no circuit dataflow. In particular,
+                    // `noalias.scope.decl` has a metadata operand that
+                    // inkwell cannot represent as a `BasicValueEnum`; skip
+                    // it before generic call-argument conversion.
+                    None
+                } else if let Some(intrinsic) = MemoryIntrinsic::from_name(&callee_name) {
                     self.translate_memory_intrinsic(fctx, instr, intrinsic)?;
                     None
                 } else if let Some(intrinsic) = OverflowIntrinsic::from_name(&callee_name) {
@@ -1338,6 +1351,12 @@ impl<'ctx> Importer<'ctx> {
                         .insert(instr.as_any_value_enum(), fields);
                     None
                 } else {
+                    // Validate arguments before asking `func_id` to inspect
+                    // the callee signature. `FunctionValue::get_params`
+                    // itself assumes every parameter is a BasicValue and
+                    // would otherwise hit inkwell's metadata panic before
+                    // `call_arg_bits` can turn this into ImportError.
+                    let args = self.call_arg_bits(fctx, instr)?;
                     let tail_end = tail_call_end(instr);
                     // A `ReturnCall` has no continuation, so it can only
                     // target a defined function when it represents LLVM's
@@ -1350,7 +1369,6 @@ impl<'ctx> Importer<'ctx> {
                             && callee_fn.get_first_basic_block().is_some());
                     let callee_id = self.func_id(callee_fn);
                     called.push(callee_fn);
-                    let args = self.call_arg_bits(fctx, instr)?;
                     if is_tail_call {
                         fctx.terminators[cur.0] = Some(Terminator::ReturnCall {
                             func: callee_id,
@@ -1492,7 +1510,7 @@ impl<'ctx> Importer<'ctx> {
             MemoryIntrinsic::Memset => {
                 let n_bytes = memory_intrinsic_length(instr, 2, intrinsic)?;
                 memory_intrinsic_nonvolatile(instr, 3, intrinsic)?;
-                self.validate_intrinsic_pointer(dest, n_bytes)?;
+                self.validate_intrinsic_pointer(&dest, n_bytes)?;
 
                 let fill = call_value_operand(instr, 1, "memset fill byte")?;
                 let mut fill_bits = self.value_bits(fctx, fill)?;
@@ -1507,24 +1525,24 @@ impl<'ctx> Importer<'ctx> {
                 for _ in 0..n_bytes {
                     bytes.extend_from_slice(&fill_bits);
                 }
-                self.intrinsic_store(fctx, dest, &bytes)
+                self.intrinsic_store(fctx, &dest, &bytes)
             }
             MemoryIntrinsic::Memcpy | MemoryIntrinsic::Memmove => {
                 let src = self.intrinsic_pointer(fctx, load_store_pointer(instr, 1)?)?;
                 let n_bytes = memory_intrinsic_length(instr, 2, intrinsic)?;
                 memory_intrinsic_nonvolatile(instr, 3, intrinsic)?;
-                self.validate_intrinsic_pointer(dest, n_bytes)?;
-                self.validate_intrinsic_pointer(src, n_bytes)?;
+                self.validate_intrinsic_pointer(&dest, n_bytes)?;
+                self.validate_intrinsic_pointer(&src, n_bytes)?;
                 if intrinsic == MemoryIntrinsic::Memcpy
-                    && intrinsic_ranges_overlap(dest, src, n_bytes)?
+                    && intrinsic_ranges_overlap(&dest, &src, n_bytes)?
                 {
                     return Err(ImportError::Unsupported(
                         "memcpy source and destination overlap".into(),
                     ));
                 }
 
-                let bytes = self.intrinsic_load(fctx, src, n_bytes)?;
-                self.intrinsic_store(fctx, dest, &bytes)
+                let bytes = self.intrinsic_load(fctx, &src, n_bytes)?;
+                self.intrinsic_store(fctx, &dest, &bytes)
             }
         }
     }
@@ -1537,12 +1555,7 @@ impl<'ctx> Importer<'ctx> {
         let n_args = instr.get_num_operands().saturating_sub(1);
         let mut args = Vec::new();
         for i in 0..n_args {
-            let value = instr
-                .get_operand(i)
-                .and_then(|operand| operand.value())
-                .ok_or_else(|| {
-                    ImportError::Unsupported("call argument must be a value".into())
-                })?;
+            let value = call_value_operand(instr, i, "call argument")?;
             args.extend(self.value_bits(fctx, value)?);
         }
         Ok(args)
@@ -1695,7 +1708,7 @@ impl<'ctx> Importer<'ctx> {
 
     fn intrinsic_pointer(
         &mut self,
-        fctx: &FuncCtx<'ctx>,
+        fctx: &mut FuncCtx<'ctx>,
         ptr: PointerValue<'ctx>,
     ) -> IResult<IntrinsicPointer> {
         if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
@@ -1715,29 +1728,33 @@ impl<'ctx> Importer<'ctx> {
                 .ok_or_else(|| {
                     ImportError::Unsupported("stack pointer bits missing (internal)".into())
                 })?;
-            Ok(IntrinsicPointer::Stack {
-                ptr: sp,
-                ptr_bits0,
-            })
+            Ok(IntrinsicPointer::Stack { ptr: sp, ptr_bits0 })
         } else {
-            // `storage_for` intentionally identifies a global but has no
-            // byte-offset result. For intrinsics, accept only the actual base
-            // global rather than silently applying an offset-GEP at byte 0.
-            if unsafe { LLVMIsAGlobalVariable(ptr.as_value_ref()) }.is_null() {
-                return Err(ImportError::Unsupported(
-                    "memory intrinsic global pointer must be a base global; global GEP offsets are not supported"
-                        .into(),
-                ));
+            match self.resolve_global_ptr(fctx, ptr) {
+                // Unlike the former bare-global check, this keeps the byte
+                // offset folded by `global_ptr_of` or
+                // `storage_for_with_offset`. A constant-expression GEP
+                // must never silently become a byte-zero access.
+                Ok(GlobalPtr::Const(global)) => Ok(IntrinsicPointer::Global {
+                    storage: global.storage,
+                    byte_offset: global.byte_offset,
+                }),
+                // A symbolic global offset and a pointer of genuinely
+                // unknown provenance both already have a uniform tagged
+                // `Bits` encoding. Reuse the ordinary load/store runtime
+                // dispatch rather than treating a constant-size intrinsic
+                // as a declaration-only call or rejecting a slice pointer
+                // solely for its provenance.
+                Ok(GlobalPtr::Symbolic { .. }) | Err(_) => Ok(IntrinsicPointer::Dispatch {
+                    ptr_bits: self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?,
+                }),
             }
-            Ok(IntrinsicPointer::Global {
-                storage: self.storage_for(ptr)?,
-            })
         }
     }
 
-    fn validate_intrinsic_pointer(&self, ptr: IntrinsicPointer, n_bytes: usize) -> IResult<()> {
+    fn validate_intrinsic_pointer(&self, ptr: &IntrinsicPointer, n_bytes: usize) -> IResult<()> {
         if let IntrinsicPointer::Stack { ptr, .. } = ptr {
-            ptr.intrinsic_range(n_bytes)?;
+            (*ptr).intrinsic_range(n_bytes)?;
         }
         Ok(())
     }
@@ -1745,7 +1762,7 @@ impl<'ctx> Importer<'ctx> {
     fn intrinsic_load(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
-        ptr: IntrinsicPointer,
+        ptr: &IntrinsicPointer,
         n_bytes: usize,
     ) -> IResult<Bits> {
         match ptr {
@@ -1753,24 +1770,36 @@ impl<'ctx> Importer<'ctx> {
                 let n_bits = n_bytes.checked_mul(8).ok_or_else(|| {
                     ImportError::Unsupported("memory intrinsic length is too large".into())
                 })?;
-                Ok(self.stack_load(fctx, ptr_bits0, ptr.addr, self.byte_tid, n_bits))
+                Ok(self.stack_load(fctx, *ptr_bits0, ptr.addr, self.byte_tid, n_bits))
             }
-            IntrinsicPointer::Global { storage } => Ok(self.mem_load(fctx, storage, 0, n_bytes)),
+            IntrinsicPointer::Global {
+                storage,
+                byte_offset,
+            } => Ok(self.mem_load(fctx, *storage, *byte_offset, n_bytes)),
+            IntrinsicPointer::Dispatch { ptr_bits } => {
+                self.dispatch_read(fctx, ptr_bits, self.byte_tid, n_bytes)
+            }
         }
     }
 
     fn intrinsic_store(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
-        ptr: IntrinsicPointer,
+        ptr: &IntrinsicPointer,
         bytes: &Bits,
     ) -> IResult<()> {
         match ptr {
             IntrinsicPointer::Stack { ptr, ptr_bits0 } => {
-                self.stack_store(fctx, ptr_bits0, ptr.addr, bytes);
+                self.stack_store(fctx, *ptr_bits0, ptr.addr, bytes);
             }
-            IntrinsicPointer::Global { storage } => {
-                self.mem_store(fctx, storage, 0, bytes, bytes.len().div_ceil(8));
+            IntrinsicPointer::Global {
+                storage,
+                byte_offset,
+            } => {
+                self.mem_store(fctx, *storage, *byte_offset, bytes, bytes.len().div_ceil(8));
+            }
+            IntrinsicPointer::Dispatch { ptr_bits } => {
+                self.dispatch_write(fctx, ptr_bits, bytes)?;
             }
         }
         Ok(())
@@ -2797,10 +2826,39 @@ fn call_value_operand<'ctx>(
     index: u32,
     description: &str,
 ) -> IResult<BasicValueEnum<'ctx>> {
+    // `InstructionValue::get_operand` eagerly constructs a
+    // `BasicValueEnum`. That is an inkwell panic for LLVM metadata values,
+    // so inspect the raw operand type first. This guard deliberately sits
+    // below the ignored-intrinsic check: those metadata-only hints should be
+    // skipped, while a metadata operand on any ordinary call must fail closed
+    // as an ImportError instead of crashing the importer.
+    let raw = unsafe { LLVMGetOperand(instr.as_value_ref(), index) };
+    if raw.is_null() {
+        return Err(ImportError::Unsupported(format!(
+            "{description} is missing"
+        )));
+    }
+    if unsafe { LLVMGetTypeKind(LLVMTypeOf(raw)) } == LLVMTypeKind::LLVMMetadataTypeKind {
+        return Err(ImportError::Unsupported(format!(
+            "{description} must not be metadata"
+        )));
+    }
     instr
         .get_operand(index)
         .and_then(|operand| operand.value())
         .ok_or_else(|| ImportError::Unsupported(format!("{description} must be a value")))
+}
+
+/// LLVM intrinsics that are semantic no-ops for this structural circuit
+/// importer. These must be recognized by callee name before generic call
+/// handling because several take metadata operands, which inkwell cannot
+/// convert to `BasicValueEnum`.
+fn is_ignored_llvm_intrinsic(name: &str) -> bool {
+    name == "llvm.experimental.noalias.scope.decl"
+        || name.starts_with("llvm.lifetime.start.")
+        || name.starts_with("llvm.lifetime.end.")
+        || name.starts_with("llvm.dbg.")
+        || matches!(name, "llvm.assume" | "llvm.donothing" | "llvm.sideeffect")
 }
 
 /// Detect the exact LLVM shapes that can use VAFFLE's `ReturnCall` without
@@ -2885,8 +2943,8 @@ fn overflow_integer_operand<'ctx>(
 }
 
 fn intrinsic_ranges_overlap(
-    dest: IntrinsicPointer,
-    src: IntrinsicPointer,
+    dest: &IntrinsicPointer,
+    src: &IntrinsicPointer,
     n_bytes: usize,
 ) -> IResult<bool> {
     match (dest, src) {
@@ -2894,18 +2952,31 @@ fn intrinsic_ranges_overlap(
             if dest.allocation_base == src.allocation_base
                 && dest.allocation_bits == src.allocation_bits =>
         {
-            let (dest_start, dest_end) = dest.intrinsic_range(n_bytes)?;
-            let (src_start, src_end) = src.intrinsic_range(n_bytes)?;
+            let (dest_start, dest_end) = (*dest).intrinsic_range(n_bytes)?;
+            let (src_start, src_end) = (*src).intrinsic_range(n_bytes)?;
             Ok(dest_start < src_end && src_start < dest_end)
         }
         (
             IntrinsicPointer::Global {
                 storage: dest_storage,
+                byte_offset: dest_offset,
             },
             IntrinsicPointer::Global {
                 storage: src_storage,
+                byte_offset: src_offset,
             },
-        ) => Ok(n_bytes != 0 && dest_storage == src_storage),
+        ) if dest_storage == src_storage => {
+            let n_bytes = u64::try_from(n_bytes).map_err(|_| {
+                ImportError::Unsupported("memory intrinsic length is too large".into())
+            })?;
+            let dest_end = dest_offset.checked_add(n_bytes).ok_or_else(|| {
+                ImportError::Unsupported("memory intrinsic range overflow".into())
+            })?;
+            let src_end = src_offset.checked_add(n_bytes).ok_or_else(|| {
+                ImportError::Unsupported("memory intrinsic range overflow".into())
+            })?;
+            Ok(*dest_offset < src_end && *src_offset < dest_end)
+        }
         _ => Ok(false),
     }
 }

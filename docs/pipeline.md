@@ -161,6 +161,9 @@ Frontend routes that feed those passes:
 | LLVM reachable `unreachable` (rustc panic=abort) | [`llvm-unreachable.md`](llvm-unreachable.md) |
 | LLVM `ReturnCall` to Import | [`llvm-import-returncall.md`](llvm-import-returncall.md) |
 | LLVM `ConstantInt` cache vs dominance | [`llvm-const-cache-dominance.md`](llvm-const-cache-dominance.md) |
+| LLVM pointer-param runtime dispatch | [`llvm-ptr-runtime-dispatch.md`](llvm-ptr-runtime-dispatch.md) |
+| LLVM memcpy from a constant global | [`llvm-memcpy-global.md`](llvm-memcpy-global.md) |
+| LLVM `noalias.scope.decl` metadata calls | [`llvm-noalias-scope-decl.md`](llvm-noalias-scope-decl.md) |
 | Full pipeline (weaving, backends, proving) | `volar` repo's `docs/pipeline.md` |
 | Textual circuit libraries (Noir, POD2) | [`circuit-source.md`](circuit-source.md) |
 

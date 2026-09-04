@@ -11,11 +11,12 @@ spill pattern unroll to a circuit.
 - The length must be a constant integer representable as `usize`, and the
   volatile operand must be the constant `false`. Symbolic or oversized lengths
   and volatile calls fail with a named `ImportError::Unsupported`.
-- Each pointer must be either a direct global-storage base already supported by
-  the importer, or a tracked constant-GEP pointer derived from one `alloca`.
-  Stack pointers retain their allocation identity, current bit address, and
-  allocation bounds; every intrinsic byte range is checked against those
-  bounds.
+- A statically resolved global pointer may be a bare global or a constant-GEP
+  pointer with a folded byte offset. Tracked constant-GEP stack pointers use
+  the direct stack path and retain their allocation identity, current bit
+  address, and allocation bounds; every intrinsic byte range is checked
+  against those bounds. Other pointer values use the importer's runtime
+  storage-identity dispatch when their tagged representation is available.
 - `memset` normalizes its fill operand to eight bits and emits one repeated
   byte sequence. Stack accesses use the existing bit-addressed `stack_load` /
   `stack_store` helpers; global accesses use the existing byte-addressed
@@ -42,9 +43,8 @@ produce their expected copied bytes.
 ## Out of scope
 
 - Symbolic lengths or volatile memory intrinsics.
-- Heap, pointer `phi` / `select`, symbolic GEP, and other unresolved pointer
-  forms.
-- Global pointer offsets beyond the pre-existing base-global support.
+- Heap and pointer forms that cannot be represented by the importer's tagged
+  runtime pointer encoding.
 - Real exception handling; see [`llvm-landingpad.md`](llvm-landingpad.md).
 
 Site canary `llvm_vaffle_rustc_o0_stack_spill_memset` now expects unroll.
