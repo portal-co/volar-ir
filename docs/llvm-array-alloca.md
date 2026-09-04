@@ -165,11 +165,12 @@ that file's existing convention); `llvm_array_alloca_stack_spill_computes_x_xor_
 - Symbolic/dynamic GEP index, pointer `phi`/`select`, heap `malloc`,
   identity `WebProofBackend::verify`, full SLH-DSA verify — all unchanged
   from `llvm-alloca.md`.
-- Site `llvm`/`llvm-loop` canaries for rustc `-O0` `stack_spill` without
-  memset are in `site` (`llvm_vaffle_array_alloca_stack_spill`). The rustc
-  `-O0` leftover that still blocks *unroll* is `llvm.memset`
-  ([`llvm-memset.md`](llvm-memset.md)). Dead `landingpad` blocks rustc
-  `-O0` `poll_fsm` import ([`llvm-landingpad.md`](llvm-landingpad.md)).
+- Site `llvm`/`llvm-loop` canaries for rustc `-O0` wrapping `stack_spill`
+  (memset) and rustc `-O0` `poll_fsm` (dead landingpad) are in `site`.
+  Debug rustc `-O0` `+` without the panic edge unrolls
+  ([`llvm-overflow-extractvalue.md`](llvm-overflow-extractvalue.md)); the
+  real rustc panic edge imports as `ReturnCall` and `movfuscate` panics
+  ([`llvm-import-returncall.md`](llvm-import-returncall.md)).
 
 ## Where
 

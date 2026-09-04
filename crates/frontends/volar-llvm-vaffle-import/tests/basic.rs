@@ -6,6 +6,7 @@
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use vaffle::{FuncDecl, Terminator, Value};
+use volar_ir_common::Stmt;
 use volar_llvm_vaffle_import::{import_module, import_module_inlined};
 
 fn parse(source: &str) -> Context {
@@ -247,6 +248,58 @@ merge:
 }
 
 #[test]
+fn const_literal_in_sibling_blocks_is_not_shared() {
+    let source = r#"
+define i32 @opt_join(i1 %flag, i32 %a, i32 %b) {
+entry:
+  %slot = alloca i32, align 4
+  br i1 %flag, label %some_a, label %some_b
+some_a:
+  store i32 1, ptr %slot
+  %a_minus_one = sub i32 %a, 1
+  br label %join
+some_b:
+  store i32 1, ptr %slot
+  %b_minus_one = sub i32 %b, 1
+  br label %join
+join:
+  %result = phi i32 [ %a_minus_one, %some_a ], [ %b_minus_one, %some_b ]
+  ret i32 %result
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+
+    let out = import_module(&module, &["opt_join"]).expect("import succeeds");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let one_in = |block: usize| {
+        body.blocks[block]
+            .stmts
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &body.values[id.0].kind,
+                    Value::Op(Stmt::Const(constant, _)) if constant.lo == 1 && constant.hi == 0
+                )
+            })
+            .expect("each sibling must materialize its own literal one")
+    };
+    assert_ne!(
+        one_in(1),
+        one_in(2),
+        "a literal emitted in one sibling cannot be used by the other"
+    );
+}
+
+#[test]
 fn global_load_store() {
     let source = r#"
 @counter = global i32 0
@@ -285,6 +338,115 @@ entry:
     });
     assert!(has_read, "expected a StorageRead for the global load");
     assert!(has_write, "expected a StorageWrite for the global store");
+    let _ = context;
+}
+
+#[test]
+fn global_gep_instruction_offset_folds_into_storage_addr() {
+    // A constant-index `getelementptr` *instruction* (not embedded as a
+    // constant expression) off a global. Previously this failed closed at
+    // the subsequent `load`: the GEP's own result wasn't tracked, so
+    // `storage_for` saw a non-global pointer and hit ConstChain.
+    let source = r#"
+@arr = global [4 x i8] zeroinitializer
+
+define i8 @get_byte() {
+entry:
+  %p = getelementptr inbounds [4 x i8], ptr @arr, i64 0, i64 2
+  %v = load i8, ptr %p
+  ret i8 %v
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["get_byte"])
+        .expect("constant-index GEP instruction off a global must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let has_offset_const = body
+        .values
+        .iter()
+        .any(|v| matches!(&v.kind, Value::Op(Stmt::Const(c, _)) if c.lo == 2 && c.hi == 0));
+    assert!(
+        has_offset_const,
+        "expected the GEP's byte offset (2) to be folded into a StorageRead address constant"
+    );
+    let _ = context;
+}
+
+#[test]
+fn global_gep_constant_expr_offset_folds_into_storage_addr() {
+    // The same offset, but expressed as a `getelementptr` constant
+    // expression embedded directly in the load's pointer operand (LLVM
+    // constant-folds this shape instead of emitting a separate
+    // instruction). Previously `storage_for`'s `strip_pointer` walk resolved
+    // straight through to `@arr` at offset 0, silently discarding the index
+    // -- not an error, just the wrong byte.
+    let source = r#"
+@arr = global [4 x i8] zeroinitializer
+
+define i8 @get_byte() {
+entry:
+  %v = load i8, ptr getelementptr inbounds ([4 x i8], ptr @arr, i64 0, i64 2)
+  ret i8 %v
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["get_byte"])
+        .expect("constant-index GEP constant expression off a global must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let has_offset_const = body
+        .values
+        .iter()
+        .any(|v| matches!(&v.kind, Value::Op(Stmt::Const(c, _)) if c.lo == 2 && c.hi == 0));
+    assert!(
+        has_offset_const,
+        "expected the GEP constant expression's byte offset (2) to be folded into a StorageRead \
+         address constant, not silently dropped"
+    );
+    let _ = context;
+}
+
+#[test]
+fn global_gep_symbolic_index_still_deferred() {
+    // A GEP *instruction* with a symbolic (non-constant) index off a global
+    // -- a dynamic offset, deferred to a later stage, not this one. Must
+    // still fail closed, not silently misresolve to offset 0.
+    let source = r#"
+@arr = global [4 x i8] zeroinitializer
+
+define i8 @get_byte(i64 %i) {
+entry:
+  %p = getelementptr inbounds [4 x i8], ptr @arr, i64 0, i64 %i
+  %v = load i8, ptr %p
+  ret i8 %v
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let err = import_module(&module, &["get_byte"]).expect_err(
+        "symbolic GEP index into a global must still fail closed (deferred, not yet supported)",
+    );
+    let _ = err.to_string();
     let _ = context;
 }
 
@@ -331,6 +493,73 @@ entry:
     assert!(has_alloc, "expected a Value::StackAlloc marker");
     assert!(has_read, "expected an ALLOCA StorageRead for the spill load");
     assert!(has_write, "expected an ALLOCA StorageWrite for the spill store");
+}
+
+#[test]
+fn dynamic_gep_index_into_alloca_imports() {
+    // A `getelementptr` with a *symbolic* (non-constant) index into a stack
+    // pointer -- previously a named `Unsupported` error
+    // ("symbolic index into stack pointer not supported"). ALLOCA addresses
+    // already tolerate a runtime `addr` operand (see `rebase_stack_addr`),
+    // so this just needed the importer's own restriction lifted: real
+    // bit-circuit multiply-and-add instead of a compile-time-constant
+    // offset.
+    let source = r#"
+define i32 @dynamic_gep(i32 %x, i32 %i) {
+entry:
+  %buf = alloca [4 x i32], align 4
+  %p = getelementptr i32, ptr %buf, i32 %i
+  store i32 %x, ptr %p
+  %y = load i32, ptr %p
+  ret i32 %y
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out =
+        import_module(&module, &["dynamic_gep"]).expect("symbolic-index GEP into alloca must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+
+    // Every ALLOCA StorageRead/StorageWrite address must be a *computed*
+    // value (a `Stmt::Merge` of bit-circuit-adder output), not a
+    // `Stmt::Const` -- confirming the address is genuinely runtime, not
+    // silently folded back down to a fixed offset.
+    let addr_ids: Vec<usize> = body
+        .values
+        .iter()
+        .filter_map(|v| match &v.kind {
+            Value::Op(Stmt::StorageRead {
+                storage: volar_ir_common::StorageId::ALLOCA,
+                addr,
+                ..
+            })
+            | Value::Op(Stmt::StorageWrite {
+                storage: volar_ir_common::StorageId::ALLOCA,
+                addr,
+                ..
+            }) => Some(addr.0),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !addr_ids.is_empty(),
+        "expected ALLOCA StorageRead/StorageWrite operations"
+    );
+    for id in addr_ids {
+        assert!(
+            !matches!(&body.values[id].kind, Value::Op(Stmt::Const(..))),
+            "expected a computed (non-constant) address for the dynamic GEP, got {:?}",
+            body.values[id].kind
+        );
+    }
+    let _ = context;
 }
 
 #[test]

@@ -38,8 +38,8 @@ defined abort model, not an assertion that an overflow path is impossible.
 | `panic=unwind` `invoke` + `landingpad` | named `Invoke` (`llvm_vaffle_rustc_o0_overflow_invoke_is_named_unsupported`) |
 | symbolic `gep i32, ptr %xs, i64 %i` | named unsupported (`llvm_vaffle_symbolic_gep_is_named_unsupported`) |
 
-Site canary `llvm_vaffle_rustc_o0_overflow_panic_unreachable` can now add
-movfuscation as a follow-up update outside this repository.
+Site canary `llvm_vaffle_rustc_o0_overflow_panic_unreachable` now expects
+movfuscate + fuse (unroll stays fail-closed).
 
 ## Supported contract
 

@@ -47,5 +47,4 @@ produce their expected copied bytes.
 - Global pointer offsets beyond the pre-existing base-global support.
 - Real exception handling; see [`llvm-landingpad.md`](llvm-landingpad.md).
 
-The external site-canary expectation update is follow-up work and is not
-modified in this repository.
+Site canary `llvm_vaffle_rustc_o0_stack_spill_memset` now expects unroll.

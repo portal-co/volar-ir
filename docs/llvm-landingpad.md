@@ -32,5 +32,4 @@ are evaluated before and after lowering.
 - Lowering a reachable `unreachable` terminator.
 - Pointer joins and other unrelated LLVM importer gaps.
 
-The external site-canary expectation update is follow-up work and is not
-modified in this repository.
+Site canary `llvm_vaffle_rustc_o0_poll_fsm_landingpad` now expects fuse.

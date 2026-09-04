@@ -81,7 +81,9 @@ cargo test -p volar-llvm-vaffle-import --test basic
 cargo test -p volar-ir-build --features llvm --test llvm_frontends
 ```
 
-The external site-canary update is follow-up work outside this repository.
+Site canary `llvm_vaffle_rustc_o0_overflow_panic_unreachable` now expects
+import + unroll fail-closed. `movfuscate` of that fixture is
+[`llvm-import-returncall.md`](llvm-import-returncall.md).
 
 ## Not this task
 

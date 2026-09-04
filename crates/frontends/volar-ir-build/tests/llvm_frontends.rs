@@ -578,6 +578,88 @@ entry:
 }
 
 #[test]
+fn llvm_const_literal_in_sibling_blocks_lowers_movfuscates_and_fuses() {
+    let src = r#"
+define i32 @opt_join(i1 %flag, i32 %a, i32 %b) {
+entry:
+  %slot = alloca i32, align 4
+  br i1 %flag, label %some_a, label %some_b
+some_a:
+  store i32 1, ptr %slot
+  %a_minus_one = sub i32 %a, 1
+  br label %join
+some_b:
+  store i32 1, ptr %slot
+  %b_minus_one = sub i32 %b, 1
+  br label %join
+join:
+  %result = phi i32 [ %a_minus_one, %some_a ], [ %b_minus_one, %some_b ]
+  ret i32 %result
+}
+"#;
+    let path = write_temp_ll("const_literal_siblings", src);
+    let (original, original_types) = Pipeline::from_llvm(&path, &["opt_join"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .expect("sibling literals must lower without a VAFFLE dominance panic")
+        .to_volar_ir();
+    let (movfuscated, movfuscated_types) = Pipeline::from_llvm(&path, &["opt_join"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .expect("sibling literals must movfuscate")
+        .to_volar_ir();
+    assert!(movfuscated.is_movfuscated());
+
+    let input = |flag: bool, a: u32, b: u32| {
+        let mut packed = vec![vec![false; 64]; 2];
+        packed[0][0] = flag;
+        for (value, offset) in [(a as u64, 1usize), (b as u64, 33)] {
+            for bit in 0..32 {
+                let position = offset + bit;
+                packed[position / 64][position % 64] = (value >> bit) & 1 != 0;
+            }
+        }
+        packed
+    };
+    let pc_inputs = volar_ir_passes::pc_bits_needed(original.blocks.len());
+    for (flag, expected) in [(true, 4u64), (false, 8u64)] {
+        let original_input = input(flag, 5, 9);
+        let original_result =
+            volar_fuzz::interpreter::ir::eval_ir(&original, &original_types, &original_input)
+                .expect("original opt_join terminates");
+        let original_value = original_result
+            .iter()
+            .enumerate()
+            .fold(0u64, |value, (i, bit)| value | ((bit[0] as u64) << i));
+        assert_eq!(original_value, expected, "opt_join({flag}, 5, 9)");
+
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+            .params
+            .iter()
+            .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
+            .collect();
+        for (i, input_word) in original_input.into_iter().enumerate() {
+            mov_inputs[pc_inputs + i] = input_word;
+        }
+        let movfuscated_result =
+            volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &movfuscated_types, &mov_inputs)
+                .expect("movfuscated opt_join terminates");
+        assert_eq!(
+            movfuscated_result, original_result,
+            "movfuscation changed opt_join({flag}, 5, 9)"
+        );
+    }
+
+    let fused = Pipeline::from_llvm(&path, &["opt_join"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .and_then(|p| p.lower_to_boolar())
+        .and_then(|p| p.fuse(64, volar_ir_passes::LoweringMode::Unconditional))
+        .expect("sibling literal fixture must lower through fuse");
+    let _ = fused.to_boolar_circuit();
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn llvm_register_xor_unrolls() {
     let src = r#"
 define i32 @xor_one(i32 %x) {
