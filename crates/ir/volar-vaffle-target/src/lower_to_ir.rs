@@ -1903,12 +1903,14 @@ fn ir_type_bit_width(types: &IRTypes, tid: TypeId) -> usize {
 
 /// Return the VAFFLE TypeId of a value in a function body.
 ///
-/// `Output`/single-result `Call` need the callee's own [`SigDecl`] to type
-/// correctly (a `Call`'s own values entry carries no type of its own) —
-/// `module` is threaded through for that lookup. Falls back to `BIT_TID`
-/// only for shapes with no well-defined single-value scalar type
-/// (`StackAlloc`/`PtrLoad`/`PtrStore`/`PtrOffset`, which `lower_function`
-/// already treats as `Bit`-typed addresses independently of this helper).
+/// A direct single-result `Call` needs the callee's own [`SigDecl`] to type
+/// correctly (a `Call`'s own values entry carries no type of its own).
+/// `Output` instead is the flat, per-bit projection used by the VAFFLE
+/// producers, so its `idx` is a bit index rather than a `SigDecl::results`
+/// index. Falls back to `BIT_TID` for it and for shapes with no well-defined
+/// single-value scalar type (`StackAlloc`/`PtrLoad`/`PtrStore`/`PtrOffset`,
+/// which `lower_function` already treats as `Bit`-typed addresses
+/// independently of this helper).
 pub(crate) fn vaffle_value_vtid<P: Clone>(
     module: &Module<P>,
     values: &[volar_ir_common::Node<Value, P>],
@@ -1917,10 +1919,7 @@ pub(crate) fn vaffle_value_vtid<P: Clone>(
     match &values[vid.0].kind {
         Value::Param { ty, .. } => *ty,
         Value::Op(stmt) => stmt_result_vtid(stmt),
-        Value::Output { value, idx } => match &values[value.0].kind {
-            Value::Call { func, .. } => sig_of(module, *func).results[*idx],
-            _ => TypeId(0),
-        },
+        Value::Output { .. } => TypeId(0),
         Value::Call { func, .. } => {
             let results = &sig_of(module, *func).results;
             // A multi-result Call referenced directly (not through an

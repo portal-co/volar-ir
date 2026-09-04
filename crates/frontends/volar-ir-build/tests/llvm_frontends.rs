@@ -761,6 +761,53 @@ entry:
 }
 
 #[test]
+fn llvm_call_result_bits_spill_across_blocks() {
+    // LLVM bit-blasts this i32 call result into 32 Value::Output nodes. Both
+    // successor blocks use those nodes, so SSA-ification must spill each
+    // output as a Bit (rather than treating its bit index as a SigDecl result
+    // index). A constant branch keeps the path concrete for unroll_ir while
+    // preserving the cross-block shape.
+    let src = r#"
+define i32 @id(i32 %x) {
+entry:
+  ret i32 %x
+}
+
+define i32 @use_across_blocks(i32 %x) {
+entry:
+  %y = call i32 @id(i32 %x)
+  br i1 true, label %a, label %b
+
+a:
+  %a_result = add i32 %y, 1
+  ret i32 %a_result
+
+b:
+  %b_result = add i32 %y, 2
+  ret i32 %b_result
+}
+"#;
+    let path = write_temp_ll("call_output_bits_spill", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["use_across_blocks"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("a call result used in a successor block must lower and unroll")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let x: u64 = 123;
+    let input_word: Vec<bool> = (0..64).map(|i| (x >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("call-output spill evaluation terminates");
+    let value = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
+    assert_eq!(value, x + 1);
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn llvm_direct_tail_call_return_computes_correct_value() {
     let src = r#"
 define i32 @helper(i32 %x) {
