@@ -15,11 +15,13 @@ spill pattern unroll to a circuit.
   into a step circuit. Symbolic `memset`/`memmove`, oversized constant lengths,
   and volatile calls fail with a named `ImportError::Unsupported`.
 - A statically resolved global pointer may be a bare global or a constant-GEP
-  pointer with a folded byte offset. Tracked constant-GEP stack pointers use
-  the direct stack path and retain their allocation identity, current bit
-  address, and allocation bounds; every intrinsic byte range is checked
-  against those bounds. Other pointer values use the importer's runtime
-  storage-identity dispatch when their tagged representation is available.
+  pointer with a folded byte offset. A tracked `StackPtr::Const` uses the
+  direct stack path and retains its allocation identity, current bit address,
+  and compile-time range check. A `StackPtr::Symbolic` uses direct dynamic
+  ALLOCA reads/writes for its constant byte range; defined executions must
+  keep its concrete address within that alloca. Other pointer values use the
+  importer's runtime storage-identity dispatch when their tagged
+  representation is available.
 - `memset` normalizes its fill operand to eight bits and emits one repeated
   byte sequence. Stack accesses use the existing bit-addressed `stack_load` /
   `stack_store` helpers; global accesses use the existing byte-addressed

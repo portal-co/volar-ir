@@ -71,4 +71,3 @@ cargo test -p volar-ir-build --features llvm --test llvm_frontends
   dispatch (stages 3-4), not just address arithmetic.
 - Multi-index GEP into a stack pointer, and non-integer element types —
   unchanged, still a named error.
-- Memory intrinsics through a symbolically-addressed stack pointer.

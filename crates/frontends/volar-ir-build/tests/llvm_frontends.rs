@@ -378,6 +378,84 @@ entry:
 }
 
 #[test]
+fn llvm_constant_memcpy_through_symbolic_stack_gep_preserves_value() {
+    let src = r#"
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+
+define i32 @copy_at(i64 %i, i32 %src) {
+entry:
+  %src_buf = alloca [4 x i8], align 4
+  %buf = alloca [64 x i8], align 1
+  store i32 %src, ptr %src_buf, align 4
+  %p = getelementptr inbounds i8, ptr %buf, i64 %i
+  call void @llvm.memcpy.p0.p0.i64(ptr %p, ptr %src_buf, i64 4, i1 false)
+  %out = load i32, ptr %p, align 1
+  ret i32 %out
+}
+"#;
+    let path = write_temp_ll("symbolic_stack_memcpy", src);
+    let (original, original_types) = Pipeline::from_llvm(&path, &["copy_at"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .expect("constant memcpy through symbolic stack GEP must lower")
+        .to_volar_ir();
+    assert!(
+        !original.is_circuit(),
+        "symbolic address must retain runtime work"
+    );
+
+    let (movfuscated, movfuscated_types) = Pipeline::from_llvm(&path, &["copy_at"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.movfuscate())
+        .expect("symbolic stack memcpy must movfuscate")
+        .to_volar_ir();
+    assert!(movfuscated.is_movfuscated());
+
+    let bits = |value: u64, width: usize| {
+        (0..width)
+            .map(|bit| (value >> bit) & 1 != 0)
+            .collect::<Vec<bool>>()
+    };
+    let pc_inputs = volar_ir_passes::pc_bits_needed(original.blocks.len());
+    for (index, src) in [
+        (0u64, 0x4433_2211u32),
+        (17, 0xBBAA_9988),
+        (60, 0xDEAD_BEEF),
+    ] {
+        let original_input = vec![bits(index, 64), bits(src as u64, 32)];
+        let original_result =
+            volar_fuzz::interpreter::ir::eval_ir(&original, &original_types, &original_input)
+                .expect("in-bounds symbolic stack memcpy must terminate");
+        let value = original_result
+            .iter()
+            .enumerate()
+            .fold(0u32, |word, (bit, value)| word | ((value[0] as u32) << bit));
+        assert_eq!(value, src, "copy_at({index})");
+
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+            .params
+            .iter()
+            .map(|ty| {
+                vec![
+                    false;
+                    volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)
+                ]
+            })
+            .collect();
+        for (i, input_word) in original_input.into_iter().enumerate() {
+            mov_inputs[pc_inputs + i] = input_word;
+        }
+        let movfuscated_result =
+            volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &movfuscated_types, &mov_inputs)
+                .expect("movfuscated symbolic stack memcpy must terminate");
+        assert_eq!(
+            movfuscated_result, original_result,
+            "movfuscation changed copy_at({index})"
+        );
+    }
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn llvm_null_pointer_compares_without_aliasing_stack_zero() {
     let src = r#"
 define i1 @is_null(ptr %p) {

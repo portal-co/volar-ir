@@ -213,7 +213,9 @@ type Bits = Vec<ValueId>;
 #[derive(Clone, Copy, Debug)]
 struct StackPointer {
     /// Identity and bounds of the originating alloca, in bit-addressed
-    /// `StorageId::ALLOCA` slots.
+    /// `StorageId::ALLOCA` slots. Used by `StackPtr::Const`'s import-time
+    /// memory-intrinsic range check; symbolic stack addresses retain their
+    /// normal runtime defined-execution requirement instead.
     allocation_base: u64,
     allocation_bits: u64,
     /// Current pointer position within (or potentially beyond) that alloca.
@@ -296,7 +298,7 @@ enum GlobalPtr {
 #[derive(Clone, Debug)]
 enum IntrinsicPointer {
     Stack {
-        ptr: StackPointer,
+        ptr: StackPtr,
         ptr_bits0: ValueId,
     },
     Global {
@@ -1918,15 +1920,6 @@ impl<'ctx> Importer<'ctx> {
         ptr: PointerValue<'ctx>,
     ) -> IResult<IntrinsicPointer> {
         if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
-            let sp = match stack_ptr {
-                StackPtr::Const(sp) => sp,
-                StackPtr::Symbolic { .. } => {
-                    return Err(ImportError::Unsupported(
-                        "memory intrinsic through a symbolically-addressed stack pointer not supported"
-                            .into(),
-                    ));
-                }
-            };
             let ptr_bits0 = fctx
                 .cache
                 .get(&ptr.as_any_value_enum())
@@ -1934,7 +1927,10 @@ impl<'ctx> Importer<'ctx> {
                 .ok_or_else(|| {
                     ImportError::Unsupported("stack pointer bits missing (internal)".into())
                 })?;
-            Ok(IntrinsicPointer::Stack { ptr: sp, ptr_bits0 })
+            Ok(IntrinsicPointer::Stack {
+                ptr: stack_ptr,
+                ptr_bits0,
+            })
         } else {
             match self.resolve_global_ptr(fctx, ptr) {
                 // Unlike the former bare-global check, this keeps the byte
@@ -1959,7 +1955,11 @@ impl<'ctx> Importer<'ctx> {
     }
 
     fn validate_intrinsic_pointer(&self, ptr: &IntrinsicPointer, n_bytes: usize) -> IResult<()> {
-        if let IntrinsicPointer::Stack { ptr, .. } = ptr {
+        if let IntrinsicPointer::Stack {
+            ptr: StackPtr::Const(ptr),
+            ..
+        } = ptr
+        {
             (*ptr).intrinsic_range(n_bytes)?;
         }
         Ok(())
@@ -1972,11 +1972,29 @@ impl<'ctx> Importer<'ctx> {
         n_bytes: usize,
     ) -> IResult<Bits> {
         match ptr {
-            IntrinsicPointer::Stack { ptr, ptr_bits0 } => {
+            IntrinsicPointer::Stack {
+                ptr: StackPtr::Const(ptr),
+                ptr_bits0,
+            } => {
                 let n_bits = n_bytes.checked_mul(8).ok_or_else(|| {
                     ImportError::Unsupported("memory intrinsic length is too large".into())
                 })?;
                 Ok(self.stack_load(fctx, *ptr_bits0, ptr.addr, self.byte_tid, n_bits))
+            }
+            IntrinsicPointer::Stack {
+                ptr: StackPtr::Symbolic { addr_bits, .. },
+                ptr_bits0,
+            } => {
+                let n_bits = n_bytes.checked_mul(8).ok_or_else(|| {
+                    ImportError::Unsupported("memory intrinsic length is too large".into())
+                })?;
+                Ok(self.stack_load_dynamic(
+                    fctx,
+                    *ptr_bits0,
+                    addr_bits,
+                    self.byte_tid,
+                    n_bits,
+                ))
             }
             IntrinsicPointer::Global {
                 storage,
@@ -1995,9 +2013,16 @@ impl<'ctx> Importer<'ctx> {
         bytes: &Bits,
     ) -> IResult<()> {
         match ptr {
-            IntrinsicPointer::Stack { ptr, ptr_bits0 } => {
+            IntrinsicPointer::Stack {
+                ptr: StackPtr::Const(ptr),
+                ptr_bits0,
+            } => {
                 self.stack_store(fctx, *ptr_bits0, ptr.addr, bytes);
             }
+            IntrinsicPointer::Stack {
+                ptr: StackPtr::Symbolic { addr_bits, .. },
+                ptr_bits0,
+            } => self.stack_store_dynamic(fctx, *ptr_bits0, addr_bits, bytes),
             IntrinsicPointer::Global {
                 storage,
                 byte_offset,
@@ -3167,7 +3192,16 @@ fn intrinsic_ranges_overlap(
     n_bytes: usize,
 ) -> IResult<bool> {
     match (dest, src) {
-        (IntrinsicPointer::Stack { ptr: dest, .. }, IntrinsicPointer::Stack { ptr: src, .. })
+        (
+            IntrinsicPointer::Stack {
+                ptr: StackPtr::Const(dest),
+                ..
+            },
+            IntrinsicPointer::Stack {
+                ptr: StackPtr::Const(src),
+                ..
+            },
+        )
             if dest.allocation_base == src.allocation_base
                 && dest.allocation_bits == src.allocation_bits =>
         {

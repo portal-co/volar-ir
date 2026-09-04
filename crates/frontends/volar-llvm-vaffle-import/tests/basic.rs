@@ -6,7 +6,7 @@
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use vaffle::{FuncDecl, Terminator, Value};
-use volar_ir_common::Stmt;
+use volar_ir_common::{StorageId, Stmt};
 use volar_llvm_vaffle_import::{import_module, import_module_inlined};
 
 fn parse(source: &str) -> Context {
@@ -1164,6 +1164,72 @@ entry:
             .iter()
             .any(|block| matches!(block.terminator, Terminator::IfNonzero { .. }))
     );
+}
+
+#[test]
+fn constant_memory_intrinsics_through_symbolic_stack_gep_lower_without_calls() {
+    let source = r#"
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+
+define void @copy_at(i64 %i, i32 %src) {
+entry:
+  %src_buf = alloca [4 x i8], align 4
+  %buf = alloca [64 x i8], align 1
+  store i32 %src, ptr %src_buf, align 4
+  %p = getelementptr inbounds i8, ptr %buf, i64 %i
+  call void @llvm.memcpy.p0.p0.i64(ptr %p, ptr %src_buf, i64 4, i1 false)
+  ret void
+}
+
+define void @fill_at(i64 %i) {
+entry:
+  %buf = alloca [64 x i8], align 1
+  %p = getelementptr inbounds i8, ptr %buf, i64 %i
+  call void @llvm.memset.p0.i64(ptr %p, i8 -86, i64 4, i1 false)
+  ret void
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["copy_at", "fill_at"])
+        .expect("constant memory intrinsics through symbolic stack GEPs must import");
+    assert_eq!(out.funcs.len(), 2);
+
+    let dynamic_stack_writes = |body: &vaffle::FuncBody| {
+        body.values
+            .iter()
+            .filter(|value| {
+                let Value::Op(Stmt::StorageWrite { storage, addr, .. }) = &value.kind else {
+                    return false;
+                };
+                *storage == StorageId::ALLOCA
+                    && matches!(body.values[addr.0].kind, Value::Op(Stmt::Merge { .. }))
+            })
+            .count()
+    };
+    for func in &out.funcs {
+        let FuncDecl::Body(body) = func else {
+            panic!("expected a function body");
+        };
+        assert!(
+            !body
+                .values
+                .iter()
+                .any(|value| matches!(value.kind, Value::Call { .. })),
+            "a supported intrinsic must not remain a call"
+        );
+        assert_eq!(
+            dynamic_stack_writes(body),
+            32,
+            "four byte intrinsic must perform 32 dynamically addressed stack writes"
+        );
+    }
 }
 
 #[test]

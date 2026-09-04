@@ -56,7 +56,8 @@ not this repo's.
 | Cross-function call numeric correctness | `docs/llvm-cross-function-calls.md` | `unroll_ir`/`movfuscate` on a non-inlined multi-function call; `lower_to_ir.rs`'s calling convention |
 | LLVM memcpy from a constant global | `docs/llvm-memcpy-global.md` | `llvm.memcpy`/`memset` of `@global` or untracked slice pointers (HMAC IV) |
 | LLVM `noalias.scope.decl` | `docs/llvm-noalias-scope-decl.md` | inkwell ICE on metadata-typed `llvm.experimental.noalias.scope.decl` (rustc guests) |
-| LLVM constant `null` pointer | `docs/llvm-const-null.md` | `icmp eq ptr %p, null` / `phi` of `null` (`site-keys` `derive` leftover) |
+| LLVM constant `null` pointer | `docs/llvm-const-null.md` | `icmp eq ptr %p, null` / `phi` of `null` |
+| LLVM memcpy through a symbolic stack GEP | `docs/llvm-memcpy-symbolic-stack.md` | constant-length `llvm.memcpy` of `gep i8, ptr %alloca, i64 %i` (`site-keys` `derive` SHA block buffer) |
 | Text format | `docs/text-format-spec.md` | Working on `volar-lir-text`/`volar-ir-text` |
 
 ## Compression-aware logging
