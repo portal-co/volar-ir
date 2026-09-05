@@ -49,7 +49,7 @@ use volar_ir::{
 use volar_ir_common::Constant;
 
 use crate::dispatch_accumulator::{
-    DispatchBitPrimitives, DispatchSlotPrimitives, emit_select_bit, emit_select_slot,
+    emit_select_bit, emit_select_slot, DispatchBitPrimitives, DispatchSlotPrimitives,
 };
 use crate::movfuscate::subst_ir;
 
@@ -146,17 +146,21 @@ fn lower_to_circuit_impl<P: Clone>(
 
     for _k in 0..limit as usize {
         // Build substitution map: original SSA id → circuit var id.
-        let mut var_map: BTreeMap<u32, u32> = BTreeMap::new();
-        for (j, &cv) in current_state.iter().enumerate() {
-            var_map.insert(j as u32, cv);
-        }
+        // SSA IDs in one block are contiguous: params first, followed by one
+        // ID per statement.  Keep the substitution table in that same dense
+        // layout.  A `BTreeMap` here used one tree lookup per gate operand and
+        // became the dominant cost when a large movfuscated body was unrolled
+        // for every step of a linked LLVM program.
+        let mut var_map = Vec::with_capacity(p + block0.stmts.len());
+        var_map.extend_from_slice(&current_state);
 
         // Re-emit all block stmts with fresh circuit var IDs, carrying provenance.
         for (i, stmt) in block0.stmts.iter().enumerate() {
             let prov = stmt.prov.clone();
-            let out_id = emitter.emit(subst_stmt(&stmt.kind, &var_map), prov);
+            let out_id = emitter.emit_substituted(subst_stmt(&stmt.kind, &var_map), prov);
             // Map original stmt result (p + i) → fresh circuit var.
-            var_map.insert(p as u32 + i as u32, out_id);
+            debug_assert_eq!(var_map.len(), p + i);
+            var_map.push(out_id);
         }
 
         // Process terminator to extract (done, result, next_args).
@@ -299,14 +303,14 @@ pub fn lower_to_circuit_with_boundary<P: Clone>(
 /// - `next_args`: circuit vars to use as the next iteration's block params.
 fn process_terminator<P: Clone>(
     terminator: &BIrTerminator,
-    var_map: &BTreeMap<u32, u32>,
+    var_map: &[u32],
     emitter: &mut Emitter<P>,
     current_state: &[u32],
     ctrl_prov: &P,
 ) -> (u32, Vec<u32>, Vec<u32>) {
     let lookup = |id: &IRVarId| -> u32 {
         *var_map
-            .get(&id.0)
+            .get(id.0 as usize)
             .unwrap_or_else(|| panic!("lower_to_circuit: var {} not found in map", id.0))
     };
 
@@ -435,10 +439,10 @@ fn emit_or<P: Clone>(emitter: &mut Emitter<P>, a: u32, b: u32, prov: &P) -> u32 
 
 /// Apply `var_map` to all operands of a `BIrStmt`, returning a new stmt
 /// with circuit var IDs substituted for original SSA IDs.
-fn subst_stmt(stmt: &BIrStmt, var_map: &BTreeMap<u32, u32>) -> BIrStmt {
+fn subst_stmt(stmt: &BIrStmt, var_map: &[u32]) -> BIrStmt {
     let s =
         |id: &IRVarId| -> IRVarId {
-            IRVarId(*var_map.get(&id.0).unwrap_or_else(|| {
+            IRVarId(*var_map.get(id.0 as usize).unwrap_or_else(|| {
                 panic!("lower_to_circuit: var {} not in map during subst", id.0)
             }))
         };
@@ -553,6 +557,11 @@ fn subst_stmt(stmt: &BIrStmt, var_map: &BTreeMap<u32, u32>) -> BIrStmt {
 struct Emitter<P: Clone = ()> {
     stmts: Vec<volar_ir_common::Node<BIrStmt, P>>,
     next_id: u32,
+    /// Bounded sharing table for pure statements re-emitted while unrolling a
+    /// movfuscated block.  It deliberately excludes storage, actions,
+    /// oracles, and randomness: those statements may observe or produce
+    /// effects and must retain their original occurrence order.
+    substituted_gates: Option<SubstitutedGateCache>,
 }
 
 impl<P: Clone> Emitter<P> {
@@ -560,6 +569,7 @@ impl<P: Clone> Emitter<P> {
         Self {
             stmts: Vec::new(),
             next_id: first_id,
+            substituted_gates: None,
         }
     }
 
@@ -571,6 +581,124 @@ impl<P: Clone> Emitter<P> {
         self.stmts
             .push(volar_ir_common::Node::new(stmt, prov, None));
         id
+    }
+
+    /// Emit a source statement after SSA substitution, reusing an earlier
+    /// exactly-equal pure Boolean operation when it remains live across loop
+    /// iterations.  This is a bounded hash-cons table rather than general
+    /// CSE: collisions only lose a reuse opportunity, and the table never
+    /// grows with either the input body or the unroll limit.
+    fn emit_substituted(&mut self, stmt: BIrStmt, prov: P) -> u32 {
+        let Some(key) = SubstitutedGateKey::from_stmt(&stmt) else {
+            return self.emit(stmt, prov);
+        };
+
+        if let Some(existing) = self
+            .substituted_gates
+            .as_ref()
+            .and_then(|cache| cache.get(key))
+        {
+            return existing;
+        }
+
+        let result = self.emit(stmt, prov);
+        self.substituted_gates
+            .get_or_insert_with(SubstitutedGateCache::new)
+            .insert(key, result);
+        result
+    }
+}
+
+/// Exact key for the pure Boolar operations that may be shared across
+/// unrolled iterations.  Binary Boolean operations are commutative, so the
+/// two operands are canonicalized into ascending ID order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SubstitutedGateKey {
+    kind: SubstitutedGateKind,
+    lo: u32,
+    hi: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubstitutedGateKind {
+    Zero,
+    One,
+    And,
+    Or,
+    Xor,
+    Not,
+}
+
+impl SubstitutedGateKey {
+    fn from_stmt(stmt: &BIrStmt) -> Option<Self> {
+        match stmt {
+            BIrStmt::Zero => Some(Self::constant(SubstitutedGateKind::Zero)),
+            BIrStmt::One => Some(Self::constant(SubstitutedGateKind::One)),
+            BIrStmt::And(a, b) => Some(Self::binary(SubstitutedGateKind::And, *a, *b)),
+            BIrStmt::Or(a, b) => Some(Self::binary(SubstitutedGateKind::Or, *a, *b)),
+            BIrStmt::Xor(a, b) => Some(Self::binary(SubstitutedGateKind::Xor, *a, *b)),
+            BIrStmt::Not(a) => Some(Self {
+                kind: SubstitutedGateKind::Not,
+                lo: a.0,
+                hi: 0,
+            }),
+            _ => None,
+        }
+    }
+
+    fn constant(kind: SubstitutedGateKind) -> Self {
+        Self { kind, lo: 0, hi: 0 }
+    }
+
+    fn binary(kind: SubstitutedGateKind, a: IRVarId, b: IRVarId) -> Self {
+        let (lo, hi) = if a.0 <= b.0 { (a.0, b.0) } else { (b.0, a.0) };
+        Self { kind, lo, hi }
+    }
+}
+
+/// Fixed-size, direct-mapped cache for substituted pure gates.  Linked LLVM
+/// bodies can contain millions of distinct gates, so retaining a general CSE
+/// map would merely move the fusion memory blow-up into the cache.  A cache
+/// collision replaces an unrelated entry and is semantically harmless.
+struct SubstitutedGateCache {
+    slots: Vec<Option<(SubstitutedGateKey, u32)>>,
+}
+
+impl SubstitutedGateCache {
+    const CAPACITY: usize = 1 << 18;
+
+    fn new() -> Self {
+        Self {
+            slots: vec![None; Self::CAPACITY],
+        }
+    }
+
+    fn get(&self, key: SubstitutedGateKey) -> Option<u32> {
+        let (stored, value) = self.slots[Self::slot(key)]?;
+        (stored == key).then_some(value)
+    }
+
+    fn insert(&mut self, key: SubstitutedGateKey, value: u32) {
+        self.slots[Self::slot(key)] = Some((key, value));
+    }
+
+    fn slot(key: SubstitutedGateKey) -> usize {
+        let tag = match key.kind {
+            SubstitutedGateKind::Zero => 0u64,
+            SubstitutedGateKind::One => 1,
+            SubstitutedGateKind::And => 2,
+            SubstitutedGateKind::Or => 3,
+            SubstitutedGateKind::Xor => 4,
+            SubstitutedGateKind::Not => 5,
+        };
+        let mut hash = ((key.lo as u64) << 32) | key.hi as u64;
+        hash ^= tag.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+        hash ^= hash >> 31;
+        hash as usize & (Self::CAPACITY - 1)
     }
 }
 
@@ -1219,6 +1347,44 @@ mod tests {
         assert!(
             l6.blocks[0].stmts.len() > l3.blocks[0].stmts.len(),
             "more iterations → more gates"
+        );
+    }
+
+    #[test]
+    fn reuses_pure_gates_with_identical_substituted_operands() {
+        // The loop carries its input unchanged, so the source `And` has the
+        // same operands after every unrolled iteration.  Its one output must
+        // be reused rather than replicated once per iteration.  The loop
+        // infrastructure itself is intentionally still emitted per step.
+        let blocks: BIrBlocks<()> = BIrBlocks {
+            blocks: std::vec![BIrBlock {
+                params: 2,
+                stmts: std::vec![BIrStmt::And(IRVarId(1), IRVarId(0))]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Block(IRBlockId(0)),
+                    args: std::vec![IRVarId(0), IRVarId(1)],
+                }),
+            }],
+            pre_init: std::vec![],
+        };
+
+        let lowered = lower_to_circuit(&blocks, 8, LoweringMode::Unconditional);
+        let repeated_and_count = lowered.blocks[0]
+            .stmts
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    BIrStmt::And(IRVarId(0), IRVarId(1)) | BIrStmt::And(IRVarId(1), IRVarId(0))
+                )
+            })
+            .count();
+        assert_eq!(
+            repeated_and_count, 1,
+            "identical substituted source gates share one circuit wire"
         );
     }
 
