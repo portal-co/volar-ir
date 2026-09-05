@@ -966,7 +966,7 @@ fn lower_poly_bit<P: Clone>(
                 };
                 and_acc = Some(match and_acc {
                     None => bit_var,
-                    Some(prev) => emitter.emit(BIrStmt::And(prev, bit_var), prov.clone()),
+                    Some(prev) => emitter.emit_poly_and(prev, bit_var, prov.clone()),
                 });
             }
             (!is_zero).then_some(and_acc).flatten()
@@ -975,7 +975,7 @@ fn lower_poly_bit<P: Clone>(
         if let Some(mv) = mono_var {
             acc = Some(match acc {
                 None => mv,
-                Some(prev) => emitter.emit(BIrStmt::Xor(prev, mv), prov.clone()),
+                Some(prev) => emitter.emit_poly_xor(prev, mv, prov.clone()),
             });
         }
     }
@@ -1041,6 +1041,12 @@ struct Emitter<P: Clone> {
     /// Cache of constant index-bit wires used as appended address suffixes:
     /// `(bit_position, bit_value) → wire`.
     const_wires: BTreeMap<(u32, bool), IRVarId>,
+    /// Bounded hash-cons table for Boolean gates emitted while expanding
+    /// `IRStmt::Poly`. This is intentionally direct-mapped rather than a
+    /// full unbounded CSE table: linked LLVM programs can contain millions of
+    /// distinct gates, while repeated local subexpressions are the useful
+    /// sharing opportunity here.
+    poly_gates: Option<PolyGateCache>,
 }
 
 impl<P: Clone> Emitter<P> {
@@ -1049,6 +1055,7 @@ impl<P: Clone> Emitter<P> {
             stmts: vec![],
             next_var: params,
             const_wires: BTreeMap::new(),
+            poly_gates: None,
         }
     }
 
@@ -1058,6 +1065,39 @@ impl<P: Clone> Emitter<P> {
             .push(volar_ir_common::Node::new(stmt, prov, None));
         self.next_var += 1;
         id
+    }
+
+    /// Emit or reuse an AND introduced by `lower_poly_bit`.
+    fn emit_poly_and(&mut self, a: IRVarId, b: IRVarId, prov: P) -> IRVarId {
+        self.emit_poly_gate(PolyGateKind::And, a, b, prov)
+    }
+
+    /// Emit or reuse an XOR introduced by `lower_poly_bit`.
+    fn emit_poly_xor(&mut self, a: IRVarId, b: IRVarId, prov: P) -> IRVarId {
+        self.emit_poly_gate(PolyGateKind::Xor, a, b, prov)
+    }
+
+    fn emit_poly_gate(
+        &mut self,
+        kind: PolyGateKind,
+        a: IRVarId,
+        b: IRVarId,
+        prov: P,
+    ) -> IRVarId {
+        let key = PolyGateKey::new(kind, a, b);
+        if let Some(existing) = self.poly_gates.as_ref().and_then(|cache| cache.get(key)) {
+            return existing;
+        }
+
+        let stmt = match kind {
+            PolyGateKind::And => BIrStmt::And(a, b),
+            PolyGateKind::Xor => BIrStmt::Xor(a, b),
+        };
+        let result = self.emit(stmt, prov);
+        self.poly_gates
+            .get_or_insert_with(PolyGateCache::new)
+            .insert(key, result);
+        result
     }
 
     /// Wire that is constantly `(i >> j) & 1`, emitting a `Zero`/`One`
@@ -1073,6 +1113,82 @@ impl<P: Clone> Emitter<P> {
         );
         self.const_wires.insert((j, bit_val), w);
         w
+    }
+}
+
+/// Boolean gate kinds that `lower_poly_bit` can introduce. Both are
+/// commutative, so their cache keys use ascending operand IDs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PolyGateKind {
+    And,
+    Xor,
+}
+
+/// One exact, commutative Boolean-gate key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PolyGateKey {
+    kind: PolyGateKind,
+    lo: IRVarId,
+    hi: IRVarId,
+}
+
+impl PolyGateKey {
+    fn new(kind: PolyGateKind, a: IRVarId, b: IRVarId) -> Self {
+        if a.0 <= b.0 {
+            Self {
+                kind,
+                lo: a,
+                hi: b,
+            }
+        } else {
+            Self {
+                kind,
+                lo: b,
+                hi: a,
+            }
+        }
+    }
+}
+
+/// A bounded, direct-mapped cache. Collision replacement can only miss a
+/// sharing opportunity; it can never alias two different gates. Keeping this
+/// fixed-size prevents the lowerer from retaining every unique SHA gate while
+/// still capturing the dense repeated subexpressions movfuscation creates.
+struct PolyGateCache {
+    slots: Vec<Option<(PolyGateKey, IRVarId)>>,
+}
+
+impl PolyGateCache {
+    const CAPACITY: usize = 1 << 16;
+
+    fn new() -> Self {
+        Self {
+            slots: vec![None; Self::CAPACITY],
+        }
+    }
+
+    fn get(&self, key: PolyGateKey) -> Option<IRVarId> {
+        let (stored, value) = self.slots[Self::slot(key)]?;
+        (stored == key).then_some(value)
+    }
+
+    fn insert(&mut self, key: PolyGateKey, value: IRVarId) {
+        self.slots[Self::slot(key)] = Some((key, value));
+    }
+
+    fn slot(key: PolyGateKey) -> usize {
+        let tag = match key.kind {
+            PolyGateKind::And => 0u64,
+            PolyGateKind::Xor => 1u64,
+        };
+        let mut hash = ((key.lo.0 as u64) << 32) | key.hi.0 as u64;
+        hash ^= tag.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+        hash ^= hash >> 31;
+        hash as usize & (Self::CAPACITY - 1)
     }
 }
 
@@ -1572,6 +1688,60 @@ mod tests {
                 BIrStmt::And(IRVarId(0), IRVarId((bit + 1) as u32))
             );
         }
+    }
+
+    #[test]
+    fn repeated_wide_polys_reuse_their_boolar_gate_dag() {
+        let mut types = TypeTable::new();
+        let bit = types.bit();
+        let byte = types.primitive(PrimType::_8);
+        let mut coeffs = BTreeMap::new();
+        // Per output bit this is
+        // selector XOR (selector AND value_bit) XOR value_bit.
+        coeffs.insert(std::vec![IRVarId(0)], 1);
+        coeffs.insert(std::vec![IRVarId(0), IRVarId(1)], 1);
+        coeffs.insert(std::vec![IRVarId(1)], 1);
+        let block = IRBlock::<()> {
+            params: std::vec![bit, byte],
+            stmts: std::vec![
+                Node::new(
+                    IRStmt::Poly {
+                        ty: byte,
+                        coeffs: coeffs.clone(),
+                        constant: zero_const(),
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(
+                    IRStmt::Poly {
+                        ty: byte,
+                        coeffs,
+                        constant: zero_const(),
+                    },
+                    (),
+                    None,
+                ),
+            ],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    std::vec![IRVarId(2), IRVarId(3)],
+                ),
+            },
+        };
+
+        let lowered = lower_ir_to_boolar(&IRBlocks::new(std::vec![block]), &types);
+        let block = &lowered.blocks[0];
+        // The first byte emits one AND and two XOR gates per lane. The
+        // identical second polynomial aliases all 24 emitted gates rather
+        // than recreating another DAG.
+        assert_eq!(block.stmts.len(), 24);
+        let BIrTerminator::Jmp(BIrTarget { args, .. }) = &block.terminator else {
+            panic!("expected return jump");
+        };
+        assert_eq!(args.len(), 16);
+        assert_eq!(&args[..8], &args[8..]);
     }
 
     // -- Provenance threading -------------------------------------------------
