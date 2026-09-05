@@ -214,9 +214,14 @@ pub trait MovfuscCtx {
     /// silently corrupts storage on every step it isn't genuinely active.
     ///
     /// Returns the full var table `[remapped_params…, fresh_stmt_vars…]`.
+    ///
+    /// `blocks` is mutable so an owned implementation may transfer
+    /// statement payloads into the combined circuit as it visits each source
+    /// block.  Implementations which need the legacy borrowed behaviour may
+    /// simply read it immutably.
     fn emit_block_stmts(
         &mut self,
-        blocks: &Self::Blocks,
+        blocks: &mut Self::Blocks,
         block_idx: usize,
         state_vars: &[u32],
         is_active: u32,
@@ -637,7 +642,7 @@ pub fn thread_synthetic_slots(
 /// check per block.
 pub fn movfuscate<C: MovfuscCtx>(
     mut ctx: C,
-    blocks: &C::Blocks,
+    blocks: &mut C::Blocks,
     state_slot_types: Vec<C::SlotTy>,
     return_slot_types: Vec<C::SlotTy>,
     watch: &[(usize, u32)],
@@ -716,7 +721,7 @@ pub fn movfuscate<C: MovfuscCtx>(
             }
         }
         let term = ctx.emit_block_terminator(
-            blocks,
+            &*blocks,
             i,
             &block_vals,
             pc_width,
@@ -1149,7 +1154,7 @@ impl<P: Clone> MovfuscCtx for BIrCtx<P> {
 
     fn emit_block_stmts(
         &mut self,
-        blocks: &BIrBlocks<P>,
+        blocks: &mut BIrBlocks<P>,
         block_idx: usize,
         state_vars: &[u32],
         _is_active: u32,
@@ -1404,6 +1409,41 @@ pub(crate) fn subst_ir(stmt: &IRStmt, var_map: &[u32]) -> IRStmt {
             ty: ty.clone(),
         },
         _ => panic!("subst_ir: unhandled IRStmt variant — add substitution for this variant"),
+    }
+}
+
+/// Owned counterpart to [`subst_ir`].
+///
+/// Movfuscation's pipeline path consumes its source module, so a polynomial
+/// does not need to leave its coefficient map behind for the input's later
+/// destructor.  Remap each monomial vector in place and move it into the new
+/// tree.  The tree nodes themselves are rebuilt because their ordering can
+/// change, but the (dominant) per-monomial `Vec` allocations are retained.
+/// Other statement kinds retain the borrowed helper's established behaviour.
+fn subst_ir_owned(stmt: IRStmt, var_map: &[u32]) -> IRStmt {
+    match stmt {
+        IRStmt::Poly {
+            ty,
+            coeffs,
+            constant,
+        } => {
+            let coeffs = coeffs
+                .into_iter()
+                .map(|(mut vars, coeff)| {
+                    for var in &mut vars {
+                        *var = IRVarId(var_map[var.0 as usize]);
+                    }
+                    vars.sort();
+                    (vars, coeff)
+                })
+                .collect();
+            IRStmt::Poly {
+                ty,
+                coeffs,
+                constant,
+            }
+        }
+        other => subst_ir(&other, var_map),
     }
 }
 
@@ -2049,12 +2089,12 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
 
     fn emit_block_stmts(
         &mut self,
-        blocks: &IRBlocks<P>,
+        blocks: &mut IRBlocks<P>,
         block_idx: usize,
         state_vars: &[u32],
         is_active: u32,
     ) -> Vec<u32> {
-        let block = &blocks.blocks[block_idx];
+        let block = &mut blocks.blocks[block_idx];
         let p = block.params.len();
         let mut var_map: Vec<u32> = Vec::with_capacity(p + block.stmts.len());
 
@@ -2087,10 +2127,22 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         }
 
         // Emit stmts with substitution, handling Block-typed Const specially.
-        for (stmt_idx, stmt) in block.stmts.iter().enumerate() {
+        for (stmt_idx, stmt) in block.stmts.iter_mut().enumerate() {
             // Stage this stmt's source provenance; `push_typed` will clone it.
             self.pending_prov = stmt.prov.clone();
-            let mapped = subst_ir(&stmt.kind, &var_map);
+            // The source module is owned by the pipeline.  Leave a tiny
+            // placeholder behind solely to preserve source SSA numbering for
+            // the terminator pass, then move a Poly's monomial buffers into
+            // the substituted output rather than cloning all of them.
+            let source = core::mem::replace(
+                &mut stmt.kind,
+                IRStmt::Const(Constant { hi: 0, lo: 0 }, self.bit_type_id),
+            );
+            let orig_storage_src = match &source {
+                IRStmt::StorageWrite { src, .. } => Some(src.0),
+                _ => None,
+            };
+            let mapped = subst_ir_owned(source, &var_map);
             let orig_var_id = (p + stmt_idx) as u32;
 
             // Block-typed Const: encode the referenced block index as
@@ -2138,10 +2190,8 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                 // `src` is the post-substitution combined-block var ID.
                 // `block_var_to_bits` is keyed by *original* IR var IDs, so
                 // we must look up via the pre-substitution src from `stmt`.
-                let orig_src_id = match &stmt.kind {
-                    IRStmt::StorageWrite { src, .. } => src.0,
-                    _ => unreachable!(),
-                };
+                let orig_src_id =
+                    orig_storage_src.expect("mapped StorageWrite must originate from StorageWrite");
                 if let Some((bits, _sig)) = self.block_var_to_bits.get(&orig_src_id).cloned() {
                     // Block-typed write: merge PC bits into Vec and store in even lane.
                     let parts: Vec<IRVarId> = bits.iter().map(|&b| IRVarId(b)).collect();
@@ -2739,8 +2789,12 @@ fn movfuscate_biir_impl<P: Clone>(blocks: &BIrBlocks<P>, control_prov: Option<&P
     let state_slot_types = vec![(); state_width];
     let ret_width = BIrCtx::<P>::return_val_width(blocks);
     let return_slot_types = vec![(); ret_width];
+    // Keep the public Boolar entry point borrowed for compatibility.  The
+    // owned Volar path below is the large-program fast path; Boolar remains
+    // a width-1 compatibility shim (see boolar-ir-conflicts.md).
+    let mut working = blocks.clone();
     let (mut result, _block_ranges, _accum_info, _watch) =
-        movfuscate(ctx, blocks, state_slot_types, return_slot_types, &[]);
+        movfuscate(ctx, &mut working, state_slot_types, return_slot_types, &[]);
     result.pre_init = blocks.pre_init.clone();
     result
 }
@@ -2755,7 +2809,29 @@ fn movfuscate_biir_impl<P: Clone>(blocks: &BIrBlocks<P>, control_prov: Option<&P
 /// `types` is used for type inference; an `IRType::Bit` entry is added if
 /// absent.  Single-block input is returned unchanged.
 pub fn movfuscate_ir<P: Clone>(blocks: &IRBlocks<P>, types: &mut IRTypes) -> IRBlocks<P> {
-    movfuscate_ir_impl(blocks, types, &[], None).0
+    // Preserve the long-standing borrowed API.  Pipeline callers that own
+    // their input should use `movfuscate_ir_owned`, which transfers Poly
+    // monomial buffers instead of first cloning the entire source program.
+    let mut working = blocks.clone();
+    movfuscate_ir_impl(&mut working, types, &[], None).0
+}
+
+/// Owned counterpart to [`movfuscate_ir`].
+///
+/// This is the preferred route for a compiler pipeline that no longer needs
+/// the pre-movfuscation program.  It consumes `blocks` and moves each
+/// `IRStmt::Poly`'s monomial buffers into its substituted output as the
+/// source block is visited, avoiding a whole-program clone-then-drop peak.
+/// The produced step circuit is byte-for-byte equivalent to
+/// [`movfuscate_ir`] for the same input.
+pub fn movfuscate_ir_owned<P: Clone>(mut blocks: IRBlocks<P>, types: &mut IRTypes) -> IRBlocks<P> {
+    // Keep the borrowed API's type-table side effect while returning the
+    // already-owned single block without an unnecessary clone.
+    if blocks.blocks.len() == 1 {
+        types.intern(IRType::Primitive(Type::Bit));
+        return blocks;
+    }
+    movfuscate_ir_impl(&mut blocks, types, &[], None).0
 }
 
 /// As [`movfuscate_ir`], but permits a statement-free multi-block circuit.
@@ -2767,7 +2843,8 @@ pub fn movfuscate_ir_with_control_provenance<P: Clone>(
     types: &mut IRTypes,
     control_prov: &P,
 ) -> IRBlocks<P> {
-    movfuscate_ir_impl(blocks, types, &[], Some(control_prov)).0
+    let mut working = blocks.clone();
+    movfuscate_ir_impl(&mut working, types, &[], Some(control_prov)).0
 }
 
 /// As [`movfuscate_ir`], but additionally returns each original block's own
@@ -2782,7 +2859,9 @@ pub fn movfuscate_ir_with_boundary<P: Clone>(
     blocks: &IRBlocks<P>,
     types: &mut IRTypes,
 ) -> (IRBlocks<P>, Vec<MovfuscBlockBoundary>, MovfuscAccumInfo) {
-    let (result, boundaries, accum_info, _watch) = movfuscate_ir_impl(blocks, types, &[], None);
+    let mut working = blocks.clone();
+    let (result, boundaries, accum_info, _watch) =
+        movfuscate_ir_impl(&mut working, types, &[], None);
     (result, boundaries, accum_info)
 }
 
@@ -2802,7 +2881,8 @@ pub fn movfuscate_ir_with_boundary_and_watch<P: Clone>(
     MovfuscAccumInfo,
     Vec<(usize, u32, u32)>,
 ) {
-    movfuscate_ir_impl(blocks, types, watch, None)
+    let mut working = blocks.clone();
+    movfuscate_ir_impl(&mut working, types, watch, None)
 }
 
 /// Diagnostic (temporary, not used by any real pipeline): dumps
@@ -2869,7 +2949,7 @@ pub fn debug_dump_slot_of<P: Clone>(
 }
 
 fn movfuscate_ir_impl<P: Clone>(
-    blocks: &IRBlocks<P>,
+    blocks: &mut IRBlocks<P>,
     types: &mut IRTypes,
     watch: &[(usize, u32)],
     control_prov: Option<&P>,
@@ -3379,6 +3459,54 @@ mod tests {
         let (with_boundary, _ranges, _accum_info) =
             movfuscate_ir_with_boundary(&blocks, &mut types_b);
         assert_eq!(plain, with_boundary);
+    }
+
+    #[test]
+    fn test_owned_ir_movfuscation_matches_borrowed_poly_output() {
+        let types = bit_types();
+        let bit = IRTypeId(0);
+        let blocks: IRBlocks<()> = IRBlocks::new(std::vec![
+            IRBlock {
+                params: std::vec![bit],
+                // `1 + x` exercises the move-only Poly coefficient path.
+                stmts: std::vec![IRStmt::Poly {
+                    ty: bit,
+                    coeffs: std::collections::BTreeMap::from([(std::vec![IRVarId(0)], 1u8,)]),
+                    constant: Constant { hi: 0, lo: 1 },
+                }]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(1)],
+                    ),
+                },
+            },
+            IRBlock {
+                params: std::vec![bit],
+                stmts: std::vec![IRStmt::Poly {
+                    ty: bit,
+                    coeffs: std::collections::BTreeMap::from([(std::vec![IRVarId(0)], 1u8,)]),
+                    constant: Constant { hi: 0, lo: 0 },
+                }]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(1)]),
+                },
+            },
+        ]);
+
+        let mut borrowed_types = types.clone();
+        let borrowed = movfuscate_ir(&blocks, &mut borrowed_types);
+        let mut owned_types = types;
+        let owned = movfuscate_ir_owned(blocks, &mut owned_types);
+
+        assert_eq!(owned, borrowed);
+        assert_eq!(owned_types, borrowed_types);
     }
 
     // =========================================================================

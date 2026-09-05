@@ -33,7 +33,8 @@ pub use lower_to_circuit::{
 };
 pub use movfuscate::{
     MovfuscAccumInfo, MovfuscAccumInit, MovfuscAccumStep, MovfuscBlockBoundary, movfuscate_biir,
-    movfuscate_biir_with_control_provenance, movfuscate_ir, movfuscate_ir_with_boundary,
+    movfuscate_biir_with_control_provenance, movfuscate_ir, movfuscate_ir_owned,
+    movfuscate_ir_with_boundary,
     movfuscate_ir_with_control_provenance, pc_bits_needed, remap_movfusc_accum_info,
     remap_movfusc_boundaries, remap_movfusc_boundary, thread_synthetic_slots,
 };

@@ -247,7 +247,10 @@ impl PipelinePass<VolarIrStage> for Movfuscate {
     type Output = VolarIrStage;
 
     fn apply(self, (blocks, mut types): (IRBlocks, IRTypes)) -> Result<(IRBlocks, IRTypes), BoxError> {
-        let blocks = volar_ir_passes::movfuscate_ir(&blocks, &mut types);
+        // The pipeline owns this stage, so transfer its large Poly payloads
+        // into the step circuit instead of routing through the legacy
+        // borrowed compatibility API.
+        let blocks = volar_ir_passes::movfuscate_ir_owned(blocks, &mut types);
         Ok((blocks, types))
     }
 }
