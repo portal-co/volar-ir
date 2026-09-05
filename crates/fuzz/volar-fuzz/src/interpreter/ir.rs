@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use volar_ir::ir::{IRBlockId, IRBlockTargetId, IRBlocks, IRStmt, IRTerminator, IRTypes, IRVarId};
 use volar_ir_common::{
-    Constant, IrType, OracleDecl, PreInitSegment, Stmt, StorageId, Type, TypeId,
+    Constant, IrType, OracleDecl, PolyCoeffs, PreInitSegment, Stmt, StorageId, Type, TypeId,
 };
 
 use crate::generators::oracle::hash_oracle;
@@ -618,7 +618,7 @@ pub fn rotate_right(val: &[bool], width: usize, n: usize) -> IrValue {
 ///   result[k] = (constant bit k) XOR (XOR of monomials where coeff is odd:
 ///               AND of var[k] for each var in the monomial key)
 pub fn eval_poly(
-    coeffs: &std::collections::BTreeMap<Vec<IRVarId>, u8>,
+    coeffs: &PolyCoeffs<IRVarId>,
     constant: &Constant,
     width: usize,
     vars: &BTreeMap<u32, IrValue>,
@@ -797,7 +797,7 @@ mod tests {
         let bit = types.bit();
         let v0 = IRVarId(0);
         let v1 = IRVarId(1);
-        let mut coeffs = std::collections::BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![v0, v1], 1u8);
         let stmt = Stmt::Poly {
             ty: bit,
@@ -824,7 +824,7 @@ mod tests {
         let bit = types.bit();
         let v0 = IRVarId(0);
         let v1 = IRVarId(1);
-        let mut coeffs = std::collections::BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![v0], 1u8);
         coeffs.insert(vec![v1], 1u8);
         let stmt = Stmt::Poly {

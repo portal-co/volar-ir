@@ -31,7 +31,6 @@
 //! the caller as (at least) the storage's true declared size, or
 //! out-of-range addresses will silently read zero / drop writes.
 
-use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -39,7 +38,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypeId,
     IRTypes, IRVarId, PrimType as Type,
 };
-use volar_ir_common::{Constant, StorageId};
+use volar_ir_common::{Constant, PolyCoeffs, StorageId};
 
 /// Which storage id to eliminate, the value type of each cell, and the
 /// declared cell count.
@@ -286,7 +285,7 @@ fn push_typed<P: Clone>(
 fn emit_poly<P: Clone>(
     block: &mut IRBlock<P>,
     var_types: &mut Vec<IRTypeId>,
-    coeffs: BTreeMap<Vec<IRVarId>, u8>,
+    coeffs: PolyCoeffs<IRVarId>,
     constant: Constant,
     ty: IRTypeId,
     prov: P,
@@ -305,7 +304,7 @@ fn emit_and_bit<P: Clone>(
 ) -> u32 {
     let mut key = vec![IRVarId(a), IRVarId(b)];
     key.sort();
-    let mut coeffs = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(key, 1u8);
     emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 0 }, bit_ty, prov)
 }
@@ -318,7 +317,7 @@ fn emit_not_bit<P: Clone>(
     a: u32,
     prov: P,
 ) -> u32 {
-    let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![IRVarId(a)], 1);
     emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 1 }, bit_ty, prov)
 }
@@ -332,7 +331,7 @@ fn emit_poly_xor_const<P: Clone>(
     ty: IRTypeId,
     prov: P,
 ) -> u32 {
-    let mut coeffs = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![IRVarId(val)], 1u8);
     emit_poly(block, var_types, coeffs, const_k, ty, prov)
 }
@@ -369,7 +368,7 @@ fn emit_gate<P: Clone>(
 ) -> u32 {
     let mut key = vec![IRVarId(is_active), IRVarId(val)];
     key.sort();
-    let mut coeffs = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(key, 1u8);
     emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 0 }, ty, prov)
 }
@@ -383,7 +382,7 @@ fn emit_field_add<P: Clone>(
     ty: IRTypeId,
     prov: P,
 ) -> u32 {
-    let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![IRVarId(a)], 1);
     coeffs.insert(vec![IRVarId(b)], 1);
     emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 0 }, ty, prov)

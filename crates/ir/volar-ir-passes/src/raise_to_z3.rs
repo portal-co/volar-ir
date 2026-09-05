@@ -35,10 +35,10 @@
 //!   In practice Volar IR polynomials are bounded by gate fan-in.
 //! - All other statements are cloned unchanged.
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 use volar_ir::ir::{IRBlock, IRBlocks, IRStmt, IRTypeId, IRTypes, IRVarId};
-use volar_ir_common::{Constant, IrType, Stmt, Type as PrimType};
+use volar_ir_common::{Constant, IrType, PolyCoeffs, Stmt, Type as PrimType};
 
 // ============================================================================
 // Public API
@@ -116,9 +116,9 @@ fn lift_stmt(stmt: &IRStmt, bit_ty: IRTypeId, z3_ty: IRTypeId) -> IRStmt {
 ///
 /// Returns `(gf3_coeffs, gf3_constant)`.
 fn mobius_lift(
-    coeffs: &BTreeMap<Vec<IRVarId>, u8>,
+    coeffs: &PolyCoeffs<IRVarId>,
     constant: Constant,
-) -> (BTreeMap<Vec<IRVarId>, u8>, Constant) {
+) -> (PolyCoeffs<IRVarId>, Constant) {
     // --- Collect and index all variables ---------------------------------
     let mut all_vars: Vec<IRVarId> = Vec::new();
     for mono in coeffs.keys() {
@@ -203,7 +203,7 @@ fn mobius_lift(
         lo: a_vals[0] as u128,
     };
 
-    let mut new_coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+    let mut new_coeffs = PolyCoeffs::new();
     for s in 1..num_subsets {
         if a_vals[s] == 0 {
             continue;
@@ -235,10 +235,10 @@ mod tests {
         IRVarId(n)
     }
 
-    // Evaluate a GF(3) polynomial (BTreeMap<mono, coeff>, constant) at a
+    // Evaluate a GF(3) polynomial (PolyCoeffs<mono>, constant) at a
     // point given as a map var_index → value (0, 1, or 2).
     fn eval_gf3(
-        coeffs: &BTreeMap<Vec<IRVarId>, u8>,
+        coeffs: &PolyCoeffs<IRVarId>,
         constant: Constant,
         point: &[(IRVarId, u8)],
     ) -> u8 {
@@ -279,7 +279,7 @@ mod tests {
 
     // Evaluate a GF(2) polynomial at a 0/1 point.
     fn eval_gf2(
-        coeffs: &BTreeMap<Vec<IRVarId>, u8>,
+        coeffs: &PolyCoeffs<IRVarId>,
         constant: Constant,
         point: &[(IRVarId, u8)],
     ) -> u8 {
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn test_identity_lift() {
         // f = x  →  g = x
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![var(0)], 1u8);
         let constant = Constant { hi: 0, lo: 0 };
         let (g_coeffs, g_const) = mobius_lift(&coeffs, constant);
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn test_not_lift() {
         // f = 1 + x  →  g = 1 + 2x
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![var(0)], 1u8);
         let constant = Constant { hi: 0, lo: 1 };
         let (g_coeffs, g_const) = mobius_lift(&coeffs, constant);
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn test_xor_lift() {
         // f = x + y  →  g = x + y + xy
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![var(0)], 1u8);
         coeffs.insert(vec![var(1)], 1u8);
         let constant = Constant { hi: 0, lo: 0 };
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn test_and_lift() {
         // f = xy  →  g = xy
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![var(0), var(1)], 1u8);
         let constant = Constant { hi: 0, lo: 0 };
         let (g_coeffs, g_const) = mobius_lift(&coeffs, constant);
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn test_or_lift() {
         // f = x + y + xy  →  g = x + y + 2xy
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![var(0)], 1u8);
         coeffs.insert(vec![var(1)], 1u8);
         coeffs.insert(vec![var(0), var(1)], 1u8);
@@ -405,7 +405,7 @@ mod tests {
 
         let mut types = TypeTable::new();
         let bit_id = types.intern(IrType::Primitive(PrimType::Bit));
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![IRVarId(0)], 1u8); // "x"
         let poly_stmt = Stmt::Poly {
             ty: bit_id,

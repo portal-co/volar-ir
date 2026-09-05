@@ -482,7 +482,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRTypeId,
     IRTypes, IRVarId,
 };
-use volar_ir_common::{Constant, IrType, Node, Type};
+use volar_ir_common::{Constant, IrType, Node, PolyCoeffs, Type};
 use volar_ir_passes::{LoweringMode, lower_to_circuit_ir};
 
 use crate::interpreter::ir::{
@@ -635,7 +635,7 @@ fn build_xor_chain(
         let (stmts, jump_var) = if is_last {
             (vec![], IRVarId(0))
         } else {
-            let mut coeffs = std::collections::BTreeMap::new();
+            let mut coeffs = PolyCoeffs::new();
             coeffs.insert(vec![IRVarId(0)], 1u8);
             let stmt = IRStmt::Poly {
                 ty: g8.clone(),
@@ -733,7 +733,7 @@ fn test_movfuscate_sequential_unrelated_same_slot_no_aliasing() {
         stmts.into_iter().map(|s| Node::new(s, (), None)).collect()
     };
 
-    let mut coeffs = std::collections::BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![IRVarId(0)], 1u8);
 
     let blocks: IRBlocks<()> = IRBlocks::new(vec![

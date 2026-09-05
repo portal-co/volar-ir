@@ -41,10 +41,10 @@
 //! XOR and rotation via `Poly`/`Rol`, 64-bit addition via the ripple-carry
 //! adder from `volar_lir::circuits::bc_add`.
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 use volar_ir::ir::{IRStmt, IRType, IRTypeId, IRTypes, IRVarId};
-use volar_ir_common::{Constant, OracleDecl, StorageId, Type as PrimType};
+use volar_ir_common::{Constant, OracleDecl, PolyCoeffs, StorageId, Type as PrimType};
 use volar_lir::circuits::{BitCircuitBuilder, bc_add};
 
 // ============================================================================
@@ -168,7 +168,7 @@ impl BitCircuitBuilder for BitEmitter<'_> {
         ))
     }
 
-    fn bc_poly(&mut self, coeffs: BTreeMap<Vec<IRVarId>, u8>, constant: u128) -> IRVarId {
+    fn bc_poly(&mut self, coeffs: PolyCoeffs<IRVarId>, constant: u128) -> IRVarId {
         self.inner.emit(IRStmt::Poly {
             ty: self.bit_ty,
             coeffs,
@@ -187,7 +187,7 @@ impl BitCircuitBuilder for BitEmitter<'_> {
         ac.sort();
         let mut bc = vec![b, c];
         bc.sort();
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(ab, 1u8);
         coeffs.insert(ac, 1u8);
         coeffs.insert(bc, 1u8);
@@ -248,7 +248,7 @@ impl IrHashAlgorithm for XorFoldHash32 {
                     dst_ty: u32_ty,
                 })
             };
-            let mut xor: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+            let mut xor = PolyCoeffs::new();
             xor.insert(vec![h], 1);
             xor.insert(vec![w], 1);
             h = emitter.emit(IRStmt::Poly {
@@ -498,7 +498,7 @@ fn sip_finalize_ir(
 
 /// `a XOR b` over `_64` using `Poly`.
 fn sip_xor(emitter: &mut dyn IrEmitter, a: IRVarId, b: IRVarId, u64_ty: IRTypeId) -> IRVarId {
-    let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![a], 1);
     coeffs.insert(vec![b], 1);
     emitter.emit(IRStmt::Poly {
@@ -514,7 +514,7 @@ fn sip_xor_const(emitter: &mut dyn IrEmitter, a: IRVarId, k: u64, u64_ty: IRType
     if k == 0 {
         return a;
     }
-    let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![a], 1);
     emitter.emit(IRStmt::Poly {
         ty: u64_ty,

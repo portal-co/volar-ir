@@ -86,7 +86,7 @@ use alloc::{
 };
 
 use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigId, Terminator, Value, ValueId};
-use volar_ir_common::{Constant, IrType, Node, Stmt, StorageId, TypeId};
+use volar_ir_common::{Constant, IrType, Node, PolyCoeffs, Stmt, StorageId, TypeId};
 use volar_lir::circuits::{BitCircuitBuilder, bc_add};
 
 use crate::lower_to_ir::{collect_unique_uses, compute_cross_block_values, compute_owner};
@@ -192,7 +192,7 @@ impl<'a, P: Clone> BitCircuitBuilder for VecBuilder<'a, P> {
         vid
     }
 
-    fn bc_poly(&mut self, coeffs: BTreeMap<Vec<ValueId>, u8>, constant: u128) -> ValueId {
+    fn bc_poly(&mut self, coeffs: PolyCoeffs<ValueId>, constant: u128) -> ValueId {
         let vid = ValueId(self.values.len());
         self.values.push(Node::new(
             Value::Op(Stmt::Poly {
@@ -570,21 +570,15 @@ fn ssa_ify_function_owned<P: Clone>(
 }
 
 /// Apply a per-block reload substitution without cloning a polynomial's
-/// monomial vectors. The B-tree nodes are rebuilt, but each moved
-/// `Vec<ValueId>` buffer is retained. This intentionally preserves the
-/// existing `Value::map` monomial order exactly.
+/// monomial vectors or rebuilding its coefficient collection.
 fn remap_value_in_place(value: &mut Value, subst: &[Option<ValueId>]) {
     if let Value::Op(Stmt::Poly { coeffs, .. }) = value {
-        let remapped: BTreeMap<Vec<ValueId>, u8> = core::mem::take(coeffs)
-            .into_iter()
-            .map(|(mut mono, coeff)| {
-                for v in &mut mono {
-                    *v = subst[v.0].unwrap_or(*v);
-                }
-                (mono, coeff)
-            })
-            .collect();
-        *coeffs = remapped;
+        coeffs.remap_monomials_in_place(|mono| {
+            for v in mono.iter_mut() {
+                *v = subst[v.0].unwrap_or(*v);
+            }
+            mono.sort();
+        });
         return;
     }
 
@@ -1204,7 +1198,7 @@ mod tests {
                 node(const_op(1)),
                 node(Value::Op(CommonStmt::Poly {
                     ty: TypeId(0),
-                    coeffs: BTreeMap::from([(vec![ValueId(0)], 1)]),
+                    coeffs: PolyCoeffs::from_iter([(vec![ValueId(0)], 1)]),
                     constant: Constant { hi: 0, lo: 0 },
                 })),
             ],

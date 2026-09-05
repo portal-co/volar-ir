@@ -30,7 +30,7 @@ use volar_ir::{
     circuit::VCircuit,
     ir::{Constant, IRStmt, IRTypeId, IRTypes, IRVarId, PreInitSegment, StorageId},
 };
-use volar_ir_common::IrType;
+use volar_ir_common::{IrType, PolyCoeffs};
 use volar_lir::{
     BitCircuitBuilder, IcmpPred,
     circuits::{
@@ -313,7 +313,7 @@ impl BitCircuitBuilder for Emitter {
         ))
     }
 
-    fn bc_poly(&mut self, coeffs: BTreeMap<Vec<IRVarId>, u8>, constant: u128) -> IRVarId {
+    fn bc_poly(&mut self, coeffs: PolyCoeffs<IRVarId>, constant: u128) -> IRVarId {
         self.emit(IRStmt::Poly {
             ty: self.bit,
             coeffs,

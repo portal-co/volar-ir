@@ -61,7 +61,7 @@ use volar_ir::ir::{
     ActionDecl, IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt,
     IRTerminator, IRTypeId, IRTypes, IRVarId, OracleDecl,
 };
-use volar_ir_common::{Constant, IrType, Stmt, StorageId, Type, TypeId};
+use volar_ir_common::{Constant, IrType, PolyCoeffs, Stmt, StorageId, Type, TypeId};
 use volar_lir::circuits::{
     bc_add, frame_read_cont, frame_reload, frame_spill, frame_write_cont, frame_write_ret, n_packs,
     pack_bits, unpack_words, BitCircuitBuilder, FrameLayout, StackPtr, StorageEmitter, PACK_W,
@@ -228,7 +228,7 @@ impl<P: Clone> BitCircuitBuilder for BlockEmitter<P> {
             BIT_TID,
         ))
     }
-    fn bc_poly(&mut self, coeffs: BTreeMap<Vec<IRVarId>, u8>, constant: u128) -> IRVarId {
+    fn bc_poly(&mut self, coeffs: PolyCoeffs<IRVarId>, constant: u128) -> IRVarId {
         self.emit(IRStmt::Poly {
             ty: BIT_TID,
             coeffs,
@@ -245,7 +245,7 @@ impl<P: Clone> BitCircuitBuilder for BlockEmitter<P> {
         ac.sort();
         let mut bc_ = vec![b, c];
         bc_.sort();
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(ab, 1u8);
         coeffs.insert(ac, 1u8);
         coeffs.insert(bc_, 1u8);
@@ -3029,7 +3029,7 @@ mod tests {
         }); // 3 = out
         {
             // xor_res = local XOR out  (degree-1 polynomial: local + out)
-            let mut coeffs = alloc::collections::BTreeMap::new();
+            let mut coeffs = PolyCoeffs::new();
             coeffs.insert(std::vec![ValueId(1)], 1u8);
             coeffs.insert(std::vec![ValueId(3)], 1u8);
             vals0.push(Value::Op(Stmt::Poly {

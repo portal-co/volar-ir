@@ -143,7 +143,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRTypeId,
     IRTypes, IRVarId,
 };
-use volar_ir_common::{Constant, IrType as CommonIrType, Type};
+use volar_ir_common::{Constant, IrType as CommonIrType, PolyCoeffs, Type};
 
 fn node<T>(kind: T) -> volar_ir_common::Node<T, ()> {
     volar_ir_common::Node::new(kind, (), None)
@@ -279,8 +279,6 @@ pub fn make_biir_self_loop() -> BIrBlocks {
 // IRBlocks circuit builders (typed, using Poly)
 // ============================================================================
 
-use std::collections::BTreeMap;
-
 fn bit_types() -> IRTypes {
     IRTypes(vec![CommonIrType::Primitive(Type::Bit)])
 }
@@ -292,7 +290,7 @@ fn bit_tid() -> IRTypeId {
 /// IR: 2-bit XOR via Poly.
 pub fn make_ir_xor() -> (IRBlocks, IRTypes) {
     let types = bit_types();
-    let mut coeffs = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![IRVarId(0)], 1u8);
     coeffs.insert(vec![IRVarId(1)], 1u8);
     let blocks = IRBlocks::new(vec![IRBlock {
@@ -312,7 +310,7 @@ pub fn make_ir_xor() -> (IRBlocks, IRTypes) {
 /// IR: 2-bit AND via Poly.
 pub fn make_ir_and() -> (IRBlocks, IRTypes) {
     let types = bit_types();
-    let mut coeffs = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     let mut key = vec![IRVarId(0), IRVarId(1)];
     key.sort();
     coeffs.insert(key, 1u8);
@@ -333,7 +331,7 @@ pub fn make_ir_and() -> (IRBlocks, IRTypes) {
 /// IR: 1-bit NOT via Poly (a + 1 in GF(2)).
 pub fn make_ir_not() -> (IRBlocks, IRTypes) {
     let types = bit_types();
-    let mut coeffs = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![IRVarId(0)], 1u8);
     let blocks = IRBlocks::new(vec![IRBlock {
         params: vec![bit_tid()],

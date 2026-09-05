@@ -19,7 +19,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRVarId,
 };
 use volar_ir_common::{
-    Constant, IrType, Node, OracleDecl, Stmt, StorageId, Type, TypeId, TypeTable,
+    Constant, IrType, Node, OracleDecl, PolyCoeffs, Stmt, StorageId, Type, TypeId, TypeTable,
 };
 
 use crate::interpreter::ir::primitive_width;
@@ -111,7 +111,7 @@ pub fn interpret_ir(
                 .map(|(i, _)| i)
                 .collect();
 
-            let mut coeffs = std::collections::BTreeMap::new();
+            let mut coeffs = PolyCoeffs::new();
             coeffs.insert(vec![IRVarId(v0_idx as u32)], 1u8);
 
             if same_w.len() > 1 {
@@ -268,7 +268,7 @@ fn build_extended_ir_stmts(
                 .map(|(i, _)| i)
                 .collect();
 
-            let mut coeffs = std::collections::BTreeMap::new();
+            let mut coeffs = PolyCoeffs::new();
             coeffs.insert(vec![v0_id], 1u8);
 
             if same_w.len() > 1 {

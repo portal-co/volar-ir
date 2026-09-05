@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use vaffle::{BlockId, FuncDecl, FuncId, Module, Terminator, Value, ValueId};
-use volar_ir_common::{Constant, OracleDecl, Stmt, StorageId, TypeId, TypeTable};
+use volar_ir_common::{Constant, OracleDecl, PolyCoeffs, Stmt, StorageId, TypeId, TypeTable};
 
 use crate::generators::oracle::hash_oracle;
 use crate::interpreter::ir::{
@@ -374,7 +374,7 @@ fn eval_vaffle_stmt(
 // ============================================================================
 
 fn eval_vaffle_poly(
-    coeffs: &std::collections::BTreeMap<Vec<ValueId>, u8>,
+    coeffs: &PolyCoeffs<ValueId>,
     constant: &Constant,
     width: usize,
     value_table: &BTreeMap<usize, IrValue>,

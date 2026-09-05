@@ -75,7 +75,8 @@ use vaffle::{
     Terminator, Value, ValueId,
 };
 use volar_ir_common::{
-    Constant, IrType, Node, Stmt, StorageAllocator, StorageId, Type, TypeId, TypeTable,
+    Constant, IrType, Node, PolyCoeffs, Stmt, StorageAllocator, StorageId, Type, TypeId,
+    TypeTable,
 };
 use volar_lir::circuits::{self, BitCircuitBuilder};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
@@ -3598,7 +3599,7 @@ impl<'a, 'ctx> BitCircuitBuilder for Ctx<'a, 'ctx> {
 
     fn bc_poly(
         &mut self,
-        coeffs: std::collections::BTreeMap<Vec<ValueId>, u8>,
+        coeffs: PolyCoeffs<ValueId>,
         constant: u128,
     ) -> ValueId {
         let ty = self.bit_tid;

@@ -54,7 +54,7 @@ use volar_ir::typed_gadget::{
     TypedAnchor, TypedAuxSource, TypedGadgetBinding, TypedGadgetLibrary, TypedGadgetSpec,
     TypedPort, TypedRegionEntry, TypedRegionTable,
 };
-use volar_ir_common::{Constant, Type, TypeTable};
+use volar_ir_common::{Constant, PolyCoeffs, Type, TypeTable};
 use volar_ir_passes::apply_gadgets;
 use volar_ir_passes::region_lowering::{
     lower_gadget_library, lower_typed_bindings, lower_typed_region_table,
@@ -113,12 +113,12 @@ fn build_typed_host(tc: &TypedCase, types: &mut TypeTable) -> IRBlocks {
                 1 => volar_ir::ir::IRStmt::Const(Constant { hi: 0, lo: 1 }, bit),
                 2 => volar_ir::ir::IRStmt::Poly {
                     ty: bit,
-                    coeffs: std::collections::BTreeMap::from([(vec![pick(ra), pick(rb)], 1u8)]),
+                    coeffs: PolyCoeffs::from_iter([(vec![pick(ra), pick(rb)], 1u8)]),
                     constant: Constant { hi: 0, lo: 0 },
                 },
                 3 => volar_ir::ir::IRStmt::Poly {
                     ty: bit,
-                    coeffs: std::collections::BTreeMap::from([
+                    coeffs: PolyCoeffs::from_iter([
                         (vec![pick(ra)], 1u8),
                         (vec![pick(rb)], 1u8),
                         (vec![pick(ra), pick(rb)], 1u8),
@@ -127,7 +127,7 @@ fn build_typed_host(tc: &TypedCase, types: &mut TypeTable) -> IRBlocks {
                 },
                 4 => volar_ir::ir::IRStmt::Poly {
                     ty: bit,
-                    coeffs: std::collections::BTreeMap::from([
+                    coeffs: PolyCoeffs::from_iter([
                         (vec![pick(ra)], 1u8),
                         (vec![pick(rb)], 1u8),
                     ]),
@@ -135,7 +135,7 @@ fn build_typed_host(tc: &TypedCase, types: &mut TypeTable) -> IRBlocks {
                 },
                 _ => volar_ir::ir::IRStmt::Poly {
                     ty: bit,
-                    coeffs: std::collections::BTreeMap::from([
+                    coeffs: PolyCoeffs::from_iter([
                         (vec![pick(ra)], 1u8),
                     ]),
                     constant: Constant { hi: 0, lo: 1 },
@@ -197,7 +197,7 @@ fn typed_pad(types: &mut TypeTable) -> TypedGadgetSpec {
     let out = body.push_stmt(
         volar_ir::ir::IRStmt::Poly {
             ty: bit,
-            coeffs: std::collections::BTreeMap::from([
+            coeffs: PolyCoeffs::from_iter([
                 (vec![IRVarId(0)], 1u8),
                 (vec![IRVarId(1)], 1u8),
             ]),

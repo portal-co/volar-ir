@@ -28,10 +28,10 @@ use core::convert::Infallible;
 use core::fmt;
 
 use volar_ir::ir::{
-    IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRTypeId,
+    IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId,
     IRTypes, IRVarId,
 };
-use volar_ir_common::{Constant, Stmt, StorageId};
+use volar_ir_common::{Constant, PolyCoeffs, Stmt, StorageId};
 use volar_ir_opt::common::{
     constant_or, constant_rol, constant_ror, constant_shl, mask_constant, stmt_output_type,
     type_bit_width,
@@ -412,7 +412,7 @@ fn eval_shuffle(
 }
 
 fn eval_poly(
-    coeffs: &BTreeMap<Vec<IRVarId>, u8>,
+    coeffs: &PolyCoeffs<IRVarId>,
     constant: Constant,
     ty: IRTypeId,
     consts: &BTreeMap<u32, Constant>,
@@ -553,7 +553,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use volar_ir::ir::{IRBlock, IRType, IRTypeId};
+    use volar_ir::ir::{IRBlock, IRStmt, IRType, IRTypeId};
     use volar_ir_common::{Node, Type};
 
     fn bit_types() -> IRTypes {

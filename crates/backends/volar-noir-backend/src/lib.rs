@@ -58,7 +58,7 @@ mod tests {
     use volar_ir::boolar::BIrStmt;
     use volar_ir::circuit::{BCircuit, VCircuit};
     use volar_ir::ir::{IRStmt, IRVarId};
-    use volar_ir_common::{Constant, TypeTable};
+    use volar_ir_common::{Constant, PolyCoeffs, TypeTable};
 
     fn and_xor_circuit() -> BCircuit<()> {
         let mut c = BCircuit::new(3);
@@ -131,7 +131,7 @@ mod tests {
         let mut types = TypeTable::new();
         let bit = types.bit();
         let mut c = VCircuit::new(vec![bit, bit]);
-        let mut coeffs = std::collections::BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![IRVarId(0), IRVarId(1)], 1u8);
         c.push_stmt(
             IRStmt::Poly {

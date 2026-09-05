@@ -863,7 +863,7 @@ mod tests {
     };
     use volar_ir::region::{RegionId, RegionSelector, WireAnchor};
     use volar_ir::typed_gadget::{TypedAnchor as TA, TypedPort, TypedRegionEntry};
-    use volar_ir_common::{Constant, Node, StorageId, Type, TypeTable};
+    use volar_ir_common::{Constant, Node, PolyCoeffs, StorageId, Type, TypeTable};
 
     fn types() -> (TypeTable, IRTypeId, IRTypeId) {
         let mut t = TypeTable::new();
@@ -950,7 +950,7 @@ mod tests {
         let mut outs = Vec::with_capacity(8);
         for i in 0..8 {
             // data_i + key_i (two linear monomials) = XOR.
-            let coeffs = BTreeMap::from([
+            let coeffs = PolyCoeffs::from_iter([
                 (vec![IRVarId(i)], 1u8),
                 (vec![IRVarId(8 + i)], 1u8),
             ]);
@@ -1522,7 +1522,7 @@ mod tests {
         let o = body.push_stmt(
             volar_ir::ir::IRStmt::Poly {
                 ty: bit,
-                coeffs: BTreeMap::new(),
+                coeffs: PolyCoeffs::new(),
                 constant: Constant { hi: 0, lo: 1 },
             },
             (),

@@ -24,7 +24,7 @@ use vaffle::{
     ValueId,
 };
 use volar_ir_common::{
-    Constant, IrType, Node, OracleDecl, Stmt, StorageId, Type, TypeId, TypeTable,
+    Constant, IrType, Node, OracleDecl, PolyCoeffs, Stmt, StorageId, Type, TypeId, TypeTable,
 };
 
 use crate::generators::ir::{PRIM_TYPES, RawIrStmt, RawTypeIdx};
@@ -103,7 +103,7 @@ pub fn interpret_vaffle(
                 .map(|(i, _)| i)
                 .collect();
 
-            let mut coeffs = BTreeMap::new();
+            let mut coeffs = PolyCoeffs::new();
             coeffs.insert(vec![ValueId(v0_idx)], 1u8);
 
             if same_w.len() > 1 {
@@ -294,7 +294,7 @@ fn build_vaffle_extended_block(
                 .filter(|(_, (_, w, _))| *w == v0_w)
                 .map(|(i, _)| i)
                 .collect();
-            let mut coeffs = std::collections::BTreeMap::new();
+            let mut coeffs = PolyCoeffs::new();
             coeffs.insert(vec![v0_id], 1u8);
             if same_w.len() > 1 {
                 let v1_vi_idx = (b as usize) % same_w.len();

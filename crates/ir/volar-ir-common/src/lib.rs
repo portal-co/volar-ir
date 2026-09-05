@@ -12,7 +12,254 @@ pub use generated::{
     ActionDecl, Constant, Node, OracleDecl, PreInitSegment, RngDecl, StorageId, Type, TypeId,
 };
 
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
+use alloc::vec::Vec;
+
+/// Canonical sparse coefficient collection for [`Stmt::Poly`].
+///
+/// Monomials are held in lexicographic key order with at most one entry per
+/// key, matching the observable semantics of the old `BTreeMap<Vec<V>, u8>`
+/// representation. A flat allocation is deliberate: owned transformations
+/// can rewrite every variable in place and retain both the outer collection
+/// and its monomial buffers instead of allocating a second B-tree.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct PolyCoeffs<V>(Vec<(Vec<V>, u8)>);
+
+impl<V> Default for PolyCoeffs<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V> PolyCoeffs<V> {
+    /// Create an empty coefficient collection.
+    pub const fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Number of monomial entries.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether this polynomial has no non-constant monomials.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Remove every monomial.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Iterate over `(monomial, coefficient)` pairs in canonical key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&Vec<V>, &u8)> {
+        self.0.iter().map(|(monomial, coeff)| (monomial, coeff))
+    }
+
+    /// Iterate over monomial keys in canonical order.
+    pub fn keys(&self) -> impl Iterator<Item = &Vec<V>> {
+        self.0.iter().map(|(monomial, _)| monomial)
+    }
+
+    /// Iterate over coefficients in canonical key order.
+    pub fn values(&self) -> impl Iterator<Item = &u8> {
+        self.0.iter().map(|(_, coeff)| coeff)
+    }
+
+    /// Retain monomials for which `f` returns `true`.
+    pub fn retain(&mut self, mut f: impl FnMut(&Vec<V>, &mut u8) -> bool) {
+        self.0.retain_mut(|(monomial, coeff)| f(monomial, coeff));
+    }
+}
+
+impl<V: Ord> PolyCoeffs<V> {
+    fn key_index(&self, key: &[V]) -> Result<usize, usize> {
+        self.0
+            .binary_search_by(|(monomial, _)| monomial.as_slice().cmp(key))
+    }
+
+    /// Return the coefficient for `key`, if present.
+    pub fn get(&self, key: &[V]) -> Option<&u8> {
+        self.key_index(key).ok().map(|index| &self.0[index].1)
+    }
+
+    /// Insert or replace a monomial coefficient, returning the prior value.
+    pub fn insert(&mut self, key: Vec<V>, coeff: u8) -> Option<u8> {
+        match self.key_index(&key) {
+            Ok(index) => Some(core::mem::replace(&mut self.0[index].1, coeff)),
+            Err(index) => {
+                self.0.insert(index, (key, coeff));
+                None
+            }
+        }
+    }
+
+    /// Return a map-style entry for `key`.
+    pub fn entry(&mut self, key: Vec<V>) -> PolyCoeffsEntry<'_, V> {
+        match self.key_index(&key) {
+            Ok(index) => PolyCoeffsEntry::Occupied(&mut self.0[index].1),
+            Err(index) => PolyCoeffsEntry::Vacant {
+                entries: &mut self.0,
+                index,
+                key,
+            },
+        }
+    }
+
+    /// Remove a monomial coefficient, returning it if present.
+    pub fn remove(&mut self, key: &[V]) -> Option<u8> {
+        self.key_index(key).ok().map(|index| self.0.remove(index).1)
+    }
+
+    /// Rewrite monomial vectors in place and restore canonical key order only
+    /// when the rewrite actually changed it. This is the owned movfuscation
+    /// fast path: monotonic substitutions retain the existing vector order and
+    /// allocate no replacement coefficient collection.
+    pub fn remap_monomials_in_place(&mut self, mut f: impl FnMut(&mut Vec<V>)) {
+        for (monomial, _) in &mut self.0 {
+            f(monomial);
+        }
+        if self
+            .0
+            .windows(2)
+            .any(|pair| pair[0].0.as_slice() >= pair[1].0.as_slice())
+        {
+            self.0.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut write = 0;
+            for read in 0..self.0.len() {
+                if write > 0 && self.0[write - 1].0 == self.0[read].0 {
+                    self.0[write - 1].1 = self.0[read].1;
+                } else {
+                    if write != read {
+                        self.0.swap(write, read);
+                    }
+                    write += 1;
+                }
+            }
+            self.0.truncate(write);
+        }
+    }
+}
+
+/// A mutable entry returned by [`PolyCoeffs::entry`].
+pub enum PolyCoeffsEntry<'a, V> {
+    /// An existing coefficient.
+    Occupied(&'a mut u8),
+    /// A key position that has not been allocated yet.
+    Vacant {
+        entries: &'a mut Vec<(Vec<V>, u8)>,
+        index: usize,
+        key: Vec<V>,
+    },
+}
+
+impl<'a, V> PolyCoeffsEntry<'a, V> {
+    /// Return the existing coefficient or insert `default` at the canonical
+    /// key position and return it.
+    pub fn or_insert(self, default: u8) -> &'a mut u8 {
+        match self {
+            Self::Occupied(coeff) => coeff,
+            Self::Vacant {
+                entries,
+                index,
+                key,
+            } => {
+                entries.insert(index, (key, default));
+                &mut entries[index].1
+            }
+        }
+    }
+}
+
+impl<V> IntoIterator for PolyCoeffs<V> {
+    type Item = (Vec<V>, u8);
+    type IntoIter = alloc::vec::IntoIter<(Vec<V>, u8)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a, V> IntoIterator for &'a PolyCoeffs<V> {
+    type Item = (&'a Vec<V>, &'a u8);
+    type IntoIter = core::iter::Map<
+        core::slice::Iter<'a, (Vec<V>, u8)>,
+        fn(&(Vec<V>, u8)) -> (&Vec<V>, &u8),
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        fn as_pair<V>(entry: &(Vec<V>, u8)) -> (&Vec<V>, &u8) {
+            (&entry.0, &entry.1)
+        }
+        self.0.iter().map(as_pair)
+    }
+}
+
+impl<V: Ord> core::iter::FromIterator<(Vec<V>, u8)> for PolyCoeffs<V> {
+    fn from_iter<T: IntoIterator<Item = (Vec<V>, u8)>>(iter: T) -> Self {
+        let mut entries: Vec<(Vec<V>, u8)> = iter.into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut write = 0;
+        for read in 0..entries.len() {
+            if write > 0 && entries[write - 1].0 == entries[read].0 {
+                entries[write - 1].1 = entries[read].1;
+            } else {
+                if write != read {
+                    entries.swap(write, read);
+                }
+                write += 1;
+            }
+        }
+        entries.truncate(write);
+        Self(entries)
+    }
+}
+
+#[cfg(test)]
+mod poly_coeffs_tests {
+    use alloc::{vec, vec::Vec};
+
+    use super::PolyCoeffs;
+
+    #[test]
+    fn from_iter_canonicalizes_and_keeps_the_last_coefficient() {
+        let coeffs = PolyCoeffs::from_iter([
+            (vec![3], 3u8),
+            (vec![1], 1u8),
+            (vec![3], 7u8),
+        ]);
+
+        assert_eq!(
+            coeffs.into_iter().collect::<Vec<_>>(),
+            vec![(vec![1], 1), (vec![3], 7)]
+        );
+    }
+
+    #[test]
+    fn remap_reuses_monomials_and_normalizes_collisions() {
+        let mut coeffs = PolyCoeffs::from_iter([(vec![0], 3u8), (vec![1], 7u8)]);
+        let outer_ptr = coeffs.0.as_ptr();
+
+        coeffs.remap_monomials_in_place(|monomial| {
+            monomial[0] += 2;
+        });
+        assert_eq!(outer_ptr, coeffs.0.as_ptr());
+        assert_eq!(
+            coeffs.iter().map(|(key, value)| (key.clone(), *value)).collect::<Vec<_>>(),
+            vec![(vec![2], 3), (vec![3], 7)]
+        );
+
+        coeffs.remap_monomials_in_place(|monomial| monomial[0] = 9);
+        assert_eq!(
+            coeffs.into_iter().collect::<Vec<_>>(),
+            vec![(vec![9], 7)]
+        );
+    }
+}
 
 // ============================================================================
 // Unified type system
@@ -286,8 +533,7 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     Poly {
         /// Output (and dominant operand) type.
         ty: Ty,
-        #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::AsVec))]
-        coeffs: BTreeMap<Vec<Var>, u8>,
+        coeffs: PolyCoeffs<Var>,
         constant: Constant,
     },
     /// Rotate-left `src` (of type `ty`) by `n` bit positions.
@@ -442,7 +688,7 @@ impl<Var: Ord, Ty, Stor> Stmt<Var, Var, Ty, Stor> {
                             .collect::<Result<Vec<NV>, E>>()?;
                         Ok((mono, coeff))
                     })
-                    .collect::<Result<BTreeMap<Vec<NV>, u8>, E>>()?;
+                    .collect::<Result<PolyCoeffs<NV>, E>>()?;
                 Stmt::Poly {
                     ty,
                     coeffs,
@@ -636,7 +882,7 @@ impl<Var, Addr, Ty, Stor> Stmt<Var, Addr, Ty, Stor> {
                             .collect::<Result<Vec<NV>, E>>()?;
                         Ok((mono, coeff))
                     })
-                    .collect::<Result<BTreeMap<Vec<NV>, u8>, E>>()?;
+                    .collect::<Result<PolyCoeffs<NV>, E>>()?;
                 Stmt::Poly {
                     ty,
                     coeffs,
@@ -809,7 +1055,7 @@ impl<Var, Addr, Ty, Stor> Stmt<Var, Addr, Ty, Stor> {
                 let coeffs = coeffs
                     .iter()
                     .map(|(mono, coeff)| (mono.iter().collect::<Vec<&Var>>(), *coeff))
-                    .collect::<BTreeMap<Vec<&Var>, u8>>();
+                    .collect::<PolyCoeffs<&Var>>();
                 Stmt::Poly {
                     ty,
                     coeffs,

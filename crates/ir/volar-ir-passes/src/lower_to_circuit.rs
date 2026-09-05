@@ -37,7 +37,6 @@
 //! [`lower_to_circuit_with_boundary`] returns alongside the lowered circuit.
 //! Static lowering ([`lower_to_circuit`]) is unchanged.
 
-use alloc::collections::BTreeMap;
 use alloc::{vec, vec::Vec};
 use volar_ir::{
     boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
@@ -46,7 +45,7 @@ use volar_ir::{
         IRTypeId, IRVarId,
     },
 };
-use volar_ir_common::Constant;
+use volar_ir_common::{Constant, PolyCoeffs};
 
 use crate::dispatch_accumulator::{
     emit_select_bit, emit_select_slot, DispatchBitPrimitives, DispatchSlotPrimitives,
@@ -756,7 +755,7 @@ impl<P: Clone> IrEmitter<P> {
 
     fn emit_poly(
         &mut self,
-        coeffs: BTreeMap<Vec<IRVarId>, u8>,
+        coeffs: PolyCoeffs<IRVarId>,
         constant_lo: u128,
         ty: IRTypeId,
     ) -> u32 {
@@ -786,7 +785,7 @@ impl<P: Clone> DispatchBitPrimitives for IrEmitter<P> {
         }
         let mut key = vec![IRVarId(a), IRVarId(b)];
         key.sort();
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(key, 1u8);
         let bt = self.bit_type_id.clone();
         self.emit_poly(coeffs, 0, bt)
@@ -795,14 +794,14 @@ impl<P: Clone> DispatchBitPrimitives for IrEmitter<P> {
         if a == b {
             return self.emit_zero_bit();
         }
-        let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![IRVarId(a)], 1);
         coeffs.insert(vec![IRVarId(b)], 1);
         let bt = self.bit_type_id.clone();
         self.emit_poly(coeffs, 0, bt)
     }
     fn emit_not(&mut self, a: u32) -> u32 {
-        let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![IRVarId(a)], 1);
         let bt = self.bit_type_id.clone();
         self.emit_poly(coeffs, 1, bt)
@@ -822,7 +821,7 @@ impl<P: Clone> DispatchSlotPrimitives for IrEmitter<P> {
         }
         let mut key = vec![IRVarId(is_active), IRVarId(val)];
         key.sort();
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(key, 1u8);
         self.emit_poly(coeffs, 0, ty.clone())
     }
@@ -830,7 +829,7 @@ impl<P: Clone> DispatchSlotPrimitives for IrEmitter<P> {
         if a == b {
             return self.emit_zero_slot(ty);
         }
-        let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![IRVarId(a)], 1);
         coeffs.insert(vec![IRVarId(b)], 1);
         self.emit_poly(coeffs, 0, ty.clone())
@@ -1567,7 +1566,7 @@ mod tests {
                     stmts: std::vec![IRStmt::Poly {
                         ty: bit_ty,
                         coeffs: {
-                            let mut m = BTreeMap::new();
+                            let mut m = PolyCoeffs::new();
                             m.insert(std::vec![IRVarId(0)], 1u8);
                             m
                         },

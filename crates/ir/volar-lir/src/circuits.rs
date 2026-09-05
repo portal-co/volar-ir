@@ -18,7 +18,8 @@
 
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
+use volar_ir_common::PolyCoeffs;
 
 // ============================================================================
 // Trait
@@ -51,32 +52,25 @@ pub trait BitCircuitBuilder {
     /// degree-0 term (again, only its low bit matters).
     ///
     /// Returns the SSA variable that holds this polynomial's result.
-    fn bc_poly(&mut self, coeffs: BTreeMap<Vec<Self::Bit>, u8>, constant: u128) -> Self::Bit;
+    fn bc_poly(&mut self, coeffs: PolyCoeffs<Self::Bit>, constant: u128) -> Self::Bit;
 
     // ---- Derived single-bit ops (may be overridden for efficiency) ----------
 
     /// `a XOR b` - `Poly { {[a]:1, [b]:1}, constant:0 }`.
     fn bc_xor(&mut self, a: Self::Bit, b: Self::Bit) -> Self::Bit {
-        let mut c = BTreeMap::new();
-        c.insert(vec![a], 1u8);
-        c.insert(vec![b], 1u8);
-        self.bc_poly(c, 0)
+        self.bc_poly(PolyCoeffs::from_iter([(vec![a], 1u8), (vec![b], 1u8)]), 0)
     }
 
     /// `a AND b` - `Poly { {[a,b]:1}, constant:0 }`.
     fn bc_and(&mut self, a: Self::Bit, b: Self::Bit) -> Self::Bit {
         let mut key = vec![a, b];
         key.sort();
-        let mut c = BTreeMap::new();
-        c.insert(key, 1u8);
-        self.bc_poly(c, 0)
+        self.bc_poly(PolyCoeffs::from_iter([(key, 1u8)]), 0)
     }
 
     /// `NOT a` - `Poly { {[a]:1}, constant:1 }` (i.e. `1 + a` in GF(2)).
     fn bc_not(&mut self, a: Self::Bit) -> Self::Bit {
-        let mut c = BTreeMap::new();
-        c.insert(vec![a], 1u8);
-        self.bc_poly(c, 1)
+        self.bc_poly(PolyCoeffs::from_iter([(vec![a], 1u8)]), 1)
     }
 
     /// `a OR b` - De Morgan: `NOT(NOT(a) AND NOT(b))`.
@@ -106,11 +100,10 @@ pub trait BitCircuitBuilder {
         ac.sort();
         let mut bc = vec![b.clone(), c.clone()];
         bc.sort();
-        let mut coeffs = BTreeMap::new();
-        coeffs.insert(ab, 1u8);
-        coeffs.insert(ac, 1u8);
-        coeffs.insert(bc, 1u8);
-        self.bc_poly(coeffs, 0)
+        self.bc_poly(
+            PolyCoeffs::from_iter([(ab, 1u8), (ac, 1u8), (bc, 1u8)]),
+            0,
+        )
     }
 }
 

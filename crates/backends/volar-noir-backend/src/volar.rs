@@ -6,7 +6,7 @@ use volar_circuit_source::{
     SourcePackage,
 };
 use volar_ir::ir::{IRTypes, IRVarId};
-use volar_ir_common::{Constant, IrType, Type, TypeId};
+use volar_ir_common::{Constant, IrType, PolyCoeffs, Type, TypeId};
 
 use crate::bool::package_files_for_lib;
 use crate::ident::sanitize_ident;
@@ -281,7 +281,7 @@ fn transmute_expr(
 fn render_poly(
     circuit: &NamedVolarCircuit,
     ty: TypeId,
-    coeffs: &std::collections::BTreeMap<Vec<IRVarId>, u8>,
+    coeffs: &PolyCoeffs<IRVarId>,
     constant: &Constant,
 ) -> Result<String, EmitError> {
     let types = &circuit.types;

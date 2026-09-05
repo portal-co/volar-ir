@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use volar_ir::boolar::{BIrPreInitSegment, LaneId};
 use volar_ir::ir::{IRTypes, IRVarId};
-use volar_ir_common::{Constant, StorageId, TypeId};
+use volar_ir_common::{Constant, PolyCoeffs, StorageId, TypeId};
 
 /// A named SSA wire, plus whether the backend must emit a binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,7 +147,7 @@ pub enum NamedVolarOp {
     },
     Poly {
         ty: TypeId,
-        coeffs: BTreeMap<Vec<IRVarId>, u8>,
+        coeffs: PolyCoeffs<IRVarId>,
         constant: Constant,
     },
     Rol {

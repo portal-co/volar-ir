@@ -57,7 +57,7 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::{vec, vec::Vec};
-use volar_ir_common::{Constant, PreInitSegment, StorageId, Type};
+use volar_ir_common::{Constant, PolyCoeffs, PreInitSegment, StorageId, Type};
 
 use volar_ir::{
     boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
@@ -1416,10 +1416,11 @@ pub(crate) fn subst_ir(stmt: &IRStmt, var_map: &[u32]) -> IRStmt {
 ///
 /// Movfuscation's pipeline path consumes its source module, so a polynomial
 /// does not need to leave its coefficient map behind for the input's later
-/// destructor.  Remap each monomial vector in place and move it into the new
-/// tree.  The tree nodes themselves are rebuilt because their ordering can
-/// change, but the (dominant) per-monomial `Vec` allocations are retained.
-/// Other statement kinds retain the borrowed helper's established behaviour.
+/// destructor. Remap every monomial vector in place. [`PolyCoeffs`] restores
+/// key order only if substitution disturbed it, so monotonic substitutions
+/// retain the source collection and its monomial buffers without a tree
+/// rebuild. Other statement kinds retain the borrowed helper's established
+/// behaviour.
 fn subst_ir_owned(stmt: IRStmt, var_map: &[u32]) -> IRStmt {
     match stmt {
         IRStmt::Poly {
@@ -1427,16 +1428,13 @@ fn subst_ir_owned(stmt: IRStmt, var_map: &[u32]) -> IRStmt {
             coeffs,
             constant,
         } => {
-            let coeffs = coeffs
-                .into_iter()
-                .map(|(mut vars, coeff)| {
-                    for var in &mut vars {
-                        *var = IRVarId(var_map[var.0 as usize]);
-                    }
-                    vars.sort();
-                    (vars, coeff)
-                })
-                .collect();
+            let mut coeffs = coeffs;
+            coeffs.remap_monomials_in_place(|vars| {
+                for var in vars.iter_mut() {
+                    *var = IRVarId(var_map[var.0 as usize]);
+                }
+                vars.sort();
+            });
             IRStmt::Poly {
                 ty,
                 coeffs,
@@ -1473,7 +1471,7 @@ fn promote_type(a: &IRTypeId, b: &IRTypeId, ir_types: &[IRType]) -> IRTypeId {
 /// Infer the result type of a `Poly` stmt: the widest field type among all
 /// variable operands, with `Bit` as the identity for promotion.
 fn infer_poly_result_type(
-    coeffs: &BTreeMap<Vec<IRVarId>, u8>,
+    coeffs: &PolyCoeffs<IRVarId>,
     var_types: &[IRTypeId],
     ir_types: &[IRType],
     bit_type_id: &IRTypeId,
@@ -1491,16 +1489,17 @@ fn infer_poly_result_type(
 /// Infer the result type of any `IRStmt`.
 fn infer_stmt_result_type(
     stmt: &IRStmt,
-    var_types: &[IRTypeId],
-    ir_types: &[IRType],
+    _var_types: &[IRTypeId],
+    _ir_types: &[IRType],
     bit_type_id: &IRTypeId,
 ) -> IRTypeId {
     match stmt {
         IRStmt::Const(_, ty) | IRStmt::StorageRead { ty, .. } => ty.clone(),
         IRStmt::Transmute { dst_ty, .. } => dst_ty.clone(),
-        IRStmt::Poly { coeffs, .. } => {
-            infer_poly_result_type(coeffs, var_types, ir_types, bit_type_id)
-        }
+        // Poly statements already carry the authoritative result type. In
+        // particular, scanning every monomial here is pure overhead while
+        // movfuscating large circuits.
+        IRStmt::Poly { ty, .. } => ty.clone(),
         IRStmt::Rol { ty, .. }
         | IRStmt::Ror { ty, .. }
         | IRStmt::Merge { ty, .. }
@@ -1741,7 +1740,7 @@ impl<P: Clone> IrCtx<P> {
 
     /// Emit a `Poly` with the given coefficients and constant, inferring the
     /// result type from the operand types tracked in `self.var_types`.
-    fn emit_poly(&mut self, coeffs: BTreeMap<Vec<IRVarId>, u8>, constant_lo: u128) -> u32 {
+    fn emit_poly(&mut self, coeffs: PolyCoeffs<IRVarId>, constant_lo: u128) -> u32 {
         let result_type =
             infer_poly_result_type(&coeffs, &self.var_types, &self.ir_types, &self.bit_type_id);
         self.push_typed(
@@ -1771,7 +1770,7 @@ impl<P: Clone> IrCtx<P> {
 
     /// Emit `val XOR const_k` (field addition in GF(2^n)) using `Poly`.
     fn emit_poly_xor_const(&mut self, val: u32, const_k: Constant, ty: IRTypeId) -> u32 {
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![IRVarId(val)], 1u8);
         self.push_typed(
             IRStmt::Poly {
@@ -2008,7 +2007,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         }
         let mut key = vec![IRVarId(a), IRVarId(b)];
         key.sort();
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(key, 1u8);
         self.emit_poly(coeffs, 0)
     }
@@ -2018,7 +2017,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         if a == b {
             return self.emit_zero_bit();
         }
-        let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![IRVarId(a)], 1);
         coeffs.insert(vec![IRVarId(b)], 1);
         self.emit_poly(coeffs, 0)
@@ -2026,7 +2025,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
 
     /// `NOT a` = `Poly { {[a]: 1u8}, constant: 1 }` (i.e. `1 + a` in GF(2)).
     fn emit_not(&mut self, a: u32) -> u32 {
-        let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![IRVarId(a)], 1);
         self.emit_poly(coeffs, 1)
     }
@@ -2051,7 +2050,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         // Canonical order for the monomial key.
         let mut key = vec![IRVarId(is_active), IRVarId(val)];
         key.sort();
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(key, 1u8);
         let t = ty.clone();
         self.push_typed(
@@ -2071,7 +2070,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         if a == b {
             return self.emit_zero_slot(ty); // a + a = 0 in characteristic-2 fields
         }
-        let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![IRVarId(a)], 1);
         coeffs.insert(vec![IRVarId(b)], 1);
         let t = ty.clone();
@@ -3471,7 +3470,7 @@ mod tests {
                 // `1 + x` exercises the move-only Poly coefficient path.
                 stmts: std::vec![IRStmt::Poly {
                     ty: bit,
-                    coeffs: std::collections::BTreeMap::from([(std::vec![IRVarId(0)], 1u8,)]),
+                    coeffs: PolyCoeffs::from_iter([(std::vec![IRVarId(0)], 1u8)]),
                     constant: Constant { hi: 0, lo: 1 },
                 }]
                 .into_iter()
@@ -3488,7 +3487,7 @@ mod tests {
                 params: std::vec![bit],
                 stmts: std::vec![IRStmt::Poly {
                     ty: bit,
-                    coeffs: std::collections::BTreeMap::from([(std::vec![IRVarId(0)], 1u8,)]),
+                    coeffs: PolyCoeffs::from_iter([(std::vec![IRVarId(0)], 1u8)]),
                     constant: Constant { hi: 0, lo: 0 },
                 }]
                 .into_iter()
@@ -3507,6 +3506,54 @@ mod tests {
 
         assert_eq!(owned, borrowed);
         assert_eq!(owned_types, borrowed_types);
+    }
+
+    #[test]
+    fn owned_poly_substitution_restores_canonical_monomial_order() {
+        let source = IRStmt::Poly {
+            ty: IRTypeId(0),
+            coeffs: PolyCoeffs::from_iter([
+                (std::vec![IRVarId(0)], 1u8),
+                (std::vec![IRVarId(1)], 1u8),
+            ]),
+            constant: Constant { hi: 0, lo: 0 },
+        };
+
+        let IRStmt::Poly { coeffs, .. } = subst_ir_owned(source, &[4, 3]) else {
+            unreachable!()
+        };
+        assert_eq!(
+            coeffs.into_iter().collect::<Vec<_>>(),
+            std::vec![(std::vec![IRVarId(3)], 1), (std::vec![IRVarId(4)], 1)]
+        );
+    }
+
+    #[test]
+    fn declared_poly_type_is_authoritative_during_type_collection() {
+        let types = IRTypes(std::vec![
+            IRType::Primitive(Type::Bit),
+            IRType::Primitive(Type::Galois64),
+        ]);
+        let block = IRBlock {
+            params: std::vec![IRTypeId(0)],
+            stmts: std::vec![Node::new(
+                IRStmt::Poly {
+                    ty: IRTypeId(1),
+                    coeffs: PolyCoeffs::from_iter([(std::vec![IRVarId(0)], 1u8)]),
+                    constant: Constant { hi: 0, lo: 0 },
+                },
+                (),
+                None,
+            )],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(1)]),
+            },
+        };
+
+        assert_eq!(
+            infer_block_var_types(&block, &types.0, &IRTypeId(0)),
+            std::vec![IRTypeId(0), IRTypeId(1)]
+        );
     }
 
     // =========================================================================
@@ -3735,7 +3782,7 @@ mod tests {
                 params: std::vec![bit.clone(), bit.clone()], // slot0, slot1
                 stmts: std::vec![IRStmt::Poly {
                     ty: bit.clone(),
-                    coeffs: std::collections::BTreeMap::from([(std::vec![IRVarId(0)], 1u8)]),
+                    coeffs: PolyCoeffs::from_iter([(std::vec![IRVarId(0)], 1u8)]),
                     constant: Constant { hi: 0, lo: 1 },
                 }]
                 .into_iter()
@@ -3753,7 +3800,7 @@ mod tests {
                 params: std::vec![bit.clone(), bit.clone()], // slot0, slot1
                 stmts: std::vec![IRStmt::Poly {
                     ty: bit.clone(),
-                    coeffs: std::collections::BTreeMap::from([(std::vec![IRVarId(1)], 1u8)]),
+                    coeffs: PolyCoeffs::from_iter([(std::vec![IRVarId(1)], 1u8)]),
                     constant: Constant { hi: 0, lo: 1 },
                 }]
                 .into_iter()
@@ -3991,7 +4038,7 @@ mod tests {
             IRType::Primitive(Type::AES8)
         ]);
         let g8 = IRTypeId(1);
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(std::vec![IRVarId(0)], 1u8);
         let blocks = IRBlocks::new(std::vec![
             IRBlock {

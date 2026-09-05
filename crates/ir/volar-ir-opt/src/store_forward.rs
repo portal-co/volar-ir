@@ -15,7 +15,7 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 use vaffle::{FuncBody, FuncDecl, Module, Value, ValueId};
 use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId};
 use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId};
-use volar_ir_common::{Constant, Node, StorageId, TypeId, TypeTable};
+use volar_ir_common::{Constant, Node, PolyCoeffs, StorageId, TypeId, TypeTable};
 
 use crate::biir::apply_aliases_to_biir_terminator;
 use crate::common::{
@@ -101,7 +101,7 @@ fn get_bit_of_constant(c: Constant, b: usize) -> bool {
 ///   A monomial with an unknown bit is still known-0 if another bit in that monomial is known-0.
 fn poly_known_bits<Var: Ord>(
     w: usize,
-    coeffs: &BTreeMap<Vec<Var>, u8>,
+    coeffs: &PolyCoeffs<Var>,
     constant: &Constant,
     get_kb: impl Fn(&Var) -> KnownBits,
 ) -> KnownBits {
@@ -160,7 +160,7 @@ fn poly_known_bits<Var: Ord>(
 
 /// GF(2) polynomial representation of an address: `(monomials, constant)`.
 /// Monomial coefficients are mod-2; XOR-ing two of these gives their difference.
-type IrPolyRepr = (BTreeMap<Vec<IRVarId>, u8>, Constant);
+type IrPolyRepr = (PolyCoeffs<IRVarId>, Constant);
 
 /// Extract the GF(2) polynomial representation of an IR address variable.
 fn ir_addr_poly(
@@ -169,12 +169,12 @@ fn ir_addr_poly(
     poly_map: &BTreeMap<IRVarId, IrPolyRepr>,
 ) -> IrPolyRepr {
     if let Some(&c) = const_map.get(&v) {
-        return (BTreeMap::new(), c);
+        return (PolyCoeffs::new(), c);
     }
     if let Some(p) = poly_map.get(&v) {
         return p.clone();
     }
-    let mut m = BTreeMap::new();
+    let mut m = PolyCoeffs::new();
     m.insert(alloc::vec![v], 1u8);
     (m, Constant { hi: 0, lo: 0 })
 }
@@ -1620,15 +1620,15 @@ fn merge_biir_caches_with_injection<P: Clone>(
 // ============================================================================
 
 /// Extract the GF(2) polynomial representation of a VAFFLE address value.
-fn vaffle_addr_poly(values: &[Node<Value>], v: ValueId) -> (BTreeMap<Vec<ValueId>, u8>, Constant) {
+fn vaffle_addr_poly(values: &[Node<Value>], v: ValueId) -> (PolyCoeffs<ValueId>, Constant) {
     use volar_ir_common::Stmt;
     match &values[v.0].kind {
-        Value::Op(Stmt::Const(c, _)) => (BTreeMap::new(), *c),
+        Value::Op(Stmt::Const(c, _)) => (PolyCoeffs::new(), *c),
         Value::Op(Stmt::Poly {
             coeffs, constant, ..
         }) => (coeffs.clone(), *constant),
         _ => {
-            let mut m = BTreeMap::new();
+            let mut m = PolyCoeffs::new();
             m.insert(alloc::vec![v], 1u8);
             (m, Constant { hi: 0, lo: 0 })
         }

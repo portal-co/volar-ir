@@ -15,7 +15,8 @@ use alloc::{
 };
 
 use volar_ir_common::{
-    ActionDecl, Constant, IrType, Node, OracleDecl, Stmt, StorageId, Type, TypeId, TypeTable,
+    ActionDecl, Constant, IrType, Node, OracleDecl, PolyCoeffs, Stmt, StorageId, Type, TypeId,
+    TypeTable,
 };
 use volar_lir::{
     BitCircuitBuilder, BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt,
@@ -320,7 +321,7 @@ impl VaffleTarget {
         let wide_ty = self.intern_type(IrType::Vec(width, bit_tid));
         let lhs_wide = self.compose_address(lhs_bits);
         let rhs_wide = self.compose_address(rhs_bits);
-        let mut coeffs: BTreeMap<Vec<ValueId>, u8> = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         let mut and_key = vec![lhs_wide, rhs_wide];
         and_key.sort();
         match op {
@@ -363,7 +364,7 @@ impl VaffleTarget {
         let bit_tid = self.bit_tid();
         let wide_ty = self.intern_type(IrType::Vec(width, bit_tid));
         let wide = self.compose_address(bits);
-        let mut coeffs: BTreeMap<Vec<ValueId>, u8> = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(vec![wide], 1);
         let all_ones = (1u128 << width) - 1;
         let result_wide = self.fb().emit_value(Value::Op(Stmt::Poly {
@@ -557,7 +558,7 @@ impl BitCircuitBuilder for VaffleTarget {
         self.emit_const(val as u128, ty)
     }
 
-    fn bc_poly(&mut self, coeffs: BTreeMap<Vec<ValueId>, u8>, constant: u128) -> ValueId {
+    fn bc_poly(&mut self, coeffs: PolyCoeffs<ValueId>, constant: u128) -> ValueId {
         let bit_tid = self.bit_tid();
         let v = Value::Op(Stmt::Poly {
             ty: bit_tid,
@@ -575,7 +576,7 @@ impl BitCircuitBuilder for VaffleTarget {
         if a == b {
             return self.bc_const(false);
         }
-        let mut c = BTreeMap::new();
+        let mut c = PolyCoeffs::new();
         c.insert(vec![a], 1u8);
         c.insert(vec![b], 1u8);
         self.bc_poly(c, 0)
@@ -586,12 +587,12 @@ impl BitCircuitBuilder for VaffleTarget {
         }
         let mut key = vec![a, b];
         key.sort();
-        let mut c = BTreeMap::new();
+        let mut c = PolyCoeffs::new();
         c.insert(key, 1u8);
         self.bc_poly(c, 0)
     }
     fn bc_not(&mut self, a: ValueId) -> ValueId {
-        let mut c = BTreeMap::new();
+        let mut c = PolyCoeffs::new();
         c.insert(vec![a], 1u8);
         self.bc_poly(c, 1)
     }
@@ -614,7 +615,7 @@ impl BitCircuitBuilder for VaffleTarget {
         ac.sort();
         let mut bc_ = vec![b, c];
         bc_.sort();
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(ab, 1u8);
         coeffs.insert(ac, 1u8);
         coeffs.insert(bc_, 1u8);
@@ -1978,7 +1979,7 @@ mod tests {
             let mut types = t.module.types.clone();
             types.intern(IrType::Vec(width, bit_tid))
         };
-        let wide_polys: Vec<(&std::collections::BTreeMap<Vec<ValueId>, u8>, Constant)> = body
+        let wide_polys: Vec<(&PolyCoeffs<ValueId>, Constant)> = body
             .values
             .iter()
             .filter_map(|v| match &v.kind {
@@ -2010,7 +2011,7 @@ mod tests {
         assert_eq!(and_coeffs.len(), 1);
         let and_mono = and_coeffs.keys().next().unwrap();
         assert_eq!(and_mono.len(), 2, "AND must be one degree-2 monomial (a*b)");
-        assert_eq!(and_coeffs[and_mono], 1u8);
+        assert_eq!(and_coeffs.get(and_mono), Some(&1u8));
         assert_eq!(and_const, Constant { hi: 0, lo: 0 });
 
         // or: {[a]:1, [b]:1, [a,b]:1}, constant 0 -- a+b+ab (verified by
@@ -2054,7 +2055,7 @@ mod tests {
         assert_eq!(not_coeffs.len(), 1);
         let not_mono = not_coeffs.keys().next().unwrap();
         assert_eq!(not_mono.len(), 1, "NOT must be one degree-1 monomial (a)");
-        assert_eq!(not_coeffs[not_mono], 1u8);
+        assert_eq!(not_coeffs.get(not_mono), Some(&1u8));
         assert_eq!(
             not_const,
             Constant {

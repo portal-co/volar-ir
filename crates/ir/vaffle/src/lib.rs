@@ -1,6 +1,6 @@
 #![no_std]
 
-use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use volar_ir_common::{ActionDecl, Node, OracleDecl, PreInitSegment, Stmt, TypeId, TypeTable};
 
 extern crate alloc;

@@ -924,7 +924,7 @@ mod tests {
     use crate::ir::{IRBlock, IRBlockTargetId, IRBranchTarget, IRBlocks, IRTerminator, IRType};
     use alloc::string::ToString;
     use alloc::vec;
-    use volar_ir_common::{Node, TypeTable};
+    use volar_ir_common::{Node, PolyCoeffs, TypeTable};
 
     fn types() -> IRTypes {
         let mut t = TypeTable::new();
@@ -1191,7 +1191,7 @@ mod tests {
     fn xor_body(types: &IRTypes, w8: IRTypeId) -> VCircuit {
         let _ = types;
         let mut vc = VCircuit::new(vec![w8, w8]);
-        let coeffs = BTreeMap::from([(vec![IRVarId(0), IRVarId(1)], 1u8)]);
+        let coeffs = PolyCoeffs::from_iter([(vec![IRVarId(0), IRVarId(1)], 1u8)]);
         let out = vc.push_stmt(
             IRStmt::Poly {
                 ty: w8,
@@ -1330,6 +1330,7 @@ mod rkyv_tests {
     use crate::region::RegionId;
     use alloc::string::ToString;
     use alloc::vec;
+    use volar_ir_common::PolyCoeffs;
 
     #[test]
     fn typed_region_table_rkyv_roundtrip() {
@@ -1367,7 +1368,7 @@ mod rkyv_tests {
     #[test]
     fn typed_gadget_types_rkyv_roundtrip() {
         let mut body = VCircuit::new(vec![IRTypeId(0), IRTypeId(0)]);
-        let coeffs = BTreeMap::from([(vec![IRVarId(0), IRVarId(1)], 1u8)]);
+        let coeffs = PolyCoeffs::from_iter([(vec![IRVarId(0), IRVarId(1)], 1u8)]);
         let out = body.push_stmt(
             IRStmt::Poly {
                 ty: IRTypeId(0),

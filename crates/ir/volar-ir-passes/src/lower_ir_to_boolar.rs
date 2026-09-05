@@ -63,7 +63,7 @@ use volar_ir::{
         IRVarId, PrimType,
     },
 };
-use volar_ir_common::{Constant, StorageId};
+use volar_ir_common::{Constant, PolyCoeffs, StorageId};
 
 /// A source call did not match the external declarations carried by its
 /// containing [`IRBlocks`].  Lowering is deliberately fail-closed: a backend
@@ -920,7 +920,7 @@ fn flatten_bits(args: &[IRVarId], var_bits: &BTreeMap<u32, Vec<IRVarId>>) -> Vec
 ///
 /// Implements: `result[j] = constant[j] ⊕ ⊕{(mono,coeff): coeff odd} ∧(vars[j])`.
 fn lower_poly_bit<P: Clone>(
-    coeffs: &alloc::collections::BTreeMap<Vec<IRVarId>, u8>,
+    coeffs: &PolyCoeffs<IRVarId>,
     constant: &Constant,
     bit: usize,
     var_bits: &BTreeMap<u32, Vec<IRVarId>>,
@@ -1578,8 +1578,7 @@ mod tests {
         let mut types = TypeTable::new();
         let aes8_id = types.primitive(PrimType::AES8);
 
-        let mut coeffs: alloc::collections::BTreeMap<std::vec::Vec<IRVarId>, u8> =
-            alloc::collections::BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(std::vec![IRVarId(0)], 1);
         coeffs.insert(std::vec![IRVarId(1)], 1);
 
@@ -1622,7 +1621,7 @@ mod tests {
             stmts: std::vec![Node::new(
                 volar_ir::ir::IRStmt::Poly {
                     ty: byte,
-                    coeffs: BTreeMap::new(),
+                    coeffs: PolyCoeffs::new(),
                     constant: Constant {
                         hi: 0,
                         lo: 0b1010_0101
@@ -1661,7 +1660,7 @@ mod tests {
         let mut types = TypeTable::new();
         let bit = types.bit();
         let byte = types.primitive(PrimType::_8);
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(std::vec![IRVarId(0), IRVarId(1)], 1);
         let block = IRBlock::<()> {
             params: std::vec![bit, byte],
@@ -1695,7 +1694,7 @@ mod tests {
         let mut types = TypeTable::new();
         let bit = types.bit();
         let byte = types.primitive(PrimType::_8);
-        let mut coeffs = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         // Per output bit this is
         // selector XOR (selector AND value_bit) XOR value_bit.
         coeffs.insert(std::vec![IRVarId(0)], 1);

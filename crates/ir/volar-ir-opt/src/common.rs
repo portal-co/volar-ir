@@ -3,7 +3,7 @@
 //! Shared helpers for constant-folding all three IR layers.
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use volar_ir_common::{Constant, IrType, Stmt, Type, TypeId, TypeTable};
+use volar_ir_common::{Constant, IrType, PolyCoeffs, Stmt, Type, TypeId, TypeTable};
 
 // ============================================================================
 // Alias canonicalization
@@ -268,7 +268,8 @@ pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
             }
         }
         Stmt::Poly { coeffs, .. } => {
-            // Rebuild the BTreeMap with aliased, sorted, deduped keys.
+            // Rebuild the canonical coefficient collection with aliased,
+            // sorted, deduped keys.
             // XOR-accumulate coefficients for colliding keys.
             let old = core::mem::take(coeffs);
             for (key, coeff) in old {
@@ -427,10 +428,10 @@ pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
 /// Zero-coefficient entries are removed afterwards.
 /// Returns `true` if any substitution was made.
 pub fn merge_poly_into<V: Clone + Ord>(
-    dst_coeffs: &mut BTreeMap<Vec<V>, u8>,
+    dst_coeffs: &mut PolyCoeffs<V>,
     dst_constant: &mut Constant,
     src_var: &V,
-    src_coeffs: &BTreeMap<Vec<V>, u8>,
+    src_coeffs: &PolyCoeffs<V>,
     src_constant: Constant,
 ) -> bool {
     let singleton_key = alloc::vec![src_var.clone()];
@@ -477,7 +478,7 @@ pub fn merge_poly_into<V: Clone + Ord>(
 /// Returns `true` if any change was made.
 pub fn fold_poly_in_place<V: Clone + Ord>(
     ty: TypeId,
-    coeffs: &mut BTreeMap<Vec<V>, u8>,
+    coeffs: &mut PolyCoeffs<V>,
     constant: &mut Constant,
     const_map: &BTreeMap<V, Constant>,
     type_map: &BTreeMap<V, TypeId>,
@@ -492,7 +493,7 @@ pub fn fold_poly_in_place<V: Clone + Ord>(
     let old_coeffs = core::mem::take(coeffs);
     // Keep a clone to compare at the end (old_coeffs is consumed by the loop).
     let old_coeffs_for_cmp = old_coeffs.clone();
-    let mut new_coeffs: BTreeMap<Vec<V>, u8> = BTreeMap::new();
+    let mut new_coeffs = PolyCoeffs::new();
 
     for (key, coeff) in old_coeffs {
         if coeff & 1 == 0 {

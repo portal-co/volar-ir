@@ -14,7 +14,7 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use vaffle::{FuncBody, FuncDecl, Module, Terminator, Value, ValueId};
-use volar_ir_common::{Constant, Stmt, TypeId, TypeTable};
+use volar_ir_common::{Constant, PolyCoeffs, Stmt, TypeId, TypeTable};
 
 use crate::common::{
     constant_or, constant_rol, constant_ror, constant_shl, fold_poly_in_place, mask_constant,
@@ -64,7 +64,7 @@ fn fold_vaffle_body_once(body: &mut FuncBody, types: &TypeTable) -> bool {
     let mut const_map: BTreeMap<ValueId, Constant> = BTreeMap::new();
     let mut type_map: BTreeMap<ValueId, TypeId> = BTreeMap::new();
     // poly_map: vid → (coeffs, constant, TypeId) for surviving Poly values.
-    let mut poly_map: BTreeMap<ValueId, (BTreeMap<Vec<ValueId>, u8>, Constant, TypeId)> =
+    let mut poly_map: BTreeMap<ValueId, (PolyCoeffs<ValueId>, Constant, TypeId)> =
         BTreeMap::new();
     let mut changed = false;
 

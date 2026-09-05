@@ -11,7 +11,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypes,
     IRVarId,
 };
-use volar_ir_common::{Constant, Node, Stmt, TypeId};
+use volar_ir_common::{Constant, Node, PolyCoeffs, Stmt, TypeId};
 
 use crate::common::{
     apply_aliases_to_stmt, canon_alias, constant_is_zero, constant_rol, constant_ror,
@@ -211,7 +211,7 @@ pub fn batch_ir_blocks_with_remap<P: Clone>(
 }
 
 /// Every distinct variable referenced anywhere in `coeffs`.
-fn poly_vars(coeffs: &BTreeMap<Vec<IRVarId>, u8>) -> BTreeSet<IRVarId> {
+fn poly_vars(coeffs: &PolyCoeffs<IRVarId>) -> BTreeSet<IRVarId> {
     coeffs.keys().flatten().copied().collect()
 }
 
@@ -222,11 +222,11 @@ fn poly_vars(coeffs: &BTreeMap<Vec<IRVarId>, u8>) -> BTreeSet<IRVarId> {
 /// that cancel to an even coefficient) -- mirrors `merge_poly_into`'s own
 /// GF(2) discipline elsewhere in this crate.
 fn substitute_var(
-    coeffs: &BTreeMap<Vec<IRVarId>, u8>,
+    coeffs: &PolyCoeffs<IRVarId>,
     from: IRVarId,
     to: IRVarId,
-) -> BTreeMap<Vec<IRVarId>, u8> {
-    let mut out: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+) -> PolyCoeffs<IRVarId> {
+    let mut out = PolyCoeffs::new();
     for (mono, &c) in coeffs {
         let mut new_mono: Vec<IRVarId> = mono
             .iter()
@@ -283,7 +283,7 @@ fn batch_ir_block_once<P: Clone>(
     // on `region_of[i]` too (when given) means two statements from
     // different regions never join the same batch -- see
     // `batch_ir_blocks_with_regions`'s own doc for why.
-    let mut canon_map: BTreeMap<(u32, TypeId, BTreeMap<Vec<IRVarId>, u8>), usize> = BTreeMap::new();
+    let mut canon_map: BTreeMap<(u32, TypeId, PolyCoeffs<IRVarId>), usize> = BTreeMap::new();
     let mut batches: Vec<PolyBatch> = Vec::new();
 
     for i in 0..block.stmts.len() {
@@ -455,7 +455,7 @@ fn batch_ir_block_once<P: Clone>(
                 Stmt::Poly { coeffs, .. } => (coeffs.clone(),),
                 _ => unreachable!("template_idx always points at a Poly (checked at open time)"),
             };
-            let remapped_template: BTreeMap<Vec<IRVarId>, u8> = template_coeffs
+            let remapped_template: PolyCoeffs<IRVarId> = template_coeffs
                 .iter()
                 .map(|(mono, &c)| {
                     let mut new_mono: Vec<IRVarId> = mono
@@ -860,7 +860,7 @@ fn remap_stmt_operands(kind: IRStmt, remap: &BTreeMap<u32, u32>) -> IRStmt {
         constant,
     } = &kind
     {
-        let mut new_coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+        let mut new_coeffs = PolyCoeffs::new();
         for (mono, &c) in coeffs {
             let mut new_mono: Vec<IRVarId> = mono
                 .iter()
@@ -1133,7 +1133,7 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
     let mut type_map: BTreeMap<IRVarId, TypeId> = BTreeMap::new();
     let mut alias_map: BTreeMap<IRVarId, IRVarId> = BTreeMap::new();
     // poly_map: var → (coeffs, constant, TypeId) for surviving Poly stmts.
-    let mut poly_map: BTreeMap<IRVarId, (BTreeMap<Vec<IRVarId>, u8>, Constant, TypeId)> =
+    let mut poly_map: BTreeMap<IRVarId, (PolyCoeffs<IRVarId>, Constant, TypeId)> =
         BTreeMap::new();
     let mut changed = false;
 

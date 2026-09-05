@@ -31,7 +31,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType,
     IRTypeId, IRTypes, IRVarId,
 };
-use volar_ir_common::{Constant, Stmt, StorageId, Type as PrimType};
+use volar_ir_common::{Constant, PolyCoeffs, Stmt, StorageId, Type as PrimType};
 
 use crate::canon::{BlockImmediates, IrHandlerKey, ZERO_CONSTANT, canonicalize_ir_block};
 use crate::ctx::{DedupTable, VirtOutput};
@@ -1358,7 +1358,7 @@ pub(crate) fn emit_handler_block<P: Clone, H: IrHashAlgorithm>(
                     coeffs: remapped_coeffs,
                     constant: ZERO_CONSTANT,
                 });
-                let mut xor_coeffs = BTreeMap::new();
+                let mut xor_coeffs = PolyCoeffs::new();
                 xor_coeffs.insert(alloc::vec![poly_out], 1u8);
                 xor_coeffs.insert(alloc::vec![const_var], 1u8);
                 let v = b.push(Stmt::Poly {
@@ -1760,7 +1760,7 @@ fn build_return_to_dispatcher(
     });
     // XOR-inject the commitment diff into next_pc.
     let next_pc = if let Some(diff_var) = protection {
-        let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(alloc::vec![next_pc_raw], 1);
         coeffs.insert(alloc::vec![diff_var], 1);
         b.push(Stmt::Poly {
@@ -1808,7 +1808,7 @@ fn build_direct_dispatch_terminator<P: Clone>(
         addr: pc,
     });
     let next_pc = if let Some(diff_var) = protection {
-        let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+        let mut coeffs = PolyCoeffs::new();
         coeffs.insert(alloc::vec![next_pc_raw], 1);
         coeffs.insert(alloc::vec![diff_var], 1);
         b.push(Stmt::Poly {
@@ -1916,7 +1916,7 @@ fn emit_arm_subblock<P: Clone>(
             addr: pc,
         });
         let next_pc = if let Some(diff_var) = diff_opt {
-            let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+            let mut coeffs = PolyCoeffs::new();
             coeffs.insert(alloc::vec![next_pc_raw], 1);
             coeffs.insert(alloc::vec![diff_var], 1);
             b.push(Stmt::Poly {
@@ -2152,17 +2152,20 @@ fn remap_vars(vs: &[IRVarId], canonical_var: &[IRVarId]) -> Vec<IRVarId> {
 }
 
 fn remap_coeffs(
-    coeffs: &BTreeMap<Vec<IRVarId>, u8>,
+    coeffs: &PolyCoeffs<IRVarId>,
     canonical_var: &[IRVarId],
-) -> BTreeMap<Vec<IRVarId>, u8> {
-    let mut out: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+) -> PolyCoeffs<IRVarId> {
+    let mut out = PolyCoeffs::new();
     for (key, &c) in coeffs {
         let mut new_key: Vec<IRVarId> = key.iter().map(|v| remap_var(*v, canonical_var)).collect();
         new_key.sort();
-        let entry = out.entry(new_key).or_insert(0);
-        *entry ^= c;
+        let remapped = out.get(&new_key).copied().unwrap_or(0) ^ c;
+        if remapped == 0 {
+            out.remove(&new_key);
+        } else {
+            out.insert(new_key, remapped);
+        }
     }
-    out.retain(|_, c| *c != 0);
     out
 }
 
@@ -2349,7 +2352,7 @@ fn emit_commitment_check_ir<H: IrHashAlgorithm>(
     });
 
     // 5. diff = computed XOR expected (zero iff commitment is valid).
-    let mut diff_coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+    let mut diff_coeffs = PolyCoeffs::new();
     diff_coeffs.insert(alloc::vec![computed], 1);
     diff_coeffs.insert(alloc::vec![expected], 1);
     let diff = b.push(Stmt::Poly {

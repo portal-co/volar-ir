@@ -23,7 +23,7 @@
 //! - `blockaddress`/`indirectbr` are not supported (mirrors the interpreter,
 //!   which has no opcode handling for either).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fmt;
 
@@ -36,7 +36,7 @@ use volar_ir::ir::{
     Constant, IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRTypeId,
     IRTypes, IRVarId, StorageId,
 };
-use volar_ir_common::Node;
+use volar_ir_common::{Node, PolyCoeffs};
 use volar_lir::circuits::BitCircuitBuilder;
 
 use volar_llvm_import_core::{
@@ -198,7 +198,7 @@ impl BitCircuitBuilder for BlockEmitter {
         ))
     }
 
-    fn bc_poly(&mut self, coeffs: BTreeMap<Vec<IRVarId>, u8>, constant: u128) -> IRVarId {
+    fn bc_poly(&mut self, coeffs: PolyCoeffs<IRVarId>, constant: u128) -> IRVarId {
         self.emit(IRStmt::Poly {
             ty: self.bit_tid,
             coeffs,
