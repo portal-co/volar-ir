@@ -867,7 +867,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             let mut frame_sp = StackPtr::new(sp_bits.clone());
             frame_sp.retreat(own_layout.size);
 
-            let mut val_map: BTreeMap<usize, IRVarId> = BTreeMap::new();
+            let mut val_map = ValueMap::new(body.values.len());
             // Per-bit result of each `Value::Call` processed so far in this
             // vaffle block, keyed by the call's own `ValueId.0` -- consulted
             // by `Value::Output { value, idx }` (see its own match arm
@@ -940,7 +940,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             // *includes* `spill_base` (`cross_block_base = spill_base +
             // n_spill_words`), so passing it directly here double-counts
             // `spill_base`. Pass the region-relative offset instead.
-            for (&vid, &var) in val_map.iter() {
+            for (vid, var) in val_map.iter() {
                 if cross_block_values.contains(&vid) {
                     self.spill_trace.push(alloc::format!(
                         "SPILL(entry) vaffle_bi={vaffle_bi} vid={vid} addr={} src_var={}",
@@ -965,7 +965,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             let mut future_uses =
                 collect_use_counts(&body.values, &vaffle_block.stmts, &vaffle_block.terminator);
             for &vid in &cross_block_values {
-                if future_uses.contains(vid) && !val_map.contains_key(&vid) {
+                if future_uses.contains(vid) && !val_map.contains_key(vid) {
                     self.spill_trace.push(alloc::format!(
                         "RELOAD(entry) vaffle_bi={vaffle_bi} vid={vid} addr={}",
                         own_layout.n_spill + vid as u64
@@ -998,7 +998,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             ty,
                             addr,
                         }) => {
-                            let local_addr = val_map.get(&addr.0).copied().unwrap_or(IRVarId(0));
+                            let local_addr = val_map.get(addr.0).unwrap_or(IRVarId(0));
                             let real_addr =
                                 rebase_stack_addr(
                                     &mut current_em,
@@ -1019,7 +1019,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             ty,
                             addr,
                         }) => {
-                            let local_addr = val_map.get(&addr.0).copied().unwrap_or(IRVarId(0));
+                            let local_addr = val_map.get(addr.0).unwrap_or(IRVarId(0));
                             let real_addr =
                                 rebase_stack_addr(
                                     &mut current_em,
@@ -1027,7 +1027,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                     local_addr,
                                     self.pointer_bits,
                                 );
-                            let ir_src = val_map.get(&src.0).copied().unwrap_or(IRVarId(0));
+                            let ir_src = val_map.get(src.0).unwrap_or(IRVarId(0));
                             let id = current_em.emit(IRStmt::StorageWrite {
                                 storage: StorageId::STACK,
                                 src: ir_src,
@@ -1071,12 +1071,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             val_map.insert(svid.0, addr);
                         }
                         Value::PtrLoad { ptr, .. } => {
-                            let s = val_map.get(&ptr.0).copied().unwrap_or(IRVarId(0));
+                            let s = val_map.get(ptr.0).unwrap_or(IRVarId(0));
                             val_map.insert(svid.0, s);
                         }
                         Value::PtrStore { .. } => {}
                         Value::PtrOffset { idx, .. } => {
-                            let s = val_map.get(&idx.0).copied().unwrap_or(IRVarId(0));
+                            let s = val_map.get(idx.0).unwrap_or(IRVarId(0));
                             val_map.insert(svid.0, s);
                         }
                         Value::Output { value, idx } => {
@@ -1095,7 +1095,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     // references it directly (not via an explicit param/arg)
                     // needs to be able to reload it.
                     if cross_block_values.contains(&svid.0) {
-                        if let Some(&var) = val_map.get(&svid.0) {
+                        if let Some(var) = val_map.get(svid.0) {
                             self.spill_trace.push(alloc::format!(
                                 "SPILL(stmt) vaffle_bi={vaffle_bi} vid={} addr={} src_var={}",
                                 svid.0,
@@ -1142,12 +1142,14 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                 if matches!(&body.values[key].kind, Value::StackAlloc { .. }) {
                                     continue;
                                 }
-                                if val_map.contains_key(&key) {
+                                if val_map.contains_key(key) {
                                     spill_keys.push(key);
                                 }
                             }
-                            let spill_bits: Vec<IRVarId> =
-                                spill_keys.iter().map(|key| val_map[key]).collect();
+                            let spill_bits: Vec<IRVarId> = spill_keys
+                                .iter()
+                                .map(|&key| val_map.required(key))
+                                .collect();
                             let spill_words = pack_bits(&mut current_em, &spill_bits, PACK_W);
                             for (wi, &word) in spill_words.iter().enumerate() {
                                 frame_spill(
@@ -1161,8 +1163,10 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             }
 
                             // 2. Pack callee args — passed as entry-block params, not frame writes.
-                            let arg_bits: Vec<IRVarId> =
-                                call_args.iter().map(|vid| val_map[&vid.0]).collect();
+                            let arg_bits: Vec<IRVarId> = call_args
+                                .iter()
+                                .map(|vid| val_map.required(vid.0))
+                                .collect();
                             let arg_words = pack_bits(&mut current_em, &arg_bits, PACK_W);
 
                             // 3. Write continuation.
@@ -1323,7 +1327,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             // Cross-block spill of the call's own result (see
                             // the `before_call` loop's identical comment).
                             if cross_block_values.contains(&call_vid.0) {
-                                if let Some(&var) = val_map.get(&call_vid.0) {
+                                if let Some(var) = val_map.get(call_vid.0) {
                                     frame_spill(
                                         &mut cont_em,
                                         &cont_frame_sp,
@@ -1417,14 +1421,14 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     fn translate_terminator(
         &self,
         term: &Terminator,
-        val_map: &BTreeMap<usize, IRVarId>,
+        val_map: &ValueMap,
         func_idx: usize,
         sp_bits: &[IRVarId],
         frame_sp: &StackPtr<IRVarId>,
         own_layout: &FrameLayout,
         em: &mut BlockEmitter<P>,
     ) -> IRTerminator {
-        let s = |vid: &ValueId| val_map.get(&vid.0).copied().unwrap_or(IRVarId(0));
+        let s = |vid: &ValueId| val_map.get(vid.0).unwrap_or(IRVarId(0));
         let entry_off = self.func_info[func_idx]
             .entry_block
             .expect("translate_terminator requires a function body");
@@ -1535,7 +1539,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 // Pack G's args — passed as entry-block params, not frame writes.
                 let arg_bits: Vec<IRVarId> = call_args
                     .iter()
-                    .map(|vid| val_map.get(&vid.0).copied().unwrap_or(IRVarId(0)))
+                    .map(|vid| val_map.get(vid.0).unwrap_or(IRVarId(0)))
                     .collect();
                 let arg_words = pack_bits(em, &arg_bits, PACK_W);
 
@@ -1697,6 +1701,49 @@ fn find_call<'a, P: Clone>(
         }
     }
     (stmts, None, &[])
+}
+
+/// Dense mapping from a function-local VAFFLE `ValueId` to its lowered IR
+/// variable. `ValueId`s are arena indices, so this avoids a B-tree lookup for
+/// every operand, spill candidate, and reload in large LLVM-imported blocks.
+struct ValueMap {
+    values: Vec<Option<IRVarId>>,
+}
+
+impl ValueMap {
+    fn new(n_values: usize) -> Self {
+        Self {
+            values: vec![None; n_values],
+        }
+    }
+
+    fn get(&self, value: usize) -> Option<IRVarId> {
+        self.values.get(value).copied().flatten()
+    }
+
+    fn required(&self, value: usize) -> IRVarId {
+        self.get(value).unwrap_or_else(|| {
+            panic!("lower_function: VAFFLE ValueId {value} has no IR mapping")
+        })
+    }
+
+    fn contains_key(&self, value: usize) -> bool {
+        self.get(value).is_some()
+    }
+
+    fn insert(&mut self, value: usize, ir_var: IRVarId) -> Option<IRVarId> {
+        let slot = self.values.get_mut(value).unwrap_or_else(|| {
+            panic!("lower_function: VAFFLE ValueId {value} is outside its value arena")
+        });
+        core::mem::replace(slot, Some(ir_var))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (usize, IRVarId)> + '_ {
+        self.values
+            .iter()
+            .enumerate()
+            .filter_map(|(value, ir_var)| ir_var.map(|ir_var| (value, ir_var)))
+    }
 }
 
 /// Collect each operand use at most once, using a caller-owned dense mark
@@ -2249,10 +2296,10 @@ fn rebase_stack_addr<P: Clone>(
 /// `type_map` maps VAFFLE `TypeId` → IR `TypeId` (produced by [`remap_type_id`]).
 fn translate_stmt(
     stmt: &volar_ir_common::Stmt<ValueId>,
-    val_map: &BTreeMap<usize, IRVarId>,
+    val_map: &ValueMap,
     type_map: &[TypeId],
 ) -> IRStmt {
-    let s = |vid: &ValueId| val_map.get(&vid.0).copied().unwrap_or(IRVarId(0));
+    let s = |vid: &ValueId| val_map.get(vid.0).unwrap_or(IRVarId(0));
     let t = |tid: &TypeId| type_map[tid.0 as usize];
     let tv = |tids: &[TypeId]| tids.iter().map(t).collect::<Vec<_>>();
     match stmt {
@@ -2452,6 +2499,25 @@ mod tests {
 
         uses.remove(0);
         assert_eq!(uses.live_values().collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn test_value_map_tracks_dense_value_ids_in_order() {
+        let mut values = ValueMap::new(4);
+        assert!(!values.contains_key(0));
+        assert_eq!(values.get(2), None);
+
+        assert_eq!(values.insert(2, IRVarId(7)), None);
+        assert_eq!(values.insert(0, IRVarId(3)), None);
+        assert_eq!(values.required(2), IRVarId(7));
+        assert!(values.contains_key(0));
+        assert_eq!(
+            values.iter().collect::<Vec<_>>(),
+            vec![(0, IRVarId(3)), (2, IRVarId(7))]
+        );
+
+        assert_eq!(values.insert(2, IRVarId(9)), Some(IRVarId(7)));
+        assert_eq!(values.get(2), Some(IRVarId(9)));
     }
 
     #[test]
