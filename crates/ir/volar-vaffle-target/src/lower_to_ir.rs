@@ -1131,20 +1131,23 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             //    by the untranslated suffix or block terminator
                             //    need to survive this call. `future_uses` was
                             //    built once for the block and consumed through
-                            //    this call, so this check is linear across the
-                            //    whole block rather than one full use walk per
-                            //    call. StackAlloc addresses are compile-time
-                            //    constants and never need to be spilled.
-                            let spill_keys: Vec<usize> = val_map
-                                .keys()
-                                .copied()
-                                .filter(|k| future_uses.contains(*k))
-                                .filter(|k| {
-                                    !matches!(&body.values[*k].kind, Value::StackAlloc { .. })
-                                })
-                                .collect();
+                            //    this call. Iterate its live-use worklist
+                            //    rather than every value ever translated into
+                            //    `val_map`: LLVM blocks often contain thousands
+                            //    of already-dead values between calls. StackAlloc
+                            //    addresses are compile-time constants and never
+                            //    need to be spilled.
+                            let mut spill_keys = Vec::new();
+                            for key in future_uses.live_values() {
+                                if matches!(&body.values[key].kind, Value::StackAlloc { .. }) {
+                                    continue;
+                                }
+                                if val_map.contains_key(&key) {
+                                    spill_keys.push(key);
+                                }
+                            }
                             let spill_bits: Vec<IRVarId> =
-                                spill_keys.iter().map(|k| val_map[k]).collect();
+                                spill_keys.iter().map(|key| val_map[key]).collect();
                             let spill_words = pack_bits(&mut current_em, &spill_bits, PACK_W);
                             for (wi, &word) in spill_words.iter().enumerate() {
                                 frame_spill(
@@ -1725,17 +1728,30 @@ struct UseCounts {
     // counter vector avoids allocating one BTree node per bit-level operand
     // in large LLVM-imported arithmetic blocks.
     counts: Vec<usize>,
+    // A dense bitmap of values with nonzero counts. It gives call sites the
+    // old ascending-ValueId spill order without ordered-set maintenance or a
+    // full `val_map` traversal. One word covers 64 arena values.
+    live_words: Vec<u64>,
 }
 
 impl UseCounts {
     fn new(n_values: usize) -> Self {
         Self {
             counts: vec![0; n_values],
+            live_words: vec![0; n_values.div_ceil(64)],
         }
     }
 
     fn contains(&self, value: usize) -> bool {
         self.counts[value] != 0
+    }
+
+    fn live_values(&self) -> impl Iterator<Item = usize> + '_ {
+        LiveValues {
+            words: &self.live_words,
+            word_idx: 0,
+            current: 0,
+        }
     }
 
     fn consume_value(&mut self, value: &Value) {
@@ -1744,6 +1760,9 @@ impl UseCounts {
     }
 
     fn add(&mut self, value: usize) {
+        if self.counts[value] == 0 {
+            self.live_words[value / 64] |= 1u64 << (value % 64);
+        }
         self.counts[value] += 1;
     }
 
@@ -1751,6 +1770,35 @@ impl UseCounts {
         let count = &mut self.counts[value];
         assert!(*count > 0, "consumed VAFFLE use was not counted");
         *count -= 1;
+        if *count == 0 {
+            let word = &mut self.live_words[value / 64];
+            let mask = 1u64 << (value % 64);
+            assert!(*word & mask != 0, "live VAFFLE use was not indexed");
+            *word &= !mask;
+        }
+    }
+}
+
+/// Ascending iterator over a [`UseCounts`] live bitmap.
+struct LiveValues<'a> {
+    words: &'a [u64],
+    word_idx: usize,
+    current: u64,
+}
+
+impl Iterator for LiveValues<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current != 0 {
+                let bit = self.current.trailing_zeros() as usize;
+                self.current &= self.current - 1;
+                return Some((self.word_idx - 1) * 64 + bit);
+            }
+            self.current = *self.words.get(self.word_idx)?;
+            self.word_idx += 1;
+        }
     }
 }
 
@@ -2375,6 +2423,7 @@ mod tests {
 
         assert_eq!(uses.counts[0], 3);
         assert_eq!(uses.counts[1], 2);
+        assert_eq!(uses.live_values().collect::<Vec<_>>(), vec![0, 1]);
 
         uses.consume_value(&values[2].kind);
         assert_eq!(uses.counts[0], 1);
@@ -2383,6 +2432,26 @@ mod tests {
         uses.consume_value(&values[3].kind);
         assert!(!uses.contains(0));
         assert!(uses.contains(1), "the terminator still needs v1");
+        assert_eq!(uses.live_values().collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn test_use_counts_iterates_live_values_in_value_id_order() {
+        let mut uses = UseCounts::new(4);
+        uses.add(0);
+        uses.add(2);
+        uses.add(1);
+        uses.add(2);
+        assert_eq!(uses.live_values().collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        uses.remove(2);
+        assert_eq!(uses.live_values().collect::<Vec<_>>(), vec![0, 1, 2]);
+        uses.remove(2);
+        assert!(!uses.contains(2));
+        assert_eq!(uses.live_values().collect::<Vec<_>>(), vec![0, 1]);
+
+        uses.remove(0);
+        assert_eq!(uses.live_values().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]
