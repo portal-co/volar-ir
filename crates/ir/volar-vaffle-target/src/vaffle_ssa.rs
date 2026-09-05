@@ -85,13 +85,11 @@ use alloc::{
     vec::Vec,
 };
 
-use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, Terminator, Value, ValueId};
+use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigId, Terminator, Value, ValueId};
 use volar_ir_common::{Constant, IrType, Node, Stmt, StorageId, TypeId};
 use volar_lir::circuits::{BitCircuitBuilder, bc_add};
 
-use crate::lower_to_ir::{
-    collect_uses, compute_cross_block_values, compute_owner, vaffle_value_vtid,
-};
+use crate::lower_to_ir::{collect_unique_uses, compute_cross_block_values, compute_owner};
 
 /// Bit-width of every `vaffle_ssa` address (`SP + ValueId`) and of SP
 /// itself. Wide enough for the largest `ValueId` in any module this
@@ -118,6 +116,50 @@ fn compute_sp_step<P: Clone>(module: &Module<P>) -> u128 {
     // Round up generously so the step is easy to eyeball in diagnostics
     // and has headroom against off-by-one errors in the max above.
     ((max_vid as u128) + 1).next_power_of_two().max(1 << 20)
+}
+
+/// Retain only the declaration data needed to type a direct `Value::Call`.
+/// The consuming rewrite moves the function bodies out of the module, so it
+/// cannot use `lower_to_ir::sig_of`, which indexes those bodies directly.
+fn module_func_sigs<P: Clone>(funcs: &[FuncDecl<P>]) -> Vec<SigId> {
+    funcs
+        .iter()
+        .map(|func| match func {
+            FuncDecl::Import { sig, .. } => *sig,
+            FuncDecl::Body(body) => body.sig,
+            _ => panic!("vaffle_ssa: unexpected FuncDecl variant"),
+        })
+        .collect()
+}
+
+/// Variant of `vaffle_value_vtid` suitable while a consuming rewrite owns the
+/// function bodies. A `Value::Call` only needs the callee's `SigId`, retained
+/// in `func_sigs`, rather than its body.
+fn ssa_value_vtid<P: Clone>(
+    module: &Module<P>,
+    func_sigs: &[SigId],
+    values: &[Node<Value, P>],
+    vid: ValueId,
+) -> TypeId {
+    match &values[vid.0].kind {
+        Value::Param { ty, .. } => *ty,
+        Value::Op(stmt) => crate::lower_to_ir::stmt_result_vtid(stmt),
+        Value::Output { .. } => TypeId(0),
+        Value::Call { func, .. } => {
+            let sig = func_sigs
+                .get(func.0)
+                .unwrap_or_else(|| {
+                    panic!("vaffle_ssa: Call references missing function {}", func.0)
+                });
+            let results = &module.sigs[sig.0].results;
+            if results.len() == 1 {
+                results[0]
+            } else {
+                TypeId(0)
+            }
+        }
+        _ => TypeId(0),
+    }
 }
 
 /// Minimal [`BitCircuitBuilder`] adapter over a `vaffle_ssa`-in-progress
@@ -182,6 +224,7 @@ pub fn ssa_ify_module<P: Clone>(module: &Module<P>) -> Module<P> {
     let bit_tid = types.bit();
     let addr_tid = types.intern(IrType::Vec(SPILL_ADDR_BITS, bit_tid));
     let sp_step = compute_sp_step(module);
+    let func_sigs = module_func_sigs(&module.funcs);
 
     let funcs = module
         .funcs
@@ -197,9 +240,15 @@ pub fn ssa_ify_module<P: Clone>(module: &Module<P>) -> Module<P> {
                 name: name.clone(),
                 sig: *sig,
             },
-            FuncDecl::Body(body) => FuncDecl::Body(ssa_ify_function(
+            FuncDecl::Body(body) => FuncDecl::Body(ssa_ify_function_owned(
                 module,
-                body,
+                FuncBody {
+                    sig: body.sig,
+                    blocks: body.blocks.clone(),
+                    values: body.values.clone(),
+                    entry: body.entry,
+                },
+                &func_sigs,
                 addr_tid,
                 bit_tid,
                 sp_step,
@@ -224,6 +273,42 @@ pub fn ssa_ify_module<P: Clone>(module: &Module<P>) -> Module<P> {
     }
 }
 
+/// Consuming counterpart to [`ssa_ify_module`].
+///
+/// A lowering pipeline owns its VAFFLE module at this point.  Move its
+/// function bodies into the SSA rewrite so the large value arena — in
+/// particular `Stmt::Poly` coefficient maps — is not first cloned solely for
+/// the borrowed compatibility API.
+pub fn ssa_ify_module_owned<P: Clone>(mut module: Module<P>) -> Module<P> {
+    let bit_tid = module.types.bit();
+    let addr_tid = module.types.intern(IrType::Vec(SPILL_ADDR_BITS, bit_tid));
+    let sp_step = compute_sp_step(&module);
+    let func_sigs = module_func_sigs(&module.funcs);
+
+    let funcs = core::mem::take(&mut module.funcs)
+        .into_iter()
+        .enumerate()
+        .map(|(fi, f)| match f {
+            FuncDecl::Import { module, name, sig } => FuncDecl::Import { module, name, sig },
+            FuncDecl::Body(body) => FuncDecl::Body(ssa_ify_function_owned(
+                &module,
+                body,
+                &func_sigs,
+                addr_tid,
+                bit_tid,
+                sp_step,
+                fi == 0,
+            )),
+            // `FuncDecl` is `#[non_exhaustive]` (defined in the `vaffle`
+            // crate, matched here from a different crate) -- wildcard
+            // required even though only these two variants exist today.
+            _ => panic!("vaffle_ssa: unexpected FuncDecl variant"),
+        })
+        .collect();
+    module.funcs = funcs;
+    module
+}
+
 /// Rewrite `body` so that no `ValueId` is ever referenced outside the
 /// block that owns its defining occurrence — every cross-block reference
 /// becomes an explicit spill (in the owning block) + reload (in each
@@ -242,8 +327,34 @@ pub fn ssa_ify_function<P: Clone>(
     sp_step: u128,
     is_entry: bool,
 ) -> FuncBody<P> {
-    let mut blocks: Vec<Block> = body.blocks.clone();
-    let mut values: Vec<Node<Value, P>> = body.values.clone();
+    let func_sigs = module_func_sigs(&module.funcs);
+    ssa_ify_function_owned(
+        module,
+        FuncBody {
+            sig: body.sig,
+            blocks: body.blocks.clone(),
+            values: body.values.clone(),
+            entry: body.entry,
+        },
+        &func_sigs,
+        addr_tid,
+        bit_tid,
+        sp_step,
+        is_entry,
+    )
+}
+
+fn ssa_ify_function_owned<P: Clone>(
+    module: &Module<P>,
+    body: FuncBody<P>,
+    func_sigs: &[SigId],
+    addr_tid: TypeId,
+    bit_tid: TypeId,
+    sp_step: u128,
+    is_entry: bool,
+) -> FuncBody<P> {
+    let mut blocks = body.blocks;
+    let mut values = body.values;
     let entry = body.entry.0;
 
     let preds = build_preds(&blocks);
@@ -283,7 +394,7 @@ pub fn ssa_ify_function<P: Clone>(
     );
 
     // ---- Phase 3: dominator-verified cross-block spill/reload ---------------
-    let owner = compute_owner(&blocks);
+    let owner = compute_owner(&blocks, values.len());
 
     // Discover every cross-block use from the body as it stands after
     // phases 1-2 (SP threading/call wiring never turns a same-block
@@ -296,20 +407,32 @@ pub fn ssa_ify_function<P: Clone>(
     // reference *from* a reachable block always resolves to a value owned
     // by another reachable, genuinely-dominating block (checked below), so
     // this never masks a real violation.
-    let mut uses_per_block: Vec<BTreeSet<usize>> = alloc::vec![BTreeSet::new(); blocks.len()];
-    for &bi in &rpo {
-        let mut cross = BTreeSet::new();
-        for u in collect_uses(&values, &blocks[bi].stmts, &blocks[bi].terminator) {
-            if owner.get(&u).copied() != Some(bi) {
-                cross.insert(u);
-            }
-        }
-        uses_per_block[bi] = cross;
+    let mut uses_per_block: Vec<Vec<usize>> = alloc::vec![Vec::new(); blocks.len()];
+    let mut use_marks = alloc::vec![0usize; values.len()];
+    let mut uses = Vec::new();
+    for (mark, &bi) in rpo.iter().enumerate() {
+        collect_unique_uses(
+            &values,
+            &blocks[bi].stmts,
+            &blocks[bi].terminator,
+            &mut use_marks,
+            mark + 1,
+            &mut uses,
+        );
+        let cross = &mut uses_per_block[bi];
+        cross.extend(uses.iter().copied().filter(|&u| owner[u] != bi));
+        // Preserve the old BTreeSet's deterministic ValueId order without
+        // its per-operand node allocation and logarithmic insertion cost.
+        cross.sort_unstable();
     }
 
     for (bi, uses) in uses_per_block.iter().enumerate() {
         for &u in uses {
-            let owner_bi = owner[&u];
+            let owner_bi = owner[u];
+            assert!(
+                owner_bi != usize::MAX,
+                "vaffle_ssa: value {u} used at block {bi} has no defining block",
+            );
             assert!(
                 dominates(owner_bi, bi, &idom),
                 "vaffle_ssa: value {u} (owned by block {owner_bi}) is used at block {bi} but \
@@ -319,20 +442,27 @@ pub fn ssa_ify_function<P: Clone>(
         }
     }
 
-    let mut needs_spill: BTreeSet<usize> = BTreeSet::new();
+    let mut needs_spill = Vec::new();
+    let mut spill_marks = alloc::vec![false; values.len()];
     for uses in &uses_per_block {
-        needs_spill.extend(uses.iter().copied());
+        for &u in uses {
+            if !spill_marks[u] {
+                spill_marks[u] = true;
+                needs_spill.push(u);
+            }
+        }
     }
+    needs_spill.sort_unstable();
 
     // Emit spills: append (address computation, storage-write) to the END
     // of each owner block's own stmts -- always safe, since a block's own
     // value (and its own SP) is fully defined by the time its own stmts
     // list ends.
-    let mut spills_by_owner: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
+    let mut spills_by_owner: Vec<Vec<u32>> = alloc::vec![Vec::new(); blocks.len()];
     for &v in &needs_spill {
         let vid = ValueId(v);
-        let owner_bi = owner[&v];
-        let ty = vaffle_value_vtid(module, &values, vid);
+        let owner_bi = owner[v];
+        let ty = ssa_value_vtid(module, func_sigs, &values, vid);
         let prov = values[v].prov.clone();
         let side = values[v].side;
         let sp_bits = sp_bits_for.get(&owner_bi).cloned();
@@ -357,12 +487,9 @@ pub fn ssa_ify_function<P: Clone>(
             prov,
             side,
         ));
-        spills_by_owner
-            .entry(owner_bi)
-            .or_default()
-            .extend(new_stmts);
+        spills_by_owner[owner_bi].extend(new_stmts);
     }
-    for (owner_bi, new_stmt_ids) in spills_by_owner {
+    for (owner_bi, new_stmt_ids) in spills_by_owner.into_iter().enumerate() {
         blocks[owner_bi]
             .stmts
             .extend(new_stmt_ids.into_iter().map(|v| ValueId(v as usize)));
@@ -372,17 +499,19 @@ pub fn ssa_ify_function<P: Clone>(
     // START of each use block's own stmts, then substitute every
     // reference to the original value with the reload's own result
     // throughout that block's stmts and terminator.
+    let mut subst = alloc::vec![None; values.len()];
+    let mut subst_touched = Vec::new();
     for bi in 0..blocks.len() {
         let uses = &uses_per_block[bi];
         if uses.is_empty() {
             continue;
         }
         let mut prelude: Vec<ValueId> = Vec::new();
-        let mut subst: BTreeMap<u32, ValueId> = BTreeMap::new();
+        let old_stmts = core::mem::take(&mut blocks[bi].stmts);
         let sp_bits = sp_bits_for.get(&bi).cloned();
         for &v in uses {
             let vid = ValueId(v);
-            let ty = vaffle_value_vtid(module, &values, vid);
+            let ty = ssa_value_vtid(module, func_sigs, &values, vid);
             let prov = values[v].prov.clone();
             let side = values[v].side;
             let (new_stmts, addr_vid) = emit_spill_address(
@@ -407,26 +536,24 @@ pub fn ssa_ify_function<P: Clone>(
             ));
             prelude.extend(new_stmts.into_iter().map(|v| ValueId(v as usize)));
             prelude.push(ValueId(reload_vid));
-            subst.insert(v as u32, ValueId(reload_vid));
+            subst[v] = Some(ValueId(reload_vid));
+            subst_touched.push(v);
         }
-        let old_stmts = core::mem::take(&mut blocks[bi].stmts);
-        blocks[bi].stmts = prelude.into_iter().chain(old_stmts).collect();
 
-        let subst_fn = |vid: ValueId| -> Result<ValueId, core::convert::Infallible> {
-            Ok(subst.get(&(vid.0 as u32)).copied().unwrap_or(vid))
-        };
-        for &svid in &blocks[bi].stmts {
-            let placeholder = Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, TypeId(0)));
-            let old = core::mem::replace(&mut values[svid.0].kind, placeholder);
-            values[svid.0].kind = old
-                .map(&mut (), |_: &mut (), v: ValueId| subst_fn(v))
-                .unwrap();
+        for &svid in &old_stmts {
+            remap_value_in_place(&mut values[svid.0].kind, &subst);
         }
+        blocks[bi].stmts = prelude.into_iter().chain(old_stmts).collect();
         let placeholder_term = Terminator::Return { values: Vec::new() };
         let old_term = core::mem::replace(&mut blocks[bi].terminator, placeholder_term);
         blocks[bi].terminator = old_term
-            .map(&mut (), |_: &mut (), v: ValueId| subst_fn(v))
+            .map(&mut (), |_: &mut (), v: ValueId| {
+                Ok::<_, core::convert::Infallible>(subst[v.0].unwrap_or(v))
+            })
             .unwrap();
+        for v in subst_touched.drain(..) {
+            subst[v] = None;
+        }
     }
 
     let out = FuncBody {
@@ -440,6 +567,34 @@ pub fn ssa_ify_function<P: Clone>(
         "vaffle_ssa: postcondition violated -- cross-block values remain after spilling"
     );
     out
+}
+
+/// Apply a per-block reload substitution without cloning a polynomial's
+/// monomial vectors. The B-tree nodes are rebuilt, but each moved
+/// `Vec<ValueId>` buffer is retained. This intentionally preserves the
+/// existing `Value::map` monomial order exactly.
+fn remap_value_in_place(value: &mut Value, subst: &[Option<ValueId>]) {
+    if let Value::Op(Stmt::Poly { coeffs, .. }) = value {
+        let remapped: BTreeMap<Vec<ValueId>, u8> = core::mem::take(coeffs)
+            .into_iter()
+            .map(|(mut mono, coeff)| {
+                for v in &mut mono {
+                    *v = subst[v.0].unwrap_or(*v);
+                }
+                (mono, coeff)
+            })
+            .collect();
+        *coeffs = remapped;
+        return;
+    }
+
+    let placeholder = Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, TypeId(0)));
+    let old = core::mem::replace(value, placeholder);
+    *value = old
+        .map(&mut (), |_: &mut (), v: ValueId| {
+            Ok::<_, core::convert::Infallible>(subst[v.0].unwrap_or(v))
+        })
+        .unwrap();
 }
 
 /// Emit `SP + vid` as a sequence of new value-arena entries, appended
@@ -1017,6 +1172,132 @@ mod tests {
                 .any(|&v| is_storage_read(&out.values, v))
         );
         assert!(compute_cross_block_values(&out).is_empty());
+    }
+
+    #[test]
+    fn owned_rewrite_preserves_poly_reload_substitution() {
+        // The cross-block operand is carried in a `Poly` monomial. This is
+        // the formerly expensive path: the owned rewrite must preserve the
+        // borrowed API's result while moving, rather than cloning, monomial
+        // vectors.
+        let make_body = || FuncBody {
+            sig: SigId(0),
+            blocks: vec![
+                Block {
+                    params: Vec::new(),
+                    stmts: vec![ValueId(0)],
+                    terminator: Terminator::Jump(Target {
+                        block: BlockId(1),
+                        args: Vec::new(),
+                        reentry: None,
+                    }),
+                },
+                Block {
+                    params: Vec::new(),
+                    stmts: vec![ValueId(1)],
+                    terminator: Terminator::Return {
+                        values: vec![ValueId(1)],
+                    },
+                },
+            ],
+            values: vec![
+                node(const_op(1)),
+                node(Value::Op(CommonStmt::Poly {
+                    ty: TypeId(0),
+                    coeffs: BTreeMap::from([(vec![ValueId(0)], 1)]),
+                    constant: Constant { hi: 0, lo: 0 },
+                })),
+            ],
+            entry: BlockId(0),
+        };
+        let mut module = mk_module(1);
+        let (bit_tid, addr_tid, sp_step) = setup(&mut module);
+        let func_sigs = module_func_sigs(&module.funcs);
+
+        let borrowed = ssa_ify_function(
+            &module,
+            &make_body(),
+            addr_tid,
+            bit_tid,
+            sp_step,
+            true,
+        );
+        let owned = ssa_ify_function_owned(
+            &module,
+            make_body(),
+            &func_sigs,
+            addr_tid,
+            bit_tid,
+            sp_step,
+            true,
+        );
+
+        assert_eq!(alloc::format!("{borrowed:?}"), alloc::format!("{owned:?}"));
+        assert!(compute_cross_block_values(&owned).is_empty());
+    }
+
+    #[test]
+    fn owned_module_rewrite_types_cross_block_call_from_signature_table() {
+        // Moving `module.funcs` must not lose the signature lookup required
+        // when a direct call result is spilled across blocks.
+        let mut module = mk_module(1);
+        module.sigs[0].results = vec![TypeId(0)];
+        module.funcs = vec![
+            FuncDecl::Body(FuncBody {
+                sig: SigId(0),
+                blocks: vec![
+                    Block {
+                        params: Vec::new(),
+                        stmts: vec![ValueId(0)],
+                        terminator: Terminator::Jump(Target {
+                            block: BlockId(1),
+                            args: Vec::new(),
+                            reentry: None,
+                        }),
+                    },
+                    Block {
+                        params: Vec::new(),
+                        stmts: Vec::new(),
+                        terminator: Terminator::Return {
+                            values: vec![ValueId(0)],
+                        },
+                    },
+                ],
+                values: vec![node(Value::Call {
+                    func: vaffle::FuncId(1),
+                    args: Vec::new(),
+                })],
+                entry: BlockId(0),
+            }),
+            FuncDecl::Body(FuncBody {
+                sig: SigId(0),
+                blocks: vec![Block {
+                    params: Vec::new(),
+                    stmts: vec![ValueId(0)],
+                    terminator: Terminator::Return {
+                        values: vec![ValueId(0)],
+                    },
+                }],
+                values: vec![node(const_op(1))],
+                entry: BlockId(0),
+            }),
+        ];
+
+        let out = ssa_ify_module_owned(module);
+        let FuncDecl::Body(entry) = &out.funcs[0] else {
+            panic!("expected rewritten entry body");
+        };
+        assert!(compute_cross_block_values(entry).is_empty());
+        assert!(entry.values.iter().any(|value| {
+            matches!(
+                &value.kind,
+                Value::Op(CommonStmt::StorageWrite {
+                    storage: StorageId::VAFFLE_SSA_SPILL,
+                    ty: TypeId(0),
+                    ..
+                })
+            )
+        }));
     }
 
     #[test]

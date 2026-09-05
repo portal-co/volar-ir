@@ -215,7 +215,7 @@ impl PipelinePass<VaffleStage> for LowerToVolarIr {
     type Output = VolarIrStage;
 
     fn apply(self, module: vaffle::Module) -> Result<(IRBlocks, IRTypes), BoxError> {
-        Ok(volar_vaffle_target::lower_vaffle_to_ir(&module))
+        Ok(volar_vaffle_target::lower_vaffle_to_ir_owned(module))
     }
 }
 

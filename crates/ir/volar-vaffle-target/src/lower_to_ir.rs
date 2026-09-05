@@ -92,6 +92,18 @@ pub fn lower_vaffle_to_ir<P: Clone>(module: &Module<P>) -> (IRBlocks<P>, IRTypes
     ctx.finish()
 }
 
+/// Consuming counterpart to [`lower_vaffle_to_ir`].
+///
+/// Builder pipelines own their VAFFLE module at this boundary, so this route
+/// transfers its bodies into the SSA rewrite rather than cloning the complete
+/// input before lower-to-IR begins.
+pub fn lower_vaffle_to_ir_owned<P: Clone>(module: Module<P>) -> (IRBlocks<P>, IRTypes) {
+    let ssa_module = crate::vaffle_ssa::ssa_ify_module_owned(module);
+    let mut ctx = LowerCtx::new(&ssa_module);
+    ctx.lower_all();
+    ctx.finish()
+}
+
 /// Lower a VAFFLE module that may contain a statement-free entry body.
 ///
 /// `control_prov` must be the existing frontend/control provenance for the
@@ -118,7 +130,7 @@ pub fn lower_vaffle_to_ir_with_inlining<P: Clone>(
     budget: volar_ir_opt::inline_vaffle::InlineBudget,
 ) -> (IRBlocks<P>, IRTypes) {
     volar_ir_opt::inline_vaffle::inline_vaffle_module(&mut module, budget);
-    lower_vaffle_to_ir(&module)
+    lower_vaffle_to_ir_owned(module)
 }
 
 /// Like [`lower_vaffle_to_ir_with_inlining`], but runs
@@ -130,7 +142,7 @@ pub fn lower_vaffle_to_ir_fully_inlined<P: Clone>(
     entries: &[vaffle::FuncId],
 ) -> Result<(IRBlocks<P>, IRTypes), volar_ir_opt::inline_vaffle::InlineEverythingError> {
     volar_ir_opt::inline_vaffle::inline_vaffle_everything(&mut module, entries)?;
-    Ok(lower_vaffle_to_ir(&module))
+    Ok(lower_vaffle_to_ir_owned(module))
 }
 
 /// Temporary diagnostic variant of [`lower_vaffle_to_ir`] that also returns
@@ -1684,20 +1696,25 @@ fn find_call<'a, P: Clone>(
     (stmts, None, &[])
 }
 
-/// Collect all `ValueId.0` indices that appear as *operands* in the given
-/// slice of statement `ValueId`s and in `term`.
+/// Collect each operand use at most once, using a caller-owned dense mark
+/// table.  VAFFLE value IDs are arena indices, so this avoids allocating and
+/// searching a B-tree node for every bit-level operand during SSA rewriting.
 ///
-/// These are the values that must be *live* (available in `val_map`) after a
-/// call site that precedes `stmt_ids` in the same block.  Only operand
-/// references are collected — the defining occurrence of a value is not.
-pub(crate) fn collect_uses<P: Clone>(
+/// `mark` must be nonzero and distinct from the marks used for earlier calls
+/// with the same table.  Results are returned in first-use order; callers
+/// which expose construction order should sort them explicitly.
+pub(crate) fn collect_unique_uses<P: Clone>(
     values: &[volar_ir_common::Node<Value, P>],
     stmt_ids: &[ValueId],
     term: &Terminator,
-) -> BTreeSet<usize> {
-    let mut uses = BTreeSet::new();
-    collect_uses_into(values, stmt_ids, term, &mut uses);
-    uses
+    marks: &mut [usize],
+    mark: usize,
+    out: &mut Vec<usize>,
+) {
+    assert_ne!(mark, 0, "collect_unique_uses requires a nonzero mark");
+    out.clear();
+    let mut sink = UniqueUseSink { marks, mark, out };
+    collect_uses_into(values, stmt_ids, term, &mut sink);
 }
 
 /// Per-value count of operand occurrences remaining in a block. This is
@@ -1741,9 +1758,22 @@ trait UseSink {
     fn add_use(&mut self, value: usize);
 }
 
-impl UseSink for BTreeSet<usize> {
+struct UniqueUseSink<'a> {
+    marks: &'a mut [usize],
+    mark: usize,
+    out: &'a mut Vec<usize>,
+}
+
+impl UseSink for UniqueUseSink<'_> {
     fn add_use(&mut self, value: usize) {
-        self.insert(value);
+        let slot = self
+            .marks
+            .get_mut(value)
+            .unwrap_or_else(|| panic!("VAFFLE operand ValueId {value} is outside its value arena"));
+        if *slot != self.mark {
+            *slot = self.mark;
+            self.out.push(value);
+        }
     }
 }
 
@@ -1941,12 +1971,22 @@ fn collect_terminator_uses<S: UseSink>(term: &Terminator, out: &mut S) {
 /// result (`lower_function`'s spill/reload of every value in this set) is
 /// built to fix.
 pub(crate) fn compute_cross_block_values<P: Clone>(body: &FuncBody<P>) -> BTreeSet<usize> {
-    let owner = compute_owner(&body.blocks);
+    let owner = compute_owner(&body.blocks, body.values.len());
 
     let mut cross: BTreeSet<usize> = BTreeSet::new();
+    let mut marks = vec![0usize; body.values.len()];
+    let mut uses = Vec::new();
     for (bi, block) in body.blocks.iter().enumerate() {
-        for u in collect_uses(&body.values, &block.stmts, &block.terminator) {
-            if owner.get(&u).copied() != Some(bi) {
+        collect_unique_uses(
+            &body.values,
+            &block.stmts,
+            &block.terminator,
+            &mut marks,
+            bi + 1,
+            &mut uses,
+        );
+        for &u in &uses {
+            if owner[u] != bi {
                 cross.insert(u);
             }
         }
@@ -1957,14 +1997,24 @@ pub(crate) fn compute_cross_block_values<P: Clone>(body: &FuncBody<P>) -> BTreeS
 /// Map every VAFFLE `ValueId.0` to the index of the block that owns its
 /// defining occurrence (as a param or a stmt). Shared by
 /// [`compute_cross_block_values`] and `vaffle_ssa`'s param-threading pass.
-pub(crate) fn compute_owner(blocks: &[Block]) -> BTreeMap<usize, usize> {
-    let mut owner: BTreeMap<usize, usize> = BTreeMap::new();
+///
+/// `ValueId` is a dense arena index, so the result is a dense table. Missing
+/// definitions are represented by `usize::MAX` and fail loudly at their use
+/// site, rather than quietly behaving like a cross-block value.
+pub(crate) fn compute_owner(blocks: &[Block], n_values: usize) -> Vec<usize> {
+    let mut owner = vec![usize::MAX; n_values];
     for (bi, block) in blocks.iter().enumerate() {
         for &(vid, _ty) in &block.params {
-            owner.insert(vid.0, bi);
+            *owner
+                .get_mut(vid.0)
+                .unwrap_or_else(|| panic!("VAFFLE parameter ValueId {} is outside its value arena", vid.0)) =
+                bi;
         }
         for &vid in &block.stmts {
-            owner.insert(vid.0, bi);
+            *owner
+                .get_mut(vid.0)
+                .unwrap_or_else(|| panic!("VAFFLE statement ValueId {} is outside its value arena", vid.0)) =
+                bi;
         }
     }
     owner
