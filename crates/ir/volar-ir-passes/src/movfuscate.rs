@@ -1421,7 +1421,7 @@ pub(crate) fn subst_ir(stmt: &IRStmt, var_map: &[u32]) -> IRStmt {
 /// retain the source collection and its monomial buffers without a tree
 /// rebuild. Other statement kinds retain the borrowed helper's established
 /// behaviour.
-fn subst_ir_owned(stmt: IRStmt, var_map: &[u32]) -> IRStmt {
+fn subst_ir_owned(stmt: IRStmt, var_map: &[u32], preserves_poly_key_order: bool) -> IRStmt {
     match stmt {
         IRStmt::Poly {
             ty,
@@ -1429,12 +1429,12 @@ fn subst_ir_owned(stmt: IRStmt, var_map: &[u32]) -> IRStmt {
             constant,
         } => {
             let mut coeffs = coeffs;
-            coeffs.remap_monomials_in_place(|vars| {
-                for var in vars.iter_mut() {
-                    *var = IRVarId(var_map[var.0 as usize]);
-                }
-                vars.sort();
-            });
+            let remap = |vars: &mut Vec<IRVarId>| remap_poly_vars(vars, var_map);
+            if preserves_poly_key_order {
+                coeffs.remap_monomials_in_place_preserving_key_order(remap);
+            } else {
+                coeffs.remap_monomials_in_place(remap);
+            }
             IRStmt::Poly {
                 ty,
                 coeffs,
@@ -1442,6 +1442,18 @@ fn subst_ir_owned(stmt: IRStmt, var_map: &[u32]) -> IRStmt {
             }
         }
         other => subst_ir(&other, var_map),
+    }
+}
+
+/// Substitute a single polynomial monomial. Degree-one monomials are the
+/// overwhelmingly common gate form, and are already canonical after every
+/// variable remap, so avoid even entering the sort implementation for them.
+fn remap_poly_vars(vars: &mut Vec<IRVarId>, var_map: &[u32]) {
+    for var in vars.iter_mut() {
+        *var = IRVarId(var_map[var.0 as usize]);
+    }
+    if vars.len() > 1 {
+        vars.sort_unstable();
     }
 }
 
@@ -2125,6 +2137,12 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
             }
         }
 
+        // `compute_static_slot_classes` assigns slots in source-parameter
+        // order. Every source stmt below maps to a newly emitted var, so this
+        // remains true for the rest of this block. Preserve a conservative
+        // fallback in case a later slot allocator changes that invariant.
+        let preserves_poly_key_order = var_map.windows(2).all(|pair| pair[0] < pair[1]);
+
         // Emit stmts with substitution, handling Block-typed Const specially.
         for (stmt_idx, stmt) in block.stmts.iter_mut().enumerate() {
             // Stage this stmt's source provenance; `push_typed` will clone it.
@@ -2141,7 +2159,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                 IRStmt::StorageWrite { src, .. } => Some(src.0),
                 _ => None,
             };
-            let mapped = subst_ir_owned(source, &var_map);
+            let mapped = subst_ir_owned(source, &var_map, preserves_poly_key_order);
             let orig_var_id = (p + stmt_idx) as u32;
 
             // Block-typed Const: encode the referenced block index as
@@ -3519,7 +3537,27 @@ mod tests {
             constant: Constant { hi: 0, lo: 0 },
         };
 
-        let IRStmt::Poly { coeffs, .. } = subst_ir_owned(source, &[4, 3]) else {
+        let IRStmt::Poly { coeffs, .. } = subst_ir_owned(source, &[4, 3], false) else {
+            unreachable!()
+        };
+        assert_eq!(
+            coeffs.into_iter().collect::<Vec<_>>(),
+            std::vec![(std::vec![IRVarId(3)], 1), (std::vec![IRVarId(4)], 1)]
+        );
+    }
+
+    #[test]
+    fn owned_poly_substitution_preserves_order_for_monotonic_maps() {
+        let source = IRStmt::Poly {
+            ty: IRTypeId(0),
+            coeffs: PolyCoeffs::from_iter([
+                (std::vec![IRVarId(0)], 1u8),
+                (std::vec![IRVarId(1)], 1u8),
+            ]),
+            constant: Constant { hi: 0, lo: 0 },
+        };
+
+        let IRStmt::Poly { coeffs, .. } = subst_ir_owned(source, &[3, 4], true) else {
             unreachable!()
         };
         assert_eq!(

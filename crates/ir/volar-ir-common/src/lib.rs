@@ -143,6 +143,22 @@ impl<V: Ord> PolyCoeffs<V> {
             self.0.truncate(write);
         }
     }
+
+    /// Rewrite monomial vectors in place when `f` preserves the canonical
+    /// lexicographic order of every key. This avoids the post-remap adjacent
+    /// key walk in [`Self::remap_monomials_in_place`].
+    ///
+    /// Callers must ensure that `f` also cannot make two distinct monomial
+    /// keys equal. A strictly monotonic variable substitution has both
+    /// properties.
+    pub fn remap_monomials_in_place_preserving_key_order(
+        &mut self,
+        mut f: impl FnMut(&mut Vec<V>),
+    ) {
+        for (monomial, _) in &mut self.0 {
+            f(monomial);
+        }
+    }
 }
 
 /// A mutable entry returned by [`PolyCoeffs::entry`].
@@ -257,6 +273,22 @@ mod poly_coeffs_tests {
         assert_eq!(
             coeffs.into_iter().collect::<Vec<_>>(),
             vec![(vec![9], 7)]
+        );
+    }
+
+    #[test]
+    fn ordered_remap_skips_normalization_for_strictly_monotonic_keys() {
+        let mut coeffs = PolyCoeffs::from_iter([(vec![0], 3u8), (vec![1], 7u8)]);
+        let outer_ptr = coeffs.0.as_ptr();
+
+        coeffs.remap_monomials_in_place_preserving_key_order(|monomial| {
+            monomial[0] += 2;
+        });
+
+        assert_eq!(outer_ptr, coeffs.0.as_ptr());
+        assert_eq!(
+            coeffs.into_iter().collect::<Vec<_>>(),
+            vec![(vec![2], 3), (vec![3], 7)]
         );
     }
 }
