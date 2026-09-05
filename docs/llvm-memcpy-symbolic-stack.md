@@ -70,7 +70,9 @@ cargo test -p volar-ir-build --features llvm --test llvm_frontends
 
 ## Still out of scope
 
-- Symbolic `memset` / `memmove` length.
+- Symbolic `memmove` length. Symbolic `memset` is landed
+  ([`llvm-memset-symbolic.md`](llvm-memset-symbolic.md)).
+  HKDF leftover is [`llvm-fuse-unroll.md`](llvm-fuse-unroll.md).
 - `invoke` / unwind.
 - Identity `WebProofBackend::verify`, SLH-DSA in-circuit, putting HKDF in
   `site-proofs-guest`.

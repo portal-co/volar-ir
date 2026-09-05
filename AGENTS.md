@@ -57,7 +57,18 @@ not this repo's.
 | LLVM memcpy from a constant global | `docs/llvm-memcpy-global.md` | `llvm.memcpy`/`memset` of `@global` or untracked slice pointers (HMAC IV) |
 | LLVM `noalias.scope.decl` | `docs/llvm-noalias-scope-decl.md` | inkwell ICE on metadata-typed `llvm.experimental.noalias.scope.decl` (rustc guests) |
 | LLVM constant `null` pointer | `docs/llvm-const-null.md` | `icmp eq ptr %p, null` / `phi` of `null` |
-| LLVM memcpy through a symbolic stack GEP | `docs/llvm-memcpy-symbolic-stack.md` | constant-length `llvm.memcpy` of `gep i8, ptr %alloca, i64 %i` (`site-keys` `derive` SHA block buffer) |
+| LLVM memcpy through a symbolic stack GEP | `docs/llvm-memcpy-symbolic-stack.md` | constant-length `llvm.memcpy` of `gep i8, ptr %alloca, i64 %i` (SHA block buffer) |
+| LLVM `load ptr` | `docs/llvm-load-ptr.md` | 64-bit `load ptr` from the LLVM data layout |
+| LLVM symbolic `memset` length | `docs/llvm-memset-symbolic.md` | `llvm.memset` of `xor i64 %pos, 63` (SHA-256 finalize padding) |
+| VAFFLE call `Output` bit index | `docs/llvm-call-output-idx.md` | landed: `Output` types as Bit, not `sig.results[idx]` |
+| VAFFLE→IR `collect_uses` on HKDF | `docs/llvm-lower-collect-uses.md` | landed: incremental `future_uses` counts, not a per-call suffix walk |
+| Boolar `lower_poly_bit` on HKDF | `docs/llvm-boolar-poly.md` | landed: hash-cons AND/XOR in `lower_poly_bit` |
+| Fuse `subst_stmt` on HKDF | `docs/llvm-fuse-hkdf.md` | landed: hash-cons `emit_substituted` |
+| Fuse unroll on HKDF | `docs/llvm-fuse-unroll.md` | resolved: acyclic `BCircuit` shape boundary |
+| Movfuscate `Poly` on HKDF | `docs/llvm-movfuscate-poly.md` | landed: owned `subst_ir` steals monomial `Vec`s |
+| VAFFLE→IR `val_map` on HKDF | `docs/llvm-lower-val-map.md` | landed: dense `ValueMap` |
+| Movfuscate `subst_ir_owned` Poly | `docs/llvm-movfuscate-subst-poly.md` | landed: `PolyCoeffs` flat `Vec` |
+| Movfuscate remap on HKDF | `docs/llvm-movfuscate-remap.md` | accepted ~32s `remap_monomials_in_place` |
 | Text format | `docs/text-format-spec.md` | Working on `volar-lir-text`/`volar-ir-text` |
 
 ## Compression-aware logging

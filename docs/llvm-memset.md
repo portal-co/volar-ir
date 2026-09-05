@@ -12,7 +12,8 @@ spill pattern unroll to a circuit.
   length must be a constant integer representable as `usize`; so must a
   `memcpy` length when a direct storage expansion is wanted. A symbolic
   `memcpy` instead lowers to a VAFFLE byte loop that `movfuscate` can turn
-  into a step circuit. Symbolic `memset`/`memmove`, oversized constant lengths,
+  into a step circuit. Symbolic `memset` uses the same loop. Symbolic
+  `memmove`, oversized constant lengths,
   and volatile calls fail with a named `ImportError::Unsupported`.
 - A statically resolved global pointer may be a bare global or a constant-GEP
   pointer with a folded byte offset. A tracked `StackPtr::Const` uses the
@@ -49,7 +50,9 @@ movfuscating into a step circuit.
 
 ## Out of scope
 
-- Symbolic `memset` / `memmove` lengths or volatile memory intrinsics.
+- Symbolic `memmove` lengths or volatile memory intrinsics.
+  Symbolic `memset` is landed
+  ([`llvm-memset-symbolic.md`](llvm-memset-symbolic.md)).
 - Heap and pointer forms that cannot be represented by the importer's tagged
   runtime pointer encoding.
 - Real exception handling; see [`llvm-landingpad.md`](llvm-landingpad.md).

@@ -166,6 +166,17 @@ Frontend routes that feed those passes:
 | LLVM `noalias.scope.decl` metadata calls | [`llvm-noalias-scope-decl.md`](llvm-noalias-scope-decl.md) |
 | LLVM constant `null` pointer | [`llvm-const-null.md`](llvm-const-null.md) |
 | LLVM memcpy through a symbolic stack GEP | [`llvm-memcpy-symbolic-stack.md`](llvm-memcpy-symbolic-stack.md) |
+| LLVM `load ptr` | [`llvm-load-ptr.md`](llvm-load-ptr.md) |
+| LLVM symbolic `memset` length | [`llvm-memset-symbolic.md`](llvm-memset-symbolic.md) |
+| VAFFLE call `Output` bit index | [`llvm-call-output-idx.md`](llvm-call-output-idx.md) |
+| VAFFLE→IR `collect_uses` on HKDF | [`llvm-lower-collect-uses.md`](llvm-lower-collect-uses.md) |
+| Boolar `lower_poly_bit` on HKDF | [`llvm-boolar-poly.md`](llvm-boolar-poly.md) |
+| Fuse `subst_stmt` on HKDF | [`llvm-fuse-hkdf.md`](llvm-fuse-hkdf.md) |
+| Fuse unroll on HKDF | [`llvm-fuse-unroll.md`](llvm-fuse-unroll.md) |
+| Movfuscate `Poly` on HKDF | [`llvm-movfuscate-poly.md`](llvm-movfuscate-poly.md) |
+| VAFFLE→IR `val_map` on HKDF | [`llvm-lower-val-map.md`](llvm-lower-val-map.md) |
+| Movfuscate `subst_ir_owned` Poly | [`llvm-movfuscate-subst-poly.md`](llvm-movfuscate-subst-poly.md) |
+| Movfuscate remap on HKDF | [`llvm-movfuscate-remap.md`](llvm-movfuscate-remap.md) |
 | Full pipeline (weaving, backends, proving) | `volar` repo's `docs/pipeline.md` |
 | Textual circuit libraries (Noir, POD2) | [`circuit-source.md`](circuit-source.md) |
 

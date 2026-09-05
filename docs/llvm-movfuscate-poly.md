@@ -1,10 +1,13 @@
 # Movfuscate `Poly` clone and drop on HKDF
 
-**Status: implemented; awaiting commit.** Linked `site_keys::derive` /
-`derive_identity` now use
+**Status: landed.** Linked `site_keys::derive` / `derive_identity` use
 the consuming Volar-IR movfuscation path. The builder moves `Poly`
 monomial buffers into the step circuit block-by-block rather than cloning
-the whole source program and then dropping it.
+the whole source program and then dropping it. Dense `val_map` landed
+([`llvm-lower-val-map.md`](llvm-lower-val-map.md)). `PolyCoeffs` as a flat `Vec` landed
+([`llvm-movfuscate-subst-poly.md`](llvm-movfuscate-subst-poly.md)). The
+live leftover is `remap_monomials_in_place`
+([`llvm-movfuscate-remap.md`](llvm-movfuscate-remap.md)).
 
 Sample of the site HKDF canary (process elapsed 3:06 of a 203 s run,
 13.9 GB resident, 19.5 GB peak, 100% CPU) is entirely in:
@@ -85,6 +88,8 @@ cargo test -p site-proofs --features llvm --lib -- llvm_vaffle_site_keys_derive 
 - Symbolic `memmove` length.
 - Unconditional fuse of the movfuscated step circuit
   ([`llvm-fuse-unroll.md`](llvm-fuse-unroll.md)).
+- `remap_monomials_in_place` walk
+  ([`llvm-movfuscate-remap.md`](llvm-movfuscate-remap.md)).
 
 ## Where
 
