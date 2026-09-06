@@ -1,5 +1,8 @@
 # Plan: Input/Output Wire Regions and Gadgets
 
+> **Current circuit path:** region anchors cross a typed step boundary as
+> documented in [`pipeline.md`](pipeline.md), then explicitly flatten for consumers.
+
 **Status:** Landed — Phases 1–5 implemented. `RegionTable`/`RegionSelector`
  live in `crates/ir/volar-ir/src/region.rs`, gadget types in `gadget.rs`,
  the splicer in `crates/ir/volar-ir-passes/src/apply_gadgets.rs`, text

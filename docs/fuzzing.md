@@ -26,7 +26,7 @@ crates/fuzz/volar-fuzz/src/
 │   ├── biir.rs         — Arbitrary<BIrBlocks>
 │   └── ir.rs           — Arbitrary<IRBlocks>
 └── properties/         — proptest property tests
-    ├── biir_passes.rs  — Properties A, B, C (movfuscate + lower_to_circuit)
+    ├── biir_passes.rs  — Property A (Boolar movfuscation)
     ├── ir_passes.rs    — Properties D, D2 (lower_ir_to_boolar incl. storage traffic)
     └── reversible.rs   — Property E (to_reversible XOR embedding + joint reversibility)
     └── gadgets.rs      — Property G (gadget application preserves boundary semantics)
@@ -35,7 +35,6 @@ crates/fuzz/volar-fuzz/src/
 fuzz/
 ├── Cargo.toml
 └── fuzz_targets/
-    ├── fuzz_biir_lower_to_circuit.rs   — libFuzzer target
     ├── fuzz_biir_movfuscate.rs         — libFuzzer target
     └── fuzz_lower_ir_to_boolar.rs      — libFuzzer target
 ```
@@ -65,7 +64,7 @@ Structural invariants guaranteed:
   CFG is a DAG, guaranteeing termination of non-movfuscated circuits.
 - Jump args match the target block's parameter count.
 - All `Return` terminators across all blocks have the same arity (required by
-  `movfuscate_biir` and `lower_to_circuit`).
+  `movfuscate_biir`).
 - Only pure gate stmts are generated: `Zero`, `One`, `And`, `Or`, `Xor`, `Not`.
   Oracle, action, RNG, and storage stmts are excluded.
 
@@ -148,20 +147,12 @@ eval_biir(movfuscate_biir(cfg), movfuscated_inputs) == eval_biir(cfg, inputs)
 The movfuscated form is a single self-looping block with a PC prefix.
 The test constructs the correct padded input and verifies outputs match.
 
-### Property B — `lower_to_circuit` preserves semantics
+### Typed step path — one-step equivalence and external driving
 
-```
-eval_biir(lower_to_circuit(movfuscate_biir(cfg)), inputs)
-    == eval_biir(movfuscate_biir(cfg), inputs)
-```
-
-Skipped when the movfuscated circuit doesn't terminate within `LOWER_LIMIT = 16`
-re-entries.
-
-### Property C — passes do not panic
-
-Both `movfuscate_biir` and `lower_to_circuit` complete without panicking on any
-generated input.
+Property P runs the typed Volar movfuscated-to-step pass and its Boolar
+adapter on the same state, then compares both one-step results. The longer
+semantic driver threads named `next_state` values until named `terminated` is
+true; it never asks the compiler to duplicate a fixed number of iterations.
 
 ### Property D — `lower_ir_to_boolar` preserves semantics
 
@@ -197,8 +188,8 @@ threading pipeline: `movfuscate_region_layout` +
 `translate_regions_movfuscate` (anchors onto the combined block's state
 slots), `movfuscate_ir`, `lower_ir_to_boolar_with_tables` +
 `lower_typed_region_table`/`lower_gadget_library`/`lower_typed_bindings`,
-`lower_to_circuit(WithTerminationFlag)` +
-`translate_regions_termination_flag`, and finally `apply_gadgets`. The
+`movfuscated_to_vstep_circuit` + `lower_vstep_to_bstep`,
+`translate_regions_step_circuit`, and finally `apply_gadgets`. The
 spliced circuit must satisfy the same ciphertext-in / plaintext-core /
 ciphertext-out contract as Property G (XOR-pad gadgets, all input
 combinations), and `movfuscate_state_regions` must tag the PC bit exactly.
@@ -216,7 +207,6 @@ reproduction). Word-width typed coverage lives in the
 
 ```bash
 cd fuzz
-cargo +nightly fuzz run fuzz_biir_lower_to_circuit
 cargo +nightly fuzz run fuzz_biir_movfuscate
 cargo +nightly fuzz run fuzz_lower_ir_to_boolar
 ```
@@ -226,7 +216,6 @@ structurally valid IR from libFuzzer byte input.  Fuzz targets check:
 
 | Target | Check |
 |--------|-------|
-| `fuzz_biir_lower_to_circuit` | `lower_to_circuit` does not panic |
 | `fuzz_biir_movfuscate` | `movfuscate_biir` does not panic |
 | `fuzz_lower_ir_to_boolar` | `lower_ir_to_boolar` does not panic |
 

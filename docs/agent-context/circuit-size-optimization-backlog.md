@@ -2,7 +2,7 @@
 
 **Load this when:** picking up further circuit-size/statement-count
 optimization work on the movfuscated Volar-IR pipeline (movfuscation,
-`lower_to_circuit_ir`, the VOLE weaver), after the width-at-rest fix.
+`movfuscated_to_vstep_circuit`, the VOLE weaver), after the width-at-rest fix.
 
 ## Status as of this log
 
@@ -80,7 +80,7 @@ width happened to numerically match whatever the interpreter's own blocks
 declare at that position, and `movfuscate_ir` (which has never itself
 cross-checked `Dyn`-target arity against args) silently tolerated the
 type-confusion. Fixing bug 1 in isolation regresses the *already-working*
-`movfuscate_ir`/`lower_to_circuit_ir` baseline (confirmed directly: with the
+`movfuscate_ir`/typed-step baseline (confirmed directly: with the
 fix applied and `virtualize_ir` *not* even in the picture,
 `interpreter_ir_movfuscates_and_unrolls_to_a_circuit` fails with
 `movfuscate_ir: block 3 has type Vec(32, TypeId(0)) at param 1, but an
@@ -168,7 +168,7 @@ formula) found:
 
 - **Without** the post-movfuscation `optimize_to_fixpoint` pass
   (`fold_ir_blocks`/`store_forward_ir_blocks`, run by `lower_interpreter`
-  between `movfuscate_ir` and `lower_to_circuit_ir`): and_count = **115,780**.
+between `movfuscate_ir` and typed-step lowering): and_count = **115,780**.
 - **With** it (the pipeline every earlier measurement in this doc used):
   and_count = **2,771,980** — **~24x larger**.
 
@@ -249,7 +249,7 @@ these accumulation steps in groups of `chunk_size` blocks at a time
 local `hat`s, since the accumulation's own `is_active_i AND done_i`-style
 selection logic is itself real AND-gates) between chunks, followed by one
 final "`..._finish`" function for whatever trails the last accumulation
-step (the terminator-select/return-padding `lower_to_circuit_ir` adds).
+step (the typed step boundary's terminator selectors and zero return padding).
 
 **Real-scale measurement** (`measure_split_weave_on_real_interpreter`,
 `crates/examples/volar-riscv-e2e/src/wat_gen.rs`, `#[ignore]`d,

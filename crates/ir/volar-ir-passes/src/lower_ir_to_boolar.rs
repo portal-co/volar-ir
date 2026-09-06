@@ -78,6 +78,21 @@ pub enum ExternalLoweringError {
         kind: &'static str,
         name: alloc::string::String,
     },
+    /// Boolar storage cells use one fixed element-address width per source
+    /// storage/type lane. A mixed-width source cannot be represented without
+    /// changing the flat-cell layout.
+    StorageAddressWidthMismatch {
+        storage: StorageId,
+        ty: IRTypeId,
+        expected: usize,
+        found: usize,
+    },
+    /// A storage operation referenced a value that has no typed address.
+    InvalidStorageAddress {
+        storage: StorageId,
+        ty: IRTypeId,
+        addr: IRVarId,
+    },
 }
 
 // ============================================================================
@@ -266,6 +281,7 @@ fn validate_external_sources<P: Clone>(
     blocks: &IRBlocks<P>,
     types: &IRTypes,
 ) -> Result<(), ExternalLoweringError> {
+    let mut storage_addr_widths: BTreeMap<(StorageId, IRTypeId), usize> = BTreeMap::new();
     for block in &blocks.blocks {
         let mut var_types: Vec<Option<IRTypeId>> = block.params.iter().copied().map(Some).collect();
         for node in &block.stmts {
@@ -359,7 +375,28 @@ fn validate_external_sources<P: Clone>(
                             name: name.clone(),
                         });
                     }
+                    for (ty, target) in output_tys.iter().zip(targets) {
+                        record_source_addr_width(
+                            target.storage,
+                            *ty,
+                            target.addr,
+                            &var_types,
+                            types,
+                            &mut storage_addr_widths,
+                        )?;
+                    }
                 }
+                IRStmt::StorageRead { storage, ty, addr }
+                | IRStmt::StorageWrite {
+                    storage, ty, addr, ..
+                } => record_source_addr_width(
+                    *storage,
+                    *ty,
+                    *addr,
+                    &var_types,
+                    types,
+                    &mut storage_addr_widths,
+                )?,
                 IRStmt::Rng { name, ty } => {
                     let decl = blocks
                         .rngs
@@ -382,6 +419,42 @@ fn validate_external_sources<P: Clone>(
         }
     }
     Ok(())
+}
+
+fn record_source_addr_width(
+    storage: StorageId,
+    ty: IRTypeId,
+    addr: IRVarId,
+    var_types: &[Option<IRTypeId>],
+    types: &IRTypes,
+    widths: &mut BTreeMap<(StorageId, IRTypeId), usize>,
+) -> Result<(), ExternalLoweringError> {
+    let addr_ty = var_types
+        .get(addr.0 as usize)
+        .and_then(|ty| *ty)
+        .ok_or(ExternalLoweringError::InvalidStorageAddress { storage, ty, addr })?;
+    let width = ir_type_bits(
+        types
+            .0
+            .get(addr_ty.0 as usize)
+            .ok_or(ExternalLoweringError::InvalidStorageAddress { storage, ty, addr })?,
+        types,
+    );
+    match widths.entry((storage, ty)) {
+        alloc::collections::btree_map::Entry::Occupied(entry) if *entry.get() != width => {
+            Err(ExternalLoweringError::StorageAddressWidthMismatch {
+                storage,
+                ty,
+                expected: *entry.get(),
+                found: width,
+            })
+        }
+        alloc::collections::btree_map::Entry::Occupied(_) => Ok(()),
+        alloc::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(width);
+            Ok(())
+        }
+    }
 }
 
 fn external_arg_types_match(
@@ -1451,7 +1524,8 @@ mod tests {
         assert_eq!(reads.len(), 64);
         assert!(reads.iter().all(|addr| addr.len() == 70));
 
-        let circuit = crate::to_circuit_fused_boolar(&lowered).expect("single block fuses");
+        let circuit = volar_ir::circuit::BCircuit::try_from_ir(&lowered)
+            .expect("single block is already a circuit");
         let (reversible, _) = crate::to_reversible(&circuit).expect("storage circuit lowers");
         let swap_addrs: std::vec::Vec<_> = reversible
             .gates()

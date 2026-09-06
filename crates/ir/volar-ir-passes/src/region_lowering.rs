@@ -23,8 +23,8 @@
 //!      slots movfuscation invents* — the PC bits and each state slot.
 //!    - [`translate_typed_aux_movfuscate`]: same remap for typed aux
 //!      `InputRange` sources.
-//!    - [`translate_regions_termination_flag`]: landed-table output anchors
-//!      shift by one position under `LoweringMode::WithTerminationFlag`.
+//!    - [`translate_regions_step_circuit`]: landed-table return anchors move
+//!      past the typed step circuit's termination and next-state ports.
 //!    - [`translate_regions_to_reversible`]: landed anchors onto the
 //!      reversible wire space via [`VarWireMap`].
 //!
@@ -35,7 +35,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use volar_ir::circuit::VCircuit;
+use volar_ir::circuit::{BStepCircuit, VCircuit};
 use volar_ir::gadget::{
     AuxSource, GadgetBinding, GadgetLibrary, GadgetSpec, Port, PortKind,
 };
@@ -474,7 +474,7 @@ pub fn lower_typed_gadget(
     let lower_body = |body: &VCircuit| -> Result<volar_ir::circuit::BCircuit, LowerGadgetError> {
         let blocks = body.clone().to_ir_blocks();
         let bir = crate::lower_ir_to_boolar::lower_ir_to_boolar(&blocks, types);
-        let fused = crate::fuse_to_circuit::to_circuit_fused_boolar(&bir)?;
+        let fused = volar_ir::circuit::BCircuit::try_from_ir(&bir)?;
         if fused.params as usize != total_bits {
             return Err(LowerGadgetError::ShapeMismatch {
                 gadget: spec.name.clone(),
@@ -743,18 +743,24 @@ pub fn movfuscate_state_regions(
     })
 }
 
-/// Shift landed output anchors by one position: the unroller
-/// (`lower_to_circuit` with `LoweringMode::WithTerminationFlag`) prepends a
-/// single `done` bit to the return values. Input and storage anchors are
-/// unchanged.
-pub fn translate_regions_termination_flag(
+/// Translate return anchors to the flattened ABI of a typed step circuit.
+///
+/// The compatibility ABI is `[terminated, next_state..., return_values...]`.
+/// This deliberately shifts only ordinary return anchors. Callers that need
+/// to mark state or the termination flag must add those boundary anchors
+/// explicitly rather than relying on an accidental positional convention.
+pub fn translate_regions_step_circuit<P: Clone>(
     table: &RegionTable,
+    circuit: &BStepCircuit<P>,
 ) -> Result<RegionTable, RegionThreadError> {
+    let shift = 1u32
+        .checked_add(circuit.boundary.next_state.len() as u32)
+        .ok_or(RegionThreadError::Overflow)?;
     let mut entries = Vec::with_capacity(table.entries.len());
     for entry in &table.entries {
         match &entry.anchor {
             volar_ir::region::WireAnchor::Output { start, len } => {
-                let start = start.checked_add(1).ok_or(RegionThreadError::Overflow)?;
+                let start = start.checked_add(shift).ok_or(RegionThreadError::Overflow)?;
                 entries.push(RegionEntry {
                     anchor: volar_ir::region::WireAnchor::Output {
                         start,
@@ -855,7 +861,7 @@ mod tests {
     use super::*;
     use alloc::collections::BTreeSet;
     use alloc::vec;
-    use volar_ir::circuit::{BCircuit, VCircuit};
+    use volar_ir::circuit::{BCircuit, BStepCircuit, VCircuit};
     use volar_ir::gadget::PortKind as PK;
     use volar_ir::boolar::BIrTerminator;
     use volar_ir::ir::{
@@ -1092,7 +1098,7 @@ mod tests {
         );
 
         // Apply and check boundary semantics: wrapped(host, pt ⊕ k) = host(pt) ⊕ k.
-        let host_bc = crate::fuse_to_circuit::to_circuit_fused_boolar(&bir).expect("fuses");
+        let host_bc = volar_ir::circuit::BCircuit::try_from_ir(&bir).expect("is circuit");
         let applied =
             crate::apply_gadgets::apply_gadgets(&host_bc, &bit_table, &bindings, &typed_lib_lowered)
                 .expect("applies");
@@ -1355,10 +1361,10 @@ mod tests {
         );
     }
 
-    // ---- unroll + reversible translations -----------------------------------
+    // ---- step-circuit + reversible translations -----------------------------
 
     #[test]
-    fn termination_flag_shifts_output_anchors() {
+    fn step_boundary_shifts_return_anchors() {
         let table = RegionTable {
             entries: vec![
                 RegionEntry {
@@ -1376,7 +1382,17 @@ mod tests {
             ],
             names: BTreeMap::new(),
         };
-        let shifted = translate_regions_termination_flag(&table).unwrap();
+        let step: BStepCircuit<()> = BStepCircuit {
+            params: 2,
+            stmts: vec![],
+            pre_init: vec![],
+            boundary: volar_ir::circuit::StepCircuitBoundary {
+                terminated: IRVarId(0),
+                next_state: vec![IRVarId(0), IRVarId(1)],
+                return_values: vec![],
+            },
+        };
+        let shifted = translate_regions_step_circuit(&table, &step).unwrap();
         let outs: Vec<u32> = shifted
             .entries
             .iter()
@@ -1385,7 +1401,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(outs, vec![3, 7]);
+        assert_eq!(outs, vec![5, 9]);
         // Inputs untouched.
         assert_eq!(
             shifted.entries[0].anchor,

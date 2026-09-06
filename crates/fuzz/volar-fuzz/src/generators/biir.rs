@@ -22,8 +22,7 @@
 //!   termination.
 //! - Args passed to a jump target match the target block's param count.
 //! - All Return terminators across all blocks have the **same arity**
-//!   (`ret_arity`), which is required by both `movfuscate_biir` and
-//!   `lower_to_circuit`.
+//!   (`ret_arity`), which is required by `movfuscate_biir`.
 //! - Only non-oracle/non-action/non-storage/non-rng stmts are generated
 //!   (`Zero`, `One`, `And`, `Or`, `Xor`, `Not`).
 

@@ -90,6 +90,27 @@ impl PipelineStage for VolarIrStage {
     type Data = (IRBlocks, IRTypes);
 }
 
+/// Movfuscated Volar IR plus the metadata emitted by the same movfuscation
+/// run. This stage prevents accidental loss of the state-transition ABI.
+pub struct MovfuscatedVolarStage;
+impl PipelineStage for MovfuscatedVolarStage {
+    type Data = (volar_ir_passes::MovfuscatedProgram, IRTypes);
+}
+
+/// Typed, non-looping Volar state-transition circuit plus the metadata that
+/// identifies its movfuscation origin.
+pub struct VolarStepCircuitStage;
+impl PipelineStage for VolarStepCircuitStage {
+    type Data = (volar_ir_passes::VStepCircuitLowering, IRTypes);
+}
+
+/// Bit-level state-transition circuit and the Boolean allocation tables from
+/// the same lowering run.
+pub struct BoolarStepCircuitStage;
+impl PipelineStage for BoolarStepCircuitStage {
+    type Data = volar_ir_passes::BStepCircuitLowering;
+}
+
 /// Boolar IR (boolean-gate SSA, possibly multi-block). Every value is
 /// exactly one bit, so — unlike [`VolarIrStage`] — no type table travels
 /// alongside it.
@@ -244,14 +265,51 @@ impl PipelinePass<VolarIrStage> for FoldIr {
 pub struct Movfuscate;
 
 impl PipelinePass<VolarIrStage> for Movfuscate {
-    type Output = VolarIrStage;
+    type Output = MovfuscatedVolarStage;
 
-    fn apply(self, (blocks, mut types): (IRBlocks, IRTypes)) -> Result<(IRBlocks, IRTypes), BoxError> {
-        // The pipeline owns this stage, so transfer its large Poly payloads
-        // into the step circuit instead of routing through the legacy
-        // borrowed compatibility API.
-        let blocks = volar_ir_passes::movfuscate_ir_owned(blocks, &mut types);
-        Ok((blocks, types))
+    fn apply(self, (blocks, mut types): (IRBlocks, IRTypes))
+        -> Result<(volar_ir_passes::MovfuscatedProgram, IRTypes), BoxError>
+    {
+        let program = volar_ir_passes::movfuscate_ir_with_metadata(
+            &blocks,
+            &mut types,
+            &volar_ir_passes::MovfuscationWatchlist::default(),
+        ).map_err(box_err)?;
+        Ok((program, types))
+    }
+}
+
+/// Convert a movfuscated block into exactly one typed state-transition step.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MovfuscatedToCircuit;
+
+impl PipelinePass<MovfuscatedVolarStage> for MovfuscatedToCircuit {
+    type Output = VolarStepCircuitStage;
+
+    fn apply(self, (program, types): (volar_ir_passes::MovfuscatedProgram, IRTypes))
+        -> Result<(volar_ir_passes::VStepCircuitLowering, IRTypes), BoxError>
+    {
+        let lowered = volar_ir_passes::movfuscated_to_vstep_circuit_with_control_provenance(
+            &program, &types, &(),
+        ).map_err(box_err)?;
+        Ok((lowered, types))
+    }
+}
+
+/// Booleanize a typed step while retaining the same-run allocation tables.
+#[derive(Debug, Clone, Default)]
+pub struct LowerStepToBoolar {
+    pub watchlist: volar_ir_passes::StepValueWatchlist,
+}
+
+impl PipelinePass<VolarStepCircuitStage> for LowerStepToBoolar {
+    type Output = BoolarStepCircuitStage;
+
+    fn apply(self, (lowered, types): (volar_ir_passes::VStepCircuitLowering, IRTypes))
+        -> Result<volar_ir_passes::BStepCircuitLowering, BoxError>
+    {
+        volar_ir_passes::lower_vstep_to_bstep(&lowered.circuit, &types, &self.watchlist)
+            .map_err(box_err)
     }
 }
 
@@ -322,24 +380,6 @@ impl PipelinePass<BoolarStage> for StorageToMuxBoolar {
 
     fn apply(self, blocks: BIrBlocks) -> Result<BIrBlocks, BoxError> {
         Ok(volar_ir_passes::storage_to_mux_boolar(&blocks, &self.0)?)
-    }
-}
-
-/// Fuse (already movfuscated, or unroll-then-fuse) Boolar IR into its
-/// single-block circuit form. `limit` bounds the MUX-unroll budget; see
-/// [`volar_ir_passes::LoweringMode`].
-#[derive(Debug, Clone, Copy)]
-pub struct FuseBoolar {
-    pub limit: u32,
-    pub mode: volar_ir_passes::LoweringMode,
-}
-
-impl PipelinePass<BoolarStage> for FuseBoolar {
-    type Output = BoolarCircuitStage;
-
-    fn apply(self, blocks: BIrBlocks) -> Result<BCircuit, BoxError> {
-        volar_ir_passes::fuse_to_circuit::lower_to_circuit_fused(&blocks, self.limit, self.mode)
-            .map_err(box_err)
     }
 }
 
@@ -424,8 +464,8 @@ impl Pipeline<VolarIrStage> {
         self.apply(FoldIr)
     }
 
-    /// Movfuscate Volar IR into a single self-looping block.
-    pub fn movfuscate(self) -> Result<Self, BoxError> {
+    /// Movfuscate Volar IR into a stateful, single-block stage.
+    pub fn movfuscate(self) -> Result<Pipeline<MovfuscatedVolarStage>, BoxError> {
         self.apply(Movfuscate)
     }
 
@@ -483,18 +523,54 @@ impl Pipeline<BoolarStage> {
         self.apply(StorageToMuxBoolar(cfg))
     }
 
-    /// Fuse to the single-block circuit form (unrolling with `limit`/`mode`
-    /// if not already movfuscated).
-    pub fn fuse(
-        self,
-        limit: u32,
-        mode: volar_ir_passes::LoweringMode,
-    ) -> Result<Pipeline<BoolarCircuitStage>, BoxError> {
-        self.apply(FuseBoolar { limit, mode })
-    }
-
     /// Terminal: the Boolar IR.
     pub fn to_boolar(self) -> BIrBlocks {
+        self.into_data()
+    }
+
+    /// Validate an already straight-line Boolar program as a fused circuit.
+    /// This does not transform or unroll control flow.
+    pub fn to_boolar_circuit(self) -> Result<Pipeline<BoolarCircuitStage>, BoxError> {
+        BCircuit::try_from_ir(&self.into_data())
+            .map(Pipeline::from_data)
+            .map_err(box_err)
+    }
+}
+
+impl Pipeline<MovfuscatedVolarStage> {
+    /// Produce one typed, non-looping transition circuit.
+    pub fn to_step_circuit(self) -> Result<Pipeline<VolarStepCircuitStage>, BoxError> {
+        self.apply(MovfuscatedToCircuit)
+    }
+
+    /// Terminal: the movfuscated block plus its boundary, accumulation, and
+    /// watch metadata.
+    pub fn to_movfuscated_volar_ir(self) -> (volar_ir_passes::MovfuscatedProgram, IRTypes) {
+        self.into_data()
+    }
+}
+
+impl Pipeline<VolarStepCircuitStage> {
+    /// Booleanize the one-step transition while retaining allocation tables.
+    pub fn lower_to_boolar_step(self) -> Result<Pipeline<BoolarStepCircuitStage>, BoxError> {
+        self.apply(LowerStepToBoolar::default())
+    }
+
+    /// Terminal: typed step circuit plus its Volar type table.
+    pub fn to_volar_step_circuit(self) -> (volar_ir_passes::VStepCircuitLowering, IRTypes) {
+        self.into_data()
+    }
+}
+
+impl Pipeline<BoolarStepCircuitStage> {
+    /// Flatten the explicitly typed step boundary only for a conventional
+    /// Boolar-circuit consumer.
+    pub fn to_boolar_circuit(self) -> Pipeline<BoolarCircuitStage> {
+        Pipeline::from_data(self.into_data().circuit.to_b_circuit())
+    }
+
+    /// Terminal: bit-level step circuit, allocation tables, and watches.
+    pub fn to_boolar_step_circuit(self) -> volar_ir_passes::BStepCircuitLowering {
         self.into_data()
     }
 }

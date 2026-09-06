@@ -1,5 +1,8 @@
 # Plan: Circuit-Fused IR Variants, Reversible Circuits, and Lowering Transforms
 
+> **Historical note:** movfuscated programs now enter the typed one-step
+> boundary in [`pipeline.md`](pipeline.md); this plan's fuse/unroll seam is retired.
+
 **Status:** Phases 1–3 landed (fused types, `RCircuit`, fusion + reversible
 transforms, watchlist translation, exhaustive unit tests, and fuzz Property E
 in `crates/fuzz/volar-fuzz/src/properties/reversible.rs`).

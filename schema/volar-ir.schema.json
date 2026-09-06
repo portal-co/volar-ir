@@ -711,6 +711,68 @@
       "typescript": "BCircuit"
     },
     {
+      "id": "step-circuit-boundary",
+      "doc": "The explicitly named termination, next-state, and return boundary of one circuit step.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/circuit/generated.rs",
+        "name": "StepCircuitBoundary",
+        "kind": "record",
+        "copy": false,
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "terminated", "ty": "crate::ir::IRVarId" },
+          { "name": "next_state", "ty": "alloc::vec::Vec<crate::ir::IRVarId>" },
+          { "name": "return_values", "ty": "alloc::vec::Vec<crate::ir::IRVarId>" }
+        ]
+      },
+      "typescript": "StepCircuitBoundary"
+    },
+    {
+      "id": "v-step-circuit",
+      "doc": "A typed Volar one-step circuit with declarations, pre-initialized storage, and a named transition boundary.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/circuit/generated.rs",
+        "name": "VStepCircuit",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "oracles", "ty": "alloc::vec::Vec<crate::ir::OracleDecl>" },
+          { "name": "actions", "ty": "alloc::vec::Vec<crate::ir::ActionDecl>" },
+          { "name": "rngs", "ty": "alloc::vec::Vec<crate::ir::RngDecl>" },
+          { "name": "params", "ty": "alloc::vec::Vec<volar_ir_common::TypeId>" },
+          { "name": "stmts", "ty": "alloc::vec::Vec<volar_ir_common::Node<crate::ir::IRStmt, P>>" },
+          { "name": "pre_init", "ty": "alloc::vec::Vec<crate::ir::PreInitSegment>" },
+          { "name": "boundary", "ty": "StepCircuitBoundary" }
+        ]
+      },
+      "typescript": "VStepCircuit"
+    },
+    {
+      "id": "b-step-circuit",
+      "doc": "A bit-level one-step circuit with pre-initialized storage and a named transition boundary.",
+      "rust": {
+        "output": "crates/ir/volar-ir/src/circuit/generated.rs",
+        "name": "BStepCircuit",
+        "kind": "record",
+        "copy": false,
+        "generics": [
+          { "name": "P", "bound": "Clone", "default": "()" }
+        ],
+        "derives": ["Clone", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Debug"],
+        "fields": [
+          { "name": "params", "ty": "u32" },
+          { "name": "stmts", "ty": "alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>>" },
+          { "name": "pre_init", "ty": "alloc::vec::Vec<crate::boolar::BIrPreInitSegment>" },
+          { "name": "boundary", "ty": "StepCircuitBoundary" }
+        ]
+      },
+      "typescript": "BStepCircuit"
+    },
+    {
       "id": "boolar-statement-chunk",
       "doc": "The decoded payload of one content-addressed Boolar statement chunk.",
       "rust": {

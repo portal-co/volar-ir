@@ -1,5 +1,8 @@
 # Fuse `subst_stmt` hash-cons on boolar HKDF
 
+> **Historical note:** the circuit-boundary parts of this document are
+> superseded by the typed one-step path in [`pipeline.md`](pipeline.md).
+
 **Status: landed.** `Emitter::emit_substituted` hash-conses pure Boolean
 gates re-emitted while unrolling (`SubstitutedGateCache`). Linked
 `site_keys::derive` / `derive_identity` therefore **start** `fuse`

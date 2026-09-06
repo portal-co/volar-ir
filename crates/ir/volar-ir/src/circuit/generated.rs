@@ -186,3 +186,312 @@ where
     }
 }
 
+/// The explicitly named termination, next-state, and return boundary of one circuit step.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct StepCircuitBoundary {
+    pub terminated: crate::ir::IRVarId,
+    pub next_state: alloc::vec::Vec<crate::ir::IRVarId>,
+    pub return_values: alloc::vec::Vec<crate::ir::IRVarId>,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(rkyv::bytecheck::CheckBytes)]
+#[bytecheck(crate = rkyv::bytecheck)]
+#[repr(C)]
+pub struct ArchivedStepCircuitBoundary {
+    pub terminated: <crate::ir::IRVarId as rkyv::Archive>::Archived,
+    pub next_state: <alloc::vec::Vec<crate::ir::IRVarId> as rkyv::Archive>::Archived,
+    pub return_values: <alloc::vec::Vec<crate::ir::IRVarId> as rkyv::Archive>::Archived,
+}
+
+#[cfg(feature = "rkyv")]
+#[allow(dead_code)]
+pub struct StepCircuitBoundaryResolver {
+    terminated: <crate::ir::IRVarId as rkyv::Archive>::Resolver,
+    next_state: <alloc::vec::Vec<crate::ir::IRVarId> as rkyv::Archive>::Resolver,
+    return_values: <alloc::vec::Vec<crate::ir::IRVarId> as rkyv::Archive>::Resolver,
+}
+
+#[cfg(feature = "rkyv")]
+unsafe impl rkyv::Portable for ArchivedStepCircuitBoundary
+where
+    <crate::ir::IRVarId as rkyv::Archive>::Archived: rkyv::Portable,
+    <alloc::vec::Vec<crate::ir::IRVarId> as rkyv::Archive>::Archived: rkyv::Portable,
+    <alloc::vec::Vec<crate::ir::IRVarId> as rkyv::Archive>::Archived: rkyv::Portable,
+{}
+
+#[cfg(feature = "rkyv")]
+impl rkyv::Archive for StepCircuitBoundary {
+    type Archived = ArchivedStepCircuitBoundary;
+    type Resolver = StepCircuitBoundaryResolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).terminated) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.terminated, resolver.terminated, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).next_state) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.next_state, resolver.next_state, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).return_values) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.return_values, resolver.return_values, field_out);
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for StepCircuitBoundary
+where
+    crate::ir::IRVarId: rkyv::Serialize<S>,
+    alloc::vec::Vec<crate::ir::IRVarId>: rkyv::Serialize<S>,
+    alloc::vec::Vec<crate::ir::IRVarId>: rkyv::Serialize<S>,
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(StepCircuitBoundaryResolver {
+            terminated: rkyv::Serialize::serialize(&self.terminated, serializer)?,
+            next_state: rkyv::Serialize::serialize(&self.next_state, serializer)?,
+            return_values: rkyv::Serialize::serialize(&self.return_values, serializer)?,
+        })
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<StepCircuitBoundary, D>
+    for ArchivedStepCircuitBoundary
+where
+    <crate::ir::IRVarId as rkyv::Archive>::Archived: rkyv::Deserialize<crate::ir::IRVarId, D>,
+    <alloc::vec::Vec<crate::ir::IRVarId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<crate::ir::IRVarId>, D>,
+    <alloc::vec::Vec<crate::ir::IRVarId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<crate::ir::IRVarId>, D>,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<StepCircuitBoundary, D::Error> {
+        Ok(StepCircuitBoundary {
+            terminated: rkyv::Deserialize::deserialize(&self.terminated, deserializer)?,
+            next_state: rkyv::Deserialize::deserialize(&self.next_state, deserializer)?,
+            return_values: rkyv::Deserialize::deserialize(&self.return_values, deserializer)?,
+        })
+    }
+}
+
+/// A typed Volar one-step circuit with declarations, pre-initialized storage, and a named transition boundary.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct VStepCircuit<P: Clone = ()> {
+    pub oracles: alloc::vec::Vec<crate::ir::OracleDecl>,
+    pub actions: alloc::vec::Vec<crate::ir::ActionDecl>,
+    pub rngs: alloc::vec::Vec<crate::ir::RngDecl>,
+    pub params: alloc::vec::Vec<volar_ir_common::TypeId>,
+    pub stmts: alloc::vec::Vec<volar_ir_common::Node<crate::ir::IRStmt, P>>,
+    pub pre_init: alloc::vec::Vec<crate::ir::PreInitSegment>,
+    pub boundary: StepCircuitBoundary,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(rkyv::bytecheck::CheckBytes)]
+#[bytecheck(crate = rkyv::bytecheck)]
+#[repr(C)]
+pub struct ArchivedVStepCircuit<P: Clone + rkyv::Archive = ()> {
+    pub oracles: <alloc::vec::Vec<crate::ir::OracleDecl> as rkyv::Archive>::Archived,
+    pub actions: <alloc::vec::Vec<crate::ir::ActionDecl> as rkyv::Archive>::Archived,
+    pub rngs: <alloc::vec::Vec<crate::ir::RngDecl> as rkyv::Archive>::Archived,
+    pub params: <alloc::vec::Vec<volar_ir_common::TypeId> as rkyv::Archive>::Archived,
+    pub stmts: <alloc::vec::Vec<volar_ir_common::Node<crate::ir::IRStmt, P>> as rkyv::Archive>::Archived,
+    pub pre_init: <alloc::vec::Vec<crate::ir::PreInitSegment> as rkyv::Archive>::Archived,
+    pub boundary: <StepCircuitBoundary as rkyv::Archive>::Archived,
+}
+
+#[cfg(feature = "rkyv")]
+#[allow(dead_code)]
+pub struct VStepCircuitResolver<P: Clone + rkyv::Archive = ()> {
+    oracles: <alloc::vec::Vec<crate::ir::OracleDecl> as rkyv::Archive>::Resolver,
+    actions: <alloc::vec::Vec<crate::ir::ActionDecl> as rkyv::Archive>::Resolver,
+    rngs: <alloc::vec::Vec<crate::ir::RngDecl> as rkyv::Archive>::Resolver,
+    params: <alloc::vec::Vec<volar_ir_common::TypeId> as rkyv::Archive>::Resolver,
+    stmts: <alloc::vec::Vec<volar_ir_common::Node<crate::ir::IRStmt, P>> as rkyv::Archive>::Resolver,
+    pre_init: <alloc::vec::Vec<crate::ir::PreInitSegment> as rkyv::Archive>::Resolver,
+    boundary: <StepCircuitBoundary as rkyv::Archive>::Resolver,
+}
+
+#[cfg(feature = "rkyv")]
+unsafe impl<P: Clone + rkyv::Archive> rkyv::Portable for ArchivedVStepCircuit<P>
+where
+    <alloc::vec::Vec<crate::ir::OracleDecl> as rkyv::Archive>::Archived: rkyv::Portable,
+    <alloc::vec::Vec<crate::ir::ActionDecl> as rkyv::Archive>::Archived: rkyv::Portable,
+    <alloc::vec::Vec<crate::ir::RngDecl> as rkyv::Archive>::Archived: rkyv::Portable,
+    <alloc::vec::Vec<volar_ir_common::TypeId> as rkyv::Archive>::Archived: rkyv::Portable,
+    <alloc::vec::Vec<volar_ir_common::Node<crate::ir::IRStmt, P>> as rkyv::Archive>::Archived: rkyv::Portable,
+    <alloc::vec::Vec<crate::ir::PreInitSegment> as rkyv::Archive>::Archived: rkyv::Portable,
+    <StepCircuitBoundary as rkyv::Archive>::Archived: rkyv::Portable,
+{}
+
+#[cfg(feature = "rkyv")]
+impl<P: Clone + rkyv::Archive> rkyv::Archive for VStepCircuit<P> {
+    type Archived = ArchivedVStepCircuit<P>;
+    type Resolver = VStepCircuitResolver<P>;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).oracles) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.oracles, resolver.oracles, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).actions) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.actions, resolver.actions, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).rngs) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.rngs, resolver.rngs, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).params) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.params, resolver.params, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).stmts) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.stmts, resolver.stmts, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).pre_init) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.pre_init, resolver.pre_init, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).boundary) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.boundary, resolver.boundary, field_out);
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<P: Clone + rkyv::Archive, S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for VStepCircuit<P>
+where
+    alloc::vec::Vec<crate::ir::OracleDecl>: rkyv::Serialize<S>,
+    alloc::vec::Vec<crate::ir::ActionDecl>: rkyv::Serialize<S>,
+    alloc::vec::Vec<crate::ir::RngDecl>: rkyv::Serialize<S>,
+    alloc::vec::Vec<volar_ir_common::TypeId>: rkyv::Serialize<S>,
+    alloc::vec::Vec<volar_ir_common::Node<crate::ir::IRStmt, P>>: rkyv::Serialize<S>,
+    alloc::vec::Vec<crate::ir::PreInitSegment>: rkyv::Serialize<S>,
+    StepCircuitBoundary: rkyv::Serialize<S>,
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(VStepCircuitResolver {
+            oracles: rkyv::Serialize::serialize(&self.oracles, serializer)?,
+            actions: rkyv::Serialize::serialize(&self.actions, serializer)?,
+            rngs: rkyv::Serialize::serialize(&self.rngs, serializer)?,
+            params: rkyv::Serialize::serialize(&self.params, serializer)?,
+            stmts: rkyv::Serialize::serialize(&self.stmts, serializer)?,
+            pre_init: rkyv::Serialize::serialize(&self.pre_init, serializer)?,
+            boundary: rkyv::Serialize::serialize(&self.boundary, serializer)?,
+        })
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<P: Clone + rkyv::Archive, D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<VStepCircuit<P>, D>
+    for ArchivedVStepCircuit<P>
+where
+    <alloc::vec::Vec<crate::ir::OracleDecl> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<crate::ir::OracleDecl>, D>,
+    <alloc::vec::Vec<crate::ir::ActionDecl> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<crate::ir::ActionDecl>, D>,
+    <alloc::vec::Vec<crate::ir::RngDecl> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<crate::ir::RngDecl>, D>,
+    <alloc::vec::Vec<volar_ir_common::TypeId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<volar_ir_common::TypeId>, D>,
+    <alloc::vec::Vec<volar_ir_common::Node<crate::ir::IRStmt, P>> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<volar_ir_common::Node<crate::ir::IRStmt, P>>, D>,
+    <alloc::vec::Vec<crate::ir::PreInitSegment> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<crate::ir::PreInitSegment>, D>,
+    <StepCircuitBoundary as rkyv::Archive>::Archived: rkyv::Deserialize<StepCircuitBoundary, D>,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<VStepCircuit<P>, D::Error> {
+        Ok(VStepCircuit {
+            oracles: rkyv::Deserialize::deserialize(&self.oracles, deserializer)?,
+            actions: rkyv::Deserialize::deserialize(&self.actions, deserializer)?,
+            rngs: rkyv::Deserialize::deserialize(&self.rngs, deserializer)?,
+            params: rkyv::Deserialize::deserialize(&self.params, deserializer)?,
+            stmts: rkyv::Deserialize::deserialize(&self.stmts, deserializer)?,
+            pre_init: rkyv::Deserialize::deserialize(&self.pre_init, deserializer)?,
+            boundary: rkyv::Deserialize::deserialize(&self.boundary, deserializer)?,
+        })
+    }
+}
+
+/// A bit-level one-step circuit with pre-initialized storage and a named transition boundary.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct BStepCircuit<P: Clone = ()> {
+    pub params: u32,
+    pub stmts: alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>>,
+    pub pre_init: alloc::vec::Vec<crate::boolar::BIrPreInitSegment>,
+    pub boundary: StepCircuitBoundary,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(rkyv::bytecheck::CheckBytes)]
+#[bytecheck(crate = rkyv::bytecheck)]
+#[repr(C)]
+pub struct ArchivedBStepCircuit<P: Clone + rkyv::Archive = ()> {
+    pub params: <u32 as rkyv::Archive>::Archived,
+    pub stmts: <alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>> as rkyv::Archive>::Archived,
+    pub pre_init: <alloc::vec::Vec<crate::boolar::BIrPreInitSegment> as rkyv::Archive>::Archived,
+    pub boundary: <StepCircuitBoundary as rkyv::Archive>::Archived,
+}
+
+#[cfg(feature = "rkyv")]
+#[allow(dead_code)]
+pub struct BStepCircuitResolver<P: Clone + rkyv::Archive = ()> {
+    params: <u32 as rkyv::Archive>::Resolver,
+    stmts: <alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>> as rkyv::Archive>::Resolver,
+    pre_init: <alloc::vec::Vec<crate::boolar::BIrPreInitSegment> as rkyv::Archive>::Resolver,
+    boundary: <StepCircuitBoundary as rkyv::Archive>::Resolver,
+}
+
+#[cfg(feature = "rkyv")]
+unsafe impl<P: Clone + rkyv::Archive> rkyv::Portable for ArchivedBStepCircuit<P>
+where
+    <u32 as rkyv::Archive>::Archived: rkyv::Portable,
+    <alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>> as rkyv::Archive>::Archived: rkyv::Portable,
+    <alloc::vec::Vec<crate::boolar::BIrPreInitSegment> as rkyv::Archive>::Archived: rkyv::Portable,
+    <StepCircuitBoundary as rkyv::Archive>::Archived: rkyv::Portable,
+{}
+
+#[cfg(feature = "rkyv")]
+impl<P: Clone + rkyv::Archive> rkyv::Archive for BStepCircuit<P> {
+    type Archived = ArchivedBStepCircuit<P>;
+    type Resolver = BStepCircuitResolver<P>;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).params) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.params, resolver.params, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).stmts) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.stmts, resolver.stmts, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).pre_init) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.pre_init, resolver.pre_init, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).boundary) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.boundary, resolver.boundary, field_out);
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<P: Clone + rkyv::Archive, S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for BStepCircuit<P>
+where
+    u32: rkyv::Serialize<S>,
+    alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>>: rkyv::Serialize<S>,
+    alloc::vec::Vec<crate::boolar::BIrPreInitSegment>: rkyv::Serialize<S>,
+    StepCircuitBoundary: rkyv::Serialize<S>,
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(BStepCircuitResolver {
+            params: rkyv::Serialize::serialize(&self.params, serializer)?,
+            stmts: rkyv::Serialize::serialize(&self.stmts, serializer)?,
+            pre_init: rkyv::Serialize::serialize(&self.pre_init, serializer)?,
+            boundary: rkyv::Serialize::serialize(&self.boundary, serializer)?,
+        })
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<P: Clone + rkyv::Archive, D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<BStepCircuit<P>, D>
+    for ArchivedBStepCircuit<P>
+where
+    <u32 as rkyv::Archive>::Archived: rkyv::Deserialize<u32, D>,
+    <alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<volar_ir_common::Node<crate::boolar::BIrStmt, P>>, D>,
+    <alloc::vec::Vec<crate::boolar::BIrPreInitSegment> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<crate::boolar::BIrPreInitSegment>, D>,
+    <StepCircuitBoundary as rkyv::Archive>::Archived: rkyv::Deserialize<StepCircuitBoundary, D>,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<BStepCircuit<P>, D::Error> {
+        Ok(BStepCircuit {
+            params: rkyv::Deserialize::deserialize(&self.params, deserializer)?,
+            stmts: rkyv::Deserialize::deserialize(&self.stmts, deserializer)?,
+            pre_init: rkyv::Deserialize::deserialize(&self.pre_init, deserializer)?,
+            boundary: rkyv::Deserialize::deserialize(&self.boundary, deserializer)?,
+        })
+    }
+}

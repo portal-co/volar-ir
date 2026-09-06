@@ -32,7 +32,7 @@ The `_ =>` arm to add depends on the pass type:
 ```rust
 _ => panic!("lower_foo: unhandled XVariant variant — add lowering for this variant"),
 ```
-Use in: `lower_ir_to_boolar`, `lower_lir`, `lower_to_circuit`, `movfuscate`, `substitute_ir`, weaver codegen.
+Use in: `lower_ir_to_boolar`, `lower_lir`, `movfuscated_to_circuit`, `movfuscate`, `substitute_ir`, weaver codegen.
 
 **Text / display / debug-dump passes** — graceful output is acceptable:
 ```rust

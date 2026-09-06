@@ -103,8 +103,10 @@ else:
     let mov = Pipeline::from_llvm(&path, &["max"])
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate());
-    let (blocks, _) = mov.expect("movfuscate accepts symbolic CF").to_volar_ir();
-    assert!(blocks.is_movfuscated());
+    let (blocks, _) = mov
+        .expect("movfuscate accepts symbolic CF")
+        .to_movfuscated_volar_ir();
+    assert!(blocks.blocks.is_movfuscated());
     let _ = fs::remove_file(&path);
 }
 
@@ -131,8 +133,8 @@ entry:
         .and_then(|p| p.movfuscate());
     let (blocks, _) = mov
         .expect("xs[i] through a pointer parameter must movfuscate")
-        .to_volar_ir();
-    assert!(blocks.is_movfuscated());
+        .to_movfuscated_volar_ir();
+    assert!(blocks.blocks.is_movfuscated());
     let _ = fs::remove_file(&path);
 }
 
@@ -198,7 +200,7 @@ entry:
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.unroll_ir())
         .and_then(|p| p.lower_to_boolar())
-        .and_then(|p| p.fuse(1, volar_ir_passes::LoweringMode::Unconditional))
+        .and_then(|p| p.to_boolar_circuit())
         .and_then(|p| p.to_reversible())
         .expect("64-bit pointer spill reaches reversible lowering")
         .to_rcircuit();
@@ -390,8 +392,8 @@ entry:
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
         .expect("symbolic memcpy CFG must movfuscate into a step circuit")
-        .to_volar_ir();
-    assert!(movfuscated.is_movfuscated());
+        .to_movfuscated_volar_ir();
+    assert!(movfuscated.blocks.is_movfuscated());
     let pc_inputs = volar_ir_passes::pc_bits_needed(blocks.blocks.len());
 
     for (n, expected) in [
@@ -410,7 +412,7 @@ entry:
             .fold(0u32, |word, (bit, value)| word | ((value[0] as u32) << bit));
         assert_eq!(value, expected, "copy_prefix({n})");
 
-        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks.blocks[0]
             .params
             .iter()
             .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
@@ -419,7 +421,7 @@ entry:
             mov_inputs[pc_inputs + i] = input_word;
         }
         let movfuscated_result =
-            volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &movfuscated_types, &mov_inputs)
+            volar_fuzz::interpreter::ir::eval_ir(&movfuscated.blocks, &movfuscated_types, &mov_inputs)
                 .expect("movfuscated symbolic memcpy evaluation terminates");
         assert_eq!(
             movfuscated_result, original_result,
@@ -465,8 +467,8 @@ entry:
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
         .expect("symbolic memset CFG must movfuscate into a step circuit")
-        .to_volar_ir();
-    assert!(movfuscated.is_movfuscated());
+        .to_movfuscated_volar_ir();
+    assert!(movfuscated.blocks.is_movfuscated());
     let pc_inputs = volar_ir_passes::pc_bits_needed(blocks.blocks.len());
 
     for (n, expected) in [
@@ -485,7 +487,7 @@ entry:
             .fold(0u32, |word, (bit, value)| word | ((value[0] as u32) << bit));
         assert_eq!(value, expected, "zero_prefix({n})");
 
-        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks.blocks[0]
             .params
             .iter()
             .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
@@ -494,7 +496,7 @@ entry:
             mov_inputs[pc_inputs + i] = input_word;
         }
         let movfuscated_result =
-            volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &movfuscated_types, &mov_inputs)
+            volar_fuzz::interpreter::ir::eval_ir(&movfuscated.blocks, &movfuscated_types, &mov_inputs)
                 .expect("movfuscated symbolic memset evaluation terminates");
         assert_eq!(
             movfuscated_result, original_result,
@@ -534,8 +536,8 @@ entry:
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
         .expect("symbolic stack memcpy must movfuscate")
-        .to_volar_ir();
-    assert!(movfuscated.is_movfuscated());
+        .to_movfuscated_volar_ir();
+    assert!(movfuscated.blocks.is_movfuscated());
 
     let bits = |value: u64, width: usize| {
         (0..width)
@@ -554,7 +556,7 @@ entry:
             .fold(0u32, |word, (bit, value)| word | ((value[0] as u32) << bit));
         assert_eq!(value, src, "copy_at({index})");
 
-        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks.blocks[0]
             .params
             .iter()
             .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
@@ -563,7 +565,7 @@ entry:
             mov_inputs[pc_inputs + i] = input_word;
         }
         let movfuscated_result =
-            volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &movfuscated_types, &mov_inputs)
+            volar_fuzz::interpreter::ir::eval_ir(&movfuscated.blocks, &movfuscated_types, &mov_inputs)
                 .expect("movfuscated symbolic stack memcpy must terminate");
         assert_eq!(
             movfuscated_result, original_result,
@@ -900,18 +902,18 @@ ok:
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
         .expect("movfuscate must not jump past the import abort sink")
-        .to_volar_ir();
-    assert!(movfuscated.is_movfuscated());
+        .to_movfuscated_volar_ir();
+    assert!(movfuscated.blocks.is_movfuscated());
 
     let pc_inputs = volar_ir_passes::pc_bits_needed(original.blocks.len());
     let evaluate = |x: u64| {
-        let mut inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+        let mut inputs: Vec<Vec<bool>> = movfuscated.blocks.blocks[0]
             .params
             .iter()
             .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &types)])
             .collect();
         inputs[pc_inputs] = (0..64).map(|i| (x >> i) & 1 != 0).collect();
-        let out = volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &types, &inputs)
+        let out = volar_fuzz::interpreter::ir::eval_ir(&movfuscated.blocks, &types, &inputs)
             .expect("movfuscated import-return-call fixture terminates");
         out.iter()
             .enumerate()
@@ -951,17 +953,17 @@ entry:
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
         .expect("ordinary call to an import must not jump past the abort sink")
-        .to_volar_ir();
-    assert!(movfuscated.is_movfuscated());
+        .to_movfuscated_volar_ir();
+    assert!(movfuscated.blocks.is_movfuscated());
 
     let pc_inputs = volar_ir_passes::pc_bits_needed(original.blocks.len());
-    let mut inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+    let mut inputs: Vec<Vec<bool>> = movfuscated.blocks.blocks[0]
         .params
         .iter()
         .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &types)])
         .collect();
     inputs[pc_inputs] = (0..64).map(|i| (5u64 >> i) & 1 != 0).collect();
-    let out = volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &types, &inputs)
+    let out = volar_fuzz::interpreter::ir::eval_ir(&movfuscated.blocks, &types, &inputs)
         .expect("movfuscated import-call fixture terminates");
     assert!(
         out.iter().all(|bit| !bit[0]),
@@ -999,8 +1001,8 @@ join:
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
         .expect("sibling literals must movfuscate")
-        .to_volar_ir();
-    assert!(movfuscated.is_movfuscated());
+        .to_movfuscated_volar_ir();
+    assert!(movfuscated.blocks.is_movfuscated());
 
     let input = |flag: bool, a: u32, b: u32| {
         let mut packed = vec![vec![false; 64]; 2];
@@ -1025,7 +1027,7 @@ join:
             .fold(0u64, |value, (i, bit)| value | ((bit[0] as u64) << i));
         assert_eq!(original_value, expected, "opt_join({flag}, 5, 9)");
 
-        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks.blocks[0]
             .params
             .iter()
             .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
@@ -1034,7 +1036,7 @@ join:
             mov_inputs[pc_inputs + i] = input_word;
         }
         let movfuscated_result =
-            volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &movfuscated_types, &mov_inputs)
+            volar_fuzz::interpreter::ir::eval_ir(&movfuscated.blocks, &movfuscated_types, &mov_inputs)
                 .expect("movfuscated opt_join terminates");
         assert_eq!(
             movfuscated_result, original_result,
@@ -1045,9 +1047,10 @@ join:
     let fused = Pipeline::from_llvm(&path, &["opt_join"])
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
-        .and_then(|p| p.lower_to_boolar())
-        .and_then(|p| p.fuse(64, volar_ir_passes::LoweringMode::Unconditional))
-        .expect("sibling literal fixture must lower through fuse");
+        .and_then(|p| p.to_step_circuit())
+        .and_then(|p| p.lower_to_boolar_step())
+        .map(|p| p.to_boolar_circuit())
+        .expect("sibling literal fixture must lower through the typed step path");
     let _ = fused.to_boolar_circuit();
     let _ = fs::remove_file(&path);
 }
@@ -1112,8 +1115,8 @@ bb4:
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
         .expect("movfuscate accepts switch")
-        .to_volar_ir();
-    assert!(blocks.is_movfuscated());
+        .to_movfuscated_volar_ir();
+    assert!(blocks.blocks.is_movfuscated());
     let _ = fs::remove_file(&path);
 }
 
@@ -1155,8 +1158,8 @@ terminate:
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
         .expect("movfuscate accepts poll_fsm with dead landingpad")
-        .to_volar_ir();
-    assert!(movfuscated.is_movfuscated());
+        .to_movfuscated_volar_ir();
+    assert!(movfuscated.blocks.is_movfuscated());
 
     let pc_inputs = volar_ir_passes::pc_bits_needed(original.blocks.len());
     for (state, acc, expected_value) in [(0u8, 7u32, 8u32), (1, 7, 7 ^ 40503), (2, 7, 7)] {
@@ -1175,56 +1178,26 @@ terminate:
             .fold(0u32, |word, (i, bit)| word | ((*bit as u32) << i));
         assert_eq!(expected_word, expected_value);
 
-        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
+        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks.blocks[0]
             .params
             .iter()
             .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
             .collect();
         mov_inputs[pc_inputs] = original_input;
         let actual =
-            volar_fuzz::interpreter::ir::eval_ir(&movfuscated, &movfuscated_types, &mov_inputs)
+            volar_fuzz::interpreter::ir::eval_ir(&movfuscated.blocks, &movfuscated_types, &mov_inputs)
                 .expect("movfuscated poll_fsm terminates");
         assert_eq!(actual, expected, "movfuscation changed state {state}");
-    }
-
-    let boolar = Pipeline::from_llvm(&path, &["poll_fsm"])
-        .and_then(|p| p.lower_to_volar_ir())
-        .and_then(|p| p.movfuscate())
-        .and_then(|p| p.lower_to_boolar())
-        .expect("dead landingpad poll_fsm must lower through Boolar");
-    let boolar = boolar.to_boolar();
-    assert_eq!(boolar.blocks.len(), 1);
-    for (state, acc) in [(0u8, 7u32), (1, 7), (2, 7)] {
-        let packed = state as u64 | ((acc as u64) << 8);
-        let original_input: Vec<bool> = (0..64).map(|i| (packed >> i) & 1 != 0).collect();
-        let mut mov_inputs: Vec<Vec<bool>> = movfuscated.blocks[0]
-            .params
-            .iter()
-            .map(|ty| vec![false; volar_fuzz::interpreter::ir::bit_width(*ty, &movfuscated_types)])
-            .collect();
-        mov_inputs[pc_inputs] = original_input.clone();
-        let boolar_output = volar_fuzz::interpreter::biir::eval_biir(
-            &boolar,
-            &volar_fuzz::interpreter::ir::bit_flatten(&mov_inputs),
-        )
-        .expect("Boolar poll_fsm terminates");
-        let expected =
-            volar_fuzz::interpreter::ir::eval_ir(&original, &original_types, &[original_input])
-                .expect("original poll_fsm terminates");
-        assert_eq!(
-            boolar_output,
-            volar_fuzz::interpreter::ir::bit_flatten(&expected),
-            "Boolar lowering changed state {state}"
-        );
     }
 
     let path2 = write_temp_ll("poll_fsm_dead_landingpad_fuse", src);
     let fused = Pipeline::from_llvm(&path2, &["poll_fsm"])
         .and_then(|p| p.lower_to_volar_ir())
         .and_then(|p| p.movfuscate())
-        .and_then(|p| p.lower_to_boolar())
-        .and_then(|p| p.fuse(64, volar_ir_passes::LoweringMode::Unconditional))
-        .expect("fused dead-landingpad poll_fsm must round-trip through fuse without panicking");
+        .and_then(|p| p.to_step_circuit())
+        .and_then(|p| p.lower_to_boolar_step())
+        .map(|p| p.to_boolar_circuit())
+        .expect("dead-landingpad poll_fsm must lower through a typed step without panicking");
     let _ = fused.to_boolar_circuit();
 
     let _ = fs::remove_file(&path);

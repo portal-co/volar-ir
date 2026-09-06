@@ -198,7 +198,7 @@ pub fn eval_ir_circuit_step(
 /// every var id in `watch` (silently omitted if that id never got a
 /// value this step -- e.g. dead code eliminated it). Temporary
 /// diagnostic entry point: combine with [`crate`]-level `IRVarId`s
-/// resolved via `movfuscate::movfuscate_ir_with_boundary_and_watch`'s own
+/// resolved via `MovfuscationWatchMap` from the movfuscation run's own
 /// `(orig_block_idx, orig_var_id) -> combined_var_id` resolution, to
 /// trace an arbitrary pre-movfuscation value's real bit values across a
 /// running simulation without re-deriving where it landed by hand.

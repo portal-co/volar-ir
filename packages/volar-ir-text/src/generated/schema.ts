@@ -203,6 +203,26 @@ export interface BCircuit<P = unknown> {
   readonly pre_init: ReadonlyArray<BIrPreInitSegment>;
   readonly outputs: ReadonlyArray<IRVarId>;
 }
+export interface StepCircuitBoundary {
+  readonly terminated: IRVarId;
+  readonly next_state: ReadonlyArray<IRVarId>;
+  readonly return_values: ReadonlyArray<IRVarId>;
+}
+export interface VStepCircuit<P = unknown> {
+  readonly oracles: ReadonlyArray<OracleDecl>;
+  readonly actions: ReadonlyArray<ActionDecl>;
+  readonly rngs: ReadonlyArray<RngDecl>;
+  readonly params: ReadonlyArray<TypeId>;
+  readonly stmts: ReadonlyArray<IrNode<unknown, P>>;
+  readonly pre_init: ReadonlyArray<PreInitSegment>;
+  readonly boundary: StepCircuitBoundary;
+}
+export interface BStepCircuit<P = unknown> {
+  readonly params: bigint;
+  readonly stmts: ReadonlyArray<IrNode<unknown, P>>;
+  readonly pre_init: ReadonlyArray<BIrPreInitSegment>;
+  readonly boundary: StepCircuitBoundary;
+}
 export interface BStmtChunk<P = unknown> {
   readonly first: bigint;
   readonly stmts: ReadonlyArray<IrNode<unknown, P>>;

@@ -1,5 +1,8 @@
 # Plan: Typed Gadgets, Higher-Level IR Gadgets, and Region Threading Through Passes
 
+> **Historical note:** typed gadget regions now cross `terminated` and
+> `next_state` through the one-step boundary in [`pipeline.md`](pipeline.md).
+
 **Status:** Landed — Phases 1–4 implemented (Phase 5 doc updates: this file).
 Deviations from the draft below:
 

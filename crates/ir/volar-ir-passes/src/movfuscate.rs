@@ -334,12 +334,9 @@ impl<'a, C: MovfuscCtx + ?Sized> crate::dispatch_accumulator::DispatchBitPrimiti
 /// -- the accumulation phase (or a combiner reproducing it) becomes that
 /// function's caller.
 ///
-/// Only meaningful for a circuit produced with `limit == 1` in a
-/// subsequent `lower_to_circuit_ir` call: that's the only case where
-/// `lower_to_circuit_ir`'s own var-id numbering for the unrolled output is
-/// guaranteed identical to the movfuscated input's (identity `var_map` for
-/// one iteration) -- these ranges do not (yet) account for the renumbering
-/// `lower_to_circuit_ir` does when unrolling more than once.
+/// The typed one-step circuit pass preserves these ids by cloning the
+/// movfuscated body once and appending only its transition selectors. They
+/// are therefore stable for the named boundary and watch-map carriers.
 #[derive(Clone, Debug)]
 pub struct MovfuscBlockBoundary {
     pub start: u32,
@@ -2882,24 +2879,86 @@ pub fn movfuscate_ir_with_boundary<P: Clone>(
     (result, boundaries, accum_info)
 }
 
-/// Like [`movfuscate_ir_with_boundary`], but also resolves each
-/// `(orig_block_idx, orig_var_id)` pair in `watch` to its own combined-
-/// circuit var id (see [`movfuscate`]'s own doc comment on `watch`).
-/// Temporary diagnostic entry point: lets a caller trace an arbitrary
-/// pre-movfuscation value's runtime bit values via `eval_ir_circuit_step`
-/// without re-deriving where it landed in the combined block by hand.
-pub fn movfuscate_ir_with_boundary_and_watch<P: Clone>(
+/// Movfuscate while retaining the boundary/accumulation metadata and a typed
+/// source-value watch map for the next state-transition lowering.
+pub fn movfuscate_ir_with_metadata<P: Clone>(
     blocks: &IRBlocks<P>,
     types: &mut IRTypes,
-    watch: &[(usize, u32)],
-) -> (
-    IRBlocks<P>,
-    Vec<MovfuscBlockBoundary>,
-    MovfuscAccumInfo,
-    Vec<(usize, u32, u32)>,
-) {
+    watchlist: &crate::movfuscated_to_circuit::MovfuscationWatchlist,
+) -> Result<
+    crate::movfuscated_to_circuit::MovfuscatedProgram<P>,
+    crate::movfuscated_to_circuit::MovfuscatedToCircuitError,
+> {
+    movfuscate_ir_with_metadata_impl(blocks, types, watchlist, None)
+}
+
+/// As [`movfuscate_ir_with_metadata`], with provenance for synthetic
+/// movfuscation statements when the source program is statement-free.
+pub fn movfuscate_ir_with_metadata_and_control_provenance<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &mut IRTypes,
+    watchlist: &crate::movfuscated_to_circuit::MovfuscationWatchlist,
+    control_prov: &P,
+) -> Result<
+    crate::movfuscated_to_circuit::MovfuscatedProgram<P>,
+    crate::movfuscated_to_circuit::MovfuscatedToCircuitError,
+> {
+    movfuscate_ir_with_metadata_impl(blocks, types, watchlist, Some(control_prov))
+}
+
+fn movfuscate_ir_with_metadata_impl<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &mut IRTypes,
+    watchlist: &crate::movfuscated_to_circuit::MovfuscationWatchlist,
+    control_prov: Option<&P>,
+) -> Result<
+    crate::movfuscated_to_circuit::MovfuscatedProgram<P>,
+    crate::movfuscated_to_circuit::MovfuscatedToCircuitError,
+> {
+    if control_prov.is_none()
+        && blocks.blocks.len() > 1
+        && blocks.blocks.iter().all(|block| block.stmts.is_empty())
+    {
+        return Err(crate::movfuscated_to_circuit::MovfuscatedToCircuitError::MissingControlProvenance);
+    }
+    for watch in &watchlist.values {
+        let Some(block) = blocks.blocks.get(watch.block) else {
+            return Err(crate::movfuscated_to_circuit::MovfuscatedToCircuitError::UnknownSourceWatch {
+                block: watch.block,
+                var: watch.var.0,
+            });
+        };
+        if watch.var.0 as usize >= block.params.len() + block.stmts.len() {
+            return Err(crate::movfuscated_to_circuit::MovfuscatedToCircuitError::UnknownSourceWatch {
+                block: watch.block,
+                var: watch.var.0,
+            });
+        }
+    }
+    let watch: Vec<(usize, u32)> = watchlist
+        .values
+        .iter()
+        .map(|entry| (entry.block, entry.var.0))
+        .collect();
     let mut working = blocks.clone();
-    movfuscate_ir_impl(&mut working, types, watch, None)
+    let (blocks, boundaries, accumulation, raw_watches) =
+        movfuscate_ir_impl(&mut working, types, &watch, control_prov);
+    let entries = raw_watches
+        .into_iter()
+        .map(|(block, var, combined)| (
+            crate::movfuscated_to_circuit::MovfuscationWatch {
+                block,
+                var: IRVarId(var),
+            },
+            IRVarId(combined),
+        ))
+        .collect();
+    Ok(crate::movfuscated_to_circuit::MovfuscatedProgram {
+        blocks,
+        boundaries,
+        accumulation,
+        watches: crate::movfuscated_to_circuit::MovfuscationWatchMap { entries },
+    })
 }
 
 /// Diagnostic (temporary, not used by any real pipeline): dumps
