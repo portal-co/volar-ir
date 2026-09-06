@@ -1680,7 +1680,7 @@ mod batch_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 },
                     },
                     (),
@@ -1689,7 +1689,7 @@ mod batch_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, c], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 },
                     },
                     (),
@@ -1749,7 +1749,7 @@ mod batch_tests {
         let merge_var = IRVarId(3); // Merge is the first new statement -> var (n_params + 0)
         assert_eq!(
             wide_coeffs,
-            BTreeMap::from([(alloc::vec![a, merge_var], 1u8)]),
+            PolyCoeffs::from_iter([(alloc::vec![a, merge_var], 1u8)]),
             "wide Poly must keep the SHARED operand `a` broadcast and reference the merged wide value in place of the varying one"
         );
 
@@ -1808,7 +1808,7 @@ mod batch_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 }
                     },
                     (),
@@ -1817,7 +1817,7 @@ mod batch_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, c], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 }
                     },
                     (),
@@ -1826,7 +1826,7 @@ mod batch_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![d, e], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![d, e], 1u8)]),
                         constant: Constant { hi: 0, lo: 1 }
                     },
                     (),
@@ -1857,7 +1857,7 @@ mod batch_tests {
             } => {
                 assert_eq!(
                     coeffs,
-                    &BTreeMap::from([(alloc::vec![d, e], 1u8)]),
+                    &PolyCoeffs::from_iter([(alloc::vec![d, e], 1u8)]),
                     "the unrelated Poly's own coeffs must survive verbatim"
                 );
                 assert_eq!(*constant, Constant { hi: 0, lo: 1 });
@@ -1880,7 +1880,7 @@ mod batch_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 }
                     },
                     (),
@@ -1889,7 +1889,7 @@ mod batch_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([
+                        coeffs: PolyCoeffs::from_iter([
                             (alloc::vec![a, c], 1u8),
                             (alloc::vec![b, c], 1u8)
                         ]),
@@ -1941,7 +1941,7 @@ mod cse_tests {
         let b = IRVarId(1);
         let and_poly = || Stmt::Poly {
             ty: bit(),
-            coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+            coeffs: PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
             constant: Constant { hi: 0, lo: 0 },
         };
         let block = IRBlock {
@@ -1954,7 +1954,7 @@ mod cse_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![IRVarId(3)], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![IRVarId(3)], 1u8)]),
                         constant: Constant { hi: 0, lo: 1 },
                     },
                     (),
@@ -1981,7 +1981,7 @@ mod cse_tests {
         );
         match &stmts[0].kind {
             Stmt::Poly { coeffs, .. } => {
-                assert_eq!(coeffs, &BTreeMap::from([(alloc::vec![a, b], 1u8)]))
+                assert_eq!(coeffs, &PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]))
             }
             other => panic!("expected the surviving a·b Poly at position 0, got {other:?}"),
         }
@@ -1991,7 +1991,7 @@ mod cse_tests {
             // (originally var 3) must have been remapped, not left
             // dangling.
             Stmt::Poly { coeffs, .. } => {
-                assert_eq!(coeffs, &BTreeMap::from([(alloc::vec![IRVarId(2)], 1u8)]))
+                assert_eq!(coeffs, &PolyCoeffs::from_iter([(alloc::vec![IRVarId(2)], 1u8)]))
             }
             other => panic!("expected the consumer Poly at position 1, got {other:?}"),
         }
@@ -2018,7 +2018,7 @@ mod cse_tests {
         let b = IRVarId(1);
         let and_poly = || Stmt::Poly {
             ty: bit(),
-            coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+            coeffs: PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
             constant: Constant { hi: 0, lo: 0 },
         };
         let block = IRBlock {
@@ -2031,7 +2031,7 @@ mod cse_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([
+                        coeffs: PolyCoeffs::from_iter([
                             (alloc::vec![IRVarId(2)], 1u8),
                             (alloc::vec![IRVarId(3)], 1u8)
                         ]),
@@ -2081,7 +2081,7 @@ mod cse_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 }
                     },
                     (),
@@ -2164,7 +2164,7 @@ mod cse_tests {
         let b = IRVarId(1);
         let and_poly = || Stmt::Poly {
             ty: bit(),
-            coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+            coeffs: PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
             constant: Constant { hi: 0, lo: 0 },
         };
         let block = IRBlock {
@@ -2228,7 +2228,7 @@ mod cse_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 }
                     },
                     (),
@@ -2237,7 +2237,7 @@ mod cse_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, c], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 }
                     },
                     (),
@@ -2295,7 +2295,7 @@ mod hoist_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 }
                     },
                     (),
@@ -2305,7 +2305,7 @@ mod hoist_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, c], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, c], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 }
                     },
                     (),
@@ -2314,7 +2314,7 @@ mod hoist_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![IRVarId(5)], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![IRVarId(5)], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 }
                     },
                     (),
@@ -2347,7 +2347,7 @@ mod hoist_tests {
         match &stmts[0].kind {
             Stmt::Poly { coeffs, .. } => assert_eq!(
                 coeffs,
-                &BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                &PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
                 "region-0 statement stays first"
             ),
             other => panic!("expected a·b first, got {other:?}"),
@@ -2355,7 +2355,7 @@ mod hoist_tests {
         match &stmts[1].kind {
             Stmt::Poly { coeffs, .. } => assert_eq!(
                 coeffs,
-                &BTreeMap::from([(alloc::vec![a, c], 1u8)]),
+                &PolyCoeffs::from_iter([(alloc::vec![a, c], 1u8)]),
                 "the multi-region a·c must be hoisted to position 1, ahead of the unrelated Const"
             ),
             other => panic!("expected the hoisted a·c at position 1, got {other:?}"),
@@ -2371,7 +2371,7 @@ mod hoist_tests {
         match &stmts[3].kind {
             Stmt::Poly { coeffs, .. } => assert_eq!(
                 coeffs,
-                &BTreeMap::from([(alloc::vec![IRVarId(4)], 1u8)]),
+                &PolyCoeffs::from_iter([(alloc::vec![IRVarId(4)], 1u8)]),
                 "the consumer's own reference to a·c must be remapped to a·c's new var id (4)"
             ),
             other => panic!("expected the consumer Poly last, got {other:?}"),
@@ -2424,7 +2424,7 @@ mod hoist_tests {
                 Node::new(
                     Stmt::Poly {
                         ty: bit(),
-                        coeffs: BTreeMap::from([(alloc::vec![a, b], 1u8)]),
+                        coeffs: PolyCoeffs::from_iter([(alloc::vec![a, b], 1u8)]),
                         constant: Constant { hi: 0, lo: 0 }
                     },
                     (),
