@@ -35,8 +35,10 @@ IrModule<()>
 LirTarget::set_prov(prov)   // emitted instructions inherit current prov
   ↓  lower to Volar IR
 IRBlocks<P>  /  BIrBlocks<P>
-  ↓  movfuscate / lower_to_circuit
-BIrBlocks<P>                // provenance preserved through transforms
+  ↓  movfuscate / movfuscated_to_circuit
+VStepCircuit<P>             // provenance and side tags preserved through the typed transition
+  ↓  lower_vstep_to_bstep
+BStepCircuit<P>
   ↓  weave
 IrModule<Q>                 // P → Q via ProvenanceHandler
   ↓  print

@@ -12,11 +12,13 @@ use alloc::vec::Vec;
 use volar_ir_common::Node;
 
 mod generated;
-pub use generated::{BCircuit, VCircuit};
+pub use generated::{BCircuit, BStepCircuit, StepCircuitBoundary, VCircuit, VStepCircuit};
 
 use crate::{
     boolar::{BIrBlock, BIrBlocks, BIrStmt},
-    ir::{IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId, IRVarId},
+    ir::{
+        IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId, IRVarId,
+    },
 };
 
 /// Why an [`IRBlocks`] / [`BIrBlocks`] could not be fused into a circuit.
@@ -319,6 +321,133 @@ impl<P: Clone> TryFrom<&BIrBlocks<P>> for BCircuit<P> {
 impl<P: Clone> From<BCircuit<P>> for BIrBlocks<P> {
     fn from(circuit: BCircuit<P>) -> Self {
         circuit.to_bir_blocks()
+    }
+}
+
+// ============================================================================
+// Stateful step circuits
+// ============================================================================
+
+impl<P: Clone> VStepCircuit<P> {
+    /// Return the compatibility ordering used when lowering this typed step to
+    /// an ordinary single-block circuit.
+    pub fn outputs(&self) -> Vec<IRVarId> {
+        let mut outputs = Vec::with_capacity(
+            1 + self.boundary.next_state.len() + self.boundary.return_values.len(),
+        );
+        outputs.push(self.boundary.terminated);
+        outputs.extend_from_slice(&self.boundary.next_state);
+        outputs.extend_from_slice(&self.boundary.return_values);
+        outputs
+    }
+
+    /// Convert to the general Volar representation without losing module
+    /// declarations or the explicitly preserved pre-init state.
+    pub fn to_ir_blocks(self) -> IRBlocks<P> {
+        let outputs = {
+            let mut outputs = Vec::with_capacity(
+                1 + self.boundary.next_state.len() + self.boundary.return_values.len(),
+            );
+            outputs.push(self.boundary.terminated);
+            outputs.extend_from_slice(&self.boundary.next_state);
+            outputs.extend_from_slice(&self.boundary.return_values);
+            outputs
+        };
+        IRBlocks {
+            oracles: self.oracles,
+            actions: self.actions,
+            rngs: self.rngs,
+            blocks: alloc::vec![IRBlock {
+                params: self.params,
+                stmts: self.stmts,
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, outputs),
+                },
+            }],
+            pre_init: self.pre_init,
+        }
+    }
+
+    /// Map provenance while retaining the state-transition boundary and all
+    /// declaration state unchanged.
+    pub fn map_prov_with_handler<H: crate::ProvenanceHandler<P>>(
+        self,
+        handler: &H,
+    ) -> VStepCircuit<H::Output> {
+        VStepCircuit {
+            oracles: self.oracles,
+            actions: self.actions,
+            rngs: self.rngs,
+            params: self.params,
+            stmts: self
+                .stmts
+                .into_iter()
+                .map(|n| n.map_prov(|p| handler.map(&p)))
+                .collect(),
+            pre_init: self.pre_init,
+            boundary: self.boundary,
+        }
+    }
+}
+
+impl<P: Clone> BStepCircuit<P> {
+    /// Return the compatibility ordering `[terminated, next_state...,
+    /// return_values...]`.
+    pub fn outputs(&self) -> Vec<IRVarId> {
+        let mut outputs = Vec::with_capacity(
+            1 + self.boundary.next_state.len() + self.boundary.return_values.len(),
+        );
+        outputs.push(self.boundary.terminated);
+        outputs.extend_from_slice(&self.boundary.next_state);
+        outputs.extend_from_slice(&self.boundary.return_values);
+        outputs
+    }
+
+    /// Convert to a general Boolar block for evaluation or legacy consumers.
+    pub fn to_bir_blocks(self) -> BIrBlocks<P> {
+        use crate::boolar::{BIrTarget, BIrTerminator};
+        let outputs = self.outputs();
+        BIrBlocks {
+            blocks: alloc::vec![BIrBlock {
+                params: self.params,
+                stmts: self.stmts,
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: outputs,
+                }),
+            }],
+            pre_init: self.pre_init,
+        }
+    }
+
+    /// Convert to the existing fused Boolar type. This is an explicit ABI
+    /// flattening step; callers that drive a state machine should retain the
+    /// [`BStepCircuit`] instead.
+    pub fn to_b_circuit(self) -> BCircuit<P> {
+        let outputs = self.outputs();
+        BCircuit {
+            params: self.params,
+            stmts: self.stmts,
+            pre_init: self.pre_init,
+            outputs,
+        }
+    }
+
+    /// Map provenance without changing the transition boundary.
+    pub fn map_prov_with_handler<H: crate::ProvenanceHandler<P>>(
+        self,
+        handler: &H,
+    ) -> BStepCircuit<H::Output> {
+        BStepCircuit {
+            params: self.params,
+            stmts: self
+                .stmts
+                .into_iter()
+                .map(|n| n.map_prov(|p| handler.map(&p)))
+                .collect(),
+            pre_init: self.pre_init,
+            boundary: self.boundary,
+        }
     }
 }
 

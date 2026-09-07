@@ -1,6 +1,7 @@
 # Agent Context: Boolar IR vs. Volar IR — conflict log, and Boolar IR's status
 
-**Load this when:** touching `volar-ir-passes` (movfuscation, `lower_to_circuit`),
+**Load this when:** touching `volar-ir-passes` (movfuscation or the typed
+movfuscated-to-circuit step),
 `volar-weaver/src/vole.rs`, or any other shared pass/weaver code that has to
 serve both `BIrBlocks` (Boolar IR) and `IRBlocks` (Volar IR).
 
@@ -41,24 +42,19 @@ working for existing callers via thin shims, not extended.
 
 ## Conflict log
 
-### 1. `movfuscate`/`lower_to_circuit`: width-1 assumption in `dispatch_accumulator`-adjacent code
+### 1. Typed movfuscated step: width-aware core, Boolar adapter only
 
-**Symptom:** The existing `lower_to_circuit` (BIrBlocks-only) and its
-private `emit_mux`/`emit_or` helpers assume every wire is a single Bit —
-correct for Boolar IR, wrong for Volar IR's typed (possibly wide) state
-slots.
+**Symptom:** A circuit seam written directly for `BIrBlocks` can silently
+lose typed state, declarations, or watch mappings because every Boolar value
+is one bit.
 
-**Resolution:** Not a shim — a clean parallel addition. Added
-`movfuscate_ir`/`lower_to_circuit_ir` as new, separate functions
-(`crates/ir/volar-ir-passes/src/movfuscate.rs`,
-`crates/ir/volar-ir-passes/src/lower_to_circuit.rs`) reusing the
-*already width-generic* free functions in `dispatch_accumulator.rs`
-(`emit_select_bit`/`emit_select_slot`, parameterized by
-`DispatchBitPrimitives`/`DispatchSlotPrimitives::SlotTy`). No conflict —
-`dispatch_accumulator.rs` was already the right level of genericity;
-Boolar IR's `lower_to_circuit`/`movfuscate` are untouched.
+**Resolution:** `movfuscated_to_circuit.rs` is a fallible, width-aware Volar
+core emitting `VStepCircuit { terminated, next_state, return_values }`. The
+only Boolar route is `lower_vstep_to_bstep`, using the same `LoweredTables`
+allocation run for boundary and watch bits. `dispatch_accumulator.rs`
+remains the generic selector implementation.
 
-**Status:** Resolved by addition, no shim needed, no Boolar IR code touched.
+**Status:** Resolved; no Boolar-only circuit lowering or compatibility shim.
 
 ### 2. `VoleIrCtx::emit_poly`/`operand_lane`: width-1 assumption in the VOLE weaver's `Poly` handling
 

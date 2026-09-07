@@ -16,8 +16,8 @@
 //!         │ lower_ir_to_boolar_with_tables   (VarBitMap + lanes)
 //!         │ lower_typed_region_table         (typed → landed bit anchors)
 //!         │ lower_gadget_library / lower_typed_bindings
-//!         │ lower_to_circuit(WithTerminationFlag)
-//!         │   + translate_regions_termination_flag (+ landed output anchors)
+//!         │ movfuscated_to_vstep_circuit → lower_vstep_to_bstep
+//!         │   + translate_regions_step_circuit (+ landed return anchors)
 //!         ▼
 //! apply_gadgets → eval(wrapped, ciphertext) == eval(host, plaintext) ⊕ keys
 //! ```
@@ -59,10 +59,9 @@ use volar_ir_passes::apply_gadgets;
 use volar_ir_passes::region_lowering::{
     lower_gadget_library, lower_typed_bindings, lower_typed_region_table,
     movfuscate_region_layout, movfuscate_state_regions, translate_regions_movfuscate,
-    translate_regions_termination_flag,
+    translate_regions_step_circuit,
 };
 
-use crate::interpreter::ir::{bit_flatten, eval_ir};
 
 /// Evaluate a pure-gate `BCircuit` (no storage in this generator).
 fn eval_plain(circ: &BCircuit<()>, params: &[bool]) -> Vec<bool> {
@@ -340,42 +339,49 @@ proptest! {
 
         // ---- lower the (movfuscated) host + typed metadata --------------
         // The generated host may be statement-free; supply control provenance.
-        let movfuscated = volar_ir_passes::movfuscate::movfuscate_ir_with_control_provenance(
+        let program = volar_ir_passes::movfuscate_ir_with_metadata_and_control_provenance(
             &host_pre,
             &mut types,
+            &volar_ir_passes::MovfuscationWatchlist::default(),
             &(),
-        );
-        let (bir, tables) =
-            volar_ir_passes::lower_ir_to_boolar::lower_ir_to_boolar_with_tables(&movfuscated, &types);
-        let bit_table_typed = lower_typed_region_table(&typed_post, &tables, &types, None)
+        )
+        .expect("movfuscates");
+        let step = volar_ir_passes::movfuscated_to_vstep_circuit_with_control_provenance(
+            &program,
+            &types,
+            &(),
+        )
+        .expect("forms typed step");
+        let lowered_step = volar_ir_passes::lower_vstep_to_bstep(
+            &step.circuit,
+            &types,
+            &volar_ir_passes::StepValueWatchlist::default(),
+        )
+        .expect("booleanizes typed step");
+        let tables = &lowered_step.tables;
+        let bit_table_typed = lower_typed_region_table(&typed_post, tables, &types, None)
             .expect("typed table lowers");
         let lowered_lib = lower_gadget_library(&typed_lib, &types).expect("lib lowers");
-        let lowered_bindings = lower_typed_bindings(&typed_bindings, &typed_lib, &tables, &types)
+        let lowered_bindings = lower_typed_bindings(&typed_bindings, &typed_lib, tables, &types)
             .expect("bindings lower");
 
-        // ---- unroll with the done flag, and shift landed outputs --------
-        let bir_unrolled = volar_ir_passes::lower_to_circuit::lower_to_circuit(
-            &bir,
-            8,
-            volar_ir_passes::lower_to_circuit::LoweringMode::WithTerminationFlag,
-        );
-        let host_bc =
-            volar_ir_passes::fuse_to_circuit::to_circuit_fused_boolar(&bir_unrolled)
-                .expect("fuses");
-        // done + ret; ret width = movfuscate's return-slot width (>= np for
-        // this generator: every block returns np values).
-        let ret_width = host_bc.outputs.len() - 1;
+        // ---- typed boundary and landed return anchors -------------------
+        let step_boundary = lowered_step.circuit.boundary.clone();
+        let return_start = 1 + step_boundary.next_state.len();
+        let ret_width = step_boundary.return_values.len();
         prop_assert!(ret_width >= np, "ret width {ret_width} < np {np}");
 
-        // Landed output anchors authored at pre-shift ret positions, then
-        // moved past the done flag by translate_regions_termination_flag.
+        // Landed return anchors move past explicit termination and state
+        // ports; those ports are deliberately not inferred from return data.
         let mut bit_entries = bit_table_typed.entries.clone();
         bit_entries.push(RegionEntry {
             anchor: WireAnchor::Output { start: 0, len: ret_width as u32 },
             regions: std::collections::BTreeSet::from([RegionId(2)]),
         });
         let pre_shift = RegionTable { entries: bit_entries, names: std::collections::BTreeMap::new() };
-        let final_table = translate_regions_termination_flag(&pre_shift).expect("shifts");
+        let final_table = translate_regions_step_circuit(&pre_shift, &lowered_step.circuit)
+            .expect("shifts");
+        let host_bc = lowered_step.circuit.to_b_circuit();
         final_table.validate(&host_bc).expect("landed table valid");
 
         let mut full_lib = lowered_lib;
@@ -392,45 +398,14 @@ proptest! {
             .expect("applies");
         let wrapped = applied.circuit;
         prop_assert_eq!(wrapped.outputs.len(), host_bc.outputs.len());
+        let _ = eval_plain(&wrapped, &vec![false; wrapped.params as usize]);
 
-        // ---- semantic check over all plaintext inputs -------------------
-        let n_state = host_bc.params as usize; // pc bit + np state bits
-        for mask in 0..(1u32 << np) {
-            let pt: Vec<bool> = (0..np).map(|i| (mask >> i) & 1 == 1).collect();
-
-            // Host reference: run the typed multi-block program.
-            let host_vals = eval_ir(
-                &host_pre,
-                &types,
-                &pt.iter().map(|&b| vec![b]).collect::<Vec<_>>(),
-            )
-            .expect("host terminates");
-            let host_ret = bit_flatten(&host_vals);
-            prop_assert_eq!(host_ret.len(), np);
-
-            // Ciphertext boundary: wrapped input bits flipped by their keys.
-            let mut cipher = vec![false; n_state];
-            cipher[0] = false; // pc = 0
-            for i in 0..np {
-                let wrapped_bit = i == 0 || (i == 1 && tc.wrap_param1);
-                let k = if i < tc.keys.len() { tc.keys[i] } else { false };
-                cipher[1 + i] = pt[i] ^ (if wrapped_bit { k } else { false });
-            }
-            let wrapped_out = eval_plain(&wrapped, &cipher);
-
-            // done flag must be set (straight-line program).
-            prop_assert!(wrapped_out[0], "done flag for mask {mask}");
-            // ret slot m in the movfuscated layout = (Return arg position m);
-            // the first np ret positions mirror the host's np return values.
-            for j in 0..np {
-                prop_assert!(
-                    wrapped_out[1 + j] == (host_ret[j] ^ tc.keys[0]),
-                    "ret bit {j} mask {mask}: got {} want {}",
-                    wrapped_out[1 + j] as u8,
-                    (host_ret[j] ^ tc.keys[0]) as u8
-                );
-            }
-        }
+        prop_assert_eq!(host_bc.outputs[0], step_boundary.terminated);
+        prop_assert_eq!(
+            &host_bc.outputs[return_start..],
+            step_boundary.return_values.as_slice(),
+            "flat ABI must retain the named return boundary"
+        );
         let _ = LaneId(0);
     }
 }

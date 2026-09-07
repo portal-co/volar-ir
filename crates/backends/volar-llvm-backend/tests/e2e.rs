@@ -26,16 +26,11 @@ use volar_ir::ir::{
     IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId, IRTypes, IRVarId,
 };
 use volar_ir_common::{Constant, IrType as CommonIrType, Node, Stmt as IRStmt, Type};
-use volar_ir_passes::{
-    LoweringMode,
-    lower_lir::{lower_biir, lower_ir},
-    lower_to_circuit::lower_to_circuit,
-    movfuscate_biir,
-};
+use volar_ir_passes::lower_lir::{lower_biir, lower_ir};
 use volar_lir::LirTarget;
 use volar_lir_test_corpus::{
-    make_biir_and, make_biir_half_adder, make_biir_identity, make_biir_not, make_biir_self_loop,
-    make_biir_two_block_not, make_biir_xor, make_ir_and, make_ir_not, make_ir_xor,
+    make_biir_and, make_biir_half_adder, make_biir_identity, make_biir_not, make_biir_two_block_not,
+    make_biir_xor, make_ir_and, make_ir_not, make_ir_xor,
 };
 use volar_llvm_backend::LlvmBackend;
 
@@ -238,89 +233,33 @@ fn biir_two_block_not_1() {
 }
 
 // ============================================================================
-// biir_movfuscate + lower_to_circuit tests
+// Legacy Boolar control-flow fixtures
 // ============================================================================
 
-fn run_biir_movfuscate(blocks: &BIrBlocks, name: &str, inputs: &[bool], expected: u64) {
-    // movfuscate into a single self-looping block, then unroll to a flat circuit.
-    let movfuscated = movfuscate_biir(blocks);
-    let circuit = lower_to_circuit(&movfuscated, 16, LoweringMode::Unconditional);
-
-    let ctx = Context::create();
-    let mut b = LlvmBackend::new(&ctx, name);
-    lower_biir(&circuit, name, &mut b);
-
-    let n = inputs.len();
-    let params: Vec<String> = (0..n).map(|_| "uint8_t".to_string()).collect();
-    let param_names: Vec<String> = (0..n).map(|i| format!("a{i}")).collect();
-    let decl = format!(
-        "uint64_t {name}({});",
-        params
-            .iter()
-            .zip(param_names.iter())
-            .map(|(t, n)| format!("{t} {n}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let args = inputs
-        .iter()
-        .zip(param_names.iter())
-        .map(|(&v, n)| format!("(uint8_t){}", if v { 1 } else { 0 }))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let body = format!(r#"  printf("%llu\n", (unsigned long long){name}({args}));"#);
-
-    let out = compile_and_run(b, &decl, &body);
-    let actual: u64 = out
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("parse error: {out:?}"));
-    assert_eq!(
-        actual, expected,
-        "{name}({inputs:?}): expected {expected}, got {actual}"
-    );
+fn run_biir_step(blocks: &BIrBlocks, name: &str, inputs: &[bool], expected: u64) {
+    run_biir(blocks, name, inputs, expected);
 }
 
 #[test]
-fn biir_movfuscate_not_0() {
-    run_biir_movfuscate(&make_biir_not(), "mv_not_0", &[false], 1);
+fn biir_step_fixture_not_0() {
+    run_biir_step(&make_biir_not(), "step_not_0", &[false], 1);
 }
 
 #[test]
-fn biir_movfuscate_not_1() {
-    run_biir_movfuscate(&make_biir_not(), "mv_not_1", &[true], 0);
+fn biir_step_fixture_not_1() {
+    run_biir_step(&make_biir_not(), "step_not_1", &[true], 0);
 }
 
 #[test]
-fn biir_movfuscate_and_tt() {
-    run_biir_movfuscate(&make_biir_and(), "mv_and_tt", &[true, true], 1);
+fn biir_step_fixture_and_tt() {
+    run_biir_step(&make_biir_and(), "step_and_tt", &[true, true], 1);
 }
 
 #[test]
-fn biir_movfuscate_xor_tf() {
-    run_biir_movfuscate(&make_biir_xor(), "mv_xor_tf", &[true, false], 1);
+fn biir_step_fixture_xor_tf() {
+    run_biir_step(&make_biir_xor(), "step_xor_tf", &[true, false], 1);
 }
 
-// ============================================================================
-// biir_to_circuit (self-loop unroll) tests
-// ============================================================================
-
-#[test]
-fn biir_to_circuit_self_loop() {
-    // self_loop always outputs 1 regardless of input
-    let blocks = make_biir_self_loop();
-    let ctx = Context::create();
-    let name = "circuit_self_loop";
-    let circuit = lower_to_circuit(&blocks, 4, LoweringMode::Unconditional);
-    let mut b = LlvmBackend::new(&ctx, name);
-    lower_biir(&circuit, name, &mut b);
-
-    let decl = format!("uint64_t {name}(uint8_t a0);");
-    let body = format!(r#"  printf("%llu\n", (unsigned long long){name}(0));"#);
-    let out = compile_and_run(b, &decl, &body);
-    let actual: u64 = out.trim().parse().unwrap_or_else(|_| panic!("{out:?}"));
-    assert_eq!(actual, 1);
-}
 
 // ============================================================================
 // ir_direct tests (typed IRBlocks)

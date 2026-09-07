@@ -63,8 +63,7 @@ not this repo's.
 | VAFFLE call `Output` bit index | `docs/llvm-call-output-idx.md` | landed: `Output` types as Bit, not `sig.results[idx]` |
 | VAFFLE→IR `collect_uses` on HKDF | `docs/llvm-lower-collect-uses.md` | landed: incremental `future_uses` counts, not a per-call suffix walk |
 | Boolar `lower_poly_bit` on HKDF | `docs/llvm-boolar-poly.md` | landed: hash-cons AND/XOR in `lower_poly_bit` |
-| Fuse `subst_stmt` on HKDF | `docs/llvm-fuse-hkdf.md` | landed: hash-cons `emit_substituted` |
-| Fuse unroll on HKDF | `docs/llvm-fuse-unroll.md` | resolved: acyclic `BCircuit` shape boundary |
+| Movfuscated step circuit on HKDF | `docs/llvm-fuse-unroll.md` | typed one-step boundary; external driver owns iteration |
 | Movfuscate `Poly` on HKDF | `docs/llvm-movfuscate-poly.md` | landed: owned `subst_ir` steals monomial `Vec`s |
 | VAFFLE→IR `val_map` on HKDF | `docs/llvm-lower-val-map.md` | landed: dense `ValueMap` |
 | Movfuscate `subst_ir_owned` Poly | `docs/llvm-movfuscate-subst-poly.md` | landed: `PolyCoeffs` flat `Vec` |

@@ -11,17 +11,18 @@ mod lto_archive;
 mod pipeline;
 
 pub use pipeline::{
-    BoolarCircuitStage, BoolarStage, FoldIr, FromReversible, FuseBoolar, LirStage, LowerToBoolar,
-    LowerToLir, Movfuscate, Pipeline, PipelinePass, PipelineStage, RCircuitStage,
+    BoolarCircuitStage, BoolarStage, BoolarStepCircuitStage, FoldIr, FromReversible, LirStage,
+    LowerStepToBoolar, LowerToBoolar, LowerToLir, Movfuscate, MovfuscatedToCircuit,
+    MovfuscatedVolarStage, Pipeline, PipelinePass, PipelineStage, RCircuitStage,
     StorageToMuxBoolar, StorageToMuxIr, ToReversible, UnrollIrEverything, VaffleStage,
-    VolarIrStage,
+    VolarIrStage, VolarStepCircuitStage,
 };
 
 #[cfg(feature = "vaffle")]
 pub use pipeline::{InlineVaffleEverything, LowerToVolarIr};
 
 #[cfg(feature = "llvm")]
-pub use lto_archive::{write_bitcode_archive, write_bitcode_archive_members, CommandBuild};
+pub use lto_archive::{CommandBuild, write_bitcode_archive, write_bitcode_archive_members};
 
 #[cfg(feature = "vaffle")]
 pub use pipeline::serialize_vaffle_module;

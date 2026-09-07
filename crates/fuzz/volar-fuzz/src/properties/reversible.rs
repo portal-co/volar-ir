@@ -17,15 +17,10 @@ use volar_ir::ir::IRVarId;
 use volar_ir::rcircuit::StorageState;
 use volar_ir_common::StorageId;
 use volar_ir_passes::to_reversible::{ValueWatchlist, to_reversible, translate_watchlist};
-use volar_ir_passes::{
-    LoweringMode, lower_to_circuit_fused, movfuscate_biir_with_control_provenance,
-    to_boolar_circuit,
-};
+use volar_ir_passes::to_boolar_circuit;
 
 use crate::generators::biir::gen_biir_and_inputs;
-use crate::interpreter::biir::eval_biir_with_limit;
-
-use super::biir_passes::{LOWER_LIMIT, movfuscated_inputs};
+use crate::interpreter::biir::eval_biir;
 
 fn u64_address(value: u64) -> Vec<bool> {
     (0..u64::BITS as usize).map(|bit| (value >> bit) & 1 != 0).collect()
@@ -59,22 +54,17 @@ proptest! {
         (cfg, inputs) in gen_biir_and_inputs(),
         ymask in proptest::num::u32::ANY,
     ) {
-        let movfuscated = movfuscate_biir_with_control_provenance(&cfg, &());
-        let m_inputs = movfuscated_inputs(&cfg, &inputs);
-        let expected =
-            match eval_biir_with_limit(&movfuscated, &m_inputs, LOWER_LIMIT as usize) {
-                Some(v) => v,
-                None => return Ok(()),
-            };
-
-        // Fuse the lowered circuit; skip shapes fusion rejects.
-        let circuit =
-            lower_to_circuit_fused(&movfuscated, LOWER_LIMIT, LoweringMode::Unconditional);
-        let circ = match circuit {
+        let expected = match eval_biir(&cfg, &inputs) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        // Reversible lowering only accepts an already straight-line circuit.
+        // It must not introduce its own control-flow materialization path.
+        let circ = match BCircuit::try_from_ir(&cfg) {
             Ok(c) => c,
             Err(_) => return Ok(()),
         };
-        let f_out = match eval_fused_pure(&circ, &m_inputs[..circ.params as usize]) {
+        let f_out = match eval_fused_pure(&circ, &inputs[..circ.params as usize]) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -116,7 +106,7 @@ proptest! {
         let py: Vec<bool> = (0..n_out).map(|i| (ymask >> i) & 1 == 1).collect();
 
         let mut wires = vec![false; rc.num_wires];
-        for (i, b) in m_inputs.iter().take(n_params).enumerate() {
+        for (i, b) in inputs.iter().take(n_params).enumerate() {
             wires[map.wire(IRVarId(i as u32)).unwrap()] = *b;
         }
         for (k, b) in py.iter().enumerate() {
@@ -148,7 +138,7 @@ proptest! {
         prop_assert_eq!(wires_after.len(), rc.num_wires);
         // Recompute pristine inputs for comparison.
         let mut pristine = vec![false; rc.num_wires];
-        for (i, b) in m_inputs.iter().take(n_params).enumerate() {
+        for (i, b) in inputs.iter().take(n_params).enumerate() {
             pristine[map.wire(IRVarId(i as u32)).unwrap()] = *b;
         }
         for (k, b) in py.iter().enumerate() {
@@ -160,14 +150,14 @@ proptest! {
             "inverse did not restore storage");
 
         // x register untouched:
-        for (i, b) in m_inputs.iter().take(n_params).enumerate() {
+        for (i, b) in inputs.iter().take(n_params).enumerate() {
             prop_assert_eq!(wires[map.wire(IRVarId(i as u32)).unwrap()], *b,
                 "x wire {} disturbed", i);
         }
         // y ^= f(x):
         for (k, b) in f_out.iter().enumerate() {
             prop_assert_eq!(wires[y_base + k], py[k] ^ b,
-                "y wire {} wrong under x={:?}", k, m_inputs);
+                "y wire {} wrong under x={:?}", k, inputs);
         }
     }
 }

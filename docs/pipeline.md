@@ -27,14 +27,12 @@
  Movfuscated Volar IR  (looping; arbitrary CF)
      │  constant folding, SSA  (volar-ir-opt)
      │
-     │  booleanize
+     │  movfuscated_to_circuit.rs (one body, explicit typed boundary)
      ▼
- Boolar IR  (boolean SSA)
-     │  peephole opts, DCE, CSE  (volar-ir-opt)
-     │
-     │  circuit lowering  (lower_to_circuit.rs)
+ VStepCircuit  ([terminated, next_state…, return_values…])
+     │  lower_vstep_to_bstep (same-run allocation/watch tables)
      ▼
- Boolean circuit ── fuse_to_circuit.rs ──▶ circuit-fused BCircuit/VCircuit
+ BStepCircuit ── explicit flattening ──▶ circuit-fused BCircuit
                                               │
                                               │ to_reversible.rs
                                               │  naive: (x,y) ↦ (x,y ⊕ f(x))
@@ -90,7 +88,7 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | `vaffle` | VAFFLE module representation, mirrors `portal-pc-waffle-ir::Module` |
 | `volar-vaffle-target` | Lowers VAFFLE (and WAFFLE, via `portal-pc-waffle-frontend`) into Volar IR |
 | `volar-ir` | Volar IR and Boolar IR types |
-| `volar-ir-passes` | `movfuscate.rs` (looping circuit, arbitrary CF), `unroll_ir.rs` (combinational circuit, concrete CF), `lower_to_circuit.rs` (budgeted MUX unroll of a movfuscated loop), `fuse_to_circuit.rs`, `to_reversible.rs` |
+| `volar-ir-passes` | `movfuscate.rs` (looping circuit, arbitrary CF), `movfuscated_to_circuit.rs` (typed one-step transition), `unroll_ir.rs` (combinational circuit, concrete CF), `to_reversible.rs` |
 | `volar-ir-opt` | DCE, CSE, constant folding, store-forwarding, budgeted VAFFLE inlining, `inline_vaffle_everything` |
 | `volar-ir-build` | Build-time pipeline: WASM / structural LLVM / LLVM-direct / VAFFLE / Volar IR / LIR sources; inline-everything; unroll vs movfuscate; terminate at Volar IR or LIR |
 | `volar-llvm-vaffle-import` | Structural LLVM → VAFFLE (calls preserved). `import_module_inlined` composes with inline-everything |
@@ -117,7 +115,7 @@ Three ways to get a single-block circuit, with different control-flow contracts:
 |---|---|---|---|
 | `unroll_ir_everything` | Concrete (every branch/switch/address folds along the walked path; finite) | One **non-looped** block (`is_circuit()`, `Jmp Return`) | Symbolic branch/switch/address, non-finite loop, resource cap |
 | `movfuscate_ir` | Arbitrary, including symbolic | One **self-looping** block (`is_movfuscated()`) | Does not fail closed on symbolic CF |
-| `lower_to_circuit` | Already-movfuscated self-loop | Budgeted MUX-unroll of that loop | Trip may exceed the budget; the circuit still exists but may not have terminated |
+| `movfuscated_to_vstep_circuit` | Already-movfuscated self-loop | One typed transition with `terminated`, `next_state`, and `return_values` | Malformed self-loop/signature/provenance; the caller owns repeated execution |
 
 Both `unroll_ir_everything` and `movfuscate_ir` now correctly handle a real,
 non-inlined cross-function `Value::Call`/`Terminator::ReturnCall` — see
@@ -125,7 +123,7 @@ non-inlined cross-function `Value::Call`/`Terminator::ReturnCall` — see
 independent calling-convention bugs this uncovered, none of which any
 prior structural-only or inlined-path test had exercised.
 
-`unroll_ir_everything` and `movfuscate_ir` are mutually alternative shape strategies on Volar IR. Folding may run before either. Do not use `lower_to_circuit` as a substitute for unroll-everything: it assumes a symbolic-PC movfuscated loop.
+`unroll_ir_everything` and `movfuscate_ir` are mutually alternative shape strategies on Volar IR. Folding may run before either. For symbolic control flow, use `movfuscated_to_vstep_circuit` and drive `next_state` externally until `terminated`; never request an arbitrary compile-time unroll count.
 
 Frontend routes that feed those passes:
 
@@ -189,6 +187,6 @@ generated code is vendored in this repository. Each fixture is one oblivious
 single-block circuit per CPU step (state bits as entry params, RAM as
 bit-granular storage with indicator-guarded writes, XOR one-hot state
 selection across patterns). Fixtures deserialize with the volar-ir `rkyv`
-feature and can be lowered via `movfuscate`/`lower_to_circuit` or evaluated
+feature and can be validated as already-straight-line circuits or evaluated
 concretely with `volar_fuzz::interpreter::biir::eval_biir`. Equivalence tests
 against retrop's decoder + semantics interpreter live in retrop.
