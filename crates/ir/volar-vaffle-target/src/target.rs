@@ -246,6 +246,27 @@ impl VaffleTarget {
         self.fb().all_values[id.0].side = side;
     }
 
+    /// Read the `.side` of an arena node, if a function is in progress.
+    pub(crate) fn side_of(&self, id: ValueId) -> Option<volar_side::SideId> {
+        self.func.as_ref()?.all_values[id.0].side
+    }
+
+
+    /// Set the same side on every bit of a value.
+    pub(crate) fn set_value_side(&mut self, v: &VaffleValue, side: Option<volar_side::SideId>) {
+        for &b in &v.bits {
+            self.set_node_side(b, side);
+        }
+    }
+
+    /// Is `bits` a public constant equal to `value` (mod 2^width)? Used for
+    /// the vc-spec annihilator taint exceptions.
+    pub(crate) fn is_public_const(&self, bits: &[ValueId], value: u64) -> bool {
+        let public = self.vc_public_side();
+        self.const_u64(bits) == Some(value)
+            && bits.iter().all(|&b| self.side_of(b) == public)
+    }
+
     /// Read an all-`Const` bit vector as `u64` (LSB first). `None` if any
     /// bit is not a constant — used to fail-closed on symbolic VCI handles.
     pub(crate) fn const_u64(&self, bits: &[ValueId]) -> Option<u64> {
@@ -901,6 +922,18 @@ impl LirTarget for VaffleTarget {
     }
     fn mul(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
+        let width = lhs.bits.len();
+        // vc-spec annihilator: `imul` by concrete 0 ⇒ result is concrete 0
+        // (public), regardless of the other operand's taint.
+        let public = self.vc_public_side();
+        let lhs_zero = width <= 64 && self.is_public_const(&lhs.bits, 0);
+        let rhs_zero = width <= 64 && self.is_public_const(&rhs.bits, 0);
+        if lhs_zero || rhs_zero {
+            let bits = (0..width).map(|_| self.bc_const(false)).collect();
+            let r = VaffleValue { bits, ty };
+            self.set_value_side(&r, public);
+            return r;
+        }
         VaffleValue {
             bits: bc_mul(self, &lhs.bits, &rhs.bits),
             ty,
@@ -923,6 +956,17 @@ impl LirTarget for VaffleTarget {
     fn and(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
         let width = lhs.bits.len();
+        // vc-spec annihilator: `iand` by concrete 0 ⇒ result is concrete 0
+        // (public), regardless of the other operand's taint.
+        let public = self.vc_public_side();
+        let lhs_zero = width <= 64 && self.is_public_const(&lhs.bits, 0);
+        let rhs_zero = width <= 64 && self.is_public_const(&rhs.bits, 0);
+        if lhs_zero || rhs_zero {
+            let bits = (0..width).map(|_| self.bc_const(false)).collect();
+            let r = VaffleValue { bits, ty };
+            self.set_value_side(&r, public);
+            return r;
+        }
         if let Some(bits) = self.emit_wide_binop_poly(&lhs.bits, &rhs.bits, WideBinOp::And, width) {
             return VaffleValue { bits, ty };
         }
@@ -934,6 +978,18 @@ impl LirTarget for VaffleTarget {
     fn or(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
         let width = lhs.bits.len();
+        // vc-spec annihilator: `ior` by concrete all-ones ⇒ result is concrete
+        // all-ones (public), regardless of the other operand's taint.
+        let public = self.vc_public_side();
+        let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+        let lhs_ones = width <= 64 && self.is_public_const(&lhs.bits, mask);
+        let rhs_ones = width <= 64 && self.is_public_const(&rhs.bits, mask);
+        if lhs_ones || rhs_ones {
+            let bits = (0..width).map(|_| self.bc_const(true)).collect();
+            let r = VaffleValue { bits, ty };
+            self.set_value_side(&r, public);
+            return r;
+        }
         if let Some(bits) = self.emit_wide_binop_poly(&lhs.bits, &rhs.bits, WideBinOp::Or, width) {
             return VaffleValue { bits, ty };
         }

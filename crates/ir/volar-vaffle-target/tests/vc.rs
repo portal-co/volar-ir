@@ -495,3 +495,124 @@ fn vci_double_wait_is_unsupported() {
         "double-wait must fail closed: {errors:?}"
     );
 }
+
+// ============================================================================
+// vc-spec annihilator + select taint refinements (D1)
+// ============================================================================
+
+/// Collect the sides of a named function's returned (terminator) bits.
+fn result_bit_sides(target: &VaffleTarget, name: &str) -> Vec<Option<volar_side::SideId>> {
+    let fid = target.module.exports[name];
+    let VaffleFuncDecl::Body(body) = &target.module.funcs[fid.0] else {
+        panic!("expected body");
+    };
+    let vaffle::Terminator::Return { values } = &body.blocks[body.entry.0].terminator else {
+        panic!("expected return");
+    };
+    values.iter().map(|vid| body.values[vid.0].side).collect()
+}
+
+/// `(func (param i32) (result i32) (i32.mul p0 (i32.const 0)))`
+/// vc-spec annihilator: imul by concrete 0 ⇒ concrete 0, public.
+#[test]
+fn annihilator_imul_by_zero_is_public() {
+    let mut module = empty_module();
+    let sig = push_func_sig(&mut module, vec![WType::I32], vec![WType::I32]);
+    let mut body = portal_pc_waffle_ir::FunctionBody::new(&module, sig);
+    let entry = body.entry;
+    let p0 = body.blocks[entry].params[0].1;
+    let zero = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[WType::I32]);
+    let prod = body.add_op(entry, Operator::I32Mul, &[p0, zero], &[WType::I32]);
+    body.set_terminator(entry, WTerminator::Return { values: vec![prod] });
+    module.funcs.push(FuncDecl::Body(sig, "mulz".into(), body));
+
+    let vc = VcConfig::new().with_call("mulz", vec![VcArg::Private]);
+    let mut target = VaffleTarget::new();
+    let (errors, artifact) =
+        lower_waffle_module_with_vc(&module, &mut target, &WaffleImportConfig::default(), &vc);
+    assert!(errors.is_empty(), "{errors:?}");
+    let public = artifact.handler.public;
+    let sides = result_bit_sides(&target, "mulz");
+    assert!(!sides.is_empty());
+    assert!(
+        sides.iter().all(|s| *s == Some(public)),
+        "imul by concrete 0 must be public on every result bit: {sides:?}"
+    );
+}
+
+/// `(func (param i32) (result i32) (i32.and p0 (i32.const 0)))` ⇒ public 0.
+#[test]
+fn annihilator_iand_by_zero_is_public() {
+    let mut module = empty_module();
+    let sig = push_func_sig(&mut module, vec![WType::I32], vec![WType::I32]);
+    let mut body = portal_pc_waffle_ir::FunctionBody::new(&module, sig);
+    let entry = body.entry;
+    let p0 = body.blocks[entry].params[0].1;
+    let zero = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[WType::I32]);
+    let r = body.add_op(entry, Operator::I32And, &[p0, zero], &[WType::I32]);
+    body.set_terminator(entry, WTerminator::Return { values: vec![r] });
+    module.funcs.push(FuncDecl::Body(sig, "andz".into(), body));
+
+    let vc = VcConfig::new().with_call("andz", vec![VcArg::Blind]);
+    let mut target = VaffleTarget::new();
+    let (errors, artifact) =
+        lower_waffle_module_with_vc(&module, &mut target, &WaffleImportConfig::default(), &vc);
+    assert!(errors.is_empty(), "{errors:?}");
+    let public = artifact.handler.public;
+    let sides = result_bit_sides(&target, "andz");
+    assert!(sides.iter().all(|s| *s == Some(public)), "{sides:?}");
+}
+
+/// `(func (param i32) (result i32) (i32.or p0 (i32.const -1)))` ⇒ public all-ones.
+#[test]
+fn annihilator_ior_by_all_ones_is_public() {
+    let mut module = empty_module();
+    let sig = push_func_sig(&mut module, vec![WType::I32], vec![WType::I32]);
+    let mut body = portal_pc_waffle_ir::FunctionBody::new(&module, sig);
+    let entry = body.entry;
+    let p0 = body.blocks[entry].params[0].1;
+    let ones = body.add_op(entry, Operator::I32Const { value: 0xFFFF_FFFF }, &[], &[WType::I32]);
+    let r = body.add_op(entry, Operator::I32Or, &[p0, ones], &[WType::I32]);
+    body.set_terminator(entry, WTerminator::Return { values: vec![r] });
+    module.funcs.push(FuncDecl::Body(sig, "oro".into(), body));
+
+    let vc = VcConfig::new().with_call("oro", vec![VcArg::Private]);
+    let mut target = VaffleTarget::new();
+    let (errors, artifact) =
+        lower_waffle_module_with_vc(&module, &mut target, &WaffleImportConfig::default(), &vc);
+    assert!(errors.is_empty(), "{errors:?}");
+    let public = artifact.handler.public;
+    let sides = result_bit_sides(&target, "oro");
+    assert!(sides.iter().all(|s| *s == Some(public)), "{sides:?}");
+}
+
+/// `(func (param i32 i32) (result i32)
+///    (select p0 p1 (i32.const 1)))`
+/// Concrete cond ⇒ result takes the *selected* operand's taint (param 0),
+/// not the join of both branches.
+#[test]
+fn select_concrete_cond_takes_selected_taint() {
+    let mut module = empty_module();
+    let sig = push_func_sig(&mut module, vec![WType::I32, WType::I32], vec![WType::I32]);
+    let mut body = portal_pc_waffle_ir::FunctionBody::new(&module, sig);
+    let entry = body.entry;
+    let p0 = body.blocks[entry].params[0].1;
+    let p1 = body.blocks[entry].params[1].1;
+    let one = body.add_op(entry, Operator::I32Const { value: 1 }, &[], &[WType::I32]);
+    let r = body.add_op(entry, Operator::Select, &[p0, p1, one], &[WType::I32]);
+    body.set_terminator(entry, WTerminator::Return { values: vec![r] });
+    module.funcs.push(FuncDecl::Body(sig, "sel".into(), body));
+
+    // cond==1 ⇒ selects p0 (Private/local). Result must be local, not a join.
+    let vc = VcConfig::new().with_call("sel", vec![VcArg::Private, VcArg::Blind]);
+    let mut target = VaffleTarget::new();
+    let (errors, artifact) =
+        lower_waffle_module_with_vc(&module, &mut target, &WaffleImportConfig::default(), &vc);
+    assert!(errors.is_empty(), "{errors:?}");
+    let local = artifact.handler.local;
+    let sides = result_bit_sides(&target, "sel");
+    assert!(
+        sides.iter().all(|s| *s == Some(local)),
+        "concrete-cond select must take the selected operand's taint: {sides:?}"
+    );
+}

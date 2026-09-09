@@ -939,6 +939,17 @@ fn lower_op(
             let if_t = get(0)?;
             let if_f = get(1)?;
             let cond = get(2)?;
+            // vc-spec select rule: a *concrete* public condition means the
+            // result takes the selected operand's taint. Check the whole i32
+            // cond for a public constant before OR-reducing (the reduce would
+            // build a fresh, untagged bit and lose the const-ness).
+            let width = cond.bits.len();
+            let public = tgt.vc_public_side();
+            let cond_const = (width <= 64).then(|| tgt.const_u64(&cond.bits)).flatten();
+            let cond_is_public = cond.bits.iter().all(|&b| tgt.side_of(b) == public);
+            if let (Some(v), true) = (cond_const, cond_is_public) {
+                return Ok(Some(if v != 0 { if_t } else { if_f }));
+            }
             // cond is I32; treat as bool via OR-reduce (non-zero = true).
             let cond_bit = or_bits(tgt, &cond.bits);
             let cond_bool = VaffleValue {
