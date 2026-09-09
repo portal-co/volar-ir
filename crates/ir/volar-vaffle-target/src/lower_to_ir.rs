@@ -104,6 +104,36 @@ pub fn lower_vaffle_to_ir_owned<P: Clone>(module: Module<P>) -> (IRBlocks<P>, IR
     ctx.finish()
 }
 
+/// Extract the entry function's per-param-bit sides from a VAFFLE module.
+///
+/// The vaffle arena is bit-level, so each entry-block param `ValueId` is one
+/// bit; its stamped side (e.g. a vc entry-param visibility from
+/// [`crate::lower_waffle_module_with_vc`]) is that input bit's side. The
+/// returned vector is in param order and matches the boolar block-param bit
+/// layout one-to-one, so it can be fed directly to
+/// `volar_ir_passes::lower_ir_to_boolar::SideInputs::param_sides` for the
+/// entry block. This is the Stage-C bridge that surfaces input sides as an
+/// explicit lowering output (param sides cannot ride on IR nodes —
+/// `IRBlock::params` is types-only and `BIrBlock::params` is a bare count).
+///
+/// Returns `None` if the module has no entry body. Non-entry-block params
+/// are internal (spill/ABI) and carry no caller-visible side, so only the
+/// entry block is reported.
+pub fn entry_param_sides<P: Clone>(module: &Module<P>) -> Option<Vec<Option<volar_side::SideId>>> {
+    let body = module.funcs.iter().find_map(|f| match f {
+        FuncDecl::Body(b) => Some(b),
+        _ => None,
+    })?;
+    let entry = &body.blocks[body.entry.0];
+    Some(
+        entry
+            .params
+            .iter()
+            .map(|(vid, _)| body.values[vid.0].side)
+            .collect(),
+    )
+}
+
 /// Lower a VAFFLE module that may contain a statement-free entry body.
 ///
 /// `control_prov` must be the existing frontend/control provenance for the
