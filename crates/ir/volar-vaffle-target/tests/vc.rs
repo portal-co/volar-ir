@@ -155,6 +155,51 @@ fn multiply_private_blind_tags_params_and_output_regions() {
 }
 
 #[test]
+fn stmt_sides_survive_into_ir_blocks() {
+    // A-stage: the vaffle→IRBlocks lowering (lower_vaffle_to_ir_owned) must
+    // carry each derived op's side from the vaffle arena into the lowered
+    // IRBlocks stmt, computing the operand-side join at the boundary. Use
+    // private × private so both operands share the `local` side and the
+    // multiply's join is `local` (a private × blind multiply would correctly
+    // join to None — a mixed wire is unattributable to a single side).
+    let wasm = build_multiply_module();
+    let vc = VcConfig::new().with_call("multiply", vec![VcArg::Private, VcArg::Private]);
+    let mut target = VaffleTarget::new();
+    let (errors, artifact) =
+        lower_waffle_module_with_vc(&wasm, &mut target, &WaffleImportConfig::default(), &vc);
+    assert!(errors.is_empty(), "{errors:?}");
+    let local = artifact.handler.local;
+
+    let (blocks, _types) = volar_vaffle_target::lower_vaffle_to_ir_owned(target.module);
+
+    // The multiply is a derived op over the two local-sided params; its
+    // lowered IR stmts must carry the joined `local` side (not the legacy
+    // all-None), proving side propagation is live across the boundary.
+    let any_local = blocks
+        .blocks
+        .iter()
+        .any(|b| b.stmts.iter().any(|n| n.side == Some(local)));
+    assert!(
+        any_local,
+        "expected local-tagged derived stmts in lowered IRBlocks; \
+         side propagation was dropped at the vaffle→IRBlocks boundary"
+    );
+}
+
+#[test]
+fn default_lowering_drops_no_explicit_sides_into_ir_blocks() {
+    // Without vc tagging, nothing stamps sides, so the lowered IRBlocks are
+    // all None (the side channel is inert but present).
+    let wasm = build_multiply_module();
+    let mut target = VaffleTarget::new();
+    let errors = lower_waffle_module(&wasm, &mut target, &WaffleImportConfig::default());
+    assert!(errors.is_empty(), "{errors:?}");
+    let (blocks, _types) = volar_vaffle_target::lower_vaffle_to_ir_owned(target.module);
+    let any_tagged = blocks.blocks.iter().any(|b| b.stmts.iter().any(|n| n.side.is_some()));
+    assert!(!any_tagged, "untagged module must lower to all-None sides");
+}
+
+#[test]
 fn constants_are_public_under_vc() {
     let mut module = empty_module();
     let sig = push_func_sig(&mut module, vec![], vec![WType::I32]);
