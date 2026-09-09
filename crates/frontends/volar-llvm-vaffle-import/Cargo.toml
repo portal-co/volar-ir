@@ -12,5 +12,5 @@ volar-ir-common = { workspace = true }
 volar-ir-opt = { workspace = true }
 volar-lir = { workspace = true }
 inkwell = { workspace = true }
-volar-llvm-constchain = { path = "../../../../llvm-bridge/crates/volar-llvm-constchain" }
+volar-llvm-constchain = { git = "https://github.com/portal-co/llvm-bridge" }
 
