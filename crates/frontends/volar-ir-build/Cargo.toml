@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 default = []
-vaffle = ["dep:vaffle", "dep:volar-vaffle-target"]
+vaffle = ["dep:vaffle", "dep:volar-vaffle-target", "dep:volar-ssa-lir-replay"]
 wasm = ["vaffle", "dep:portal-pc-waffle-ir", "dep:portal-pc-waffle-frontend"]
 llvm = ["vaffle", "dep:inkwell", "dep:volar-llvm-vaffle-import", "dep:volar-llvm-ir-import", "dep:ar", "dep:object"]
 cc = ["llvm", "dep:cc"]
@@ -19,10 +19,12 @@ volar-ir-common.workspace = true
 volar-ir-opt.workspace = true
 volar-ir-passes.workspace = true
 volar-circuit-source.workspace = true
+volar-lir.workspace = true
 volar-lir-saved = { workspace = true, features = ["rkyv"] }
 rkyv = { workspace = true, features = ["bytecheck"] }
 vaffle = { workspace = true, features = ["rkyv"], optional = true }
 volar-vaffle-target = { workspace = true, optional = true }
+volar-ssa-lir-replay = { workspace = true, optional = true }
 portal-pc-waffle-ir = { workspace = true, optional = true }
 portal-pc-waffle-frontend = { workspace = true, optional = true }
 inkwell = { workspace = true, optional = true }
@@ -35,6 +37,8 @@ cc = { workspace = true, optional = true }
 [dev-dependencies]
 wat = "1.212.0"
 volar-fuzz.workspace = true
+volar-c-backend.workspace = true
+volar-lir-test-corpus.workspace = true
 
 [[test]]
 name = "wasm_inlined"

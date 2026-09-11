@@ -19,4 +19,7 @@ extern crate alloc;
 
 pub mod lower_vaffle;
 
-pub use lower_vaffle::{lower_vaffle_module, lower_vaffle_module_with_handler};
+pub use lower_vaffle::{
+    build_func_names, lower_vaffle_func, lower_vaffle_module, lower_vaffle_module_to_lir_chunks,
+    lower_vaffle_module_to_lir_chunks_with_handler, lower_vaffle_module_with_handler,
+};

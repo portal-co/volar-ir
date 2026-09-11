@@ -83,3 +83,33 @@ inkwell = { version = "0.10.0", features = [
 ar     = "0.9"
 object = "0.36"
 cc     = "1.2"
+
+# Local-development overlay: the workspace's own crates above are declared as
+# git dependencies on this very repo (`https://github.com/portal-co/volar-ir`)
+# so that downstream consumers like `volar`'s `volar-build` share one copy of
+# these types (Pipeline IR type identity). Without this patch, resolving them
+# locally would fetch the GitHub remote's default branch instead of this
+# working tree, breaking any local commit that hasn't been pushed yet — see
+# `volar`'s own `[patch."https://github.com/portal-co/volar-ir.git"]` block
+# for the identical pattern from the consumer side.
+[patch."https://github.com/portal-co/volar-ir"]
+volar-ir-config        = { path = "crates/ir/volar-ir-config" }
+volar-ir               = { path = "crates/ir/volar-ir" }
+volar-ir-passes        = { path = "crates/ir/volar-ir-passes" }
+volar-ir-opt           = { path = "crates/ir/volar-ir-opt" }
+volar-ir-virt          = { path = "crates/ir/volar-ir-virt" }
+volar-ir-text          = { path = "crates/ir/volar-ir-text" }
+vaffle                 = { path = "crates/ir/vaffle" }
+volar-vaffle-target    = { path = "crates/ir/volar-vaffle-target" }
+volar-ir-common        = { path = "crates/ir/volar-ir-common" }
+volar-provenance       = { path = "crates/ir/volar-provenance" }
+volar-side             = { path = "crates/ir/volar-side" }
+volar-lir              = { path = "crates/ir/volar-lir" }
+volar-lir-text         = { path = "crates/ir/volar-lir-text" }
+volar-lir-saved        = { path = "crates/ir/volar-lir-saved" }
+volar-lir-test-corpus  = { path = "crates/ir/volar-lir-test-corpus" }
+volar-fuzz             = { path = "crates/fuzz/volar-fuzz" }
+volar-c-backend        = { path = "crates/backends/volar-c-backend" }
+volar-llvm-backend     = { path = "crates/backends/volar-llvm-backend" }
+volar-wasm-backend     = { path = "crates/backends/volar-wasm-backend" }
+volar-ir-build         = { path = "crates/frontends/volar-ir-build" }

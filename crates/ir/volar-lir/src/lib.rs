@@ -25,6 +25,9 @@ use volar_ir_common::{ReentryHint, Type as NativeType};
 mod generated;
 pub use generated::{ActionStoreTarget, FieldDef, IcmpPred, NameConfig, StructDef};
 
+pub mod chunk;
+pub use chunk::assign_chunks;
+
 pub mod circuits;
 pub use circuits::{
     BitCircuitBuilder, FrameLayout, PACK_W, StackPtr, StorageEmitter, n_packs, pack_bits,

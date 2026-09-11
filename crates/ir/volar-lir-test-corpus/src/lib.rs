@@ -134,6 +134,60 @@ pub fn compile_and_run(c_src: &str, main_body: &str) -> String {
     String::from_utf8(output.stdout).expect("non-UTF8 output")
 }
 
+/// Like [`compile_and_run`], but compiles several independent C sources
+/// (e.g. one per multi-translation-unit chunk from
+/// `volar_ssa_lir_replay::lower_vaffle_module_to_lir_chunks`) as separate
+/// files and links them together with `cc`, instead of appending `main`
+/// directly after a single source string.
+///
+/// Unlike [`compile_and_run`] — where `main` is textually appended right
+/// after the function definitions in the same translation unit, so no
+/// prototype is ever needed — `main_body` here runs in its *own* separate
+/// translation unit. Modern C (and Apple Clang specifically) rejects an
+/// implicit function declaration as a hard error, so **`main_body` must
+/// itself declare the prototype of any chunk-defined function it calls**
+/// (e.g. `"uint8_t vmain(uint8_t);\nprintf(\"%d\\n\", vmain(5));"`) —
+/// exactly the forward declaration a real caller linking against a
+/// separately-compiled chunk would need to write by hand.
+///
+/// Requires `cc` in `$PATH`.  Compiles with `-O0 -std=c99`.
+pub fn compile_and_run_multi(c_srcs: &[&str], main_body: &str) -> String {
+    let dir = TempDir::new().expect("tempdir");
+    let exe_path = dir.path().join("test");
+
+    let mut c_paths = Vec::with_capacity(c_srcs.len() + 1);
+    for (i, src) in c_srcs.iter().enumerate() {
+        let path = dir.path().join(format!("chunk{i}.c"));
+        fs::write(&path, src).expect("write C source");
+        c_paths.push(path);
+    }
+
+    let main_path = dir.path().join("main.c");
+    let main_src = format!(
+        "#include <stdio.h>\n#include <stdint.h>\n#include <string.h>\n\
+         int main(void) {{\n{main_body}\n  return 0;\n}}\n"
+    );
+    fs::write(&main_path, &main_src).expect("write C main");
+    c_paths.push(main_path);
+
+    let status = Command::new("cc")
+        .args(["-O0", "-std=c99", "-o"])
+        .arg(&exe_path)
+        .args(&c_paths)
+        .status()
+        .expect("cc not found — install a C compiler");
+    assert!(
+        status.success(),
+        "C compilation failed.\nSources:\n{}\n{main_src}",
+        c_srcs.join("\n---\n")
+    );
+
+    let output = Command::new(&exe_path)
+        .output()
+        .expect("failed to run compiled program");
+    String::from_utf8(output.stdout).expect("non-UTF8 output")
+}
+
 // ============================================================================
 // BIrBlocks circuit builders (shared between C and LLVM e2e tests)
 // ============================================================================

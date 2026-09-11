@@ -269,7 +269,7 @@ impl PipelinePass<VolarIrStage> for UnrollIrEverything {
     }
 }
 
-/// Lower Volar IR to a saved LIR module.
+/// Lower Volar IR to a saved LIR module, as the function `"volar_module"`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LowerToLir;
 
@@ -277,7 +277,19 @@ impl PipelinePass<VolarIrStage> for LowerToLir {
     type Output = LirStage;
 
     fn apply(self, (blocks, types): (IRBlocks, IRTypes)) -> Result<SavedLirModule, BoxError> {
-        Ok(lower_volar_ir_to_lir(&blocks, &types))
+        Ok(lower_volar_ir_to_lir_named(&blocks, &types, "volar_module"))
+    }
+}
+
+/// Lower Volar IR to a saved LIR module under an explicit function name.
+#[derive(Debug, Clone)]
+pub struct LowerToLirNamed(pub String);
+
+impl PipelinePass<VolarIrStage> for LowerToLirNamed {
+    type Output = LirStage;
+
+    fn apply(self, (blocks, types): (IRBlocks, IRTypes)) -> Result<SavedLirModule, BoxError> {
+        Ok(lower_volar_ir_to_lir_named(&blocks, &types, &self.0))
     }
 }
 
@@ -434,9 +446,14 @@ impl Pipeline<VolarIrStage> {
         self.apply(UnrollIrEverything)
     }
 
-    /// Lower Volar IR → saved LIR.
+    /// Lower Volar IR → saved LIR, as the function `"volar_module"`.
     pub fn lower_to_lir(self) -> Result<Pipeline<LirStage>, BoxError> {
         self.apply(LowerToLir)
+    }
+
+    /// Lower Volar IR → saved LIR under an explicit function name.
+    pub fn lower_to_lir_named(self, name: &str) -> Result<Pipeline<LirStage>, BoxError> {
+        self.apply(LowerToLirNamed(name.to_string()))
     }
 
     /// Lower Volar IR → Boolar IR.
@@ -711,6 +728,26 @@ impl Pipeline<VaffleStage> {
         self.apply(LowerToVolarIr)
     }
 
+    /// Lower this VAFFLE module directly to `n_chunks` independent
+    /// [`SavedLirModule`]s (multi-translation-unit LIR compilation),
+    /// bypassing Volar IR — Volar IR has no cross-function call construct,
+    /// so a module's genuine sibling calls (`vaffle::Value::Call`) can only
+    /// survive chunking if lowered from VAFFLE directly.
+    ///
+    /// Each function is assigned to exactly one chunk. A call crossing a
+    /// chunk boundary needs no special handling: every `LirTarget` backend
+    /// already forward-declares a callee it hasn't locally defined as a
+    /// plain external-linkage declaration, which is exactly the shape
+    /// needed once each chunk is compiled independently and the results are
+    /// linked back together. See
+    /// `volar_ssa_lir_replay::lower_vaffle_module_to_lir_chunks` for the
+    /// underlying implementation and its documented limitations (notably:
+    /// `LirType::Struct` values must not cross a chunk boundary — VAFFLE
+    /// never produces them, so this is not a concern here).
+    pub fn lower_to_lir_chunks(self, n_chunks: usize) -> Vec<SavedLirModule> {
+        volar_ssa_lir_replay::lower_vaffle_module_to_lir_chunks(&self.into_data(), n_chunks)
+    }
+
     /// Terminal: the VAFFLE module.
     pub fn to_vaffle(self) -> vaffle::Module {
         self.into_data()
@@ -908,10 +945,52 @@ fn resolve_inline_entries(
     Ok(ids)
 }
 
-pub(crate) fn lower_volar_ir_to_lir(blocks: &IRBlocks, types: &IRTypes) -> SavedLirModule {
+pub(crate) fn lower_volar_ir_to_lir_named(
+    blocks: &IRBlocks,
+    types: &IRTypes,
+    name: &str,
+) -> SavedLirModule {
     let mut rec = RecordingTarget::new();
-    volar_ir_passes::lower_lir::lower_ir(blocks, types, "volar_module", &mut rec);
+    volar_ir_passes::lower_lir::lower_ir(blocks, types, name, &mut rec);
     rec.finish()
+}
+
+/// Lower several independent, named Volar IR units into `n_chunks`
+/// [`SavedLirModule`]s.
+///
+/// Volar IR has no cross-function call construct (only `OracleCall`/
+/// `ActionCall`, which are host-primitive calls, not intra-module calls —
+/// see `volar_ir_passes::lower_lir`), so every unit lowered here is already
+/// fully self-contained: unlike [`Pipeline::<VaffleStage>::lower_to_lir_chunks`],
+/// there is no cross-unit call to worry about — this just distributes
+/// independent named functions across chunks (weighted by each unit's
+/// statement count) to keep any one output file/module from growing
+/// unboundedly as more units are added.
+pub fn lower_volar_ir_units_to_lir(
+    units: &[(&str, &IRBlocks, &IRTypes)],
+    n_chunks: usize,
+) -> Vec<SavedLirModule> {
+    if units.is_empty() {
+        return Vec::new();
+    }
+
+    let weights: Vec<u64> = units
+        .iter()
+        .map(|(_, blocks, _)| {
+            let stmt_count: usize = blocks.blocks.iter().map(|b| b.stmts.len()).sum();
+            (stmt_count as u64).max(1)
+        })
+        .collect();
+    let assignment = volar_lir::assign_chunks(&weights, n_chunks);
+    let actual_chunks = assignment.iter().copied().max().map_or(0, |m| m + 1);
+
+    let mut targets: Vec<RecordingTarget> =
+        (0..actual_chunks).map(|_| RecordingTarget::new()).collect();
+    for (i, (name, blocks, types)) in units.iter().enumerate() {
+        volar_ir_passes::lower_lir::lower_ir(blocks, types, name, &mut targets[assignment[i]]);
+    }
+
+    targets.into_iter().map(RecordingTarget::finish).collect()
 }
 
 /// Serialize a VAFFLE [`Module`](vaffle::Module) to bytes for use as a `.vaffle`
