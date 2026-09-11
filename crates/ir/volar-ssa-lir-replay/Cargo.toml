@@ -10,6 +10,7 @@ repository.workspace = true
 vaffle.workspace = true
 volar-ir-common.workspace = true
 volar-lir.workspace = true
+volar-lir-saved.workspace = true
 volar-provenance.workspace = true
 
 [dev-dependencies]

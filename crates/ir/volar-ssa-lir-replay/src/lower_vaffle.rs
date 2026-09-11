@@ -5,7 +5,8 @@ use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 
 use vaffle::{FuncBody, FuncDecl, FuncId, Module, Target as VTarget, Terminator, Value, ValueId};
 use volar_ir_common::{IrType, Stmt, Type as NativeType, TypeId, TypeTable};
-use volar_lir::{BranchTarget, LirTarget, LirType};
+use volar_lir::{BranchTarget, LirTarget, LirType, assign_chunks};
+use volar_lir_saved::{RecordingTarget, SavedLirModule};
 use volar_provenance::{KeepProvenance, ProvenanceHandler};
 
 /// Lower every `FuncDecl::Body` function in `module` into `target`.
@@ -36,6 +37,98 @@ where
     }
 }
 
+// ============================================================================
+// Multi-translation-unit (chunked) lowering
+// ============================================================================
+
+/// Lower every `FuncDecl::Body` function in `module` into `n_chunks`
+/// independent [`SavedLirModule`]s instead of one shared target.
+///
+/// Each function is assigned to exactly one chunk (via [`assign_chunks`],
+/// weighted by each function's statement count, ignoring call-graph
+/// locality). A call from one chunk's function to a function assigned to a
+/// *different* chunk needs no special handling: [`LirTarget::call`] already
+/// forward-declares a callee it hasn't locally defined (as a plain
+/// external-linkage declaration in every backend), which is exactly the
+/// right shape for a genuine cross-translation-unit call once each chunk is
+/// independently compiled and the results linked together.
+///
+/// `FuncDecl::Import` entries need no chunk assignment — they never get a
+/// `begin_function`, only `call_extern` forward declarations at their call
+/// sites, same as the unchunked [`lower_vaffle_module`].
+///
+/// Forwards provenance unchanged (equivalent to [`KeepProvenance`]).
+///
+/// # Known limitation
+///
+/// This does not (and, given VAFFLE never produces `LirType::Struct`, does
+/// not need to) handle a struct-typed value crossing a chunk boundary: a
+/// `StructId` is assigned by a per-backend-instance monotonic counter, so
+/// two independently-lowered chunks can disagree on what ID the "same"
+/// struct has. `LirType::Arr` (the only aggregate VAFFLE can actually
+/// produce, via [`results_to_lir`]'s homogeneous multi-result packing) is
+/// unaffected — its C typedef name (e.g. `Arr_U8_16`) is structural, not
+/// counter-based, so two chunks compiled independently always agree on it.
+pub fn lower_vaffle_module_to_lir_chunks<P: Clone>(
+    module: &Module<P>,
+    n_chunks: usize,
+) -> Vec<SavedLirModule>
+where
+    RecordingTarget: LirTarget<P>,
+{
+    lower_vaffle_module_to_lir_chunks_with_handler(module, n_chunks, &KeepProvenance)
+}
+
+/// Like [`lower_vaffle_module_to_lir_chunks`], but maps provenance through
+/// `handler`.
+pub fn lower_vaffle_module_to_lir_chunks_with_handler<P, H>(
+    module: &Module<P>,
+    n_chunks: usize,
+    handler: &H,
+) -> Vec<SavedLirModule>
+where
+    P: Clone,
+    H: ProvenanceHandler<P>,
+    RecordingTarget: LirTarget<H::Output>,
+{
+    let func_names = build_func_names(module);
+
+    // Weight each `FuncDecl::Body` function by its statement count (a proxy
+    // for lowered-LIR size); `FuncDecl::Import` entries carry no weight
+    // since they never get a `begin_function`.
+    let mut body_indices: Vec<usize> = Vec::new();
+    let mut weights: Vec<u64> = Vec::new();
+    for (idx, decl) in module.funcs.iter().enumerate() {
+        if let FuncDecl::Body(body) = decl {
+            body_indices.push(idx);
+            let stmt_count: usize = body.blocks.iter().map(|b| b.stmts.len()).sum();
+            weights.push((stmt_count as u64).max(1));
+        }
+    }
+
+    if body_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let assignment = assign_chunks(&weights, n_chunks);
+    let actual_chunks = assignment.iter().copied().max().map_or(0, |m| m + 1);
+
+    let mut targets: Vec<RecordingTarget> = (0..actual_chunks).map(|_| RecordingTarget::new()).collect();
+
+    for (i, &func_idx) in body_indices.iter().enumerate() {
+        let chunk = assignment[i];
+        let FuncDecl::Body(body) = &module.funcs[func_idx] else {
+            unreachable!("body_indices only contains FuncDecl::Body indices");
+        };
+        let name = func_names[func_idx]
+            .as_deref()
+            .expect("internal: every FuncDecl::Body must have an assigned name");
+        lower_vaffle_func(body, module, &func_names, name, &mut targets[chunk], handler);
+    }
+
+    targets.into_iter().map(RecordingTarget::finish).collect()
+}
+
 /// Assign a stable name to every `FuncDecl::Body` function: its export name
 /// if one exists (checking `module.exports` in insertion/key order — the
 /// first match wins if a `FuncId` has multiple export aliases), otherwise a
@@ -44,8 +137,10 @@ where
 ///
 /// `vaffle::FuncBody` carries no name field of its own (only `exports` does),
 /// so this table is the single source of truth used consistently at both a
-/// function's `begin_function` site and every `call` site referencing it.
-fn build_func_names<P: Clone>(module: &Module<P>) -> Vec<Option<String>> {
+/// function's `begin_function` site and every `call` site referencing it —
+/// including across a chunk boundary (see [`lower_vaffle_module_to_lir_chunks`]),
+/// since it is built once and shared by every chunk's lowering pass.
+pub fn build_func_names<P: Clone>(module: &Module<P>) -> Vec<Option<String>> {
     let mut names: Vec<Option<String>> = alloc::vec![None; module.funcs.len()];
     for (export_name, fid) in &module.exports {
         if matches!(module.funcs.get(fid.0), Some(FuncDecl::Body(_))) {
@@ -123,7 +218,17 @@ fn results_to_lir(results: &[TypeId], types: &TypeTable) -> Option<LirType> {
 // Per-function lowering
 // ============================================================================
 
-fn lower_vaffle_func<P, T, H>(
+/// Lower a single function's body into `target`.
+///
+/// Each function must be lowered into exactly one target instance; a
+/// [`Value::Call`]/[`Terminator::ReturnCall`] site resolves its callee's name
+/// via the shared `func_names` table regardless of which target instance
+/// that callee itself was (or will be) lowered into — [`LirTarget::call`]
+/// already forward-declares a name it hasn't locally defined, so calling
+/// functions into *different* target instances (multi-translation-unit
+/// chunking) needs no special handling here. See
+/// [`lower_vaffle_module_to_lir_chunks`].
+pub fn lower_vaffle_func<P, T, H>(
     body: &FuncBody<P>,
     module: &Module<P>,
     func_names: &[Option<String>],

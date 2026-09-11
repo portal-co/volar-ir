@@ -12,13 +12,16 @@ mod pipeline;
 
 pub use pipeline::{
     BoolarCircuitStage, BoolarStage, FoldIr, FromReversible, FuseBoolar, LirStage, LowerToBoolar,
-    LowerToLir, Movfuscate, Pipeline, PipelinePass, PipelineStage, RCircuitStage,
+    LowerToLir, LowerToLirNamed, Movfuscate, Pipeline, PipelinePass, PipelineStage, RCircuitStage,
     StorageToMuxBoolar, StorageToMuxIr, ToReversible, UnrollIrEverything, VaffleStage,
-    VolarIrStage,
+    VolarIrStage, lower_volar_ir_units_to_lir,
 };
 
 #[cfg(feature = "vaffle")]
 pub use pipeline::{InlineVaffleEverything, LowerToVolarIr};
+
+#[cfg(feature = "vaffle")]
+pub use volar_ssa_lir_replay;
 
 #[cfg(feature = "llvm")]
 pub use lto_archive::{write_bitcode_archive, write_bitcode_archive_members, CommandBuild};
