@@ -501,19 +501,38 @@ pub fn lower_waffle_function(
         })
         .collect();
 
+    // ---- Pre-map every non-entry block's value params ----------------------
+    // A block's params must be resolvable before *any* block that references
+    // them is lowered, but `body.blocks.entries()` iterates in block-id order
+    // and a loop-exit block can reference its (dominating) loop header's
+    // params via an alias while carrying a *lower* block id than the header.
+    // Lowering in id order then maps the header's params only after the exit
+    // block is lowered, surfacing `UnsupportedOp("undefined v…")` on a branch
+    // arg that aliases a not-yet-processed block param. Block params are pure
+    // introduction points (they don't depend on other blocks) and
+    // `add_block_param` restores the current block, so mapping them all up
+    // front in a dedicated pass is safe and order-independent. The threaded
+    // globals stay in the main loop (they append after the value params).
+    for (wblock, block_def) in body.blocks.entries() {
+        if wblock == body.entry {
+            continue;
+        }
+        let vblock = block_map[&wblock];
+        for &(ty, wval) in &block_def.params {
+            let lir_ty = waffle_ty(ty)?;
+            let vv = target.add_block_param(vblock, lir_ty);
+            val_map.insert(wval, vv);
+        }
+    }
+
     // ---- Emit each WAFFLE block ---------------------------------------------
     for (wblock, block_def) in body.blocks.entries() {
         let vblock = block_map[&wblock];
         target.switch_to_block(vblock);
 
-        // Non-entry block params become VAFFLE block params.
+        // Non-entry block value params were pre-mapped above; here we only add
+        // the extra block params carrying the threaded globals for this block.
         if wblock != body.entry {
-            for &(ty, wval) in &block_def.params {
-                let lir_ty = waffle_ty(ty)?;
-                let vv = target.add_block_param(vblock, lir_ty);
-                val_map.insert(wval, vv);
-            }
-            // Extra block params carry the threaded globals for this block.
             current_globals = global_lir_tys
                 .iter()
                 .map(|ty| target.add_block_param(vblock, ty.clone()))
@@ -2735,5 +2754,41 @@ mod tests {
             .iter()
             .find(|f| matches!(f, vaffle::FuncDecl::Body(_)));
         assert!(caller.is_some(), "caller function body should be present");
+    }
+
+    /// Regression: a loop whose exit block references the (dominating) loop
+    /// header's block params via an alias, while the exit block carries a
+    /// *lower* block id than the header, must lower without
+    /// `UnsupportedOp("undefined v…")`. The lowering pre-maps every non-entry
+    /// block's value params before emitting any block, so forward references
+    /// resolve regardless of block-id order. (This is the `(block (loop …))`
+    /// counting loop, which previously failed with `undefined v11`.)
+    #[test]
+    fn loop_exit_referencing_header_param_lowers() {
+        let wat_src = r#"(module
+          (func $f (export "f") (param $n i32) (result i32)
+            (local $acc i32)
+            (block $done
+              (loop $l
+                (br_if $done (i32.eqz (local.get $n)))
+                (local.set $acc (i32.add (local.get $acc) (local.get $n)))
+                (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+                (br $l)))
+            (local.get $acc)))"#;
+        let bytes = wat::parse_str(wat_src).expect("wat assembles");
+        let mut wasm = portal_pc_waffle_frontend::from_wasm_bytes(
+            &bytes,
+            &portal_pc_waffle_frontend::FrontendOptions::default(),
+        )
+        .expect("wasm parses");
+        portal_pc_waffle_frontend::expand_all_funcs(&mut wasm).expect("expand");
+
+        let mut target = VaffleTarget::new();
+        let errors = lower_waffle_module(&wasm, &mut target, &WaffleImportConfig::default());
+        assert!(
+            errors.is_empty(),
+            "loop with forward block-param reference must lower: {errors:?}"
+        );
+        assert_eq!(target.module.funcs.len(), 1);
     }
 }
