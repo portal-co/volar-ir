@@ -833,7 +833,6 @@ dependencies = [
 [[package]]
 name = "lazy-repo"
 version = "0.1.0"
-source = "git+https://github.com/portal-co/lazy-repo.git#8c80b2d8e89891168f7f7c01a2d04164e0b5fafe"
 dependencies = [
  "rkyv",
  "sha2",
@@ -1803,15 +1802,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "rkyv",
- "volar-ir-common 0.1.0",
-]
-
-[[package]]
-name = "vaffle"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-dependencies = [
- "volar-ir-common 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-common",
 ]
 
 [[package]]
@@ -1825,17 +1816,21 @@ name = "volar-c-backend"
 version = "0.1.0"
 dependencies = [
  "tempfile",
- "volar-ir-common 0.1.0",
- "volar-lir 0.1.0",
+ "volar-ir-common",
+ "volar-lir",
  "volar-lir-test-corpus",
 ]
+
+[[package]]
+name = "volar-circuit-exec-core"
+version = "0.1.0"
 
 [[package]]
 name = "volar-circuit-source"
 version = "0.1.0"
 dependencies = [
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
+ "volar-ir",
+ "volar-ir-common",
 ]
 
 [[package]]
@@ -1844,30 +1839,15 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "proptest",
- "vaffle 0.1.0",
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-ir-opt 0.1.0",
- "volar-ir-passes 0.1.0",
- "volar-ir-virt 0.1.0",
- "volar-lir 0.1.0",
+ "vaffle",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-opt",
+ "volar-ir-passes",
+ "volar-ir-virt",
+ "volar-lir",
  "volar-lir-test-corpus",
- "volar-vaffle-target 0.1.0",
-]
-
-[[package]]
-name = "volar-fuzz"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-dependencies = [
- "arbitrary",
- "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-common 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-passes 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-virt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-vaffle-target 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-vaffle-target",
 ]
 
 [[package]]
@@ -1877,21 +1857,10 @@ dependencies = [
  "lazy-repo",
  "log",
  "rkyv",
- "volar-ir-common 0.1.0",
- "volar-lir 0.1.0",
- "volar-provenance 0.1.0",
- "volar-side 0.1.0",
-]
-
-[[package]]
-name = "volar-ir"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-dependencies = [
- "volar-ir-common 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-side 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-common",
+ "volar-lir",
+ "volar-provenance",
+ "volar-side",
 ]
 
 [[package]]
@@ -1905,17 +1874,17 @@ dependencies = [
  "portal-pc-waffle-frontend",
  "portal-pc-waffle-ir",
  "rkyv",
- "vaffle 0.1.0",
+ "vaffle",
  "volar-circuit-source",
- "volar-fuzz 0.1.0",
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-ir-opt 0.1.0",
- "volar-ir-passes 0.1.0",
- "volar-lir-saved 0.1.0",
+ "volar-fuzz",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-opt",
+ "volar-ir-passes",
+ "volar-lir-saved",
  "volar-llvm-ir-import",
  "volar-llvm-vaffle-import",
- "volar-vaffle-target 0.1.0",
+ "volar-vaffle-target",
  "wat",
 ]
 
@@ -1924,15 +1893,7 @@ name = "volar-ir-common"
 version = "0.1.0"
 dependencies = [
  "rkyv",
- "volar-side 0.1.0",
-]
-
-[[package]]
-name = "volar-ir-common"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-dependencies = [
- "volar-side 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-side",
 ]
 
 [[package]]
@@ -1940,54 +1901,25 @@ name = "volar-ir-config"
 version = "0.1.0"
 
 [[package]]
-name = "volar-ir-config"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-
-[[package]]
 name = "volar-ir-opt"
 version = "0.1.0"
 dependencies = [
- "vaffle 0.1.0",
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-provenance 0.1.0",
-]
-
-[[package]]
-name = "volar-ir-opt"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-dependencies = [
- "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-common 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "vaffle",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-provenance",
 ]
 
 [[package]]
 name = "volar-ir-passes"
 version = "0.1.0"
 dependencies = [
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-ir-config 0.1.0",
- "volar-ir-opt 0.1.0",
- "volar-lir 0.1.0",
- "volar-provenance 0.1.0",
-]
-
-[[package]]
-name = "volar-ir-passes"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-dependencies = [
- "volar-ir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-common 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-config 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-config",
+ "volar-ir-opt",
+ "volar-lir",
+ "volar-provenance",
 ]
 
 [[package]]
@@ -2002,32 +1934,19 @@ dependencies = [
 name = "volar-ir-text"
 version = "0.1.0"
 dependencies = [
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
+ "volar-ir",
+ "volar-ir-common",
 ]
 
 [[package]]
 name = "volar-ir-virt"
 version = "0.1.0"
 dependencies = [
- "volar-fuzz 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-ir-passes 0.1.0",
- "volar-lir 0.1.0",
- "volar-provenance 0.1.0",
-]
-
-[[package]]
-name = "volar-ir-virt"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-dependencies = [
- "volar-ir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-common 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-passes 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-passes",
+ "volar-lir",
+ "volar-provenance",
 ]
 
 [[package]]
@@ -2035,17 +1954,8 @@ name = "volar-lir"
 version = "0.1.0"
 dependencies = [
  "rkyv",
- "volar-ir-common 0.1.0",
- "volar-side 0.1.0",
-]
-
-[[package]]
-name = "volar-lir"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-dependencies = [
- "volar-ir-common 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-side 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-common",
+ "volar-side",
 ]
 
 [[package]]
@@ -2053,15 +1963,7 @@ name = "volar-lir-saved"
 version = "0.1.0"
 dependencies = [
  "rkyv",
- "volar-lir 0.1.0",
-]
-
-[[package]]
-name = "volar-lir-saved"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-dependencies = [
- "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir",
 ]
 
 [[package]]
@@ -2069,19 +1971,19 @@ name = "volar-lir-test-corpus"
 version = "0.1.0"
 dependencies = [
  "tempfile",
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-ir-passes 0.1.0",
- "volar-lir 0.1.0",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-passes",
+ "volar-lir",
 ]
 
 [[package]]
 name = "volar-lir-text"
 version = "0.1.0"
 dependencies = [
- "volar-ir-common 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-lir-saved 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-common",
+ "volar-lir",
+ "volar-lir-saved",
  "volar-log",
 ]
 
@@ -2091,10 +1993,10 @@ version = "0.1.0"
 dependencies = [
  "inkwell",
  "tempfile",
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-ir-passes 0.1.0",
- "volar-lir 0.1.0",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-passes",
+ "volar-lir",
  "volar-lir-test-corpus",
  "volar-log",
 ]
@@ -2102,7 +2004,6 @@ dependencies = [
 [[package]]
 name = "volar-llvm-constchain"
 version = "0.1.0"
-source = "git+https://github.com/portal-co/llvm-bridge.git#993a729d3769cceb81781cfcfa0ece56edc01bce"
 dependencies = [
  "inkwell",
 ]
@@ -2110,9 +2011,9 @@ dependencies = [
 [[package]]
 name = "volar-llvm-import-core"
 version = "0.1.0"
-source = "git+https://github.com/portal-co/llvm-bridge.git#993a729d3769cceb81781cfcfa0ece56edc01bce"
 dependencies = [
  "inkwell",
+ "volar-circuit-exec-core",
 ]
 
 [[package]]
@@ -2120,9 +2021,9 @@ name = "volar-llvm-ir-import"
 version = "0.1.0"
 dependencies = [
  "inkwell",
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-lir 0.1.0",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-lir",
  "volar-llvm-import-core",
 ]
 
@@ -2135,10 +2036,10 @@ name = "volar-llvm-vaffle-import"
 version = "0.1.0"
 dependencies = [
  "inkwell",
- "vaffle 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-ir-opt 0.1.0",
- "volar-lir 0.1.0",
+ "vaffle",
+ "volar-ir-common",
+ "volar-ir-opt",
+ "volar-lir",
  "volar-llvm-constchain",
 ]
 
@@ -2152,10 +2053,10 @@ name = "volar-noir-backend"
 version = "0.1.0"
 dependencies = [
  "volar-circuit-source",
- "volar-fuzz 0.1.0",
- "volar-ir 0.1.0",
+ "volar-fuzz",
+ "volar-ir",
  "volar-ir-build",
- "volar-ir-common 0.1.0",
+ "volar-ir-common",
 ]
 
 [[package]]
@@ -2163,20 +2064,15 @@ name = "volar-pod2-backend"
 version = "0.1.0"
 dependencies = [
  "volar-circuit-source",
- "volar-fuzz 0.1.0",
- "volar-ir 0.1.0",
+ "volar-fuzz",
+ "volar-ir",
  "volar-ir-build",
- "volar-ir-common 0.1.0",
+ "volar-ir-common",
 ]
 
 [[package]]
 name = "volar-provenance"
 version = "0.1.0"
-
-[[package]]
-name = "volar-provenance"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
 
 [[package]]
 name = "volar-riscv-test-programs"
@@ -2186,7 +2082,7 @@ dependencies = [
  "portal-pc-waffle-frontend",
  "portal-pc-waffle-ir",
  "rv-asm",
- "volar-vaffle-target 0.1.0",
+ "volar-vaffle-target",
  "wasmtime",
  "wat",
 ]
@@ -2199,23 +2095,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "volar-side"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-
-[[package]]
 name = "volar-ssa-lir-replay"
 version = "0.1.0"
 dependencies = [
  "inkwell",
  "tempfile",
- "vaffle 0.1.0",
+ "vaffle",
  "volar-c-backend",
- "volar-ir-common 0.1.0",
- "volar-lir 0.1.0",
+ "volar-ir-common",
+ "volar-lir",
  "volar-lir-test-corpus",
  "volar-llvm-backend",
- "volar-provenance 0.1.0",
+ "volar-provenance",
 ]
 
 [[package]]
@@ -2225,30 +2116,14 @@ dependencies = [
  "portal-lazy-transform",
  "portal-pc-waffle-frontend",
  "portal-pc-waffle-ir",
- "vaffle 0.1.0",
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-ir-opt 0.1.0",
- "volar-lir 0.1.0",
+ "vaffle",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-opt",
+ "volar-lir",
  "volar-lir-test-corpus",
- "volar-side 0.1.0",
+ "volar-side",
  "wat",
- "wax-meta",
-]
-
-[[package]]
-name = "volar-vaffle-target"
-version = "0.1.0"
-source = "git+https://github.com/portal-co/volar-ir.git#a8dbb786911b2a954e77bc255dbbf9cb58a283a1"
-dependencies = [
- "portal-pc-waffle-frontend",
- "portal-pc-waffle-ir",
- "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-common 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
- "volar-side 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "wax-meta",
 ]
 
@@ -2256,11 +2131,11 @@ dependencies = [
 name = "volar-wasm-backend"
 version = "0.1.0"
 dependencies = [
- "volar-ir 0.1.0",
- "volar-ir-common 0.1.0",
- "volar-ir-passes 0.1.0",
- "volar-lir 0.1.0",
- "volar-lir-saved 0.1.0",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-passes",
+ "volar-lir",
+ "volar-lir-saved",
  "volar-lir-test-corpus",
  "wasm-encoder 0.240.0",
  "wasmtime",
@@ -2863,15 +2738,119 @@ name = "portal-solutions-asm-x86"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "volar-ir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-build"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir-test-corpus"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-ir-import"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-vaffle-import"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-wasm-circuit-import"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-crypto"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-std"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-pass-build"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-pass-support"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "thin-mcp"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "vane-aarch64"
+name = "lazy-repo-crypto"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "vane-riscv"
+name = "lazy-repo-std"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-jit-host-names"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-jit-host-names"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-abi-codegen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-abi-spec"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-abi-stubs"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-async"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-build"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-codesign-macho"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-ctx"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-daemon"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-daemon-hook"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-daemon-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-daemon-shim"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-darwin-wasi"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-host-api"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2883,7 +2862,67 @@ name = "os-jit-core"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "os-linux-wasi"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-page"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-page-codegen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-rewrite-elf"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-rewrite-macho"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "os-shim-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-shim-handler"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-syscall-emit"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-target-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-target-native"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-target-wax"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-transform-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-unix-emulation"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-unix-wasi"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-aarch64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-riscv"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2920,4 +2959,12 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "portal-solutions-blitz-x86-64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-pass-build"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-pass-support"
 version = "0.1.0"

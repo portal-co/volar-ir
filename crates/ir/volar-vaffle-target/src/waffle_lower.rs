@@ -27,12 +27,26 @@
 //!   as extra function parameters and return values.  Immutable globals return
 //!   their compile-time constant.
 //!
+//! **Floats**: F32/F64 constants, loads/stores, reinterprets, sign
+//! manipulation (`abs`/`neg`/`copysign`) lower inline as bit operations.
+//! F64 arithmetic/comparison/conversion/rounding and F32 comparisons lower
+//! to calls into module-internal helper functions (emitted once per helper
+//! kind by [`emit_softfloat_helpers`]) whose bodies are the bit-exact
+//! IEEE-754 (RNE, canonical NaN) circuits from `volar_lir::softfloat`.
+//!
+//! **Indirect calls**: `CallIndirect` on a statically-known table lowers to
+//! a dispatch cascade over the table's signature-matching entries (see
+//! [`scan_dynamic_tables`]).
+//!
 //! **Operators** (not supported — returns `UnsupportedOp`):
-//! - All F32/F64 ops and float memory ops
+//! - F32 arithmetic (`add`/`sub`/`mul`/`div`/`min`/`max`/rounding), `F64Sqrt`,
+//!   `F32Sqrt`
+//! - Trapping float-to-int conversions (`I32TruncF64S` etc. — only the
+//!   saturating `*TruncSat*` forms lower)
 //! - All V128/SIMD ops
 //! - All atomic/threads ops
-//! - Trunc-sat conversions
-//! - `CallIndirect`, `CallRef`
+//! - Trunc-sat conversions other than `I32TruncSatF64S`/`I32TruncSatF64U`
+//! - `CallIndirect` on imported/dynamically-mutated tables, `CallRef`
 //! - Tables: `TableGet`, `TableSet`, `TableGrow`, `TableSize`
 //! - Bulk memory: `MemoryInit`, `DataDrop` (`MemoryCopy`/`MemoryFill` are
 //!   desugared to module-internal byte-loop helper calls; see
@@ -43,10 +57,11 @@
 //!
 //! **Terminators** (supported):
 //! - `Br`, `CondBr`, `Return`, `ReturnCall`
+//! - `Select` (br_table) — lowered as a `CondBr` cascade through zero-param
+//!   intermediate blocks
 //! - `Unreachable`, `UB`, `None` — stubbed as a return of zero
 //!
 //! **Terminators** (not supported — returns `UnsupportedOp`):
-//! - `Select` (br_table)
 //! - `ReturnCallIndirect`, `ReturnCallRef`
 //!
 //! All integer values are bit-decomposed via `BitCircuitBuilder`, sharing
@@ -86,10 +101,11 @@ use volar_ir_common::{Constant, PreInitSegment, StorageId};
 use volar_lir::circuits::{
     StorageEmitter, bc_clz, bc_ctz, bc_popcnt, bc_rotl, bc_rotr, bc_srem, bc_urem,
 };
+use volar_lir::softfloat;
 use volar_lir::{BitCircuitBuilder, BranchTarget, IcmpPred, LirTarget, LirType};
 
 use crate::import_config::{WaffleImportConfig, WaffleImportKind};
-use crate::target::{VaffleBlock, VaffleTarget, VaffleValue, bits_for_lir_type};
+use crate::target::{SoftfloatHelper, VaffleBlock, VaffleTarget, VaffleValue, bits_for_lir_type};
 use crate::vc::{
     RevealedBits, VcArtifact, VcConfig, VcIds, VcLoweringState, VcVisibility, VciOp,
     build_vc_regions, resolve_call_func_name, validate_vc_regions, vci_op_for_func,
@@ -308,6 +324,7 @@ pub fn lower_waffle_module_with_metadata(
     // Materialise the bulk-memory helper bodies that `MemoryCopy`/
     // `MemoryFill` desugaring requested (forward-referenced by the calls).
     emit_bulk_memory_helpers(target, config);
+    emit_softfloat_helpers(target);
 
     // Collect WASM active data-segment pre-initialisations.
     // WASM linear memories use 8-bit byte cells, addressed by
@@ -1343,6 +1360,141 @@ fn lower_op(
             });
         }
 
+        // ---- Floats as raw bit patterns (softfloat strategy) -------------
+        // Floats are represented as their IEEE-754 bit patterns (`U32`/`U64`).
+        // Constants, loads/stores, reinterprets, and sign-bit manipulation
+        // are pure bit ops; arithmetic/conversions go through softfloat
+        // helper functions (bit-exact vs. IEEE RNE, deterministic for MPC).
+        // Waffle stores float immediates as their raw bit patterns.
+        Operator::F32Const { value } => vc_iconst(tgt, LirType::U32, *value as i32 as i64),
+        Operator::F64Const { value } => vc_iconst(tgt, LirType::U64, *value as i64),
+
+        Operator::I32ReinterpretF32 | Operator::F32ReinterpretI32 => {
+            let v = get(0)?;
+            VaffleValue {
+                bits: v.bits,
+                ty: LirType::U32,
+            }
+        }
+        Operator::I64ReinterpretF64 | Operator::F64ReinterpretI64 => {
+            let v = get(0)?;
+            VaffleValue {
+                bits: v.bits,
+                ty: LirType::U64,
+            }
+        }
+
+        Operator::F64Load { memory } => {
+            lower_mem_load(tgt, memory, &get(0)?, 8, LirType::U64, false, config)
+        }
+        Operator::F32Load { memory } => {
+            lower_mem_load(tgt, memory, &get(0)?, 4, LirType::U32, false, config)
+        }
+        Operator::F64Store { memory } => {
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 8, config);
+            return Ok(None);
+        }
+        Operator::F32Store { memory } => {
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 4, config);
+            return Ok(None);
+        }
+
+        Operator::F64Abs => {
+            let v = get(0)?;
+            let zero = tgt.bc_const(false);
+            let mut bits = v.bits;
+            bits[63] = zero;
+            VaffleValue {
+                bits,
+                ty: LirType::U64,
+            }
+        }
+        Operator::F32Abs => {
+            let v = get(0)?;
+            let zero = tgt.bc_const(false);
+            let mut bits = v.bits;
+            bits[31] = zero;
+            VaffleValue {
+                bits,
+                ty: LirType::U32,
+            }
+        }
+        Operator::F64Neg => {
+            let v = get(0)?;
+            let flipped = tgt.bc_not(v.bits[63]);
+            let mut bits = v.bits;
+            bits[63] = flipped;
+            VaffleValue {
+                bits,
+                ty: LirType::U64,
+            }
+        }
+        Operator::F32Neg => {
+            let v = get(0)?;
+            let flipped = tgt.bc_not(v.bits[31]);
+            let mut bits = v.bits;
+            bits[31] = flipped;
+            VaffleValue {
+                bits,
+                ty: LirType::U32,
+            }
+        }
+        Operator::F64Copysign => {
+            let (mag, sign) = (get(0)?, get(1)?);
+            let mut bits = mag.bits;
+            bits[63] = sign.bits[63];
+            VaffleValue {
+                bits,
+                ty: LirType::U64,
+            }
+        }
+        Operator::F32Copysign => {
+            let (mag, sign) = (get(0)?, get(1)?);
+            let mut bits = mag.bits;
+            bits[31] = sign.bits[31];
+            VaffleValue {
+                bits,
+                ty: LirType::U32,
+            }
+        }
+
+        // ---- Float arithmetic / comparison / conversion (softfloat) ------
+        // Each op lowers to a call into a module-internal helper function
+        // (emitted once per helper kind by `emit_softfloat_helpers`) whose
+        // body is the bit-exact IEEE-754 circuit from `volar_lir::softfloat`.
+        // Sharing one body per op keeps the total circuit size linear in
+        // the number of distinct ops, not in the number of op sites.
+        Operator::F64Eq => sf_call(tgt, SoftfloatHelper::F64Cmp(0), &[get(0)?, get(1)?]),
+        Operator::F64Ne => sf_call(tgt, SoftfloatHelper::F64Cmp(1), &[get(0)?, get(1)?]),
+        Operator::F64Lt => sf_call(tgt, SoftfloatHelper::F64Cmp(2), &[get(0)?, get(1)?]),
+        Operator::F64Le => sf_call(tgt, SoftfloatHelper::F64Cmp(3), &[get(0)?, get(1)?]),
+        Operator::F64Gt => sf_call(tgt, SoftfloatHelper::F64Cmp(4), &[get(0)?, get(1)?]),
+        Operator::F64Ge => sf_call(tgt, SoftfloatHelper::F64Cmp(5), &[get(0)?, get(1)?]),
+        Operator::F32Eq => sf_call(tgt, SoftfloatHelper::F32Cmp(0), &[get(0)?, get(1)?]),
+        Operator::F32Ne => sf_call(tgt, SoftfloatHelper::F32Cmp(1), &[get(0)?, get(1)?]),
+        Operator::F32Lt => sf_call(tgt, SoftfloatHelper::F32Cmp(2), &[get(0)?, get(1)?]),
+        Operator::F32Le => sf_call(tgt, SoftfloatHelper::F32Cmp(3), &[get(0)?, get(1)?]),
+        Operator::F32Gt => sf_call(tgt, SoftfloatHelper::F32Cmp(4), &[get(0)?, get(1)?]),
+        Operator::F32Ge => sf_call(tgt, SoftfloatHelper::F32Cmp(5), &[get(0)?, get(1)?]),
+        Operator::F64Add => sf_call(tgt, SoftfloatHelper::F64Add, &[get(0)?, get(1)?]),
+        Operator::F64Sub => sf_call(tgt, SoftfloatHelper::F64Sub, &[get(0)?, get(1)?]),
+        Operator::F64Mul => sf_call(tgt, SoftfloatHelper::F64Mul, &[get(0)?, get(1)?]),
+        Operator::F64Div => sf_call(tgt, SoftfloatHelper::F64Div, &[get(0)?, get(1)?]),
+        Operator::F64Min => sf_call(tgt, SoftfloatHelper::F64Min, &[get(0)?, get(1)?]),
+        Operator::F64Max => sf_call(tgt, SoftfloatHelper::F64Max, &[get(0)?, get(1)?]),
+        Operator::F64Trunc => sf_call(tgt, SoftfloatHelper::F64RoundInt(0), &[get(0)?]),
+        Operator::F64Floor => sf_call(tgt, SoftfloatHelper::F64RoundInt(1), &[get(0)?]),
+        Operator::F64Ceil => sf_call(tgt, SoftfloatHelper::F64RoundInt(2), &[get(0)?]),
+        Operator::F64Nearest => sf_call(tgt, SoftfloatHelper::F64RoundInt(3), &[get(0)?]),
+        Operator::F64ConvertI32U => sf_call(tgt, SoftfloatHelper::F64FromI32(false), &[get(0)?]),
+        Operator::F64ConvertI32S => sf_call(tgt, SoftfloatHelper::F64FromI32(true), &[get(0)?]),
+        Operator::F64ConvertI64U => sf_call(tgt, SoftfloatHelper::F64FromI64(false), &[get(0)?]),
+        Operator::F64ConvertI64S => sf_call(tgt, SoftfloatHelper::F64FromI64(true), &[get(0)?]),
+        Operator::F64PromoteF32 => sf_call(tgt, SoftfloatHelper::F64PromoteF32, &[get(0)?]),
+        Operator::F32DemoteF64 => sf_call(tgt, SoftfloatHelper::F32DemoteF64, &[get(0)?]),
+        Operator::I32TruncSatF64S => sf_call(tgt, SoftfloatHelper::I32TruncSatF64(true), &[get(0)?]),
+        Operator::I32TruncSatF64U => sf_call(tgt, SoftfloatHelper::I32TruncSatF64(false), &[get(0)?]),
+
         // ---- Bulk memory (desugared to module-internal helper calls) -----
         // `memory.copy`/`memory.fill` lower to calls into byte-loop helper
         // functions emitted once per (kind, dst, src) memory pair (see
@@ -1685,6 +1837,86 @@ fn mem_load_bytes(
 
 /// Write `n_bytes` bytes of `value` (little-endian, LSB first) to memory
 /// storage starting at `byte_addr`.
+/// Softfloat op arm: register the helper for end-of-module emission and
+/// call it. Parameter types come from the operand values; the result type is
+/// fixed by the helper kind.
+fn sf_call(tgt: &mut VaffleTarget, helper: SoftfloatHelper, args: &[VaffleValue]) -> VaffleValue {
+    let arg_tys: alloc::vec::Vec<LirType> = args.iter().map(|a| a.ty.clone()).collect();
+    let ret_ty = match helper {
+        SoftfloatHelper::F64Cmp(_) | SoftfloatHelper::F32Cmp(_) | SoftfloatHelper::I32TruncSatF64(_) => {
+            LirType::U32
+        }
+        SoftfloatHelper::F32DemoteF64 => LirType::U32,
+        _ => LirType::U64,
+    };
+    tgt.pending_softfloat_helpers.insert(helper);
+    tgt.call(&helper.name(), &arg_tys, args, Some(ret_ty))
+        .into_iter()
+        .next()
+        .expect("softfloat helper returns one value")
+}
+
+/// Emit every pending softfloat helper as a module-internal function whose
+/// body is the shared IEEE-754 circuit from `volar_lir::softfloat`.
+pub fn emit_softfloat_helpers(target: &mut VaffleTarget) {
+    let helpers: alloc::vec::Vec<SoftfloatHelper> =
+        target.pending_softfloat_helpers.iter().copied().collect();
+    for helper in helpers {
+        emit_one_softfloat_helper(target, helper);
+    }
+    target.pending_softfloat_helpers.clear();
+}
+
+fn emit_one_softfloat_helper(tgt: &mut VaffleTarget, helper: SoftfloatHelper) {
+    use volar_lir::softfloat as sf;
+    let (param_tys, ret_ty): (&[LirType], LirType) = match helper {
+        SoftfloatHelper::F64Cmp(_) => (&[LirType::U64, LirType::U64], LirType::U32),
+        SoftfloatHelper::F32Cmp(_) => (&[LirType::U32, LirType::U32], LirType::U32),
+        SoftfloatHelper::I32TruncSatF64(_) => (&[LirType::U64], LirType::U32),
+        SoftfloatHelper::F32DemoteF64 => (&[LirType::U64], LirType::U32),
+        SoftfloatHelper::F64PromoteF32 => (&[LirType::U32], LirType::U64),
+        SoftfloatHelper::F64FromI32(_) => (&[LirType::U32], LirType::U64),
+        SoftfloatHelper::F64FromI64(_) | SoftfloatHelper::F64RoundInt(_) => {
+            (&[LirType::U64], LirType::U64)
+        }
+        _ => (&[LirType::U64, LirType::U64], LirType::U64),
+    };
+    let (_entry, groups) = tgt.begin_function(&helper.name(), param_tys, Some(ret_ty.clone()));
+    let a = groups[0][0].clone();
+    let bits = match helper {
+        SoftfloatHelper::F64Add => sf::f64_add(tgt, &a.bits, &groups[1][0].bits, false),
+        SoftfloatHelper::F64Sub => sf::f64_add(tgt, &a.bits, &groups[1][0].bits, true),
+        SoftfloatHelper::F64Mul => sf::f64_mul(tgt, &a.bits, &groups[1][0].bits),
+        SoftfloatHelper::F64Div => sf::f64_div(tgt, &a.bits, &groups[1][0].bits),
+        SoftfloatHelper::F64Min => sf::f64_min(tgt, &a.bits, &groups[1][0].bits),
+        SoftfloatHelper::F64Max => sf::f64_max(tgt, &a.bits, &groups[1][0].bits),
+        SoftfloatHelper::F64Cmp(op) => {
+            let bit = sf::f64_cmp(tgt, &a.bits, &groups[1][0].bits, op);
+            let mut v = alloc::vec![bit];
+            for _ in 0..31 {
+                v.push(tgt.bc_const(false));
+            }
+            v
+        }
+        SoftfloatHelper::F32Cmp(op) => {
+            let bit = sf::f32_cmp(tgt, &a.bits, &groups[1][0].bits, op);
+            let mut v = alloc::vec![bit];
+            for _ in 0..31 {
+                v.push(tgt.bc_const(false));
+            }
+            v
+        }
+        SoftfloatHelper::F64RoundInt(m) => sf::f64_round_int(tgt, &a.bits, m),
+        SoftfloatHelper::F64FromI64(signed) => sf::f64_from_i64(tgt, &a.bits, signed),
+        SoftfloatHelper::F64FromI32(signed) => sf::f64_from_i32(tgt, &a.bits, signed),
+        SoftfloatHelper::I32TruncSatF64(signed) => sf::i32_trunc_sat_f64(tgt, &a.bits, signed),
+        SoftfloatHelper::F64PromoteF32 => sf::f64_promote_f32(tgt, &a.bits),
+        SoftfloatHelper::F32DemoteF64 => sf::f32_demote_f64(tgt, &a.bits),
+    };
+    tgt.ret(&[VaffleValue { bits, ty: ret_ty }]);
+    tgt.end_function();
+}
+
 fn mem_store_bytes(
     tgt: &mut VaffleTarget,
     mem_idx: u32,
@@ -2196,6 +2428,59 @@ mod tests {
     use volar_ir_common::Stmt;
 
     #[test]
+    #[test]
+    fn softfloat_ops_lower_to_shared_helper_calls() {
+        // f64 add + comparison: each must lower to a call into a shared
+        // module-internal helper (emitted once), not an inlined circuit.
+        let wat = r#"
+            (module
+              (memory 1)
+              (func (export "go") (param f64 f64) (result i32)
+                local.get 0 local.get 1 f64.add
+                local.get 0 local.get 1 f64.mul
+                f64.lt
+                (drop (f64.max (local.get 0) (f64.neg (local.get 1))))
+                ))"#;
+        let bytes = wat::parse_str(wat).expect("wat parses");
+        let module = portal_pc_waffle_frontend::from_wasm_bytes(&bytes, &Default::default())
+            .expect("frontend parses float module");
+        let mut target = VaffleTarget::with_pointer_width(vaffle::PointerWidth::Bits32);
+        let errors = lower_waffle_module(&module, &mut target, &WaffleImportConfig::new());
+        assert!(errors.is_empty(), "lowering errors: {errors:?}");
+
+        // Helpers exist as bodies (add, mul, cmp-lt, max).
+        for name in [
+            "__volar_sf_f64_add",
+            "__volar_sf_f64_mul",
+            "__volar_sf_f64_cmp_2",
+            "__volar_sf_f64_max",
+        ] {
+            let fid = *target
+                .module
+                .exports
+                .get(name)
+                .unwrap_or_else(|| panic!("helper {name} exported"));
+            assert!(
+                matches!(&target.module.funcs[fid.0], vaffle::FuncDecl::Body(..)),
+                "helper {name} is a body"
+            );
+        }
+        // The user function itself must be tiny: no inlined circuit. Its
+        // body should be a handful of call statements.
+        // The frontend names this anonymous wat function "".
+        let go = *target.module.exports.get("").expect("user function exported");
+        let body = match &target.module.funcs[go.0] {
+            vaffle::FuncDecl::Body(b) => b,
+            _ => panic!("go is a body"),
+        };
+        let calls = body
+            .values
+            .iter()
+            .filter(|n| matches!(n.kind, vaffle::Value::Call { .. }))
+            .count();
+        assert_eq!(calls, 4, "go should contain exactly 4 helper calls");
+    }
+
     fn multi_memory_bulk_ops_lower_to_per_memory_helpers() {
         // Two memories; same-memory overlapping copy in m0, cross-memory
         // copy m0 -> m1, and a fill of m1. Each must lower to a call into
