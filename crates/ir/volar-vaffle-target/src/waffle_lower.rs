@@ -501,23 +501,56 @@ pub fn lower_waffle_function(
         })
         .collect();
 
-    // ---- Emit each WAFFLE block ---------------------------------------------
+    // ---- Pre-pass: create every non-entry block's params up front ----------
+    // A forward branch's target args resolve to the target block's params, so
+    // those params must exist in `val_map` before ANY block is emitted —
+    // creating them in processing order breaks forward branches into
+    // param-carrying blocks (spike: ai-support gateway module).
+    let mut block_global_params: BTreeMap<portal_pc_waffle_ir::Block, Vec<VaffleValue>> =
+        BTreeMap::new();
     for (wblock, block_def) in body.blocks.entries() {
+        if wblock == body.entry {
+            continue;
+        }
+        let vblock = block_map[&wblock];
+        for &(ty, wval) in &block_def.params {
+            let lir_ty = waffle_ty(ty)?;
+            let vv = target.add_block_param(vblock, lir_ty);
+            val_map.insert(wval, vv);
+        }
+        // Extra block params carry the threaded globals for this block.
+        let gps = global_lir_tys
+            .iter()
+            .map(|ty| target.add_block_param(vblock, ty.clone()))
+            .collect::<Vec<_>>();
+        block_global_params.insert(wblock, gps);
+    }
+
+    // ---- Emit each WAFFLE block in reverse postorder ------------------------
+    // Op results land in `val_map` when their block is emitted, so a use must
+    // be processed after its def: arena order is not guaranteed to respect
+    // dominance, but RPO is (spike: ai-support gateway module). Unreachable
+    // blocks (absent from the RPO) are emitted last in arena order.
+    let cfg_info = portal_pc_waffle_ir::cfg::CFGInfo::new(body);
+    let mut block_order: Vec<portal_pc_waffle_ir::Block> =
+        cfg_info.rpo.values().copied().collect();
+    {
+        let reachable: alloc::collections::BTreeSet<portal_pc_waffle_ir::Block> =
+            block_order.iter().copied().collect();
+        for (wblock, _) in body.blocks.entries() {
+            if !reachable.contains(&wblock) {
+                block_order.push(wblock);
+            }
+        }
+    }
+
+    for wblock in block_order {
+        let block_def = &body.blocks[wblock];
         let vblock = block_map[&wblock];
         target.switch_to_block(vblock);
 
-        // Non-entry block params become VAFFLE block params.
         if wblock != body.entry {
-            for &(ty, wval) in &block_def.params {
-                let lir_ty = waffle_ty(ty)?;
-                let vv = target.add_block_param(vblock, lir_ty);
-                val_map.insert(wval, vv);
-            }
-            // Extra block params carry the threaded globals for this block.
-            current_globals = global_lir_tys
-                .iter()
-                .map(|ty| target.add_block_param(vblock, ty.clone()))
-                .collect();
+            current_globals = block_global_params[&wblock].clone();
         }
 
         // Instructions: each ValueRecord wraps a Value index.
@@ -990,8 +1023,12 @@ fn lower_op(
                 let all_arg_vals: Vec<VaffleValue> =
                     args.iter()
                         .map(|wv| {
-                            val_map.get(wv).cloned().ok_or_else(|| {
-                                UnsupportedOp(alloc::format!("undefined arg {:?}", wv))
+                            resolve_wval(body, val_map, *wv).ok_or_else(|| {
+                                UnsupportedOp(alloc::format!(
+                                    "undefined arg {:?} (def {:?})",
+                                    wv,
+                                    body.values[*wv]
+                                ))
                             })
                         })
                         .collect::<Result<_, _>>()?;
@@ -1053,10 +1090,23 @@ fn lower_op(
             let arg_vals: Vec<VaffleValue> = args
                 .iter()
                 .map(|wv| {
-                    val_map
-                        .get(wv)
-                        .cloned()
-                        .ok_or_else(|| UnsupportedOp(alloc::format!("undefined arg {:?}", wv)))
+                    resolve_wval(body, val_map, *wv).ok_or_else(|| {
+                        // Chase the alias chain to the undefined target for
+                        // the diagnostic (bounded, mirrors resolve_wval).
+                        let mut cur = *wv;
+                        for _ in 0..10_000 {
+                            match &body.values[cur] {
+                                ValueDef::Alias(t) => cur = *t,
+                                _ => break,
+                            }
+                        }
+                        UnsupportedOp(alloc::format!(
+                            "undefined arg {:?} (chain ends at {:?} def {:?})",
+                            wv,
+                            cur,
+                            body.values[cur]
+                        ))
+                    })
                 })
                 .collect::<Result<_, _>>()?;
             let orig_ret_tys: Vec<LirType> = result_tys
@@ -1266,6 +1316,52 @@ fn lower_term(
                 args.iter().map(|a| get(a)).collect::<Result<_, _>>()?;
             arg_vals.extend_from_slice(current_globals);
             tgt.ret_call(&name, &arg_vals);
+        }
+
+        // `br_table` desugars to a CondBr cascade through fresh intermediate
+        // blocks: block i tests `value == i` and falls through to i+1, with the
+        // last fall-through going to the default target. Intermediate blocks
+        // take no params (the threaded globals are only appended when leaving
+        // to a real target). (Spike: ai-support gateway module.)
+        Terminator::Select {
+            value,
+            targets,
+            default,
+        } => {
+            let val = get(value)?;
+            let n = targets.len();
+            if n == 0 {
+                let db = get_block(default.block)?;
+                let mut dargs = get_args(&default.args)?;
+                dargs.extend_from_slice(current_globals);
+                tgt.jump(db, BranchTarget::args(dargs));
+                return Ok(());
+            }
+            let cascade: Vec<VaffleBlock> = (0..n).map(|_| tgt.create_block()).collect();
+            tgt.jump(cascade[0], BranchTarget::args(alloc::vec::Vec::new()));
+            for (i, bt) in targets.iter().enumerate() {
+                tgt.switch_to_block(cascade[i]);
+                let k = tgt.iconst(LirType::U32, i as i64);
+                let cmp = tgt.icmp(IcmpPred::Eq, val.clone(), k);
+                let then_b = get_block(bt.block)?;
+                let mut then_args = get_args(&bt.args)?;
+                then_args.extend_from_slice(current_globals);
+                let (else_b, else_args) = if i + 1 < n {
+                    (cascade[i + 1], alloc::vec::Vec::new())
+                } else {
+                    let db = get_block(default.block)?;
+                    let mut dargs = get_args(&default.args)?;
+                    dargs.extend_from_slice(current_globals);
+                    (db, dargs)
+                };
+                tgt.branch(
+                    cmp,
+                    then_b,
+                    BranchTarget::args(then_args),
+                    else_b,
+                    BranchTarget::args(else_args),
+                );
+            }
         }
 
         other => return Err(UnsupportedOp(alloc::format!("terminator {other:?}"))),
