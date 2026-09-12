@@ -27,24 +27,40 @@
 //!   as extra function parameters and return values.  Immutable globals return
 //!   their compile-time constant.
 //!
+//! **Floats**: F32/F64 constants, loads/stores, reinterprets, sign
+//! manipulation (`abs`/`neg`/`copysign`) lower inline as bit operations.
+//! F64 arithmetic/comparison/conversion/rounding and F32 comparisons lower
+//! to calls into module-internal helper functions (emitted once per helper
+//! kind by [`emit_softfloat_helpers`]) whose bodies are the bit-exact
+//! IEEE-754 (RNE, canonical NaN) circuits from `volar_lir::softfloat`.
+//!
+//! **Indirect calls**: `CallIndirect` on a statically-known table lowers to
+//! a dispatch cascade over the table's signature-matching entries (see
+//! [`scan_dynamic_tables`]).
+//!
 //! **Operators** (not supported — returns `UnsupportedOp`):
-//! - All F32/F64 ops and float memory ops
+//! - F32 arithmetic (`add`/`sub`/`mul`/`div`/`min`/`max`/rounding) and
+//!   `F32Sqrt`
 //! - All V128/SIMD ops
 //! - All atomic/threads ops
-//! - Trunc-sat conversions
-//! - `CallIndirect`, `CallRef`
+//! - F32-family conversions (`*TruncSatF32*`, `F32ConvertI*`) and
+//!   `I64TruncSatF32*`
+//! - `CallIndirect` on imported/dynamically-mutated tables, `CallRef`
 //! - Tables: `TableGet`, `TableSet`, `TableGrow`, `TableSize`
-//! - Bulk memory: `MemoryCopy`, `MemoryFill`, `MemoryInit`, `DataDrop`
+//! - Bulk memory: `MemoryInit`, `DataDrop` (`MemoryCopy`/`MemoryFill` are
+//!   desugared to module-internal byte-loop helper calls; see
+//!   [`emit_bulk_memory_helpers`])
 //! - Reference types: `RefNull`, `RefIsNull`, `RefFunc`
 //! - GC proposal operators
 //! - `Unreachable` operator (distinct from `Terminator::Unreachable`)
 //!
 //! **Terminators** (supported):
 //! - `Br`, `CondBr`, `Return`, `ReturnCall`
+//! - `Select` (br_table) — lowered as a `CondBr` cascade through zero-param
+//!   intermediate blocks
 //! - `Unreachable`, `UB`, `None` — stubbed as a return of zero
 //!
 //! **Terminators** (not supported — returns `UnsupportedOp`):
-//! - `Select` (br_table)
 //! - `ReturnCallIndirect`, `ReturnCallRef`
 //!
 //! All integer values are bit-decomposed via `BitCircuitBuilder`, sharing
@@ -68,6 +84,7 @@ use portal_pc_waffle_ir::{
     Func,
     FuncDecl,
     FunctionBody,
+    ImportKind,
     MemoryArg,
     Module as WModule,
     Operator,
@@ -83,10 +100,11 @@ use volar_ir_common::{Constant, PreInitSegment, StorageId};
 use volar_lir::circuits::{
     StorageEmitter, bc_clz, bc_ctz, bc_popcnt, bc_rotl, bc_rotr, bc_srem, bc_urem,
 };
+use volar_lir::softfloat;
 use volar_lir::{BitCircuitBuilder, BranchTarget, IcmpPred, LirTarget, LirType};
 
 use crate::import_config::{WaffleImportConfig, WaffleImportKind};
-use crate::target::{VaffleBlock, VaffleTarget, VaffleValue, bits_for_lir_type};
+use crate::target::{SoftfloatHelper, VaffleBlock, VaffleTarget, VaffleValue, bits_for_lir_type};
 use crate::vc::{
     RevealedBits, VcArtifact, VcConfig, VcIds, VcLoweringState, VcVisibility, VciOp,
     build_vc_regions, resolve_call_func_name, validate_vc_regions, vci_op_for_func,
@@ -302,6 +320,11 @@ pub fn lower_waffle_module_with_metadata(
         }
     }
 
+    // Materialise the bulk-memory helper bodies that `MemoryCopy`/
+    // `MemoryFill` desugaring requested (forward-referenced by the calls).
+    emit_bulk_memory_helpers(target, config);
+    emit_softfloat_helpers(target);
+
     // Collect WASM active data-segment pre-initialisations.
     // WASM linear memories use 8-bit byte cells, addressed by
     // `mem_load_bytes`/`mem_store_bytes`'s own `StorageId::memory(..)` +
@@ -410,10 +433,53 @@ pub fn lower_waffle_function_lazy(
             declaration.name()
         )));
     }
+    if !target.dynamic_tables_computed {
+        target.dynamic_tables = scan_dynamic_tables(wasm);
+        target.dynamic_tables_computed = true;
+    }
     let name = declaration.name().to_string();
     let body = portal_pc_waffle_frontend::clone_and_expand_body(wasm, function)
         .map_err(|error| UnsupportedOp(alloc::format!("failed to expand {name}: {error}")))?;
     lower_waffle_function(&body, &name, wasm, target, config)
+}
+
+/// Tables whose contents are not statically known: imported tables plus any
+/// table targeted by `table.set`/`table.grow` anywhere in the module.
+/// `call_indirect` on a static table lowers to a dispatch cascade over the
+/// materialized `func_elements`; on a dynamic table it stays `UnsupportedOp`.
+///
+/// (Expanding every body here costs one extra parse pass over the module;
+/// the result is cached on the target via `dynamic_tables_computed`.)
+pub fn scan_dynamic_tables(wasm: &WModule) -> alloc::collections::BTreeSet<u32> {
+    let mut dynamic = alloc::collections::BTreeSet::new();
+    for import in &wasm.imports {
+        if let ImportKind::Table(t) = &import.kind {
+            dynamic.insert(t.index() as u32);
+        }
+    }
+    for (func_ref, decl) in wasm.funcs.entries() {
+        if matches!(decl, FuncDecl::Import(..)) {
+            continue;
+        }
+        let Ok(body) = portal_pc_waffle_frontend::clone_and_expand_body(wasm, func_ref)
+        else {
+            continue;
+        };
+        for (_, block) in body.blocks.entries() {
+            for record in &block.insts {
+                if let ValueDef::Operator(op, _, _) = &body.values[record.value] {
+                    match op {
+                        Operator::TableSet { table_index }
+                        | Operator::TableGrow { table_index } => {
+                            dynamic.insert(table_index.index() as u32);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    dynamic
 }
 
 /// Lower a single WAFFLE `FunctionBody` into `target`.
@@ -501,23 +567,56 @@ pub fn lower_waffle_function(
         })
         .collect();
 
-    // ---- Emit each WAFFLE block ---------------------------------------------
+    // ---- Pre-pass: create every non-entry block's params up front ----------
+    // A forward branch's target args resolve to the target block's params, so
+    // those params must exist in `val_map` before ANY block is emitted —
+    // creating them in processing order breaks forward branches into
+    // param-carrying blocks (spike: ai-support gateway module).
+    let mut block_global_params: BTreeMap<portal_pc_waffle_ir::Block, Vec<VaffleValue>> =
+        BTreeMap::new();
     for (wblock, block_def) in body.blocks.entries() {
+        if wblock == body.entry {
+            continue;
+        }
+        let vblock = block_map[&wblock];
+        for &(ty, wval) in &block_def.params {
+            let lir_ty = waffle_ty(ty)?;
+            let vv = target.add_block_param(vblock, lir_ty);
+            val_map.insert(wval, vv);
+        }
+        // Extra block params carry the threaded globals for this block.
+        let gps = global_lir_tys
+            .iter()
+            .map(|ty| target.add_block_param(vblock, ty.clone()))
+            .collect::<Vec<_>>();
+        block_global_params.insert(wblock, gps);
+    }
+
+    // ---- Emit each WAFFLE block in reverse postorder ------------------------
+    // Op results land in `val_map` when their block is emitted, so a use must
+    // be processed after its def: arena order is not guaranteed to respect
+    // dominance, but RPO is (spike: ai-support gateway module). Unreachable
+    // blocks (absent from the RPO) are emitted last in arena order.
+    let cfg_info = portal_pc_waffle_ir::cfg::CFGInfo::new(body);
+    let mut block_order: Vec<portal_pc_waffle_ir::Block> =
+        cfg_info.rpo.values().copied().collect();
+    {
+        let reachable: alloc::collections::BTreeSet<portal_pc_waffle_ir::Block> =
+            block_order.iter().copied().collect();
+        for (wblock, _) in body.blocks.entries() {
+            if !reachable.contains(&wblock) {
+                block_order.push(wblock);
+            }
+        }
+    }
+
+    for wblock in block_order {
+        let block_def = &body.blocks[wblock];
         let vblock = block_map[&wblock];
         target.switch_to_block(vblock);
 
-        // Non-entry block params become VAFFLE block params.
         if wblock != body.entry {
-            for &(ty, wval) in &block_def.params {
-                let lir_ty = waffle_ty(ty)?;
-                let vv = target.add_block_param(vblock, lir_ty);
-                val_map.insert(wval, vv);
-            }
-            // Extra block params carry the threaded globals for this block.
-            current_globals = global_lir_tys
-                .iter()
-                .map(|ty| target.add_block_param(vblock, ty.clone()))
-                .collect();
+            current_globals = block_global_params[&wblock].clone();
         }
 
         // Instructions: each ValueRecord wraps a Value index.
@@ -670,7 +769,19 @@ fn lower_op(
 
         // ---- I32 arithmetic --------------------------------------------
         Operator::I32Add => tgt.add(get(0)?, get(1)?),
-        Operator::I32Sub => tgt.sub(get(0)?, get(1)?),
+        Operator::I32Sub => {
+            let (a, b) = (get(0)?, get(1)?);
+            if a.bits.len() != 32 || b.bits.len() != 32 {
+                return Err(UnsupportedOp(alloc::format!(
+                    "I32Sub width mismatch: {} vs {} bits (lhs def: {:?}, rhs def: {:?})",
+                    a.bits.len(),
+                    b.bits.len(),
+                    body.values[args[0]],
+                    body.values[args[1]],
+                )));
+            }
+            tgt.sub(a, b)
+        }
         Operator::I32Mul => tgt.mul(get(0)?, get(1)?),
         Operator::I32DivS => tgt.sdiv(get(0)?, get(1)?),
         Operator::I32DivU => tgt.udiv(get(0)?, get(1)?),
@@ -865,47 +976,47 @@ fn lower_op(
         Operator::I64Eqz => {
             let z = tgt.iconst(LirType::U64, 0);
             let c = tgt.icmp(IcmpPred::Eq, get(0)?, z);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64Eq => {
             let c = tgt.icmp(IcmpPred::Eq, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64Ne => {
             let c = tgt.icmp(IcmpPred::Ne, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64LtS => {
             let c = tgt.icmp(IcmpPred::Slt, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64LtU => {
             let c = tgt.icmp(IcmpPred::Ult, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64GtS => {
             let c = tgt.icmp(IcmpPred::Sgt, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64GtU => {
             let c = tgt.icmp(IcmpPred::Ugt, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64LeS => {
             let c = tgt.icmp(IcmpPred::Sle, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64LeU => {
             let c = tgt.icmp(IcmpPred::Ule, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64GeS => {
             let c = tgt.icmp(IcmpPred::Sge, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64GeU => {
             let c = tgt.icmp(IcmpPred::Uge, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
 
         // ---- Conversions -----------------------------------------------
@@ -990,8 +1101,12 @@ fn lower_op(
                 let all_arg_vals: Vec<VaffleValue> =
                     args.iter()
                         .map(|wv| {
-                            val_map.get(wv).cloned().ok_or_else(|| {
-                                UnsupportedOp(alloc::format!("undefined arg {:?}", wv))
+                            resolve_wval(body, val_map, *wv).ok_or_else(|| {
+                                UnsupportedOp(alloc::format!(
+                                    "undefined arg {:?} (def {:?})",
+                                    wv,
+                                    body.values[*wv]
+                                ))
                             })
                         })
                         .collect::<Result<_, _>>()?;
@@ -1053,10 +1168,23 @@ fn lower_op(
             let arg_vals: Vec<VaffleValue> = args
                 .iter()
                 .map(|wv| {
-                    val_map
-                        .get(wv)
-                        .cloned()
-                        .ok_or_else(|| UnsupportedOp(alloc::format!("undefined arg {:?}", wv)))
+                    resolve_wval(body, val_map, *wv).ok_or_else(|| {
+                        // Chase the alias chain to the undefined target for
+                        // the diagnostic (bounded, mirrors resolve_wval).
+                        let mut cur = *wv;
+                        for _ in 0..10_000 {
+                            match &body.values[cur] {
+                                ValueDef::Alias(t) => cur = *t,
+                                _ => break,
+                            }
+                        }
+                        UnsupportedOp(alloc::format!(
+                            "undefined arg {:?} (chain ends at {:?} def {:?})",
+                            wv,
+                            cur,
+                            body.values[cur]
+                        ))
+                    })
                 })
                 .collect::<Result<_, _>>()?;
             let orig_ret_tys: Vec<LirType> = result_tys
@@ -1088,6 +1216,323 @@ fn lower_op(
         }
 
         Operator::Nop => return Ok(None),
+
+        // ---- Indirect calls (static-table dispatch cascade) --------------
+        // `call_indirect` on a statically-known table lowers to a CondBr
+        // cascade over the table's sig-matching entries, rejoining in a
+        // continuation block whose params carry the results + threaded
+        // globals. Null/mismatched entries and out-of-range indices take the
+        // fall-through, which yields zeroed results (the same non-trapping
+        // discipline as `Terminator::Unreachable`).
+        Operator::CallIndirect {
+            sig_index,
+            table_index,
+        } => {
+            let tidx = table_index.index() as u32;
+            if tgt.dynamic_tables.contains(&tidx) {
+                return Err(UnsupportedOp(alloc::format!(
+                    "call_indirect on dynamically-mutated or imported table {tidx}"
+                )));
+            }
+            if table_index.index() >= wasm.tables.len() {
+                return Err(UnsupportedOp(alloc::format!("unknown table {tidx}")));
+            }
+            let table = &wasm.tables[*table_index];
+            let Some(elems) = &table.func_elements else {
+                return Err(UnsupportedOp(alloc::format!(
+                    "call_indirect on non-funcref table {tidx}"
+                )));
+            };
+
+            let idx_val = get(0)?;
+            let call_args: Vec<VaffleValue> = (1..args.len())
+                .map(|i| get(i))
+                .collect::<Result<_, _>>()?;
+            let orig_ret_tys: Vec<LirType> = result_tys
+                .iter()
+                .map(|&t| waffle_ty(t))
+                .collect::<Result<_, _>>()?;
+
+            // Dispatch candidates: non-null entries whose signature matches
+            // the call site's statically-known signature. Imported functions
+            // would need oracle/action routing — not supported in v1.
+            let mut candidates: Vec<(u32, Func)> = Vec::new();
+            for (i, f) in elems.iter().enumerate() {
+                if f.is_invalid() {
+                    continue;
+                }
+                let fdecl = &wasm.funcs[*f];
+                if fdecl.sig() != *sig_index {
+                    continue;
+                }
+                if matches!(fdecl, FuncDecl::Import(..)) {
+                    return Err(UnsupportedOp(alloc::format!(
+                        "call_indirect table {tidx} holds imported function"
+                    )));
+                }
+                candidates.push((i as u32, *f));
+            }
+
+            // Continuation: one param per result, then one per threaded
+            // global. Every dispatch arm (and the zeroed fall-through)
+            // rejoins here; the rest of the enclosing wasm block is emitted
+            // after it.
+            let cont = tgt.create_block();
+            let cont_rets: Vec<VaffleValue> = orig_ret_tys
+                .iter()
+                .map(|ty| tgt.add_block_param(cont, ty.clone()))
+                .collect();
+            let cont_globals: Vec<VaffleValue> = global_lir_tys
+                .iter()
+                .map(|ty| tgt.add_block_param(cont, ty.clone()))
+                .collect();
+            let zero_rets: Vec<VaffleValue> = orig_ret_tys
+                .iter()
+                .map(|ty| tgt.iconst(ty.clone(), 0))
+                .collect();
+
+            let mut all_ret_tys = orig_ret_tys.clone();
+            all_ret_tys.extend_from_slice(global_lir_tys);
+
+            for (pos, (elem_idx, func)) in candidates.iter().enumerate() {
+                let case_blk = tgt.create_block();
+                let next_check = if pos + 1 < candidates.len() {
+                    Some(tgt.create_block())
+                } else {
+                    None
+                };
+                let idx_const = tgt.iconst(LirType::U32, *elem_idx as i64);
+                let cond = tgt.icmp(IcmpPred::Eq, idx_val.clone(), idx_const);
+                match next_check {
+                    Some(next) => {
+                        tgt.branch(
+                            cond,
+                            case_blk,
+                            BranchTarget::args(alloc::vec![]),
+                            next,
+                            BranchTarget::args(alloc::vec![]),
+                        );
+                    }
+                    None => {
+                        // Last candidate: fall through to the continuation
+                        // with zeroed results, globals threaded through.
+                        let mut fall_args = zero_rets.clone();
+                        fall_args.extend_from_slice(current_globals);
+                        tgt.branch(
+                            cond,
+                            case_blk,
+                            BranchTarget::args(alloc::vec![]),
+                            cont,
+                            BranchTarget::args(fall_args),
+                        );
+                    }
+                }
+                tgt.switch_to_block(case_blk);
+                let mut all_args = call_args.clone();
+                all_args.extend_from_slice(current_globals);
+                let results =
+                    tgt.call_extern_multi(&callee_name(wasm, *func), &all_args, &all_ret_tys);
+                tgt.jump(cont, BranchTarget::args(results));
+                if let Some(next) = next_check {
+                    tgt.switch_to_block(next);
+                }
+            }
+            if candidates.is_empty() {
+                let mut fall_args = zero_rets;
+                fall_args.extend_from_slice(current_globals);
+                tgt.jump(cont, BranchTarget::args(fall_args));
+            }
+
+            tgt.switch_to_block(cont);
+            *current_globals = cont_globals;
+            return Ok(match cont_rets.len() {
+                0 => None,
+                1 => Some(cont_rets.into_iter().next().unwrap()),
+                _ => {
+                    let bits: Vec<ValueId> = cont_rets
+                        .iter()
+                        .flat_map(|vv| vv.bits.iter().copied())
+                        .collect();
+                    let ty = cont_rets[0].ty.clone();
+                    Some(VaffleValue { bits, ty })
+                }
+            });
+        }
+
+        // ---- Floats as raw bit patterns (softfloat strategy) -------------
+        // Floats are represented as their IEEE-754 bit patterns (`U32`/`U64`).
+        // Constants, loads/stores, reinterprets, and sign-bit manipulation
+        // are pure bit ops; arithmetic/conversions go through softfloat
+        // helper functions (bit-exact vs. IEEE RNE, deterministic for MPC).
+        // Waffle stores float immediates as their raw bit patterns.
+        Operator::F32Const { value } => vc_iconst(tgt, LirType::U32, *value as i32 as i64),
+        Operator::F64Const { value } => vc_iconst(tgt, LirType::U64, *value as i64),
+
+        Operator::I32ReinterpretF32 | Operator::F32ReinterpretI32 => {
+            let v = get(0)?;
+            VaffleValue {
+                bits: v.bits,
+                ty: LirType::U32,
+            }
+        }
+        Operator::I64ReinterpretF64 | Operator::F64ReinterpretI64 => {
+            let v = get(0)?;
+            VaffleValue {
+                bits: v.bits,
+                ty: LirType::U64,
+            }
+        }
+
+        Operator::F64Load { memory } => {
+            lower_mem_load(tgt, memory, &get(0)?, 8, LirType::U64, false, config)
+        }
+        Operator::F32Load { memory } => {
+            lower_mem_load(tgt, memory, &get(0)?, 4, LirType::U32, false, config)
+        }
+        Operator::F64Store { memory } => {
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 8, config);
+            return Ok(None);
+        }
+        Operator::F32Store { memory } => {
+            lower_mem_store(tgt, memory, &get(0)?, &get(1)?, 4, config);
+            return Ok(None);
+        }
+
+        Operator::F64Abs => {
+            let v = get(0)?;
+            let zero = tgt.bc_const(false);
+            let mut bits = v.bits;
+            bits[63] = zero;
+            VaffleValue {
+                bits,
+                ty: LirType::U64,
+            }
+        }
+        Operator::F32Abs => {
+            let v = get(0)?;
+            let zero = tgt.bc_const(false);
+            let mut bits = v.bits;
+            bits[31] = zero;
+            VaffleValue {
+                bits,
+                ty: LirType::U32,
+            }
+        }
+        Operator::F64Neg => {
+            let v = get(0)?;
+            let flipped = tgt.bc_not(v.bits[63]);
+            let mut bits = v.bits;
+            bits[63] = flipped;
+            VaffleValue {
+                bits,
+                ty: LirType::U64,
+            }
+        }
+        Operator::F32Neg => {
+            let v = get(0)?;
+            let flipped = tgt.bc_not(v.bits[31]);
+            let mut bits = v.bits;
+            bits[31] = flipped;
+            VaffleValue {
+                bits,
+                ty: LirType::U32,
+            }
+        }
+        Operator::F64Copysign => {
+            let (mag, sign) = (get(0)?, get(1)?);
+            let mut bits = mag.bits;
+            bits[63] = sign.bits[63];
+            VaffleValue {
+                bits,
+                ty: LirType::U64,
+            }
+        }
+        Operator::F32Copysign => {
+            let (mag, sign) = (get(0)?, get(1)?);
+            let mut bits = mag.bits;
+            bits[31] = sign.bits[31];
+            VaffleValue {
+                bits,
+                ty: LirType::U32,
+            }
+        }
+
+        // ---- Float arithmetic / comparison / conversion (softfloat) ------
+        // Each op lowers to a call into a module-internal helper function
+        // (emitted once per helper kind by `emit_softfloat_helpers`) whose
+        // body is the bit-exact IEEE-754 circuit from `volar_lir::softfloat`.
+        // Sharing one body per op keeps the total circuit size linear in
+        // the number of distinct ops, not in the number of op sites.
+        Operator::F64Eq => sf_call(tgt, SoftfloatHelper::F64Cmp(0), &[get(0)?, get(1)?]),
+        Operator::F64Ne => sf_call(tgt, SoftfloatHelper::F64Cmp(1), &[get(0)?, get(1)?]),
+        Operator::F64Lt => sf_call(tgt, SoftfloatHelper::F64Cmp(2), &[get(0)?, get(1)?]),
+        Operator::F64Le => sf_call(tgt, SoftfloatHelper::F64Cmp(3), &[get(0)?, get(1)?]),
+        Operator::F64Gt => sf_call(tgt, SoftfloatHelper::F64Cmp(4), &[get(0)?, get(1)?]),
+        Operator::F64Ge => sf_call(tgt, SoftfloatHelper::F64Cmp(5), &[get(0)?, get(1)?]),
+        Operator::F32Eq => sf_call(tgt, SoftfloatHelper::F32Cmp(0), &[get(0)?, get(1)?]),
+        Operator::F32Ne => sf_call(tgt, SoftfloatHelper::F32Cmp(1), &[get(0)?, get(1)?]),
+        Operator::F32Lt => sf_call(tgt, SoftfloatHelper::F32Cmp(2), &[get(0)?, get(1)?]),
+        Operator::F32Le => sf_call(tgt, SoftfloatHelper::F32Cmp(3), &[get(0)?, get(1)?]),
+        Operator::F32Gt => sf_call(tgt, SoftfloatHelper::F32Cmp(4), &[get(0)?, get(1)?]),
+        Operator::F32Ge => sf_call(tgt, SoftfloatHelper::F32Cmp(5), &[get(0)?, get(1)?]),
+        Operator::F64Add => sf_call(tgt, SoftfloatHelper::F64Add, &[get(0)?, get(1)?]),
+        Operator::F64Sub => sf_call(tgt, SoftfloatHelper::F64Sub, &[get(0)?, get(1)?]),
+        Operator::F64Mul => sf_call(tgt, SoftfloatHelper::F64Mul, &[get(0)?, get(1)?]),
+        Operator::F64Div => sf_call(tgt, SoftfloatHelper::F64Div, &[get(0)?, get(1)?]),
+        Operator::F64Min => sf_call(tgt, SoftfloatHelper::F64Min, &[get(0)?, get(1)?]),
+        Operator::F64Max => sf_call(tgt, SoftfloatHelper::F64Max, &[get(0)?, get(1)?]),
+        Operator::F64Trunc => sf_call(tgt, SoftfloatHelper::F64RoundInt(0), &[get(0)?]),
+        Operator::F64Floor => sf_call(tgt, SoftfloatHelper::F64RoundInt(1), &[get(0)?]),
+        Operator::F64Ceil => sf_call(tgt, SoftfloatHelper::F64RoundInt(2), &[get(0)?]),
+        Operator::F64Nearest => sf_call(tgt, SoftfloatHelper::F64RoundInt(3), &[get(0)?]),
+        Operator::F64ConvertI32U => sf_call(tgt, SoftfloatHelper::F64FromI32(false), &[get(0)?]),
+        Operator::F64ConvertI32S => sf_call(tgt, SoftfloatHelper::F64FromI32(true), &[get(0)?]),
+        Operator::F64ConvertI64U => sf_call(tgt, SoftfloatHelper::F64FromI64(false), &[get(0)?]),
+        Operator::F64ConvertI64S => sf_call(tgt, SoftfloatHelper::F64FromI64(true), &[get(0)?]),
+        Operator::F64PromoteF32 => sf_call(tgt, SoftfloatHelper::F64PromoteF32, &[get(0)?]),
+        Operator::F32DemoteF64 => sf_call(tgt, SoftfloatHelper::F32DemoteF64, &[get(0)?]),
+        Operator::I32TruncSatF64S => sf_call(tgt, SoftfloatHelper::I32TruncSatF64(true), &[get(0)?]),
+        Operator::I32TruncSatF64U => sf_call(tgt, SoftfloatHelper::I32TruncSatF64(false), &[get(0)?]),
+        Operator::I64TruncSatF64S => sf_call(tgt, SoftfloatHelper::I64TruncSatF64(true), &[get(0)?]),
+        Operator::I64TruncSatF64U => sf_call(tgt, SoftfloatHelper::I64TruncSatF64(false), &[get(0)?]),
+        Operator::F64Sqrt => sf_call(tgt, SoftfloatHelper::F64Sqrt, &[get(0)?]),
+        Operator::I32TruncF64S => sf_call(tgt, SoftfloatHelper::I32TruncF64(true), &[get(0)?]),
+        Operator::I32TruncF64U => sf_call(tgt, SoftfloatHelper::I32TruncF64(false), &[get(0)?]),
+        Operator::I64TruncF64S => sf_call(tgt, SoftfloatHelper::I64TruncF64(true), &[get(0)?]),
+        Operator::I64TruncF64U => sf_call(tgt, SoftfloatHelper::I64TruncF64(false), &[get(0)?]),
+
+        // ---- Bulk memory (desugared to module-internal helper calls) -----
+        // `memory.copy`/`memory.fill` lower to calls into byte-loop helper
+        // functions emitted once per (kind, dst, src) memory pair (see
+        // `emit_bulk_memory_helpers`). Like the rest of the memory lowering,
+        // addresses are masked to the configured `memory_address_bits`
+        // instead of trapping out-of-bounds.
+        Operator::MemoryCopy { dst_mem, src_mem } => {
+            let (dst_idx, src_idx) = (dst_mem.index() as u32, src_mem.index() as u32);
+            let (dst, src, len) = (get(0)?, get(1)?, get(2)?);
+            tgt.pending_bulk_helpers
+                .insert((BulkHelper::Memmove, dst_idx, src_idx));
+            tgt.call(
+                &bulk_helper_name(BulkHelper::Memmove, dst_idx, src_idx),
+                &[LirType::U32, LirType::U32, LirType::U32],
+                &[dst, src, len],
+                None,
+            );
+            return Ok(None);
+        }
+        Operator::MemoryFill { mem } => {
+            let mem_idx = mem.index() as u32;
+            let (dst, val, len) = (get(0)?, get(1)?, get(2)?);
+            tgt.pending_bulk_helpers
+                .insert((BulkHelper::Memset, mem_idx, mem_idx));
+            tgt.call(
+                &bulk_helper_name(BulkHelper::Memset, mem_idx, mem_idx),
+                &[LirType::U32, LirType::U32, LirType::U32],
+                &[dst, val, len],
+                None,
+            );
+            return Ok(None);
+        }
 
         // ---- Memory loads (byte-addressed storage) ---------------------
         Operator::I32Load { memory } => {
@@ -1268,6 +1713,52 @@ fn lower_term(
             tgt.ret_call(&name, &arg_vals);
         }
 
+        // `br_table` desugars to a CondBr cascade through fresh intermediate
+        // blocks: block i tests `value == i` and falls through to i+1, with the
+        // last fall-through going to the default target. Intermediate blocks
+        // take no params (the threaded globals are only appended when leaving
+        // to a real target). (Spike: ai-support gateway module.)
+        Terminator::Select {
+            value,
+            targets,
+            default,
+        } => {
+            let val = get(value)?;
+            let n = targets.len();
+            if n == 0 {
+                let db = get_block(default.block)?;
+                let mut dargs = get_args(&default.args)?;
+                dargs.extend_from_slice(current_globals);
+                tgt.jump(db, BranchTarget::args(dargs));
+                return Ok(());
+            }
+            let cascade: Vec<VaffleBlock> = (0..n).map(|_| tgt.create_block()).collect();
+            tgt.jump(cascade[0], BranchTarget::args(alloc::vec::Vec::new()));
+            for (i, bt) in targets.iter().enumerate() {
+                tgt.switch_to_block(cascade[i]);
+                let k = tgt.iconst(LirType::U32, i as i64);
+                let cmp = tgt.icmp(IcmpPred::Eq, val.clone(), k);
+                let then_b = get_block(bt.block)?;
+                let mut then_args = get_args(&bt.args)?;
+                then_args.extend_from_slice(current_globals);
+                let (else_b, else_args) = if i + 1 < n {
+                    (cascade[i + 1], alloc::vec::Vec::new())
+                } else {
+                    let db = get_block(default.block)?;
+                    let mut dargs = get_args(&default.args)?;
+                    dargs.extend_from_slice(current_globals);
+                    (db, dargs)
+                };
+                tgt.branch(
+                    cmp,
+                    then_b,
+                    BranchTarget::args(then_args),
+                    else_b,
+                    BranchTarget::args(else_args),
+                );
+            }
+        }
+
         other => return Err(UnsupportedOp(alloc::format!("terminator {other:?}"))),
     }
     Ok(())
@@ -1352,6 +1843,95 @@ fn mem_load_bytes(
 
 /// Write `n_bytes` bytes of `value` (little-endian, LSB first) to memory
 /// storage starting at `byte_addr`.
+/// Softfloat op arm: register the helper for end-of-module emission and
+/// call it. Parameter types come from the operand values; the result type is
+/// fixed by the helper kind.
+fn sf_call(tgt: &mut VaffleTarget, helper: SoftfloatHelper, args: &[VaffleValue]) -> VaffleValue {
+    let arg_tys: alloc::vec::Vec<LirType> = args.iter().map(|a| a.ty.clone()).collect();
+    let ret_ty = match helper {
+        SoftfloatHelper::F64Cmp(_)
+        | SoftfloatHelper::F32Cmp(_)
+        | SoftfloatHelper::I32TruncSatF64(_)
+        | SoftfloatHelper::I32TruncF64(_) => LirType::U32,
+        SoftfloatHelper::F32DemoteF64 => LirType::U32,
+        _ => LirType::U64,
+    };
+    tgt.pending_softfloat_helpers.insert(helper);
+    tgt.call(&helper.name(), &arg_tys, args, Some(ret_ty))
+        .into_iter()
+        .next()
+        .expect("softfloat helper returns one value")
+}
+
+/// Emit every pending softfloat helper as a module-internal function whose
+/// body is the shared IEEE-754 circuit from `volar_lir::softfloat`.
+pub fn emit_softfloat_helpers(target: &mut VaffleTarget) {
+    let helpers: alloc::vec::Vec<SoftfloatHelper> =
+        target.pending_softfloat_helpers.iter().copied().collect();
+    for helper in helpers {
+        emit_one_softfloat_helper(target, helper);
+    }
+    target.pending_softfloat_helpers.clear();
+}
+
+fn emit_one_softfloat_helper(tgt: &mut VaffleTarget, helper: SoftfloatHelper) {
+    use volar_lir::softfloat as sf;
+    let (param_tys, ret_ty): (&[LirType], LirType) = match helper {
+        SoftfloatHelper::F64Cmp(_) => (&[LirType::U64, LirType::U64], LirType::U32),
+        SoftfloatHelper::F32Cmp(_) => (&[LirType::U32, LirType::U32], LirType::U32),
+        SoftfloatHelper::I32TruncSatF64(_) | SoftfloatHelper::I32TruncF64(_) => {
+            (&[LirType::U64], LirType::U32)
+        }
+        SoftfloatHelper::F32DemoteF64 => (&[LirType::U64], LirType::U32),
+        SoftfloatHelper::F64PromoteF32 => (&[LirType::U32], LirType::U64),
+        SoftfloatHelper::F64FromI32(_) => (&[LirType::U32], LirType::U64),
+        SoftfloatHelper::F64FromI64(_)
+        | SoftfloatHelper::F64RoundInt(_)
+        | SoftfloatHelper::F64Sqrt
+        | SoftfloatHelper::I64TruncF64(_)
+        | SoftfloatHelper::I64TruncSatF64(_) => (&[LirType::U64], LirType::U64),
+        _ => (&[LirType::U64, LirType::U64], LirType::U64),
+    };
+    let (_entry, groups) = tgt.begin_function(&helper.name(), param_tys, Some(ret_ty.clone()));
+    let a = groups[0][0].clone();
+    let bits = match helper {
+        SoftfloatHelper::F64Add => sf::f64_add(tgt, &a.bits, &groups[1][0].bits, false),
+        SoftfloatHelper::F64Sub => sf::f64_add(tgt, &a.bits, &groups[1][0].bits, true),
+        SoftfloatHelper::F64Mul => sf::f64_mul(tgt, &a.bits, &groups[1][0].bits),
+        SoftfloatHelper::F64Div => sf::f64_div(tgt, &a.bits, &groups[1][0].bits),
+        SoftfloatHelper::F64Min => sf::f64_min(tgt, &a.bits, &groups[1][0].bits),
+        SoftfloatHelper::F64Max => sf::f64_max(tgt, &a.bits, &groups[1][0].bits),
+        SoftfloatHelper::F64Cmp(op) => {
+            let bit = sf::f64_cmp(tgt, &a.bits, &groups[1][0].bits, op);
+            let mut v = alloc::vec![bit];
+            for _ in 0..31 {
+                v.push(tgt.bc_const(false));
+            }
+            v
+        }
+        SoftfloatHelper::F32Cmp(op) => {
+            let bit = sf::f32_cmp(tgt, &a.bits, &groups[1][0].bits, op);
+            let mut v = alloc::vec![bit];
+            for _ in 0..31 {
+                v.push(tgt.bc_const(false));
+            }
+            v
+        }
+        SoftfloatHelper::F64RoundInt(m) => sf::f64_round_int(tgt, &a.bits, m),
+        SoftfloatHelper::F64FromI64(signed) => sf::f64_from_i64(tgt, &a.bits, signed),
+        SoftfloatHelper::F64FromI32(signed) => sf::f64_from_i32(tgt, &a.bits, signed),
+        SoftfloatHelper::I32TruncSatF64(signed) => sf::i32_trunc_sat_f64(tgt, &a.bits, signed),
+        SoftfloatHelper::F64PromoteF32 => sf::f64_promote_f32(tgt, &a.bits),
+        SoftfloatHelper::F32DemoteF64 => sf::f32_demote_f64(tgt, &a.bits),
+        SoftfloatHelper::F64Sqrt => sf::f64_sqrt(tgt, &a.bits),
+        SoftfloatHelper::I32TruncF64(signed) => sf::i32_trunc_f64(tgt, &a.bits, signed),
+        SoftfloatHelper::I64TruncF64(signed) => sf::i64_trunc_f64(tgt, &a.bits, signed),
+        SoftfloatHelper::I64TruncSatF64(signed) => sf::i64_trunc_sat_f64(tgt, &a.bits, signed),
+    };
+    tgt.ret(&[VaffleValue { bits, ty: ret_ty }]);
+    tgt.end_function();
+}
+
 fn mem_store_bytes(
     tgt: &mut VaffleTarget,
     mem_idx: u32,
@@ -1609,6 +2189,243 @@ fn lower_vci_reveal(
 }
 
 // ============================================================================
+// Bulk-memory helper functions
+// ============================================================================
+
+use crate::target::BulkHelper;
+
+/// Name of the module-internal helper for a bulk-memory operation on the
+/// given memories. Each memory pair gets its own helper because storages
+/// are static per `StorageRead`/`StorageWrite` op.
+pub fn bulk_helper_name(kind: BulkHelper, dst_mem: u32, src_mem: u32) -> alloc::string::String {
+    match kind {
+        BulkHelper::Memset => alloc::format!("__volar_memset_m{dst_mem}"),
+        BulkHelper::Memmove => alloc::format!("__volar_memmove_m{dst_mem}_m{src_mem}"),
+    }
+}
+
+/// Emit the module-internal bulk-memory helpers requested during lowering
+/// (`target.pending_bulk_helpers`). Call once after all wasm functions have
+/// been lowered; safe to call with an empty set (a no-op).
+///
+/// * `__volar_memset_m{m}(dst: u32, val: u32, len: u32)` — wasm `memory.fill`.
+/// * `__volar_memmove_m{d}_m{s}(dst: u32, src: u32, len: u32)` — wasm
+///   `memory.copy`. When `d == s` the copy is overlap-safe (copies backwards
+///   when `dst > src`); across distinct memories a plain forward copy is
+///   emitted, since disjoint storages cannot overlap.
+///
+/// All helpers are byte loops with the same masked-address (non-trapping)
+/// discipline as the load/store lowering.
+pub fn emit_bulk_memory_helpers(target: &mut VaffleTarget, config: &WaffleImportConfig) {
+    let helpers: alloc::vec::Vec<(BulkHelper, u32, u32)> =
+        target.pending_bulk_helpers.iter().copied().collect();
+    for (kind, dst_mem, src_mem) in helpers {
+        match kind {
+            BulkHelper::Memset => emit_memset_helper(target, config, dst_mem),
+            BulkHelper::Memmove => emit_memmove_helper(target, config, dst_mem, src_mem),
+        }
+    }
+    target.pending_bulk_helpers.clear();
+}
+
+/// Emit one byte of `bits` (merged to `Vec(8, Bit)`) at `base + idx`
+/// in `storage`, using the same discipline as `mem_store_bytes`.
+fn helper_store_byte(
+    tgt: &mut VaffleTarget,
+    config: &WaffleImportConfig,
+    storage: StorageId,
+    base: &VaffleValue,
+    idx: &VaffleValue,
+    byte_var: ValueId,
+) {
+    let addr = tgt.add(base.clone(), idx.clone());
+    let byte_tid = tgt.byte_tid();
+    tgt.emit_write(
+        storage,
+        byte_var,
+        byte_tid,
+        memory_address_bits(&addr.bits, config),
+    );
+}
+
+/// Read the byte at `base + idx` from `storage`.
+fn helper_load_byte(
+    tgt: &mut VaffleTarget,
+    config: &WaffleImportConfig,
+    storage: StorageId,
+    base: &VaffleValue,
+    idx: &VaffleValue,
+) -> ValueId {
+    let addr = tgt.add(base.clone(), idx.clone());
+    let byte_tid = tgt.byte_tid();
+    tgt.emit_read(
+        storage,
+        byte_tid,
+        memory_address_bits(&addr.bits, config),
+    )
+}
+
+/// `__volar_memset_m{m}(dst: u32, val: u32, len: u32)`:
+/// `for i in 0..len { mem_m[dst + i] = val as u8 }`.
+fn emit_memset_helper(tgt: &mut VaffleTarget, config: &WaffleImportConfig, mem: u32) {
+    let (entry, groups) = tgt.begin_function(
+        &bulk_helper_name(BulkHelper::Memset, mem, mem),
+        &[LirType::U32, LirType::U32, LirType::U32],
+        None,
+    );
+    let _ = entry;
+    let dst = groups[0][0].clone();
+    let val = groups[1][0].clone();
+    let len = groups[2][0].clone();
+
+    let storage = StorageId::memory(mem);
+    let header = tgt.create_block();
+    let body = tgt.create_block();
+    let exit = tgt.create_block();
+
+    let h_i = tgt.add_block_param(header, LirType::U32);
+    let h_dst = tgt.add_block_param(header, LirType::U32);
+    let h_val = tgt.add_block_param(header, LirType::U32);
+    let h_len = tgt.add_block_param(header, LirType::U32);
+
+    // entry: jump header(0, dst, val, len)
+    let zero = tgt.iconst(LirType::U32, 0);
+    tgt.jump(header, BranchTarget::args(alloc::vec![zero, dst, val, len]));
+
+    // header: i < len ? body : exit
+    tgt.switch_to_block(header);
+    let cond = tgt.icmp(IcmpPred::Ult, h_i.clone(), h_len.clone());
+    tgt.branch(
+        cond,
+        body,
+        BranchTarget::args(alloc::vec![]),
+        exit,
+        BranchTarget::args(alloc::vec![]),
+    );
+
+    // body: mem[dst + i] = low byte of val; jump header(i + 1, ...)
+    tgt.switch_to_block(body);
+    let byte_var = tgt.compose_address(&h_val.bits[..8]);
+    helper_store_byte(tgt, config, storage, &h_dst, &h_i, byte_var);
+    let one = tgt.iconst(LirType::U32, 1);
+    let i_next = tgt.add(h_i, one);
+    tgt.jump(
+        header,
+        BranchTarget::args(alloc::vec![i_next, h_dst, h_val, h_len]),
+    );
+
+    // exit: fall through to the default empty `Return`.
+    tgt.switch_to_block(exit);
+    tgt.end_function();
+}
+
+/// `__volar_memmove_m{d}_m{s}(dst: u32, src: u32, len: u32)` — when `d == s`,
+/// an overlap-safe copy (forward when `dst <= src`, backward when
+/// `dst > src`); across distinct memories a plain forward copy suffices.
+fn emit_memmove_helper(tgt: &mut VaffleTarget, config: &WaffleImportConfig, dst_mem: u32, src_mem: u32) {
+    let same_mem = dst_mem == src_mem;
+    let (entry, groups) = tgt.begin_function(
+        &bulk_helper_name(BulkHelper::Memmove, dst_mem, src_mem),
+        &[LirType::U32, LirType::U32, LirType::U32],
+        None,
+    );
+    let _ = entry;
+    let dst = groups[0][0].clone();
+    let src = groups[1][0].clone();
+    let len = groups[2][0].clone();
+
+    let read_from = StorageId::memory(src_mem);
+    let write_to = StorageId::memory(dst_mem);
+    let fwd_header = tgt.create_block();
+    let fwd_body = tgt.create_block();
+    let exit = tgt.create_block();
+    // The backward-copy blocks exist only for the overlap-safe same-memory
+    // variant; across distinct memories they would be dead weight.
+    let (back_header, back_body) = if same_mem {
+        (tgt.create_block(), tgt.create_block())
+    } else {
+        (exit, exit)
+    };
+
+    let fh_i = tgt.add_block_param(fwd_header, LirType::U32);
+    let fh_dst = tgt.add_block_param(fwd_header, LirType::U32);
+    let fh_src = tgt.add_block_param(fwd_header, LirType::U32);
+    let fh_len = tgt.add_block_param(fwd_header, LirType::U32);
+
+    let zero = tgt.iconst(LirType::U32, 0);
+    if same_mem {
+        let bh_i = tgt.add_block_param(back_header, LirType::U32);
+        let bh_dst = tgt.add_block_param(back_header, LirType::U32);
+        let bh_src = tgt.add_block_param(back_header, LirType::U32);
+        let bh_len = tgt.add_block_param(back_header, LirType::U32);
+
+        // entry: dst > src ? back_header(len, ...) : fwd_header(0, ...)
+        let go_back = tgt.icmp(IcmpPred::Ugt, dst.clone(), src.clone());
+        tgt.branch(
+            go_back,
+            back_header,
+            BranchTarget::args(alloc::vec![len.clone(), dst.clone(), src.clone(), len.clone()]),
+            fwd_header,
+            BranchTarget::args(alloc::vec![zero, dst.clone(), src.clone(), len.clone()]),
+        );
+
+        // back_header: i != 0 ? back_body : exit
+        tgt.switch_to_block(back_header);
+        let zero = tgt.iconst(LirType::U32, 0);
+        let cond = tgt.icmp(IcmpPred::Ne, bh_i.clone(), zero);
+        tgt.branch(
+            cond,
+            back_body,
+            BranchTarget::args(alloc::vec![]),
+            exit,
+            BranchTarget::args(alloc::vec![]),
+        );
+
+        // back_body: i -= 1; mem[dst + i] = mem[src + i]; jump back_header(i, ...)
+        tgt.switch_to_block(back_body);
+        let one = tgt.iconst(LirType::U32, 1);
+        let i_prev = tgt.sub(bh_i, one);
+        let byte = helper_load_byte(tgt, config, read_from, &bh_src, &i_prev);
+        helper_store_byte(tgt, config, write_to, &bh_dst, &i_prev, byte);
+        tgt.jump(
+            back_header,
+            BranchTarget::args(alloc::vec![i_prev, bh_dst, bh_src, bh_len]),
+        );
+    } else {
+        // Distinct memories cannot overlap: plain forward copy.
+        tgt.jump(
+            fwd_header,
+            BranchTarget::args(alloc::vec![zero, dst.clone(), src.clone(), len.clone()]),
+        );
+    }
+
+    // fwd_header: i < len ? fwd_body : exit
+    tgt.switch_to_block(fwd_header);
+    let cond = tgt.icmp(IcmpPred::Ult, fh_i.clone(), fh_len.clone());
+    tgt.branch(
+        cond,
+        fwd_body,
+        BranchTarget::args(alloc::vec![]),
+        exit,
+        BranchTarget::args(alloc::vec![]),
+    );
+
+    // fwd_body: mem_d[dst + i] = mem_s[src + i]; jump fwd_header(i + 1, ...)
+    tgt.switch_to_block(fwd_body);
+    let byte = helper_load_byte(tgt, config, read_from, &fh_src, &fh_i);
+    helper_store_byte(tgt, config, write_to, &fh_dst, &fh_i, byte);
+    let one = tgt.iconst(LirType::U32, 1);
+    let i_next = tgt.add(fh_i, one);
+    tgt.jump(
+        fwd_header,
+        BranchTarget::args(alloc::vec![i_next, fh_dst, fh_src, fh_len]),
+    );
+
+    tgt.switch_to_block(exit);
+    tgt.end_function();
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1626,6 +2443,136 @@ mod tests {
     use volar_ir_common::Stmt;
 
     #[test]
+    #[test]
+    fn softfloat_ops_lower_to_shared_helper_calls() {
+        // f64 add + comparison: each must lower to a call into a shared
+        // module-internal helper (emitted once), not an inlined circuit.
+        let wat = r#"
+            (module
+              (memory 1)
+              (func (export "go") (param f64 f64) (result i32)
+                local.get 0 local.get 1 f64.add
+                local.get 0 local.get 1 f64.mul
+                f64.lt
+                (drop (f64.max (local.get 0) (f64.neg (local.get 1))))
+                ))"#;
+        let bytes = wat::parse_str(wat).expect("wat parses");
+        let module = portal_pc_waffle_frontend::from_wasm_bytes(&bytes, &Default::default())
+            .expect("frontend parses float module");
+        let mut target = VaffleTarget::with_pointer_width(vaffle::PointerWidth::Bits32);
+        let errors = lower_waffle_module(&module, &mut target, &WaffleImportConfig::new());
+        assert!(errors.is_empty(), "lowering errors: {errors:?}");
+
+        // Helpers exist as bodies (add, mul, cmp-lt, max).
+        for name in [
+            "__volar_sf_f64_add",
+            "__volar_sf_f64_mul",
+            "__volar_sf_f64_cmp_2",
+            "__volar_sf_f64_max",
+        ] {
+            let fid = *target
+                .module
+                .exports
+                .get(name)
+                .unwrap_or_else(|| panic!("helper {name} exported"));
+            assert!(
+                matches!(&target.module.funcs[fid.0], vaffle::FuncDecl::Body(..)),
+                "helper {name} is a body"
+            );
+        }
+        // The user function itself must be tiny: no inlined circuit. Its
+        // body should be a handful of call statements.
+        // The frontend names this anonymous wat function "".
+        let go = *target.module.exports.get("").expect("user function exported");
+        let body = match &target.module.funcs[go.0] {
+            vaffle::FuncDecl::Body(b) => b,
+            _ => panic!("go is a body"),
+        };
+        let calls = body
+            .values
+            .iter()
+            .filter(|n| matches!(n.kind, vaffle::Value::Call { .. }))
+            .count();
+        assert_eq!(calls, 4, "go should contain exactly 4 helper calls");
+    }
+
+    fn multi_memory_bulk_ops_lower_to_per_memory_helpers() {
+        // Two memories; same-memory overlapping copy in m0, cross-memory
+        // copy m0 -> m1, and a fill of m1. Each must lower to a call into
+        // its own memory-index-specialized helper.
+        let wat = r#"
+            (module
+              (memory $a 1)
+              (memory $b 1)
+              (func (export "go") (param i32 i32 i32)
+                local.get 0 local.get 1 local.get 2
+                (memory.copy $a $a)
+                local.get 0 local.get 1 local.get 2
+                (memory.copy $b $a)
+                local.get 0 local.get 1 local.get 2
+                (memory.fill $b)))"#;
+        let bytes = wat::parse_str(wat).expect("wat parses");
+        let module = portal_pc_waffle_frontend::from_wasm_bytes(&bytes, &Default::default())
+            .expect("frontend parses multi-memory module");
+        let mut target = VaffleTarget::with_pointer_width(vaffle::PointerWidth::Bits32);
+        let errors = lower_waffle_module(&module, &mut target, &WaffleImportConfig::new());
+        assert!(errors.is_empty(), "lowering errors: {errors:?}");
+
+        // All three helpers exist as bodies.
+        for name in [
+            "__volar_memmove_m0_m0",
+            "__volar_memmove_m1_m0",
+            "__volar_memset_m1",
+        ] {
+            let fid = *target
+                .module
+                .exports
+                .get(name)
+                .unwrap_or_else(|| panic!("missing helper {name}"));
+            assert!(
+                matches!(target.module.funcs[fid.0], vaffle::FuncDecl::Body(_)),
+                "{name} has no body"
+            );
+        }
+
+        // The cross-memory memmove reads memory 0 and writes memory 1,
+        // and skips the backward-copy loop (3 blocks: entry/header/body/exit
+        // with no backward pair => fewer blocks than the same-memory one).
+        let storages_of = |name: &str| -> (alloc::collections::BTreeSet<_>, alloc::collections::BTreeSet<_>, usize) {
+            let fid = target.module.exports[name];
+            let vaffle::FuncDecl::Body(body) = &target.module.funcs[fid.0] else {
+                panic!("{name} has no body")
+            };
+            let mut reads = alloc::collections::BTreeSet::new();
+            let mut writes = alloc::collections::BTreeSet::new();
+            for node in &body.values {
+                match &node.kind {
+                    vaffle::Value::Op(volar_ir_common::Stmt::StorageRead { storage, .. }) => {
+                        reads.insert(*storage);
+                    }
+                    vaffle::Value::Op(volar_ir_common::Stmt::StorageWrite { storage, .. }) => {
+                        writes.insert(*storage);
+                    }
+                    _ => {}
+                }
+            }
+            (reads, writes, body.blocks.len())
+        };
+        let (r, w, cross_blocks) = storages_of("__volar_memmove_m1_m0");
+        assert_eq!(r, [StorageId::memory(0)].into_iter().collect());
+        assert_eq!(w, [StorageId::memory(1)].into_iter().collect());
+        let (r, w, same_blocks) = storages_of("__volar_memmove_m0_m0");
+        assert_eq!(r, [StorageId::memory(0)].into_iter().collect());
+        assert_eq!(w, [StorageId::memory(0)].into_iter().collect());
+        assert!(
+            same_blocks > cross_blocks,
+            "same-memory memmove keeps its backward-copy loop ({same_blocks} vs {cross_blocks})"
+        );
+        let (r, w, _) = storages_of("__volar_memset_m1");
+        assert!(r.is_empty());
+        assert_eq!(w, [StorageId::memory(1)].into_iter().collect());
+    }
+
     fn respect_unstable_skips_declared_unused_data_storage() {
         let mut wasm = WModule::empty();
         wasm.memories.push(MemoryData {

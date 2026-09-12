@@ -13,7 +13,7 @@ volar-ir-common.workspace = true
 volar-side.workspace = true
 volar-lir.workspace = true
 rkyv = { workspace = true, optional = true }
-lazy-repo = { path = "../../../../lazy-repo/crates/lazy-repo", default-features = false, optional = true }
+lazy-repo = { git = "https://github.com/portal-co/lazy-repo.git", default-features = false, optional = true }
 
 [features]
 log-trace = ["dep:log"]

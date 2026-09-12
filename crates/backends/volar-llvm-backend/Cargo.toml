@@ -12,7 +12,7 @@ volar-ir-common.workspace = true
 inkwell.workspace = true
 
 [dev-dependencies]
-volar-log = { path = "../../../../volar/crates/helper/volar-log" }
+volar-log = { git = "https://github.com/portal-co/volar.git" }
 tempfile = "3"
 volar-lir-test-corpus = { workspace = true }
 volar-ir.workspace = true

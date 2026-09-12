@@ -132,7 +132,8 @@ impl<V: Ord> PolyCoeffs<V> {
             let mut write = 0;
             for read in 0..self.0.len() {
                 if write > 0 && self.0[write - 1].0 == self.0[read].0 {
-                    self.0[write - 1].1 = self.0[read].1;
+                    // GF(2) canonicalization: coefficients ADD (mod 2).
+                    self.0[write - 1].1 ^= self.0[read].1;
                 } else {
                     if write != read {
                         self.0.swap(write, read);
@@ -222,7 +223,11 @@ impl<V: Ord> core::iter::FromIterator<(Vec<V>, u8)> for PolyCoeffs<V> {
         let mut write = 0;
         for read in 0..entries.len() {
             if write > 0 && entries[write - 1].0 == entries[read].0 {
-                entries[write - 1].1 = entries[read].1;
+                // GF(2) canonicalization: coefficients on the same monomial
+                // ADD (mod 2) — this is what makes `bc_xor(a, a) = 0` hold
+                // for aliased wires. (Previously "keep last", which silently
+                // broke aliased XORs.)
+                entries[write - 1].1 ^= entries[read].1;
             } else {
                 if write != read {
                     entries.swap(write, read);
@@ -242,16 +247,17 @@ mod poly_coeffs_tests {
     use super::PolyCoeffs;
 
     #[test]
-    fn from_iter_canonicalizes_and_keeps_the_last_coefficient() {
+    fn from_iter_canonicalizes_and_xor_combines_duplicate_coefficients() {
         let coeffs = PolyCoeffs::from_iter([
             (vec![3], 3u8),
             (vec![1], 1u8),
             (vec![3], 7u8),
         ]);
 
+        // GF(2): coefficients on monomial [3] combine as 1+1 = 0 (mod 2).
         assert_eq!(
             coeffs.into_iter().collect::<Vec<_>>(),
-            vec![(vec![1], 1), (vec![3], 7)]
+            vec![(vec![1], 1), (vec![3], 4)]
         );
     }
 
@@ -270,9 +276,10 @@ mod poly_coeffs_tests {
         );
 
         coeffs.remap_monomials_in_place(|monomial| monomial[0] = 9);
+        // GF(2): 1+1 = 0 on the colliding monomial.
         assert_eq!(
             coeffs.into_iter().collect::<Vec<_>>(),
-            vec![(vec![9], 7)]
+            vec![(vec![9], 4)]
         );
     }
 

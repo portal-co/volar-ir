@@ -26,6 +26,7 @@ mod generated;
 pub use generated::{ActionStoreTarget, FieldDef, IcmpPred, NameConfig, StructDef};
 
 pub mod circuits;
+pub mod softfloat;
 pub use circuits::{
     BitCircuitBuilder, FrameLayout, PACK_W, StackPtr, StorageEmitter, n_packs, pack_bits,
     unpack_words,

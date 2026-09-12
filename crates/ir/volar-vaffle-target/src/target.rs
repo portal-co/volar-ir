@@ -165,6 +165,97 @@ pub struct VaffleTarget {
     pending_funcs: BTreeMap<String, FuncId>,
     /// Opt-in vc-spec session. `None` keeps default lowering untagged.
     pub(crate) vc: Option<VcLoweringState>,
+    /// Bulk-memory helper functions requested while lowering, as
+    /// `(kind, dst_mem, src_mem)` triples (`MemoryCopy`/`MemoryFill` desugar
+    /// to calls into these; the memory indices matter under `multi_memory` —
+    /// each helper reads/writes its own fixed storages). Emitted once by
+    /// `lower_waffle_module_with_metadata` after all wasm functions via
+    /// [`crate::waffle_lower::emit_bulk_memory_helpers`].
+    pub pending_bulk_helpers: alloc::collections::BTreeSet<(BulkHelper, u32, u32)>,
+    /// Softfloat helper functions that must be emitted at the end of the
+    /// module (see `emit_softfloat_helpers`). Each variant is emitted once
+    /// and shared across every op site, instead of inlining the whole
+    /// IEEE-754 circuit per site.
+    pub pending_softfloat_helpers: alloc::collections::BTreeSet<SoftfloatHelper>,
+    /// Tables (by index) whose contents are not statically known; see
+    /// [`crate::waffle_lower::scan_dynamic_tables`]. Populated on first use
+    /// during lowering when [`Self::dynamic_tables_computed`] is unset.
+    pub dynamic_tables: alloc::collections::BTreeSet<u32>,
+    /// Whether [`Self::dynamic_tables`] has been computed for the module
+    /// being lowered.
+    pub dynamic_tables_computed: bool,
+}
+
+/// Kind of module-internal bulk-memory helper emitted by
+/// [`crate::waffle_lower::emit_bulk_memory_helpers`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum SoftfloatHelper {
+    F64Add,
+    F64Sub,
+    F64Mul,
+    F64Div,
+    F64Min,
+    F64Max,
+    /// f64 comparison; the payload is the softfloat op index (0..=5 =
+    /// eq, ne, lt, le, gt, ge).
+    F64Cmp(usize),
+    /// f32 comparison; payload as above.
+    F32Cmp(usize),
+    /// f64 round-to-integer; payload is the mode (0=trunc, 1=floor,
+    /// 2=ceil, 3=nearest-even).
+    F64RoundInt(u8),
+    /// f64 from i64; payload = signed.
+    F64FromI64(bool),
+    /// f64 from i32; payload = signed.
+    F64FromI32(bool),
+    /// wasm `i32.trunc_sat_f64_*`; payload = signed.
+    I32TruncSatF64(bool),
+    F64PromoteF32,
+    F32DemoteF64,
+    F64Sqrt,
+    /// wasm `i32.trunc_f64_*` (trapping form; zero under the non-trapping
+    /// discipline); payload = signed.
+    I32TruncF64(bool),
+    /// wasm `i64.trunc_f64_*`; payload = signed.
+    I64TruncF64(bool),
+    /// wasm `i64.trunc_sat_f64_*`; payload = signed.
+    I64TruncSatF64(bool),
+}
+
+impl SoftfloatHelper {
+    /// Deterministic module-internal helper name.
+    pub fn name(&self) -> alloc::string::String {
+        use alloc::format;
+        match self {
+            SoftfloatHelper::F64Add => format!("__volar_sf_f64_add"),
+            SoftfloatHelper::F64Sub => format!("__volar_sf_f64_sub"),
+            SoftfloatHelper::F64Mul => format!("__volar_sf_f64_mul"),
+            SoftfloatHelper::F64Div => format!("__volar_sf_f64_div"),
+            SoftfloatHelper::F64Min => format!("__volar_sf_f64_min"),
+            SoftfloatHelper::F64Max => format!("__volar_sf_f64_max"),
+            SoftfloatHelper::F64Cmp(op) => format!("__volar_sf_f64_cmp_{op}"),
+            SoftfloatHelper::F32Cmp(op) => format!("__volar_sf_f32_cmp_{op}"),
+            SoftfloatHelper::F64RoundInt(m) => format!("__volar_sf_f64_round_{m}"),
+            SoftfloatHelper::F64FromI64(s) => format!("__volar_sf_f64_from_i64_{}", if *s { "s" } else { "u" }),
+            SoftfloatHelper::F64FromI32(s) => format!("__volar_sf_f64_from_i32_{}", if *s { "s" } else { "u" }),
+            SoftfloatHelper::I32TruncSatF64(s) => format!("__volar_sf_i32_trunc_sat_f64_{}", if *s { "s" } else { "u" }),
+            SoftfloatHelper::F64PromoteF32 => format!("__volar_sf_f64_promote_f32"),
+            SoftfloatHelper::F32DemoteF64 => format!("__volar_sf_f32_demote_f64"),
+            SoftfloatHelper::F64Sqrt => format!("__volar_sf_f64_sqrt"),
+            SoftfloatHelper::I32TruncF64(s) => format!("__volar_sf_i32_trunc_f64_{}", if *s { "s" } else { "u" }),
+            SoftfloatHelper::I64TruncF64(s) => format!("__volar_sf_i64_trunc_f64_{}", if *s { "s" } else { "u" }),
+            SoftfloatHelper::I64TruncSatF64(s) => format!("__volar_sf_i64_trunc_sat_f64_{}", if *s { "s" } else { "u" }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum BulkHelper {
+    /// wasm `memory.fill`: `__volar_memset_m{dst}`.
+    Memset,
+    /// wasm `memory.copy`: `__volar_memmove_m{dst}_m{src}`. Overlap-safe
+    /// when `dst == src`; a plain forward copy across distinct memories.
+    Memmove,
 }
 
 impl VaffleTarget {
@@ -192,6 +283,10 @@ impl VaffleTarget {
             optimized_abi: false,
             pending_funcs: BTreeMap::new(),
             vc: None,
+            pending_bulk_helpers: alloc::collections::BTreeSet::new(),
+            pending_softfloat_helpers: alloc::collections::BTreeSet::new(),
+            dynamic_tables: alloc::collections::BTreeSet::new(),
+            dynamic_tables_computed: false,
         }
     }
 
