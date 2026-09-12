@@ -133,20 +133,25 @@ fn eval_block(
         params.len()
     );
 
-    // Build the variable table: params first (indices 0..params), then stmts.
-    let mut vars: BTreeMap<u32, bool> = BTreeMap::new();
+    // Build the variable table: params first (indices 0..params), then
+    // stmts. Var ids are dense (`params + stmt_index`), so a Vec indexed by
+    // id is asymptotically identical to a map but ~100x cheaper to build —
+    // this is the difference between a fast evaluation and a 27GB
+    // BTreeMap-per-block build/drop cycle on multi-million-gate circuits
+    // (the X25519 stepped ladder OOMed on it, 2026-09-12).
+    let mut vars: Vec<bool> = Vec::with_capacity(block.params as usize + block.stmts.len());
     // Side-table for OracleCall aggregates: var_id → Vec<bool> (one bit per output bit).
     let mut oracle_agg: BTreeMap<u32, Vec<bool>> = BTreeMap::new();
 
-    for (i, &v) in params.iter().enumerate() {
-        vars.insert(i as u32, v);
+    for &v in params.iter() {
+        vars.push(v);
     }
 
     let base = block.params;
     for (i, node) in block.stmts.iter().enumerate() {
         let id = base + i as u32;
         let val = eval_stmt(&node.kind, id, &vars, &mut oracle_agg, storage);
-        vars.insert(id, val);
+        vars.push(val);
     }
 
     // Evaluate terminator.
@@ -175,7 +180,7 @@ fn eval_block(
 fn eval_stmt(
     stmt: &BIrStmt,
     stmt_id: u32,
-    vars: &BTreeMap<u32, bool>,
+    vars: &[bool],
     oracle_agg: &mut BTreeMap<u32, Vec<bool>>,
     storage: &mut BIrStorageMap,
 ) -> bool {
@@ -252,7 +257,7 @@ fn eval_stmt(
 }
 
 /// Resolve a `BIrTarget` to a `BlockResult`.
-fn resolve_target(target: &BIrTarget, vars: &BTreeMap<u32, bool>) -> BlockResult {
+fn resolve_target(target: &BIrTarget, vars: &[bool]) -> BlockResult {
     let args: Vec<bool> = target.args.iter().map(|id| get(vars, id)).collect();
     match &target.block {
         IRBlockTargetId::Return => BlockResult::Return(args),
@@ -268,10 +273,8 @@ fn resolve_target(target: &BIrTarget, vars: &BTreeMap<u32, bool>) -> BlockResult
 }
 
 /// Look up a variable, panicking with a clear message if it is missing.
-fn get(vars: &BTreeMap<u32, bool>, id: &IRVarId) -> bool {
-    *vars
-        .get(&id.0)
-        .unwrap_or_else(|| panic!("eval_biir: var {} not found in current scope", id.0))
+fn get(vars: &[bool], id: &IRVarId) -> bool {
+    vars[id.0 as usize]
 }
 
 // ============================================================================
