@@ -1068,7 +1068,11 @@ fn lower_op(
                         let real_args = &all_arg_vals[1..=*n_args];
                         let fallbacks = &all_arg_vals[*n_args + 1..];
                         tgt.set_side(*side);
-                        let r = tgt.action_call(
+                        // Emit a real `Stmt::ActionCall` (not a call to an
+                        // env import): the evaluator-hosted action extern
+                        // (e.g. a network socket) survives lowering as an
+                        // `IRStmt::ActionCall`.
+                        let r = tgt.action_call_multi(
                             action_name,
                             guard_bit,
                             real_args,

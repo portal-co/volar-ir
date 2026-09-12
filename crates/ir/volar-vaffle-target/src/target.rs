@@ -1526,6 +1526,70 @@ impl VaffleTarget {
         }
         results
     }
+
+    /// Emit a REAL IR-level action call (`Stmt::ActionCall` + per-output
+    /// `ActionOutput` projections), so it survives the vaffle→IR lowering as
+    /// an `IRStmt::ActionCall` validated against `module.actions` — the
+    /// schedule-level `Gate::ActionBit` extern path (evaluator-hosted
+    /// actions, e.g. network sockets). Unlike [`Self::action_call`], the
+    /// guard/fallback selection is NOT expanded here: it is part of the
+    /// action's execution semantics (the host is not invoked when the guard
+    /// is 0; the fallback bits are used instead).
+    pub fn action_call_multi(
+        &mut self,
+        name: &str,
+        guard_bit: ValueId,
+        args: &[VaffleValue],
+        fallbacks: &[VaffleValue],
+        ret_tys: &[LirType],
+    ) -> Vec<VaffleValue> {
+        debug_assert!(
+            self.module.actions.iter().any(|d| d.name == name),
+            "action_call_multi: action `{name}` is not registered in module.actions"
+        );
+        let merge = |t: &mut Self, v: &VaffleValue| -> ValueId {
+            if v.bits.len() == 1 {
+                return v.bits[0];
+            }
+            let tid = t.lir_type_to_tid(&v.ty);
+            t.fb().emit_value(Value::Op(Stmt::Merge {
+                parts: v.bits.clone(),
+                ty: tid,
+            }))
+        };
+        let arg_vars: Vec<ValueId> = args.iter().map(|v| merge(self, v)).collect();
+        let fb_vars: Vec<ValueId> = fallbacks.iter().map(|v| merge(self, v)).collect();
+        let output_tys: Vec<TypeId> = ret_tys
+            .iter()
+            .map(|t| self.lir_type_to_tid(t))
+            .collect();
+        let result_ty = self.intern_type(IrType::Tuple(output_tys.clone()));
+        let call = self.fb().emit_value(Value::Op(Stmt::ActionCall {
+            name: name.to_string(),
+            guard: guard_bit,
+            args: arg_vars,
+            fallbacks: fb_vars,
+            output_tys: output_tys.clone(),
+            result_ty,
+        }));
+        let mut results = Vec::with_capacity(ret_tys.len());
+        for (idx, ty) in ret_tys.iter().enumerate() {
+            let tid = output_tys[idx];
+            let out = self.fb().emit_value(Value::Op(Stmt::ActionOutput {
+                call,
+                idx,
+                ty: tid,
+            }));
+            let n = self.bits_for(ty);
+            assert!(n <= 256, "action_call_multi: result wider than 256 bits");
+            let bits: Vec<ValueId> = (0..n).map(|b| self.extract_bit(out, b as u8)).collect();
+            results.push(VaffleValue {
+                bits,
+                ty: ty.clone(),
+            });
+        }
+        results
+    }
 }
 
 // ============================================================================
