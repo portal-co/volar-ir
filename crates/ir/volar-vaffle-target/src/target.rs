@@ -172,6 +172,13 @@ pub struct VaffleTarget {
     /// `lower_waffle_module_with_metadata` after all wasm functions via
     /// [`crate::waffle_lower::emit_bulk_memory_helpers`].
     pub pending_bulk_helpers: alloc::collections::BTreeSet<(BulkHelper, u32, u32)>,
+    /// Tables (by index) whose contents are not statically known; see
+    /// [`crate::waffle_lower::scan_dynamic_tables`]. Populated on first use
+    /// during lowering when [`Self::dynamic_tables_computed`] is unset.
+    pub dynamic_tables: alloc::collections::BTreeSet<u32>,
+    /// Whether [`Self::dynamic_tables`] has been computed for the module
+    /// being lowered.
+    pub dynamic_tables_computed: bool,
 }
 
 /// Kind of module-internal bulk-memory helper emitted by
@@ -211,6 +218,8 @@ impl VaffleTarget {
             pending_funcs: BTreeMap::new(),
             vc: None,
             pending_bulk_helpers: alloc::collections::BTreeSet::new(),
+            dynamic_tables: alloc::collections::BTreeSet::new(),
+            dynamic_tables_computed: false,
         }
     }
 

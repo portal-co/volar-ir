@@ -2851,11 +2851,39 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "portal-solutions-asm-arm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-riscv32"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "thin-mcp"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "vane-aarch64"
 version = "0.1.0"
 
 [[patch.unused]]
 name = "vane-riscv"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-interposer"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-jit-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-shim-core"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2892,32 +2920,4 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "portal-solutions-blitz-x86-64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-arm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-riscv32"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-interposer"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-jit-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-shim-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "thin-mcp"
 version = "0.1.0"

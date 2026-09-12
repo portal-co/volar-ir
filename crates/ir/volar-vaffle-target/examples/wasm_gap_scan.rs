@@ -28,6 +28,11 @@ fn main() {
         c
     };
 
+    // Precompute the dynamic-table analysis once for the whole module
+    // (per-function lazy lowering would rescan the module per call site).
+    let dynamic_tables = volar_vaffle_target::waffle_lower::scan_dynamic_tables(&module);
+    eprintln!("dynamic tables: {:?}", dynamic_tables);
+
     // Lower function-by-function so a hard panic in the lowering (a bug, not
     // a clean UnsupportedOp) is reported as a gap entry instead of killing
     // the scan.
@@ -39,6 +44,8 @@ fn main() {
         let name = decl.name().to_string();
         let mut target =
             volar_vaffle_target::VaffleTarget::with_pointer_width(vaffle::PointerWidth::Bits32);
+        target.dynamic_tables = dynamic_tables.clone();
+        target.dynamic_tables_computed = true;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             volar_vaffle_target::waffle_lower::lower_waffle_function_lazy(
                 &module, func, &mut target, &config,

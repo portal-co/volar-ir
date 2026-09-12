@@ -70,6 +70,7 @@ use portal_pc_waffle_ir::{
     Func,
     FuncDecl,
     FunctionBody,
+    ImportKind,
     MemoryArg,
     Module as WModule,
     Operator,
@@ -416,10 +417,53 @@ pub fn lower_waffle_function_lazy(
             declaration.name()
         )));
     }
+    if !target.dynamic_tables_computed {
+        target.dynamic_tables = scan_dynamic_tables(wasm);
+        target.dynamic_tables_computed = true;
+    }
     let name = declaration.name().to_string();
     let body = portal_pc_waffle_frontend::clone_and_expand_body(wasm, function)
         .map_err(|error| UnsupportedOp(alloc::format!("failed to expand {name}: {error}")))?;
     lower_waffle_function(&body, &name, wasm, target, config)
+}
+
+/// Tables whose contents are not statically known: imported tables plus any
+/// table targeted by `table.set`/`table.grow` anywhere in the module.
+/// `call_indirect` on a static table lowers to a dispatch cascade over the
+/// materialized `func_elements`; on a dynamic table it stays `UnsupportedOp`.
+///
+/// (Expanding every body here costs one extra parse pass over the module;
+/// the result is cached on the target via `dynamic_tables_computed`.)
+pub fn scan_dynamic_tables(wasm: &WModule) -> alloc::collections::BTreeSet<u32> {
+    let mut dynamic = alloc::collections::BTreeSet::new();
+    for import in &wasm.imports {
+        if let ImportKind::Table(t) = &import.kind {
+            dynamic.insert(t.index() as u32);
+        }
+    }
+    for (func_ref, decl) in wasm.funcs.entries() {
+        if matches!(decl, FuncDecl::Import(..)) {
+            continue;
+        }
+        let Ok(body) = portal_pc_waffle_frontend::clone_and_expand_body(wasm, func_ref)
+        else {
+            continue;
+        };
+        for (_, block) in body.blocks.entries() {
+            for record in &block.insts {
+                if let ValueDef::Operator(op, _, _) = &body.values[record.value] {
+                    match op {
+                        Operator::TableSet { table_index }
+                        | Operator::TableGrow { table_index } => {
+                            dynamic.insert(table_index.index() as u32);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    dynamic
 }
 
 /// Lower a single WAFFLE `FunctionBody` into `target`.
@@ -1156,6 +1200,148 @@ fn lower_op(
         }
 
         Operator::Nop => return Ok(None),
+
+        // ---- Indirect calls (static-table dispatch cascade) --------------
+        // `call_indirect` on a statically-known table lowers to a CondBr
+        // cascade over the table's sig-matching entries, rejoining in a
+        // continuation block whose params carry the results + threaded
+        // globals. Null/mismatched entries and out-of-range indices take the
+        // fall-through, which yields zeroed results (the same non-trapping
+        // discipline as `Terminator::Unreachable`).
+        Operator::CallIndirect {
+            sig_index,
+            table_index,
+        } => {
+            let tidx = table_index.index() as u32;
+            if tgt.dynamic_tables.contains(&tidx) {
+                return Err(UnsupportedOp(alloc::format!(
+                    "call_indirect on dynamically-mutated or imported table {tidx}"
+                )));
+            }
+            if table_index.index() >= wasm.tables.len() {
+                return Err(UnsupportedOp(alloc::format!("unknown table {tidx}")));
+            }
+            let table = &wasm.tables[*table_index];
+            let Some(elems) = &table.func_elements else {
+                return Err(UnsupportedOp(alloc::format!(
+                    "call_indirect on non-funcref table {tidx}"
+                )));
+            };
+
+            let idx_val = get(0)?;
+            let call_args: Vec<VaffleValue> = (1..args.len())
+                .map(|i| get(i))
+                .collect::<Result<_, _>>()?;
+            let orig_ret_tys: Vec<LirType> = result_tys
+                .iter()
+                .map(|&t| waffle_ty(t))
+                .collect::<Result<_, _>>()?;
+
+            // Dispatch candidates: non-null entries whose signature matches
+            // the call site's statically-known signature. Imported functions
+            // would need oracle/action routing — not supported in v1.
+            let mut candidates: Vec<(u32, Func)> = Vec::new();
+            for (i, f) in elems.iter().enumerate() {
+                if f.is_invalid() {
+                    continue;
+                }
+                let fdecl = &wasm.funcs[*f];
+                if fdecl.sig() != *sig_index {
+                    continue;
+                }
+                if matches!(fdecl, FuncDecl::Import(..)) {
+                    return Err(UnsupportedOp(alloc::format!(
+                        "call_indirect table {tidx} holds imported function"
+                    )));
+                }
+                candidates.push((i as u32, *f));
+            }
+
+            // Continuation: one param per result, then one per threaded
+            // global. Every dispatch arm (and the zeroed fall-through)
+            // rejoins here; the rest of the enclosing wasm block is emitted
+            // after it.
+            let cont = tgt.create_block();
+            let cont_rets: Vec<VaffleValue> = orig_ret_tys
+                .iter()
+                .map(|ty| tgt.add_block_param(cont, ty.clone()))
+                .collect();
+            let cont_globals: Vec<VaffleValue> = global_lir_tys
+                .iter()
+                .map(|ty| tgt.add_block_param(cont, ty.clone()))
+                .collect();
+            let zero_rets: Vec<VaffleValue> = orig_ret_tys
+                .iter()
+                .map(|ty| tgt.iconst(ty.clone(), 0))
+                .collect();
+
+            let mut all_ret_tys = orig_ret_tys.clone();
+            all_ret_tys.extend_from_slice(global_lir_tys);
+
+            for (pos, (elem_idx, func)) in candidates.iter().enumerate() {
+                let case_blk = tgt.create_block();
+                let next_check = if pos + 1 < candidates.len() {
+                    Some(tgt.create_block())
+                } else {
+                    None
+                };
+                let idx_const = tgt.iconst(LirType::U32, *elem_idx as i64);
+                let cond = tgt.icmp(IcmpPred::Eq, idx_val.clone(), idx_const);
+                match next_check {
+                    Some(next) => {
+                        tgt.branch(
+                            cond,
+                            case_blk,
+                            BranchTarget::args(alloc::vec![]),
+                            next,
+                            BranchTarget::args(alloc::vec![]),
+                        );
+                    }
+                    None => {
+                        // Last candidate: fall through to the continuation
+                        // with zeroed results, globals threaded through.
+                        let mut fall_args = zero_rets.clone();
+                        fall_args.extend_from_slice(current_globals);
+                        tgt.branch(
+                            cond,
+                            case_blk,
+                            BranchTarget::args(alloc::vec![]),
+                            cont,
+                            BranchTarget::args(fall_args),
+                        );
+                    }
+                }
+                tgt.switch_to_block(case_blk);
+                let mut all_args = call_args.clone();
+                all_args.extend_from_slice(current_globals);
+                let results =
+                    tgt.call_extern_multi(&callee_name(wasm, *func), &all_args, &all_ret_tys);
+                tgt.jump(cont, BranchTarget::args(results));
+                if let Some(next) = next_check {
+                    tgt.switch_to_block(next);
+                }
+            }
+            if candidates.is_empty() {
+                let mut fall_args = zero_rets;
+                fall_args.extend_from_slice(current_globals);
+                tgt.jump(cont, BranchTarget::args(fall_args));
+            }
+
+            tgt.switch_to_block(cont);
+            *current_globals = cont_globals;
+            return Ok(match cont_rets.len() {
+                0 => None,
+                1 => Some(cont_rets.into_iter().next().unwrap()),
+                _ => {
+                    let bits: Vec<ValueId> = cont_rets
+                        .iter()
+                        .flat_map(|vv| vv.bits.iter().copied())
+                        .collect();
+                    let ty = cont_rets[0].ty.clone();
+                    Some(VaffleValue { bits, ty })
+                }
+            });
+        }
 
         // ---- Bulk memory (desugared to module-internal helper calls) -----
         // `memory.copy`/`memory.fill` lower to calls into byte-loop helper
