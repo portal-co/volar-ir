@@ -212,6 +212,14 @@ pub enum SoftfloatHelper {
     I32TruncSatF64(bool),
     F64PromoteF32,
     F32DemoteF64,
+    F64Sqrt,
+    /// wasm `i32.trunc_f64_*` (trapping form; zero under the non-trapping
+    /// discipline); payload = signed.
+    I32TruncF64(bool),
+    /// wasm `i64.trunc_f64_*`; payload = signed.
+    I64TruncF64(bool),
+    /// wasm `i64.trunc_sat_f64_*`; payload = signed.
+    I64TruncSatF64(bool),
 }
 
 impl SoftfloatHelper {
@@ -233,6 +241,10 @@ impl SoftfloatHelper {
             SoftfloatHelper::I32TruncSatF64(s) => format!("__volar_sf_i32_trunc_sat_f64_{}", if *s { "s" } else { "u" }),
             SoftfloatHelper::F64PromoteF32 => format!("__volar_sf_f64_promote_f32"),
             SoftfloatHelper::F32DemoteF64 => format!("__volar_sf_f32_demote_f64"),
+            SoftfloatHelper::F64Sqrt => format!("__volar_sf_f64_sqrt"),
+            SoftfloatHelper::I32TruncF64(s) => format!("__volar_sf_i32_trunc_f64_{}", if *s { "s" } else { "u" }),
+            SoftfloatHelper::I64TruncF64(s) => format!("__volar_sf_i64_trunc_f64_{}", if *s { "s" } else { "u" }),
+            SoftfloatHelper::I64TruncSatF64(s) => format!("__volar_sf_i64_trunc_sat_f64_{}", if *s { "s" } else { "u" }),
         }
     }
 }

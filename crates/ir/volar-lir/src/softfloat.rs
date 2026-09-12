@@ -487,9 +487,133 @@ pub fn f64_from_i32<B: BitCircuitBuilder>(b: &mut B, x: &[B::Bit], signed: bool)
 // Float -> integer conversions (wasm trunc_sat semantics)
 // ============================================================================
 
-/// `f64` -> signed 32-bit with wasm `i32.trunc_sat_f64_s` semantics:
-/// NaN -> 0, below/above range -> INT32_MIN/MAX, else truncate toward zero.
-pub fn i32_trunc_sat_f64<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], signed: bool) -> Vec<B::Bit> {
+/// Integer square root (restoring, bit-by-bit): given `x` of even width
+/// 2n, returns (root: n bits, remainder) with root = floor(sqrt(x)) and
+/// remainder = x - root^2.
+pub fn bc_isqrt<B: BitCircuitBuilder>(b: &mut B, x: &[B::Bit]) -> (Vec<B::Bit>, Vec<B::Bit>) {
+    let n2 = x.len();
+    assert!(n2 % 2 == 0);
+    let n = n2 / 2;
+    let mut rem = sf_zeros(b, n + 2);
+    let mut root = sf_zeros(b, n);
+    for i in (0..n).rev() {
+        // rem = (rem << 2) | x[2i+1..=2i]
+        let mut new_rem = Vec::with_capacity(n + 2);
+        new_rem.push(x[2 * i].clone());
+        new_rem.push(x[2 * i + 1].clone());
+        new_rem.extend(rem[..n].iter().cloned());
+        // trial = (root << 2) | 1
+        let mut trial = sf_zeros(b, n + 2);
+        trial[0] = b.bc_const(true);
+        for j in 0..n {
+            trial[j + 2] = root[j].clone();
+        }
+        let lt = sf_ult(b, &new_rem, &trial);
+        let ge = b.bc_not(lt);
+        let subbed = bc_sub(b, &new_rem, &trial);
+        rem = sf_mux(b, &ge, &subbed, &new_rem);
+        // root = (root << 1) | ge
+        let mut new_root = sf_zeros(b, n);
+        new_root[0] = ge;
+        for j in 1..n {
+            new_root[j] = root[j - 1].clone();
+        }
+        root = new_root;
+    }
+    (root, rem)
+}
+
+/// Bit-exact IEEE-754 `f64` square root (RNE).
+///
+/// NaN -> canonical NaN, +inf -> +inf, +-0 -> unchanged, x < 0 -> canonical
+/// NaN. Never produces subnormals or overflows. Rounding note: sqrt has no
+/// exact halfway cases (Q^2 + Q + 1/4 is never an integer), so RNE reduces
+/// to round-up iff remainder > Q.
+pub fn f64_sqrt<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit]) -> Vec<B::Bit> {
+    assert_eq!(a.len(), 64);
+    let p = unpack::<B>(a, 11, 52);
+    let is_nan = p.is_nan(b);
+    let is_inf = p.is_inf(b);
+    let is_zero = p.is_zero(b);
+
+    // normalize significand to [2^52, 2^53) with an explicit exponent
+    let imp = {
+        let z = p.exp_is_zero(b);
+        b.bc_not(z)
+    };
+    let mut sig = p.frac.clone();
+    sig.push(imp);
+    let exp16 = sf_zext(b, &p.exp, 16);
+    let bias = sf_const(b, 1023, 16);
+    let e_norm = bc_sub(b, &exp16, &bias);
+    let z16 = sf_zeros(b, 16);
+    let c1022 = sf_const(b, 1022, 16);
+    let neg1022 = bc_sub(b, &z16, &c1022);
+    let ez = p.exp_is_zero(b);
+    let mut e_u = sf_mux(b, &ez, &neg1022, &e_norm);
+    let lz = bc_clz(b, &sig)[..6].to_vec();
+    let sig = bc_shl(b, &sig, &lz);
+    let lz16 = sf_zext(b, &lz, 16);
+    e_u = bc_sub(b, &e_u, &lz16);
+
+    // make e_u even: if odd, sig <<= 1 and e_u -= 1
+    let odd = e_u[0].clone();
+    let sig54 = sf_zext(b, &sig, 54);
+    let sig54_sh = bc_shl(b, &sig54, core::slice::from_ref(&odd));
+    let e_odd16 = sf_zext(b, core::slice::from_ref(&odd), 16);
+    let e_even = bc_sub(b, &e_u, &e_odd16);
+
+    // q = floor(sqrt(sig' * 2^52)); input is sig54 at bits 52..106
+    let mut inp = sf_zeros(b, 52);
+    inp.extend(sig54_sh.iter().cloned());
+    let (q, rem) = bc_isqrt(b, &inp); // q: 53 bits, rem: 55
+    let q55 = sf_zext(b, &q, 55);
+    let inc = sf_ult(b, &q55, &rem); // round up iff rem > q
+
+    let q54 = sf_zext(b, &q, 54);
+    let inc54 = sf_zext(b, core::slice::from_ref(&inc), 54);
+    let sum = bc_add(b, &q54, &inc54, false);
+    let carry = sum[53].clone();
+    let z52 = sf_zeros(b, 52);
+    let frac = sf_mux(b, &carry, &z52, &sum[..52].to_vec());
+
+    // exponent: biased = 1023 + e_even/2 (+ carry)
+    let one16 = sf_const(b, 1, 16);
+    let e_half = crate::circuits::bc_ashr(b, &e_even, &one16[..1]);
+    let bias2 = sf_const(b, 1023, 16);
+    let biased = bc_add(b, &e_half, &bias2, false);
+    let carry16 = sf_zext(b, &[carry], 16);
+    let biased = bc_add(b, &biased, &carry16, false);
+
+    let sign_zero = b.bc_and(p.sign.clone(), is_zero.clone()); // sqrt(-0) = -0
+    let mut out = frac;
+    out.extend(biased[..11].iter().cloned());
+    out.push(sign_zero);
+
+    // specials
+    let nan = canonical_nan(b, 11, 52);
+    let neg_nonzero = {
+        let nz = b.bc_not(is_zero.clone());
+        b.bc_and(p.sign.clone(), nz)
+    };
+    let to_nan = b.bc_or(is_nan.clone(), neg_nonzero);
+    let f0 = b.bc_const(false);
+    let inf = inf_bits(b, 11, 52, f0);
+    let out = sf_mux(b, &is_inf, &inf, &out);
+    let out = sf_mux(b, &to_nan, &nan, &out);
+    let zero = zero_bits(b, 11, 52, p.sign.clone());
+    sf_mux(b, &is_zero, &zero, &out)
+}
+
+/// `f64` -> integer engine: returns (saturated value, would_trap) where
+/// would_trap = NaN | +-inf | out-of-range (the conditions under which the
+/// wasm trapping conversions trap). `out_bits` is 32 or 64.
+fn trunc_f64_engine<B: BitCircuitBuilder>(
+    b: &mut B,
+    a: &[B::Bit],
+    out_bits: usize,
+    signed: bool,
+) -> (Vec<B::Bit>, B::Bit) {
     assert_eq!(a.len(), 64);
     let p = unpack::<B>(a, 11, 52);
     let is_nan = p.is_nan(b);
@@ -508,26 +632,41 @@ pub fn i32_trunc_sat_f64<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], signed: 
     let mut sig = p.frac.clone();
     sig.push(b.bc_const(true)); // bit 52 = implicit (harmless for subnormals: e<0 handled)
 
-    // truncate toward zero: val = sig >> (52 - e), valid for 0 <= e <= 52
+    // truncate toward zero: val = sig >> (52 - e) for e <= 52, or
+    // sig << (e - 52) for e in 52..64. Work in 128 bits.
     let c52 = sf_const(b, 52, 16);
-    let sh = bc_sub(b, &c52, &e); // 52 - e
-    let sh7: Vec<B::Bit> = sh[..7].to_vec();
-    let shifted = bc_lshr(b, &sig, &sh7[..6]);
+    let sh_r = bc_sub(b, &c52, &e); // 52 - e
+    let sh_l = bc_sub(b, &e, &c52); // e - 52
+    let e_ge_52 = {
+        let lt = sf_ult(b, &e, &c52);
+        let nn = b.bc_not(e[15].clone());
+        let nlt = b.bc_not(lt);
+        b.bc_and(nn, nlt)
+    };
+    let sig128 = sf_zext(b, &sig, 128);
+    let shr = bc_lshr(b, &sig128, &sh_r[..7]);
+    let shl = bc_shl(b, &sig128, &sh_l[..7]);
+    let shifted = sf_mux(b, &e_ge_52, &shl, &shr);
 
     // apply sign
-    let zero32 = sf_zeros(b, 64);
-    let mag64 = sf_zext(b, &shifted, 64);
-    let neg = bc_sub(b, &zero32, &mag64);
-    let signed_val = sf_mux(b, &p.sign, &neg, &mag64);
+    let zero128 = sf_zeros(b, 128);
+    let neg = bc_sub(b, &zero128, &shifted);
+    let signed_val = sf_mux(b, &p.sign, &neg, &shifted);
 
-    // range check for 32-bit signed/unsigned
+    // range check
     let (min_v, max_v) = if signed {
-        (-(1i64 << 31) as i128 as u128, (1u128 << 31) - 1)
+        match out_bits {
+            32 => (-(1i128 << 31) as u128, (1u128 << 31) - 1),
+            _ => (-(1i128 << 63) as u128, (1u128 << 63) - 1),
+        }
     } else {
-        (0u128, (1u128 << 32) - 1)
+        match out_bits {
+            32 => (0u128, (1u128 << 32) - 1),
+            _ => (0u128, (1u128 << 64) - 1),
+        }
     };
-    // |x| >= 2^31 (signed) / 2^32 (unsigned) overflows positive side; sign adds one more for min.
-    let lim_exp = if signed { 31 } else { 32 };
+    // |x| >= 2^(n-1) (signed) / 2^n (unsigned) overflows the positive side.
+    let lim_exp = if signed { out_bits - 1 } else { out_bits };
     let lim = sf_const(b, lim_exp as u128, 16);
     let ge_lim = {
         let lt = sf_ult(b, &e, &lim);
@@ -535,18 +674,61 @@ pub fn i32_trunc_sat_f64<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], signed: 
         let nlt = b.bc_not(lt);
         b.bc_and(nn, nlt) // e >= lim_exp
     };
-    let over = b.bc_or(ge_lim, is_inf.clone());
+    let over = {
+        let t = b.bc_or(ge_lim, is_inf.clone());
+        let t = b.bc_or(t, is_nan.clone());
+        if signed {
+            t
+        } else {
+            // unsigned: any value with |x| >= 1 and sign set is out of range
+            let nn = b.bc_not(e_neg.clone());
+            let neg_out = b.bc_and(p.sign.clone(), nn);
+            b.bc_or(t, neg_out)
+        }
+    };
 
-    let max_bits = sf_const(b, max_v & 0xFFFF_FFFF_FFFF_FFFF, 64)[..32].to_vec();
-    let min_bits = sf_const(b, min_v & 0xFFFF_FFFF_FFFF_FFFF, 64)[..32].to_vec();
+    let max_bits = sf_const(b, max_v, 128)[..out_bits].to_vec();
+    let min_bits = sf_const(b, min_v, 128)[..out_bits].to_vec();
     let sat_val = sf_mux(b, &p.sign, &min_bits, &max_bits);
-    let mut out = sf_mux(b, &over, &sat_val, &signed_val[..32].to_vec());
+    let mut out = sf_mux(b, &over, &sat_val, &signed_val[..out_bits].to_vec());
     // NaN -> 0; |x| < 1 -> 0 (covers zero)
-    let z32 = sf_zeros(b, 32);
+    let z = sf_zeros(b, out_bits);
     let to_zero = b.bc_or(is_nan.clone(), e_neg.clone());
     let to_zero = b.bc_or(to_zero, is_zero.clone());
-    out = sf_mux(b, &to_zero, &z32, &out);
-    out
+    // unsigned saturation: negative inputs clamp to 0
+    let to_zero = if signed {
+        to_zero
+    } else {
+        b.bc_or(to_zero, p.sign.clone())
+    };
+    out = sf_mux(b, &to_zero, &z, &out);
+    (out, over)
+}
+
+/// `f64` -> 32-bit int with wasm `i32.trunc_sat_f64_*` semantics:
+/// NaN -> 0, out-of-range -> clamps, else truncate toward zero.
+pub fn i32_trunc_sat_f64<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], signed: bool) -> Vec<B::Bit> {
+    trunc_f64_engine(b, a, 32, signed).0
+}
+
+/// `f64` -> 64-bit int with wasm `i64.trunc_sat_f64_*` semantics.
+pub fn i64_trunc_sat_f64<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], signed: bool) -> Vec<B::Bit> {
+    trunc_f64_engine(b, a, 64, signed).0
+}
+
+/// `f64` -> 32-bit int with the wasm *trapping* conversion lowered to the
+/// module's non-trapping discipline: would-trap conditions yield 0.
+pub fn i32_trunc_f64<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], signed: bool) -> Vec<B::Bit> {
+    let (val, would_trap) = trunc_f64_engine(b, a, 32, signed);
+    let z = sf_zeros(b, 32);
+    sf_mux(b, &would_trap, &z, &val)
+}
+
+/// `f64` -> 64-bit int, trapping conversion under the zero discipline.
+pub fn i64_trunc_f64<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], signed: bool) -> Vec<B::Bit> {
+    let (val, would_trap) = trunc_f64_engine(b, a, 64, signed);
+    let z = sf_zeros(b, 64);
+    sf_mux(b, &would_trap, &z, &val)
 }
 
 // ============================================================================
@@ -1518,15 +1700,44 @@ mod tests {
         }
         for v in cases {
             let av = bits_of_f64(v);
-            let out = run(&[&av], |ev, ws| i32_trunc_sat_f64(ev, &ws[0], true));
-            let mut got = 0u32;
+            let out = run(&[&av], |ev, ws| {
+                let mut o = i32_trunc_sat_f64(ev, &ws[0], true);
+                o.extend(i32_trunc_sat_f64(ev, &ws[0], false));
+                o.extend(i64_trunc_sat_f64(ev, &ws[0], true));
+                o.extend(i64_trunc_sat_f64(ev, &ws[0], false));
+                o
+            });
+            let mut got = [0u64; 3];
             for (i, b) in out.iter().enumerate() {
                 if *b {
-                    got |= 1 << i;
+                    got[i / 64] |= 1 << (i % 64);
                 }
             }
-            let want = v as i32; // Rust `as` == wasm trunc_sat semantics
-            assert_eq!(got, want as u32, "trunc_sat_s({v:e})");
+            // Rust `as` == wasm trunc_sat semantics
+            assert_eq!(got[0] as u32, (v as i32) as u32, "trunc_sat32_s({v:e})");
+            assert_eq!(got[0] >> 32, (v as u32) as u64, "trunc_sat32_u({v:e})");
+            assert_eq!(got[1], (v as i64) as u64, "trunc_sat64_s({v:e})");
+            assert_eq!(got[2], v as u64, "trunc_sat64_u({v:e})");
+        }
+    }
+
+    #[test]
+    fn f64_sqrt_matches_native() {
+        let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
+        let mut cases = edge_f64s();
+        for _ in 0..4000 {
+            cases.push(f64::from_bits(rng.next()));
+        }
+        for v in cases {
+            let av = bits_of_f64(v);
+            let out = run(&[&av], |ev, ws| f64_sqrt(ev, &ws[0]));
+            let want = v.sqrt();
+            let g = f64_of_bits(&out);
+            if want.is_nan() {
+                assert!(g.is_nan(), "sqrt({v:e}): got {g:e}, want NaN");
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "sqrt({v:e})");
+            }
         }
     }
 

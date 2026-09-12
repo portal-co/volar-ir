@@ -39,13 +39,12 @@
 //! [`scan_dynamic_tables`]).
 //!
 //! **Operators** (not supported — returns `UnsupportedOp`):
-//! - F32 arithmetic (`add`/`sub`/`mul`/`div`/`min`/`max`/rounding), `F64Sqrt`,
+//! - F32 arithmetic (`add`/`sub`/`mul`/`div`/`min`/`max`/rounding) and
 //!   `F32Sqrt`
-//! - Trapping float-to-int conversions (`I32TruncF64S` etc. — only the
-//!   saturating `*TruncSat*` forms lower)
 //! - All V128/SIMD ops
 //! - All atomic/threads ops
-//! - Trunc-sat conversions other than `I32TruncSatF64S`/`I32TruncSatF64U`
+//! - F32-family conversions (`*TruncSatF32*`, `F32ConvertI*`) and
+//!   `I64TruncSatF32*`
 //! - `CallIndirect` on imported/dynamically-mutated tables, `CallRef`
 //! - Tables: `TableGet`, `TableSet`, `TableGrow`, `TableSize`
 //! - Bulk memory: `MemoryInit`, `DataDrop` (`MemoryCopy`/`MemoryFill` are
@@ -1494,6 +1493,13 @@ fn lower_op(
         Operator::F32DemoteF64 => sf_call(tgt, SoftfloatHelper::F32DemoteF64, &[get(0)?]),
         Operator::I32TruncSatF64S => sf_call(tgt, SoftfloatHelper::I32TruncSatF64(true), &[get(0)?]),
         Operator::I32TruncSatF64U => sf_call(tgt, SoftfloatHelper::I32TruncSatF64(false), &[get(0)?]),
+        Operator::I64TruncSatF64S => sf_call(tgt, SoftfloatHelper::I64TruncSatF64(true), &[get(0)?]),
+        Operator::I64TruncSatF64U => sf_call(tgt, SoftfloatHelper::I64TruncSatF64(false), &[get(0)?]),
+        Operator::F64Sqrt => sf_call(tgt, SoftfloatHelper::F64Sqrt, &[get(0)?]),
+        Operator::I32TruncF64S => sf_call(tgt, SoftfloatHelper::I32TruncF64(true), &[get(0)?]),
+        Operator::I32TruncF64U => sf_call(tgt, SoftfloatHelper::I32TruncF64(false), &[get(0)?]),
+        Operator::I64TruncF64S => sf_call(tgt, SoftfloatHelper::I64TruncF64(true), &[get(0)?]),
+        Operator::I64TruncF64U => sf_call(tgt, SoftfloatHelper::I64TruncF64(false), &[get(0)?]),
 
         // ---- Bulk memory (desugared to module-internal helper calls) -----
         // `memory.copy`/`memory.fill` lower to calls into byte-loop helper
@@ -1843,9 +1849,10 @@ fn mem_load_bytes(
 fn sf_call(tgt: &mut VaffleTarget, helper: SoftfloatHelper, args: &[VaffleValue]) -> VaffleValue {
     let arg_tys: alloc::vec::Vec<LirType> = args.iter().map(|a| a.ty.clone()).collect();
     let ret_ty = match helper {
-        SoftfloatHelper::F64Cmp(_) | SoftfloatHelper::F32Cmp(_) | SoftfloatHelper::I32TruncSatF64(_) => {
-            LirType::U32
-        }
+        SoftfloatHelper::F64Cmp(_)
+        | SoftfloatHelper::F32Cmp(_)
+        | SoftfloatHelper::I32TruncSatF64(_)
+        | SoftfloatHelper::I32TruncF64(_) => LirType::U32,
         SoftfloatHelper::F32DemoteF64 => LirType::U32,
         _ => LirType::U64,
     };
@@ -1872,13 +1879,17 @@ fn emit_one_softfloat_helper(tgt: &mut VaffleTarget, helper: SoftfloatHelper) {
     let (param_tys, ret_ty): (&[LirType], LirType) = match helper {
         SoftfloatHelper::F64Cmp(_) => (&[LirType::U64, LirType::U64], LirType::U32),
         SoftfloatHelper::F32Cmp(_) => (&[LirType::U32, LirType::U32], LirType::U32),
-        SoftfloatHelper::I32TruncSatF64(_) => (&[LirType::U64], LirType::U32),
+        SoftfloatHelper::I32TruncSatF64(_) | SoftfloatHelper::I32TruncF64(_) => {
+            (&[LirType::U64], LirType::U32)
+        }
         SoftfloatHelper::F32DemoteF64 => (&[LirType::U64], LirType::U32),
         SoftfloatHelper::F64PromoteF32 => (&[LirType::U32], LirType::U64),
         SoftfloatHelper::F64FromI32(_) => (&[LirType::U32], LirType::U64),
-        SoftfloatHelper::F64FromI64(_) | SoftfloatHelper::F64RoundInt(_) => {
-            (&[LirType::U64], LirType::U64)
-        }
+        SoftfloatHelper::F64FromI64(_)
+        | SoftfloatHelper::F64RoundInt(_)
+        | SoftfloatHelper::F64Sqrt
+        | SoftfloatHelper::I64TruncF64(_)
+        | SoftfloatHelper::I64TruncSatF64(_) => (&[LirType::U64], LirType::U64),
         _ => (&[LirType::U64, LirType::U64], LirType::U64),
     };
     let (_entry, groups) = tgt.begin_function(&helper.name(), param_tys, Some(ret_ty.clone()));
@@ -1912,6 +1923,10 @@ fn emit_one_softfloat_helper(tgt: &mut VaffleTarget, helper: SoftfloatHelper) {
         SoftfloatHelper::I32TruncSatF64(signed) => sf::i32_trunc_sat_f64(tgt, &a.bits, signed),
         SoftfloatHelper::F64PromoteF32 => sf::f64_promote_f32(tgt, &a.bits),
         SoftfloatHelper::F32DemoteF64 => sf::f32_demote_f64(tgt, &a.bits),
+        SoftfloatHelper::F64Sqrt => sf::f64_sqrt(tgt, &a.bits),
+        SoftfloatHelper::I32TruncF64(signed) => sf::i32_trunc_f64(tgt, &a.bits, signed),
+        SoftfloatHelper::I64TruncF64(signed) => sf::i64_trunc_f64(tgt, &a.bits, signed),
+        SoftfloatHelper::I64TruncSatF64(signed) => sf::i64_trunc_sat_f64(tgt, &a.bits, signed),
     };
     tgt.ret(&[VaffleValue { bits, ty: ret_ty }]);
     tgt.end_function();
