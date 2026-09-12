@@ -34,7 +34,9 @@
 //! - Trunc-sat conversions
 //! - `CallIndirect`, `CallRef`
 //! - Tables: `TableGet`, `TableSet`, `TableGrow`, `TableSize`
-//! - Bulk memory: `MemoryCopy`, `MemoryFill`, `MemoryInit`, `DataDrop`
+//! - Bulk memory: `MemoryInit`, `DataDrop` (`MemoryCopy`/`MemoryFill` are
+//!   desugared to module-internal byte-loop helper calls; see
+//!   [`emit_bulk_memory_helpers`])
 //! - Reference types: `RefNull`, `RefIsNull`, `RefFunc`
 //! - GC proposal operators
 //! - `Unreachable` operator (distinct from `Terminator::Unreachable`)
@@ -301,6 +303,10 @@ pub fn lower_waffle_module_with_metadata(
             }
         }
     }
+
+    // Materialise the bulk-memory helper bodies that `MemoryCopy`/
+    // `MemoryFill` desugaring requested (forward-referenced by the calls).
+    emit_bulk_memory_helpers(target, config);
 
     // Collect WASM active data-segment pre-initialisations.
     // WASM linear memories use 8-bit byte cells, addressed by
@@ -1151,6 +1157,39 @@ fn lower_op(
 
         Operator::Nop => return Ok(None),
 
+        // ---- Bulk memory (desugared to module-internal helper calls) -----
+        // `memory.copy`/`memory.fill` lower to calls into byte-loop helper
+        // functions emitted once per (kind, dst, src) memory pair (see
+        // `emit_bulk_memory_helpers`). Like the rest of the memory lowering,
+        // addresses are masked to the configured `memory_address_bits`
+        // instead of trapping out-of-bounds.
+        Operator::MemoryCopy { dst_mem, src_mem } => {
+            let (dst_idx, src_idx) = (dst_mem.index() as u32, src_mem.index() as u32);
+            let (dst, src, len) = (get(0)?, get(1)?, get(2)?);
+            tgt.pending_bulk_helpers
+                .insert((BulkHelper::Memmove, dst_idx, src_idx));
+            tgt.call(
+                &bulk_helper_name(BulkHelper::Memmove, dst_idx, src_idx),
+                &[LirType::U32, LirType::U32, LirType::U32],
+                &[dst, src, len],
+                None,
+            );
+            return Ok(None);
+        }
+        Operator::MemoryFill { mem } => {
+            let mem_idx = mem.index() as u32;
+            let (dst, val, len) = (get(0)?, get(1)?, get(2)?);
+            tgt.pending_bulk_helpers
+                .insert((BulkHelper::Memset, mem_idx, mem_idx));
+            tgt.call(
+                &bulk_helper_name(BulkHelper::Memset, mem_idx, mem_idx),
+                &[LirType::U32, LirType::U32, LirType::U32],
+                &[dst, val, len],
+                None,
+            );
+            return Ok(None);
+        }
+
         // ---- Memory loads (byte-addressed storage) ---------------------
         Operator::I32Load { memory } => {
             lower_mem_load(tgt, memory, &get(0)?, 4, LirType::U32, false, config)
@@ -1717,6 +1756,243 @@ fn lower_vci_reveal(
 }
 
 // ============================================================================
+// Bulk-memory helper functions
+// ============================================================================
+
+use crate::target::BulkHelper;
+
+/// Name of the module-internal helper for a bulk-memory operation on the
+/// given memories. Each memory pair gets its own helper because storages
+/// are static per `StorageRead`/`StorageWrite` op.
+pub fn bulk_helper_name(kind: BulkHelper, dst_mem: u32, src_mem: u32) -> alloc::string::String {
+    match kind {
+        BulkHelper::Memset => alloc::format!("__volar_memset_m{dst_mem}"),
+        BulkHelper::Memmove => alloc::format!("__volar_memmove_m{dst_mem}_m{src_mem}"),
+    }
+}
+
+/// Emit the module-internal bulk-memory helpers requested during lowering
+/// (`target.pending_bulk_helpers`). Call once after all wasm functions have
+/// been lowered; safe to call with an empty set (a no-op).
+///
+/// * `__volar_memset_m{m}(dst: u32, val: u32, len: u32)` — wasm `memory.fill`.
+/// * `__volar_memmove_m{d}_m{s}(dst: u32, src: u32, len: u32)` — wasm
+///   `memory.copy`. When `d == s` the copy is overlap-safe (copies backwards
+///   when `dst > src`); across distinct memories a plain forward copy is
+///   emitted, since disjoint storages cannot overlap.
+///
+/// All helpers are byte loops with the same masked-address (non-trapping)
+/// discipline as the load/store lowering.
+pub fn emit_bulk_memory_helpers(target: &mut VaffleTarget, config: &WaffleImportConfig) {
+    let helpers: alloc::vec::Vec<(BulkHelper, u32, u32)> =
+        target.pending_bulk_helpers.iter().copied().collect();
+    for (kind, dst_mem, src_mem) in helpers {
+        match kind {
+            BulkHelper::Memset => emit_memset_helper(target, config, dst_mem),
+            BulkHelper::Memmove => emit_memmove_helper(target, config, dst_mem, src_mem),
+        }
+    }
+    target.pending_bulk_helpers.clear();
+}
+
+/// Emit one byte of `bits` (merged to `Vec(8, Bit)`) at `base + idx`
+/// in `storage`, using the same discipline as `mem_store_bytes`.
+fn helper_store_byte(
+    tgt: &mut VaffleTarget,
+    config: &WaffleImportConfig,
+    storage: StorageId,
+    base: &VaffleValue,
+    idx: &VaffleValue,
+    byte_var: ValueId,
+) {
+    let addr = tgt.add(base.clone(), idx.clone());
+    let byte_tid = tgt.byte_tid();
+    tgt.emit_write(
+        storage,
+        byte_var,
+        byte_tid,
+        memory_address_bits(&addr.bits, config),
+    );
+}
+
+/// Read the byte at `base + idx` from `storage`.
+fn helper_load_byte(
+    tgt: &mut VaffleTarget,
+    config: &WaffleImportConfig,
+    storage: StorageId,
+    base: &VaffleValue,
+    idx: &VaffleValue,
+) -> ValueId {
+    let addr = tgt.add(base.clone(), idx.clone());
+    let byte_tid = tgt.byte_tid();
+    tgt.emit_read(
+        storage,
+        byte_tid,
+        memory_address_bits(&addr.bits, config),
+    )
+}
+
+/// `__volar_memset_m{m}(dst: u32, val: u32, len: u32)`:
+/// `for i in 0..len { mem_m[dst + i] = val as u8 }`.
+fn emit_memset_helper(tgt: &mut VaffleTarget, config: &WaffleImportConfig, mem: u32) {
+    let (entry, groups) = tgt.begin_function(
+        &bulk_helper_name(BulkHelper::Memset, mem, mem),
+        &[LirType::U32, LirType::U32, LirType::U32],
+        None,
+    );
+    let _ = entry;
+    let dst = groups[0][0].clone();
+    let val = groups[1][0].clone();
+    let len = groups[2][0].clone();
+
+    let storage = StorageId::memory(mem);
+    let header = tgt.create_block();
+    let body = tgt.create_block();
+    let exit = tgt.create_block();
+
+    let h_i = tgt.add_block_param(header, LirType::U32);
+    let h_dst = tgt.add_block_param(header, LirType::U32);
+    let h_val = tgt.add_block_param(header, LirType::U32);
+    let h_len = tgt.add_block_param(header, LirType::U32);
+
+    // entry: jump header(0, dst, val, len)
+    let zero = tgt.iconst(LirType::U32, 0);
+    tgt.jump(header, BranchTarget::args(alloc::vec![zero, dst, val, len]));
+
+    // header: i < len ? body : exit
+    tgt.switch_to_block(header);
+    let cond = tgt.icmp(IcmpPred::Ult, h_i.clone(), h_len.clone());
+    tgt.branch(
+        cond,
+        body,
+        BranchTarget::args(alloc::vec![]),
+        exit,
+        BranchTarget::args(alloc::vec![]),
+    );
+
+    // body: mem[dst + i] = low byte of val; jump header(i + 1, ...)
+    tgt.switch_to_block(body);
+    let byte_var = tgt.compose_address(&h_val.bits[..8]);
+    helper_store_byte(tgt, config, storage, &h_dst, &h_i, byte_var);
+    let one = tgt.iconst(LirType::U32, 1);
+    let i_next = tgt.add(h_i, one);
+    tgt.jump(
+        header,
+        BranchTarget::args(alloc::vec![i_next, h_dst, h_val, h_len]),
+    );
+
+    // exit: fall through to the default empty `Return`.
+    tgt.switch_to_block(exit);
+    tgt.end_function();
+}
+
+/// `__volar_memmove_m{d}_m{s}(dst: u32, src: u32, len: u32)` — when `d == s`,
+/// an overlap-safe copy (forward when `dst <= src`, backward when
+/// `dst > src`); across distinct memories a plain forward copy suffices.
+fn emit_memmove_helper(tgt: &mut VaffleTarget, config: &WaffleImportConfig, dst_mem: u32, src_mem: u32) {
+    let same_mem = dst_mem == src_mem;
+    let (entry, groups) = tgt.begin_function(
+        &bulk_helper_name(BulkHelper::Memmove, dst_mem, src_mem),
+        &[LirType::U32, LirType::U32, LirType::U32],
+        None,
+    );
+    let _ = entry;
+    let dst = groups[0][0].clone();
+    let src = groups[1][0].clone();
+    let len = groups[2][0].clone();
+
+    let read_from = StorageId::memory(src_mem);
+    let write_to = StorageId::memory(dst_mem);
+    let fwd_header = tgt.create_block();
+    let fwd_body = tgt.create_block();
+    let exit = tgt.create_block();
+    // The backward-copy blocks exist only for the overlap-safe same-memory
+    // variant; across distinct memories they would be dead weight.
+    let (back_header, back_body) = if same_mem {
+        (tgt.create_block(), tgt.create_block())
+    } else {
+        (exit, exit)
+    };
+
+    let fh_i = tgt.add_block_param(fwd_header, LirType::U32);
+    let fh_dst = tgt.add_block_param(fwd_header, LirType::U32);
+    let fh_src = tgt.add_block_param(fwd_header, LirType::U32);
+    let fh_len = tgt.add_block_param(fwd_header, LirType::U32);
+
+    let zero = tgt.iconst(LirType::U32, 0);
+    if same_mem {
+        let bh_i = tgt.add_block_param(back_header, LirType::U32);
+        let bh_dst = tgt.add_block_param(back_header, LirType::U32);
+        let bh_src = tgt.add_block_param(back_header, LirType::U32);
+        let bh_len = tgt.add_block_param(back_header, LirType::U32);
+
+        // entry: dst > src ? back_header(len, ...) : fwd_header(0, ...)
+        let go_back = tgt.icmp(IcmpPred::Ugt, dst.clone(), src.clone());
+        tgt.branch(
+            go_back,
+            back_header,
+            BranchTarget::args(alloc::vec![len.clone(), dst.clone(), src.clone(), len.clone()]),
+            fwd_header,
+            BranchTarget::args(alloc::vec![zero, dst.clone(), src.clone(), len.clone()]),
+        );
+
+        // back_header: i != 0 ? back_body : exit
+        tgt.switch_to_block(back_header);
+        let zero = tgt.iconst(LirType::U32, 0);
+        let cond = tgt.icmp(IcmpPred::Ne, bh_i.clone(), zero);
+        tgt.branch(
+            cond,
+            back_body,
+            BranchTarget::args(alloc::vec![]),
+            exit,
+            BranchTarget::args(alloc::vec![]),
+        );
+
+        // back_body: i -= 1; mem[dst + i] = mem[src + i]; jump back_header(i, ...)
+        tgt.switch_to_block(back_body);
+        let one = tgt.iconst(LirType::U32, 1);
+        let i_prev = tgt.sub(bh_i, one);
+        let byte = helper_load_byte(tgt, config, read_from, &bh_src, &i_prev);
+        helper_store_byte(tgt, config, write_to, &bh_dst, &i_prev, byte);
+        tgt.jump(
+            back_header,
+            BranchTarget::args(alloc::vec![i_prev, bh_dst, bh_src, bh_len]),
+        );
+    } else {
+        // Distinct memories cannot overlap: plain forward copy.
+        tgt.jump(
+            fwd_header,
+            BranchTarget::args(alloc::vec![zero, dst.clone(), src.clone(), len.clone()]),
+        );
+    }
+
+    // fwd_header: i < len ? fwd_body : exit
+    tgt.switch_to_block(fwd_header);
+    let cond = tgt.icmp(IcmpPred::Ult, fh_i.clone(), fh_len.clone());
+    tgt.branch(
+        cond,
+        fwd_body,
+        BranchTarget::args(alloc::vec![]),
+        exit,
+        BranchTarget::args(alloc::vec![]),
+    );
+
+    // fwd_body: mem_d[dst + i] = mem_s[src + i]; jump fwd_header(i + 1, ...)
+    tgt.switch_to_block(fwd_body);
+    let byte = helper_load_byte(tgt, config, read_from, &fh_src, &fh_i);
+    helper_store_byte(tgt, config, write_to, &fh_dst, &fh_i, byte);
+    let one = tgt.iconst(LirType::U32, 1);
+    let i_next = tgt.add(fh_i, one);
+    tgt.jump(
+        fwd_header,
+        BranchTarget::args(alloc::vec![i_next, fh_dst, fh_src, fh_len]),
+    );
+
+    tgt.switch_to_block(exit);
+    tgt.end_function();
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1734,6 +2010,83 @@ mod tests {
     use volar_ir_common::Stmt;
 
     #[test]
+    fn multi_memory_bulk_ops_lower_to_per_memory_helpers() {
+        // Two memories; same-memory overlapping copy in m0, cross-memory
+        // copy m0 -> m1, and a fill of m1. Each must lower to a call into
+        // its own memory-index-specialized helper.
+        let wat = r#"
+            (module
+              (memory $a 1)
+              (memory $b 1)
+              (func (export "go") (param i32 i32 i32)
+                local.get 0 local.get 1 local.get 2
+                (memory.copy $a $a)
+                local.get 0 local.get 1 local.get 2
+                (memory.copy $b $a)
+                local.get 0 local.get 1 local.get 2
+                (memory.fill $b)))"#;
+        let bytes = wat::parse_str(wat).expect("wat parses");
+        let module = portal_pc_waffle_frontend::from_wasm_bytes(&bytes, &Default::default())
+            .expect("frontend parses multi-memory module");
+        let mut target = VaffleTarget::with_pointer_width(vaffle::PointerWidth::Bits32);
+        let errors = lower_waffle_module(&module, &mut target, &WaffleImportConfig::new());
+        assert!(errors.is_empty(), "lowering errors: {errors:?}");
+
+        // All three helpers exist as bodies.
+        for name in [
+            "__volar_memmove_m0_m0",
+            "__volar_memmove_m1_m0",
+            "__volar_memset_m1",
+        ] {
+            let fid = *target
+                .module
+                .exports
+                .get(name)
+                .unwrap_or_else(|| panic!("missing helper {name}"));
+            assert!(
+                matches!(target.module.funcs[fid.0], vaffle::FuncDecl::Body(_)),
+                "{name} has no body"
+            );
+        }
+
+        // The cross-memory memmove reads memory 0 and writes memory 1,
+        // and skips the backward-copy loop (3 blocks: entry/header/body/exit
+        // with no backward pair => fewer blocks than the same-memory one).
+        let storages_of = |name: &str| -> (alloc::collections::BTreeSet<_>, alloc::collections::BTreeSet<_>, usize) {
+            let fid = target.module.exports[name];
+            let vaffle::FuncDecl::Body(body) = &target.module.funcs[fid.0] else {
+                panic!("{name} has no body")
+            };
+            let mut reads = alloc::collections::BTreeSet::new();
+            let mut writes = alloc::collections::BTreeSet::new();
+            for node in &body.values {
+                match &node.kind {
+                    vaffle::Value::Op(volar_ir_common::Stmt::StorageRead { storage, .. }) => {
+                        reads.insert(*storage);
+                    }
+                    vaffle::Value::Op(volar_ir_common::Stmt::StorageWrite { storage, .. }) => {
+                        writes.insert(*storage);
+                    }
+                    _ => {}
+                }
+            }
+            (reads, writes, body.blocks.len())
+        };
+        let (r, w, cross_blocks) = storages_of("__volar_memmove_m1_m0");
+        assert_eq!(r, [StorageId::memory(0)].into_iter().collect());
+        assert_eq!(w, [StorageId::memory(1)].into_iter().collect());
+        let (r, w, same_blocks) = storages_of("__volar_memmove_m0_m0");
+        assert_eq!(r, [StorageId::memory(0)].into_iter().collect());
+        assert_eq!(w, [StorageId::memory(0)].into_iter().collect());
+        assert!(
+            same_blocks > cross_blocks,
+            "same-memory memmove keeps its backward-copy loop ({same_blocks} vs {cross_blocks})"
+        );
+        let (r, w, _) = storages_of("__volar_memset_m1");
+        assert!(r.is_empty());
+        assert_eq!(w, [StorageId::memory(1)].into_iter().collect());
+    }
+
     fn respect_unstable_skips_declared_unused_data_storage() {
         let mut wasm = WModule::empty();
         wasm.memories.push(MemoryData {

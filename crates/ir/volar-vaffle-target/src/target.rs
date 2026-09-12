@@ -165,6 +165,24 @@ pub struct VaffleTarget {
     pending_funcs: BTreeMap<String, FuncId>,
     /// Opt-in vc-spec session. `None` keeps default lowering untagged.
     pub(crate) vc: Option<VcLoweringState>,
+    /// Bulk-memory helper functions requested while lowering, as
+    /// `(kind, dst_mem, src_mem)` triples (`MemoryCopy`/`MemoryFill` desugar
+    /// to calls into these; the memory indices matter under `multi_memory` —
+    /// each helper reads/writes its own fixed storages). Emitted once by
+    /// `lower_waffle_module_with_metadata` after all wasm functions via
+    /// [`crate::waffle_lower::emit_bulk_memory_helpers`].
+    pub pending_bulk_helpers: alloc::collections::BTreeSet<(BulkHelper, u32, u32)>,
+}
+
+/// Kind of module-internal bulk-memory helper emitted by
+/// [`crate::waffle_lower::emit_bulk_memory_helpers`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum BulkHelper {
+    /// wasm `memory.fill`: `__volar_memset_m{dst}`.
+    Memset,
+    /// wasm `memory.copy`: `__volar_memmove_m{dst}_m{src}`. Overlap-safe
+    /// when `dst == src`; a plain forward copy across distinct memories.
+    Memmove,
 }
 
 impl VaffleTarget {
@@ -192,6 +210,7 @@ impl VaffleTarget {
             optimized_abi: false,
             pending_funcs: BTreeMap::new(),
             vc: None,
+            pending_bulk_helpers: alloc::collections::BTreeSet::new(),
         }
     }
 
