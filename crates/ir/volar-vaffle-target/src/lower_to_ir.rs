@@ -1668,10 +1668,37 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     }
 
     pub(crate) fn finish(self) -> (IRBlocks<P>, IRTypes) {
+        // The oracle/action declarations were cloned from the VAFFLE module
+        // carrying *module-table* TypeIds; remap them through `type_map` so
+        // they reference the IR type table like the statements they
+        // validate.
+        let remap = |tids: &[TypeId]| -> alloc::vec::Vec<TypeId> {
+            tids.iter()
+                .map(|tid| self.type_map[tid.0 as usize])
+                .collect()
+        };
+        let oracles = self
+            .oracles
+            .iter()
+            .map(|o| volar_ir_common::OracleDecl {
+                name: o.name.clone(),
+                params: remap(&o.params),
+                results: remap(&o.results),
+            })
+            .collect();
+        let actions = self
+            .actions
+            .iter()
+            .map(|a| volar_ir_common::ActionDecl {
+                name: a.name.clone(),
+                params: remap(&a.params),
+                results: remap(&a.results),
+            })
+            .collect();
         (
             IRBlocks {
-                oracles: self.oracles,
-                actions: self.actions,
+                oracles,
+                actions,
                 rngs: alloc::vec![],
                 blocks: self.blocks,
                 pre_init: self.pre_init,
