@@ -1458,6 +1458,74 @@ impl VaffleTarget {
         }
         results
     }
+
+    /// Emit an IR-level oracle call directly as `Value::Op(Stmt::OracleCall)`
+    /// plus one `Stmt::OracleOutput` projection per result (each exploded to
+    /// per-bit `Shuffle` values), instead of the `Value::Call`-to-import used
+    /// by [`call_extern_multi`](Self::call_extern_multi).
+    ///
+    /// Oracle calls are pure IR statements: they bypass the call/SP protocol
+    /// entirely, are validated against `module.oracles` by the vaffle→IR and
+    /// IR→boolar lowerings, and arrive at the boolar level as one
+    /// `BIrStmt::OracleBit` per output bit. The oracle must already be
+    /// registered in `module.oracles` (the waffle lowering's import-config
+    /// pre-registration does this).
+    ///
+    /// Each argument is packed into a single typed var via `Stmt::Merge`
+    /// carrying that param's declared `TypeId`, so the IR-level signature
+    /// validation (`decl.params` vs `args`) sees the declared types.
+    pub fn oracle_call_multi(
+        &mut self,
+        name: &str,
+        args: &[VaffleValue],
+        ret_tys: &[LirType],
+    ) -> Vec<VaffleValue> {
+        debug_assert!(
+            self.module.oracles.iter().any(|d| d.name == name),
+            "oracle_call_multi: oracle `{name}` is not registered in module.oracles"
+        );
+        let arg_vars: Vec<ValueId> = args
+            .iter()
+            .map(|v| {
+                if v.bits.len() == 1 {
+                    return v.bits[0];
+                }
+                let tid = self.lir_type_to_tid(&v.ty);
+                self.fb().emit_value(Value::Op(Stmt::Merge {
+                    parts: v.bits.clone(),
+                    ty: tid,
+                }))
+            })
+            .collect();
+        let output_tys: Vec<TypeId> = ret_tys
+            .iter()
+            .map(|t| self.lir_type_to_tid(t))
+            .collect();
+        let result_ty = self.intern_type(IrType::Tuple(output_tys.clone()));
+        let call = self.fb().emit_value(Value::Op(Stmt::OracleCall {
+            name: name.to_string(),
+            args: arg_vars,
+            output_tys: output_tys.clone(),
+            result_ty,
+        }));
+        let mut results = Vec::with_capacity(ret_tys.len());
+        for (idx, ty) in ret_tys.iter().enumerate() {
+            let tid = output_tys[idx];
+            let out = self.fb().emit_value(Value::Op(Stmt::OracleOutput {
+                call,
+                idx,
+                ty: tid,
+            }));
+            let n = self.bits_for(ty);
+            assert!(n <= 256, "oracle_call_multi: result wider than 256 bits");
+            let bits: Vec<ValueId> = (0..n).map(|b| self.extract_bit(out, b as u8)).collect();
+            results.push(VaffleValue {
+                bits,
+                ty: ty.clone(),
+            });
+        }
+        results
+    }
 }
 
 // ============================================================================

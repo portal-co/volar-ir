@@ -73,6 +73,20 @@ impl WaffleImportConfig {
         self
     }
 
+    /// Map the `portal_crypto.aes128_enc` WASM import to the
+    /// `aes128_encrypt_block` oracle (the AX circuit-extern contract in
+    /// `volar_ir_common::aes_extern`).
+    ///
+    /// The import's WASM signature is `(param i64 i64 i64 i64) (result i64
+    /// i64)` — `(key_lo, key_hi, pt_lo, pt_hi) -> (ct_lo, ct_hi)`, each i64
+    /// little-endian byte-packed.
+    pub fn with_portal_crypto_aes(self) -> Self {
+        self.with_oracle(
+            volar_ir_common::aes_extern::WAFFLE_IMPORT,
+            volar_ir_common::aes_extern::ORACLE_NAME,
+        )
+    }
+
     /// Like [`with_oracle`](Self::with_oracle), but attaches `side` to every
     /// call/output value emitted at this oracle's call sites.
     pub fn with_oracle_side(

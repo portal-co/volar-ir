@@ -237,8 +237,15 @@ pub fn lower_waffle_module_with_metadata(
         BTreeMap::new()
     };
     // Pre-register OracleDecl / ActionDecl for imports named in config.
-    for (_func_ref, decl) in wasm.funcs.entries() {
-        if let FuncDecl::Import(sig, import_name) = decl {
+    // Real-WASM imports carry their names in the module's import table
+    // ("<module>.<field>"), not in `FuncDecl::Import`'s (empty) name field —
+    // resolve through `waffle_import_func_names`.
+    let import_names = waffle_import_func_names(wasm);
+    for (func_ref, decl) in wasm.funcs.entries() {
+        if let FuncDecl::Import(sig, decl_name) = decl {
+            let import_name = import_names
+                .get(&func_ref.index())
+                .unwrap_or(decl_name);
             let Some(kind) = config.imports.get(import_name) else {
                 continue;
             };
@@ -1015,8 +1022,11 @@ fn lower_op(
             }
             let name = callee_name(wasm, fid);
 
-            // Oracle / action dispatch: bypass globals threading.
-            if let Some(kind) = config.imports.get(&name) {
+            // Oracle / action dispatch: bypass globals threading. Config
+            // lookup uses the canonical import-table name for imports.
+            let import_names = waffle_import_func_names(wasm);
+            let config_key = callee_config_key(wasm, &import_names, fid);
+            if let Some(kind) = config.imports.get(&config_key) {
                 let all_arg_vals: Vec<VaffleValue> =
                     args.iter()
                         .map(|wv| {
@@ -1036,8 +1046,12 @@ fn lower_op(
                         side,
                     } => {
                         tgt.set_side(*side);
-                        let r = tgt.call_extern_multi(
-                            &alloc::format!("oracle_{oracle_name}"),
+                        // Emit the oracle as an IR-level `OracleCall` (not a
+                        // `Value::Call` to an env import), so it survives the
+                        // vaffle→IR lowering as a real `IRStmt::OracleCall`
+                        // validated against `module.oracles`.
+                        let r = tgt.oracle_call_multi(
+                            oracle_name,
                             &all_arg_vals,
                             &orig_ret_tys,
                         );
@@ -1514,6 +1528,51 @@ fn callee_name(wasm: &WModule, fid: portal_pc_waffle_ir::Func) -> String {
         FuncDecl::Import(_, name) => name.clone(),
         _ => alloc::format!("func_{}", fid.index()),
     }
+}
+
+/// Canonical `"<module>.<field>"` names for every *imported* function in
+/// `wasm`, keyed by func index.
+///
+/// The WAFFLE frontend leaves `FuncDecl::Import`'s name field empty for real
+/// WASM binaries (the two-level `(import "mod" "field")` name lives in the
+/// module's import table, keyed by [`ImportKind::Func`]); synthetic modules
+/// (tests, producers) instead fill that name field with a single-segment
+/// name. Config lookups ([`WaffleImportConfig`]) are keyed on the canonical
+/// `"mod.field"` form, falling back to the name field so synthetic modules
+/// keep working.
+pub fn waffle_import_func_names(wasm: &WModule) -> BTreeMap<usize, String> {
+    let mut out = BTreeMap::new();
+    for import in &wasm.imports {
+        if let portal_pc_waffle_ir::ImportKind::Func(func) = import.kind {
+            out.insert(
+                func.index(),
+                alloc::format!("{}.{}", import.module, import.name),
+            );
+        }
+    }
+    for (func_ref, decl) in wasm.funcs.entries() {
+        if let FuncDecl::Import(_, name) = decl {
+            if !name.is_empty() {
+                out.entry(func_ref.index()).or_insert_with(|| name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The config lookup key for `fid`: the canonical import-table name for
+/// imports, the declaration name otherwise.
+fn callee_config_key(
+    wasm: &WModule,
+    import_names: &BTreeMap<usize, String>,
+    fid: portal_pc_waffle_ir::Func,
+) -> String {
+    if let FuncDecl::Import(..) = &wasm.funcs[fid] {
+        if let Some(name) = import_names.get(&fid.index()) {
+            return name.clone();
+        }
+    }
+    callee_name(wasm, fid)
 }
 
 fn vc_iconst(tgt: &mut VaffleTarget, ty: LirType, val: i64) -> VaffleValue {
