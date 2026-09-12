@@ -234,6 +234,7 @@ pub fn try_lower_ir_to_boolar_with_tables<P: Clone>(
                 &lane_of,
                 &mut addr_widths,
                 &mut occurrence,
+                None,
             );
             var_bits_per_block.push(vb);
             b
@@ -241,6 +242,148 @@ pub fn try_lower_ir_to_boolar_with_tables<P: Clone>(
         .collect();
 
     // ---- 3. Expand typed pre-init to bit-granular segments ---------------
+    let pre_init = blocks
+        .pre_init
+        .iter()
+        .flat_map(|seg| expand_pre_init_segment(seg, types, &lane_of, &addr_widths))
+        .collect();
+
+    Ok((
+        BIrBlocks {
+            blocks: out_blocks,
+            pre_init,
+        },
+        LoweredTables {
+            lanes: lane_table,
+            var_bits: VarBitMap {
+                blocks: var_bits_per_block,
+            },
+            addr_widths,
+        },
+    ))
+}
+
+/// Per-block side inputs for [`lower_ir_to_boolar_with_sides`].
+///
+/// `param_sides[b][i]` is the side of Boolar param bit `i` of block `b`
+/// (one entry per *bit*, not per typed param — expand a typed param's side
+/// across its `ir_type_bits` bits). Blocks without an entry default to all
+/// `None` (untracked) params. The side of every other wire is derived by the
+/// lowering: derived gates take the `volar_side::propagate` join of their
+/// operands' sides, and introduction points (constants, oracle/action
+/// outputs) inherit the side stamped on the source IR stmt node.
+#[derive(Clone, Debug, Default)]
+pub struct SideInputs {
+    /// `param_sides[b]` = per-param-bit sides for block `b`.
+    pub param_sides: BTreeMap<usize, Vec<Option<volar_side::SideId>>>,
+}
+
+/// Side-aware variant of [`lower_ir_to_boolar`].
+///
+/// Unlike the legacy entry point, every emitted Boolar node carries a side:
+/// param bits are seeded from `sides`, and each derived/introduction wire is
+/// stamped as described on [`SideInputs`]. This is the pass that lets a real
+/// program's side annotations (vc visibilities, MPC party ownership) flow
+/// through the bit-level lowering to the weaver, so the input partition for
+/// an MPC session is derived from the program rather than hand-specified.
+pub fn lower_ir_to_boolar_with_sides<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+    sides: &SideInputs,
+) -> BIrBlocks<P> {
+    try_lower_ir_to_boolar_with_sides(blocks, types, sides)
+        .unwrap_or_else(|error| panic!("lower_ir_to_boolar_with_sides: invalid external primitive: {error:?}"))
+}
+
+/// Fallible variant of [`lower_ir_to_boolar_with_sides`].
+pub fn try_lower_ir_to_boolar_with_sides<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+    sides: &SideInputs,
+) -> Result<BIrBlocks<P>, ExternalLoweringError> {
+    try_lower_ir_to_boolar_side_inner(blocks, types, sides).map(|(blocks, _)| blocks)
+}
+
+/// Side-aware variant of [`lower_ir_to_boolar_with_tables`]: the full
+/// [`LoweredTables`] bundle plus the side-carrying blocks.
+pub fn lower_ir_to_boolar_with_tables_and_sides<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+    sides: &SideInputs,
+) -> (BIrBlocks<P>, LoweredTables) {
+    try_lower_ir_to_boolar_side_inner(blocks, types, sides)
+        .unwrap_or_else(|error| panic!("lower_ir_to_boolar_with_sides: invalid external primitive: {error:?}"))
+}
+
+/// Shared driver for the side-aware entry points: identical to
+/// [`try_lower_ir_to_boolar_with_tables`] except each block is lowered with
+/// its param sides, enabling side propagation.
+fn try_lower_ir_to_boolar_side_inner<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+    sides: &SideInputs,
+) -> Result<(BIrBlocks<P>, LoweredTables), ExternalLoweringError> {
+    validate_external_sources(blocks, types)?;
+    // Lane allocation is identical to the side-agnostic driver.
+    let mut lane_of: BTreeMap<IRTypeId, LaneId> = BTreeMap::new();
+    let mut next_lane: u32 = 0;
+    {
+        let mut alloc_lane = |ty: IRTypeId| {
+            lane_of.entry(ty).or_insert_with(|| {
+                let l = LaneId(next_lane);
+                next_lane += 1;
+                l
+            });
+        };
+        for block in &blocks.blocks {
+            for stmt in &block.stmts {
+                match &stmt.kind {
+                    IRStmt::StorageRead { ty, .. } | IRStmt::StorageWrite { ty, .. } => {
+                        alloc_lane(*ty)
+                    }
+                    IRStmt::ActionStore { output_tys, .. } => {
+                        for ty in output_tys {
+                            alloc_lane(*ty);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for seg in &blocks.pre_init {
+            alloc_lane(seg.ty);
+        }
+    }
+    let lane_table: BTreeMap<LaneId, IRTypeId> =
+        lane_of.iter().map(|(&ty, &lane)| (lane, ty)).collect();
+
+    let mut addr_widths: BTreeMap<(StorageId, LaneId), usize> = BTreeMap::new();
+    let mut occurrence = 0u64;
+    let mut var_bits_per_block: Vec<BTreeMap<u32, Vec<IRVarId>>> =
+        Vec::with_capacity(blocks.blocks.len());
+    let out_blocks: Vec<BIrBlock<P>> = blocks
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(bi, block)| {
+            // Enable side tracking for every block in the side-aware driver,
+            // even blocks with no explicit param sides (empty slice seeds
+            // all-None params but still propagates stmt-node sides).
+            static EMPTY: &[Option<volar_side::SideId>] = &[];
+            let param_sides = sides.param_sides.get(&bi).map(|v| v.as_slice()).or(Some(EMPTY));
+            let (b, vb) = lower_block_with_var_bits(
+                block,
+                types,
+                &lane_of,
+                &mut addr_widths,
+                &mut occurrence,
+                param_sides,
+            );
+            var_bits_per_block.push(vb);
+            b
+        })
+        .collect();
+
     let pre_init = blocks
         .pre_init
         .iter()
@@ -431,12 +574,20 @@ fn stmt_result_type(stmt: &IRStmt) -> Option<IRTypeId> {
 
 /// Lower one block, returning the lowered Boolar block together with the
 /// block's typed-var → bit-var allocation (see [`VarBitMap`]).
+///
+/// When `param_sides` is `Some`, side tracking is enabled: param wire `i`
+/// is seeded with `param_sides[i]` (one side per *Boolar param bit*, padded
+/// with `None`), each statement's emitted wires derive their side from the
+/// join of their operands' sides, and introduction points (constants,
+/// oracle/action calls) inherit the side stamped on the source IR stmt node.
+/// When `None`, every emitted node carries `side: None` (legacy behaviour).
 fn lower_block_with_var_bits<P: Clone>(
     block: &IRBlock<P>,
     types: &IRTypes,
     lane_of: &BTreeMap<IRTypeId, LaneId>,
     addr_widths: &mut BTreeMap<(StorageId, LaneId), usize>,
     occurrence: &mut u64,
+    param_sides: Option<&[Option<volar_side::SideId>]>,
 ) -> (BIrBlock<P>, BTreeMap<u32, Vec<IRVarId>>) {
     // ---- 1. Expand params --------------------------------------------------
     // Each IR param of type T becomes ir_type_bits(T) consecutive Boolar params.
@@ -453,6 +604,9 @@ fn lower_block_with_var_bits<P: Clone>(
 
     // ---- 2. Emit stmts -----------------------------------------------------
     let mut emitter = Emitter::new(total_params);
+    if let Some(sides) = param_sides {
+        emitter.enable_side_tracking(total_params, sides);
+    }
 
     // Stash for OracleOutput / ActionOutput resolution.
     // Key: IR var index of the OracleCall / ActionCall.
@@ -473,6 +627,7 @@ fn lower_block_with_var_bits<P: Clone>(
             lane_of,
             addr_widths,
             occurrence,
+            stmt.side,
         );
     }
 
@@ -505,6 +660,7 @@ fn lower_stmt<P: Clone>(
     lane_of: &BTreeMap<IRTypeId, LaneId>,
     addr_widths: &mut BTreeMap<(StorageId, LaneId), usize>,
     occurrence: &mut u64,
+    stmt_side: Option<volar_side::SideId>,
 ) {
     match stmt {
         // ---- Constant ------------------------------------------------------
@@ -513,9 +669,9 @@ fn lower_stmt<P: Clone>(
             let bits: Vec<IRVarId> = (0..w)
                 .map(|j| {
                     if constant_bit(c, j) {
-                        emitter.emit(BIrStmt::One, prov.clone())
+                        emitter.emit_with_side(BIrStmt::One, prov.clone(), stmt_side)
                     } else {
-                        emitter.emit(BIrStmt::Zero, prov.clone())
+                        emitter.emit_with_side(BIrStmt::Zero, prov.clone(), stmt_side)
                     }
                 })
                 .collect();
@@ -540,7 +696,7 @@ fn lower_stmt<P: Clone>(
             // width, but still needs one Boolar wire per bit of `ty`.
             let w = ir_type_bits(&types.0[ty.0 as usize], types);
             let bits: Vec<IRVarId> = (0..w)
-                .map(|j| lower_poly_bit(coeffs, constant, j, var_bits, emitter, prov.clone()))
+                .map(|j| lower_poly_bit(coeffs, constant, j, var_bits, emitter, prov.clone(), stmt_side))
                 .collect();
             var_bits.insert(ir_var_idx, bits);
         }
@@ -926,10 +1082,11 @@ fn lower_poly_bit<P: Clone>(
     var_bits: &BTreeMap<u32, Vec<IRVarId>>,
     emitter: &mut Emitter<P>,
     prov: P,
+    stmt_side: Option<volar_side::SideId>,
 ) -> IRVarId {
     // Accumulator: None means "0 so far".
     let mut acc: Option<IRVarId> = if constant_bit(constant, bit) {
-        Some(emitter.emit(BIrStmt::One, prov.clone()))
+        Some(emitter.emit_with_side(BIrStmt::One, prov.clone(), stmt_side))
     } else {
         None
     };
@@ -940,7 +1097,7 @@ fn lower_poly_bit<P: Clone>(
         }
         let mono_var: Option<IRVarId> = if mono.is_empty() {
             // Empty product = 1; contributes a constant One term.
-            Some(emitter.emit(BIrStmt::One, prov.clone()))
+            Some(emitter.emit_with_side(BIrStmt::One, prov.clone(), stmt_side))
         } else {
             // AND of all variable bits at position `bit`.
             let mut and_acc: Option<IRVarId> = None;
@@ -981,7 +1138,7 @@ fn lower_poly_bit<P: Clone>(
     }
 
     // If no terms contributed, result is 0.
-    acc.unwrap_or_else(|| emitter.emit(BIrStmt::Zero, prov))
+    acc.unwrap_or_else(|| emitter.emit_with_side(BIrStmt::Zero, prov, stmt_side))
 }
 
 // ============================================================================
@@ -1031,6 +1188,44 @@ fn constant_bit(c: &Constant, bit: usize) -> bool {
 // Emitter
 // ============================================================================
 
+/// Operand wires a [`BIrStmt`] reads, for side propagation.
+///
+/// This is deliberately conservative: the side of a derived wire is the join
+/// of *every* wire the stmt's result can depend on — value operands, plus the
+/// guard of a conditional action and the address bits of a storage access
+/// (a read's result depends on which cell the address selects). `Zero`/`One`
+/// and the introduction handles (`OracleCall`, `Rng`, `ActionCall`) have
+/// no value operands here; their side is assigned by the caller via
+/// [`Emitter::emit_with_side`], not derived.
+fn stmt_operands(stmt: &BIrStmt) -> Vec<IRVarId> {
+    match stmt {
+        BIrStmt::Zero | BIrStmt::One => vec![],
+        BIrStmt::And(a, b) | BIrStmt::Or(a, b) | BIrStmt::Xor(a, b) => vec![*a, *b],
+        BIrStmt::Not(v) => vec![*v],
+        // Call handles and RNG are introduction points, not derivations:
+        // their side comes from the caller, not a join.
+        BIrStmt::OracleCall { .. } | BIrStmt::ActionCall { .. } => vec![],
+        BIrStmt::Rng { .. } | BIrStmt::RngBit { .. } => vec![],
+        // A projected bit derives from the call handle.
+        BIrStmt::OracleProjectedBit { call, .. } | BIrStmt::ActionBit { call, .. } => vec![*call],
+        // A direct oracle/action bit derives from its argument wires.
+        BIrStmt::OracleBit { args, .. } => args.clone(),
+        BIrStmt::ActionStoreBit { guard, args, fallback, addr, .. } => {
+            let mut v = vec![*guard, *fallback];
+            v.extend_from_slice(args);
+            v.extend_from_slice(addr);
+            v
+        }
+        BIrStmt::StorageRead { addr, .. } => addr.clone(),
+        BIrStmt::StorageWrite { src, addr, .. } => {
+            let mut v = vec![*src];
+            v.extend_from_slice(addr);
+            v
+        }
+        _ => vec![],
+    }
+}
+
 /// Sequential Boolar var-ID allocator and stmt accumulator.
 ///
 /// Boolar var IDs start at `params` (the number of input bit params for the
@@ -1047,6 +1242,13 @@ struct Emitter<P: Clone> {
     /// distinct gates, while repeated local subexpressions are the useful
     /// sharing opportunity here.
     poly_gates: Option<PolyGateCache>,
+    /// Side-propagation state, active only when `side_tracking` is on.
+    /// `var_side[v]` is the side of the Boolar wire with var id `v`. The
+    /// side of an emitted gate is the `volar_side::propagate` join of its
+    /// operand wires' sides; introduction points (params, constants,
+    /// oracle/action outputs) carry whatever side the caller stamped.
+    side_tracking: bool,
+    var_side: Vec<Option<volar_side::SideId>>,
 }
 
 impl<P: Clone> Emitter<P> {
@@ -1056,13 +1258,62 @@ impl<P: Clone> Emitter<P> {
             next_var: params,
             const_wires: BTreeMap::new(),
             poly_gates: None,
+            side_tracking: false,
+            var_side: vec![],
         }
+    }
+
+    /// Enable side propagation, seeding the param wires `[0, params)` with
+    /// `param_sides` (padded with `None` if shorter). Must be called before
+    /// any `emit`.
+    fn enable_side_tracking(&mut self, params: u32, param_sides: &[Option<volar_side::SideId>]) {
+        self.side_tracking = true;
+        self.var_side = (0..params)
+            .map(|i| param_sides.get(i as usize).copied().flatten())
+            .collect();
+    }
+
+    /// Side of an already-allocated wire (param or emitted stmt).
+    fn side_of(&self, var: IRVarId) -> Option<volar_side::SideId> {
+        self.var_side.get(var.0 as usize).copied().flatten()
+    }
+
+    /// Join of the operand wires' sides via `volar_side::propagate`.
+    fn joined_side(&self, operands: &[IRVarId]) -> Option<volar_side::SideId> {
+        let sides: Vec<Option<volar_side::SideId>> =
+            operands.iter().map(|&v| self.side_of(v)).collect();
+        volar_side::propagate(&sides)
     }
 
     fn emit(&mut self, stmt: BIrStmt, prov: P) -> IRVarId {
         let id = IRVarId(self.next_var);
+        // Derive the result side from the operands before pushing, while the
+        // stmt still names them. `BIrStmt` operands are `IRVarId`s.
+        let side = if self.side_tracking {
+            self.joined_side(&stmt_operands(&stmt))
+        } else {
+            None
+        };
         self.stmts
-            .push(volar_ir_common::Node::new(stmt, prov, None));
+            .push(volar_ir_common::Node::new(stmt, prov, side));
+        if self.side_tracking {
+            self.var_side.push(side);
+        }
+        self.next_var += 1;
+        id
+    }
+
+    /// Emit a constant/introduction wire with an explicit side, overriding
+    /// the (vacuous, no-operand) join. Used for `Zero`/`One`/introduction
+    /// points whose side the caller knows.
+    fn emit_with_side(&mut self, stmt: BIrStmt, prov: P, side: Option<volar_side::SideId>) -> IRVarId {
+        let id = IRVarId(self.next_var);
+        let side = if self.side_tracking { side } else { None };
+        self.stmts
+            .push(volar_ir_common::Node::new(stmt, prov, side));
+        if self.side_tracking {
+            self.var_side.push(side);
+        }
         self.next_var += 1;
         id
     }
@@ -1829,6 +2080,125 @@ mod tests {
             assert_eq!(*lane, LaneId(0));
             assert_eq!(*bit, index);
             assert_eq!(*occurrence, index as u64);
+        }
+    }
+
+    // -- Side propagation (lower_ir_to_boolar_with_sides) -------------------
+
+    use volar_side::SideId;
+
+    /// Two AES8 params XORed bit-wise via Poly; returns the lowered block so
+    /// tests can inspect per-wire sides.
+    fn xor_two_params_block() -> (IRBlocks<()>, IRTypes) {
+        let mut types = TypeTable::new();
+        let aes8_id = types.primitive(PrimType::AES8);
+        let mut coeffs = PolyCoeffs::new();
+        coeffs.insert(std::vec![IRVarId(0)], 1);
+        coeffs.insert(std::vec![IRVarId(1)], 1);
+        let block = IRBlock::<()> {
+            params: std::vec![aes8_id, aes8_id],
+            stmts: std::vec![Node::new(
+                volar_ir::ir::IRStmt::Poly {
+                    ty: aes8_id,
+                    coeffs,
+                    constant: zero_const(),
+                },
+                (),
+                None,
+            )],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(2)]),
+            },
+        };
+        (IRBlocks::new(std::vec![block]), types)
+    }
+
+    #[test]
+    fn sides_propagate_through_derived_xor() {
+        let (blocks, types) = xor_two_params_block();
+        let side_a = SideId(1);
+        // Param 0 (bits 0..8) on side A; param 1 (bits 8..16) untracked.
+        let mut param_sides = vec![None; 16];
+        for s in param_sides.iter_mut().take(8) {
+            *s = Some(side_a);
+        }
+        let sides = SideInputs {
+            param_sides: [(0, param_sides)].into_iter().collect(),
+        };
+        let lowered = lower_ir_to_boolar_with_sides(&blocks, &types, &sides);
+        let b = &lowered.blocks[0];
+        // Each output bit is Xor(param0_bit, param1_bit); the join of
+        // Some(A) and None is Some(A), so every derived Xor carries side A.
+        assert_eq!(b.stmts.len(), 8);
+        for node in &b.stmts {
+            assert!(matches!(&node.kind, BIrStmt::Xor(_, _)));
+            assert_eq!(node.side, Some(side_a), "derived Xor must inherit side A");
+        }
+    }
+
+    #[test]
+    fn conflicting_operand_sides_yield_none() {
+        let (blocks, types) = xor_two_params_block();
+        let side_a = SideId(1);
+        let side_b = SideId(2);
+        // Param 0 on side A, param 1 on side B — a mixed wire is not
+        // attributable to a single side, so the join is None.
+        let mut param_sides = vec![None; 16];
+        for s in param_sides.iter_mut().take(8) {
+            *s = Some(side_a);
+        }
+        for s in param_sides.iter_mut().skip(8) {
+            *s = Some(side_b);
+        }
+        let sides = SideInputs {
+            param_sides: [(0, param_sides)].into_iter().collect(),
+        };
+        let lowered = lower_ir_to_boolar_with_sides(&blocks, &types, &sides);
+        for node in &lowered.blocks[0].stmts {
+            assert_eq!(node.side, None, "mixed-side Xor must be unattributable");
+        }
+    }
+
+    #[test]
+    fn legacy_lowering_stamps_no_sides() {
+        // The side-agnostic entry point must be unchanged: all sides None.
+        let (blocks, types) = xor_two_params_block();
+        let lowered = lower_ir_to_boolar::<()>(&blocks, &types);
+        for node in &lowered.blocks[0].stmts {
+            assert_eq!(node.side, None);
+        }
+    }
+
+    #[test]
+    fn constant_inherits_stmt_side() {
+        // A pure-constant Poly introduction point inherits the side stamped
+        // on its source IR stmt node.
+        let mut types = TypeTable::new();
+        let u8_id = types.primitive(PrimType::_8);
+        let const_side = SideId(7);
+        let block = IRBlock::<()> {
+            params: std::vec![],
+            stmts: std::vec![Node::new(
+                volar_ir::ir::IRStmt::Poly {
+                    ty: u8_id,
+                    coeffs: PolyCoeffs::new(),
+                    constant: Constant { lo: 0b1010, hi: 0 },
+                },
+                (),
+                Some(const_side),
+            )],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(0)]),
+            },
+        };
+        let blocks = IRBlocks::new(std::vec![block]);
+        let sides = SideInputs::default();
+        let lowered = lower_ir_to_boolar_with_sides(&blocks, &types, &sides);
+        let b = &lowered.blocks[0];
+        assert_eq!(b.stmts.len(), 8);
+        for node in &b.stmts {
+            assert!(matches!(&node.kind, BIrStmt::Zero | BIrStmt::One));
+            assert_eq!(node.side, Some(const_side), "constant bit must inherit stmt side");
         }
     }
 }

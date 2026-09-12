@@ -11,4 +11,4 @@ volar-ir = { workspace = true }
 volar-ir-common = { workspace = true }
 volar-lir = { workspace = true }
 inkwell = { workspace = true }
-volar-llvm-import-core = { path = "../../../../llvm-bridge/crates/volar-llvm-import-core" }
+volar-llvm-import-core = { git = "https://github.com/portal-co/llvm-bridge" }

@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+pub mod aes_extern;
 pub mod complexity;
 pub use complexity::{MeasureSpec, ReentryHint, StructRef};
 

@@ -75,8 +75,8 @@ use vaffle::{
     Terminator, Value, ValueId,
 };
 use volar_ir_common::{
-    Constant, IrType, Node, PolyCoeffs, Stmt, StorageAllocator, StorageId, Type, TypeId,
-    TypeTable,
+    Constant, IrType, Node, OracleDecl, PolyCoeffs, Stmt, StorageAllocator, StorageId, Type,
+    TypeId, TypeTable, aes_extern,
 };
 use volar_lir::circuits::{self, BitCircuitBuilder};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
@@ -479,6 +479,11 @@ struct Importer<'ctx> {
     storage_alloc: StorageAllocator,
     bit_tid: TypeId,
     byte_tid: TypeId,
+    /// Oracle declarations registered by circuit-extern lowering (today:
+    /// `aes128_encrypt_block`, see [`translate_aes_extern`]), carried into
+    /// the finished module so the vaffle→IR and IR→boolar lowerings can
+    /// validate the emitted `Stmt::OracleCall`s against them.
+    oracles: Vec<OracleDecl>,
     /// Type stamped on `StorageId::ALLOCA` address `Stmt::Const`s
     /// (`stack_load`/`stack_store`). Must be wide enough to hold the
     /// *numeric value* of a stack bit-address (this function's own
@@ -522,6 +527,7 @@ impl<'ctx> Importer<'ctx> {
             storage_alloc: StorageAllocator::new(GLOBAL_STORAGE_BASE),
             bit_tid,
             byte_tid,
+            oracles: Vec::new(),
             addr_tid,
         }
     }
@@ -530,7 +536,7 @@ impl<'ctx> Importer<'ctx> {
         Module {
             pointer_width: self.pointer_width,
             types: self.types,
-            oracles: Vec::new(),
+            oracles: self.oracles,
             actions: Vec::new(),
             funcs: self.funcs,
             sigs: self.sigs,
@@ -1616,6 +1622,12 @@ impl<'ctx> Importer<'ctx> {
                     fctx.aggregate_fields
                         .insert(instr.as_any_value_enum(), fields);
                     None
+                } else if callee_name == aes_extern::LLVM_SYMBOL {
+                    // Circuit extern: `__portal_aes128_encrypt_block`
+                    // lowers to an IR-level `Stmt::OracleCall`, never a
+                    // declaration-only `Value::Call`.
+                    self.translate_aes_extern(fctx, instr)?;
+                    None
                 } else {
                     // Validate arguments before asking `func_id` to inspect
                     // the callee signature. `FunctionValue::get_params`
@@ -1753,6 +1765,115 @@ impl<'ctx> Importer<'ctx> {
             fctx.cache.insert(instr.as_any_value_enum(), bits);
         }
         Ok(called)
+    }
+
+    /// Lower the `__portal_aes128_encrypt_block` circuit extern (the
+    /// `volar_ir_common::aes_extern` contract): a declaration-only
+    /// `void (u64 out[2], const u64 key[2], const u64 pt[2])` call becomes
+    /// an IR-level `Stmt::OracleCall` against the `aes128_encrypt_block`
+    /// oracle, reading key/plaintext through the memory-intrinsic pointer
+    /// machinery and storing the ciphertext back through `out`.
+    ///
+    /// The oracle is registered in the module's oracle table on first use so
+    /// the vaffle→IR lowering validates every emitted call against it.
+    fn translate_aes_extern(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        instr: InstructionValue<'ctx>,
+    ) -> IResult<()> {
+        let n_args = instr.get_num_operands().saturating_sub(1);
+        if n_args != 3 {
+            return Err(ImportError::Unsupported(format!(
+                "{} takes exactly 3 pointer args (out, key, pt)",
+                aes_extern::LLVM_SYMBOL
+            )));
+        }
+        let operand_ptr = |index: u32| -> IResult<PointerValue<'ctx>> {
+            match call_value_operand(instr, index, "aes128 extern pointer arg")? {
+                BasicValueEnum::PointerValue(p) => Ok(p),
+                _ => Err(ImportError::Unsupported(format!(
+                    "{} arg {index} must be a pointer",
+                    aes_extern::LLVM_SYMBOL
+                ))),
+            }
+        };
+        let out = self.intrinsic_pointer(fctx, operand_ptr(0)?)?;
+        let key = self.intrinsic_pointer(fctx, operand_ptr(1)?)?;
+        let pt = self.intrinsic_pointer(fctx, operand_ptr(2)?)?;
+        self.validate_intrinsic_pointer(&out, aes_extern::CT_BITS / 8)?;
+        self.validate_intrinsic_pointer(&key, aes_extern::KEY_BITS / 8)?;
+        self.validate_intrinsic_pointer(&pt, aes_extern::PT_BITS / 8)?;
+
+        let key_bits = self.intrinsic_load(fctx, &key, aes_extern::KEY_BITS / 8)?;
+        let pt_bits = self.intrinsic_load(fctx, &pt, aes_extern::PT_BITS / 8)?;
+
+        // Oracle signature: params [u64; 4] = (key_lo, key_hi, pt_lo, pt_hi),
+        // results [u64; 2] = (ct_lo, ct_hi), each u64 little-endian
+        // byte-packed (matching the contract's byte-major, LSB-first-in-byte
+        // bit layout).
+        let u64_tid = self.types.primitive(Type::_64);
+        if !self
+            .oracles
+            .iter()
+            .any(|o| o.name == aes_extern::ORACLE_NAME)
+        {
+            self.oracles.push(OracleDecl {
+                name: aes_extern::ORACLE_NAME.into(),
+                params: vec![u64_tid; 4],
+                results: vec![u64_tid; 2],
+            });
+        }
+        let output_tys = vec![u64_tid; 2];
+        let result_ty = self.types.intern(IrType::Tuple(output_tys.clone()));
+
+        let cur = fctx.current;
+        let arg_vars: Vec<ValueId> = key_bits
+            .iter()
+            .chain(pt_bits.iter())
+            .copied()
+            .collect::<Vec<_>>()
+            .chunks(64)
+            .map(|chunk| {
+                fctx.emit(
+                    cur,
+                    Value::Op(Stmt::Merge {
+                        parts: chunk.to_vec(),
+                        ty: u64_tid,
+                    }),
+                )
+            })
+            .collect();
+        let call = fctx.emit(
+            cur,
+            Value::Op(Stmt::OracleCall {
+                name: aes_extern::ORACLE_NAME.into(),
+                args: arg_vars,
+                output_tys,
+                result_ty,
+            }),
+        );
+        let mut ct_bits: Bits = Vec::with_capacity(aes_extern::CT_BITS);
+        for idx in 0..2usize {
+            let word = fctx.emit(
+                cur,
+                Value::Op(Stmt::OracleOutput {
+                    call,
+                    idx,
+                    ty: u64_tid,
+                }),
+            );
+            for b in 0..64u8 {
+                ct_bits.push(fctx.emit(
+                    cur,
+                    Value::Op(Stmt::Shuffle {
+                        result_bits: vec![(b, word)],
+                        ty: self.bit_tid,
+                    }),
+                ));
+            }
+        }
+        self.intrinsic_store(fctx, &out, &ct_bits)?;
+        Ok(())
     }
 
     /// Lower supported LLVM memory intrinsics before they can become a

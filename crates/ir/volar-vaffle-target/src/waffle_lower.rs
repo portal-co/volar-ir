@@ -237,8 +237,15 @@ pub fn lower_waffle_module_with_metadata(
         BTreeMap::new()
     };
     // Pre-register OracleDecl / ActionDecl for imports named in config.
-    for (_func_ref, decl) in wasm.funcs.entries() {
-        if let FuncDecl::Import(sig, import_name) = decl {
+    // Real-WASM imports carry their names in the module's import table
+    // ("<module>.<field>"), not in `FuncDecl::Import`'s (empty) name field —
+    // resolve through `waffle_import_func_names`.
+    let import_names = waffle_import_func_names(wasm);
+    for (func_ref, decl) in wasm.funcs.entries() {
+        if let FuncDecl::Import(sig, decl_name) = decl {
+            let import_name = import_names
+                .get(&func_ref.index())
+                .unwrap_or(decl_name);
             let Some(kind) = config.imports.get(import_name) else {
                 continue;
             };
@@ -501,19 +508,38 @@ pub fn lower_waffle_function(
         })
         .collect();
 
+    // ---- Pre-map every non-entry block's value params ----------------------
+    // A block's params must be resolvable before *any* block that references
+    // them is lowered, but `body.blocks.entries()` iterates in block-id order
+    // and a loop-exit block can reference its (dominating) loop header's
+    // params via an alias while carrying a *lower* block id than the header.
+    // Lowering in id order then maps the header's params only after the exit
+    // block is lowered, surfacing `UnsupportedOp("undefined v…")` on a branch
+    // arg that aliases a not-yet-processed block param. Block params are pure
+    // introduction points (they don't depend on other blocks) and
+    // `add_block_param` restores the current block, so mapping them all up
+    // front in a dedicated pass is safe and order-independent. The threaded
+    // globals stay in the main loop (they append after the value params).
+    for (wblock, block_def) in body.blocks.entries() {
+        if wblock == body.entry {
+            continue;
+        }
+        let vblock = block_map[&wblock];
+        for &(ty, wval) in &block_def.params {
+            let lir_ty = waffle_ty(ty)?;
+            let vv = target.add_block_param(vblock, lir_ty);
+            val_map.insert(wval, vv);
+        }
+    }
+
     // ---- Emit each WAFFLE block ---------------------------------------------
     for (wblock, block_def) in body.blocks.entries() {
         let vblock = block_map[&wblock];
         target.switch_to_block(vblock);
 
-        // Non-entry block params become VAFFLE block params.
+        // Non-entry block value params were pre-mapped above; here we only add
+        // the extra block params carrying the threaded globals for this block.
         if wblock != body.entry {
-            for &(ty, wval) in &block_def.params {
-                let lir_ty = waffle_ty(ty)?;
-                let vv = target.add_block_param(vblock, lir_ty);
-                val_map.insert(wval, vv);
-            }
-            // Extra block params carry the threaded globals for this block.
             current_globals = global_lir_tys
                 .iter()
                 .map(|ty| target.add_block_param(vblock, ty.clone()))
@@ -939,6 +965,17 @@ fn lower_op(
             let if_t = get(0)?;
             let if_f = get(1)?;
             let cond = get(2)?;
+            // vc-spec select rule: a *concrete* public condition means the
+            // result takes the selected operand's taint. Check the whole i32
+            // cond for a public constant before OR-reducing (the reduce would
+            // build a fresh, untagged bit and lose the const-ness).
+            let width = cond.bits.len();
+            let public = tgt.vc_public_side();
+            let cond_const = (width <= 64).then(|| tgt.const_u64(&cond.bits)).flatten();
+            let cond_is_public = cond.bits.iter().all(|&b| tgt.side_of(b) == public);
+            if let (Some(v), true) = (cond_const, cond_is_public) {
+                return Ok(Some(if v != 0 { if_t } else { if_f }));
+            }
             // cond is I32; treat as bool via OR-reduce (non-zero = true).
             let cond_bit = or_bits(tgt, &cond.bits);
             let cond_bool = VaffleValue {
@@ -985,8 +1022,11 @@ fn lower_op(
             }
             let name = callee_name(wasm, fid);
 
-            // Oracle / action dispatch: bypass globals threading.
-            if let Some(kind) = config.imports.get(&name) {
+            // Oracle / action dispatch: bypass globals threading. Config
+            // lookup uses the canonical import-table name for imports.
+            let import_names = waffle_import_func_names(wasm);
+            let config_key = callee_config_key(wasm, &import_names, fid);
+            if let Some(kind) = config.imports.get(&config_key) {
                 let all_arg_vals: Vec<VaffleValue> =
                     args.iter()
                         .map(|wv| {
@@ -1006,8 +1046,12 @@ fn lower_op(
                         side,
                     } => {
                         tgt.set_side(*side);
-                        let r = tgt.call_extern_multi(
-                            &alloc::format!("oracle_{oracle_name}"),
+                        // Emit the oracle as an IR-level `OracleCall` (not a
+                        // `Value::Call` to an env import), so it survives the
+                        // vaffle→IR lowering as a real `IRStmt::OracleCall`
+                        // validated against `module.oracles`.
+                        let r = tgt.oracle_call_multi(
+                            oracle_name,
                             &all_arg_vals,
                             &orig_ret_tys,
                         );
@@ -1024,7 +1068,11 @@ fn lower_op(
                         let real_args = &all_arg_vals[1..=*n_args];
                         let fallbacks = &all_arg_vals[*n_args + 1..];
                         tgt.set_side(*side);
-                        let r = tgt.action_call(
+                        // Emit a real `Stmt::ActionCall` (not a call to an
+                        // env import): the evaluator-hosted action extern
+                        // (e.g. a network socket) survives lowering as an
+                        // `IRStmt::ActionCall`.
+                        let r = tgt.action_call_multi(
                             action_name,
                             guard_bit,
                             real_args,
@@ -1484,6 +1532,51 @@ fn callee_name(wasm: &WModule, fid: portal_pc_waffle_ir::Func) -> String {
         FuncDecl::Import(_, name) => name.clone(),
         _ => alloc::format!("func_{}", fid.index()),
     }
+}
+
+/// Canonical `"<module>.<field>"` names for every *imported* function in
+/// `wasm`, keyed by func index.
+///
+/// The WAFFLE frontend leaves `FuncDecl::Import`'s name field empty for real
+/// WASM binaries (the two-level `(import "mod" "field")` name lives in the
+/// module's import table, keyed by [`ImportKind::Func`]); synthetic modules
+/// (tests, producers) instead fill that name field with a single-segment
+/// name. Config lookups ([`WaffleImportConfig`]) are keyed on the canonical
+/// `"mod.field"` form, falling back to the name field so synthetic modules
+/// keep working.
+pub fn waffle_import_func_names(wasm: &WModule) -> BTreeMap<usize, String> {
+    let mut out = BTreeMap::new();
+    for import in &wasm.imports {
+        if let portal_pc_waffle_ir::ImportKind::Func(func) = import.kind {
+            out.insert(
+                func.index(),
+                alloc::format!("{}.{}", import.module, import.name),
+            );
+        }
+    }
+    for (func_ref, decl) in wasm.funcs.entries() {
+        if let FuncDecl::Import(_, name) = decl {
+            if !name.is_empty() {
+                out.entry(func_ref.index()).or_insert_with(|| name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The config lookup key for `fid`: the canonical import-table name for
+/// imports, the declaration name otherwise.
+fn callee_config_key(
+    wasm: &WModule,
+    import_names: &BTreeMap<usize, String>,
+    fid: portal_pc_waffle_ir::Func,
+) -> String {
+    if let FuncDecl::Import(..) = &wasm.funcs[fid] {
+        if let Some(name) = import_names.get(&fid.index()) {
+            return name.clone();
+        }
+    }
+    callee_name(wasm, fid)
 }
 
 fn vc_iconst(tgt: &mut VaffleTarget, ty: LirType, val: i64) -> VaffleValue {
@@ -2724,5 +2817,41 @@ mod tests {
             .iter()
             .find(|f| matches!(f, vaffle::FuncDecl::Body(_)));
         assert!(caller.is_some(), "caller function body should be present");
+    }
+
+    /// Regression: a loop whose exit block references the (dominating) loop
+    /// header's block params via an alias, while the exit block carries a
+    /// *lower* block id than the header, must lower without
+    /// `UnsupportedOp("undefined v…")`. The lowering pre-maps every non-entry
+    /// block's value params before emitting any block, so forward references
+    /// resolve regardless of block-id order. (This is the `(block (loop …))`
+    /// counting loop, which previously failed with `undefined v11`.)
+    #[test]
+    fn loop_exit_referencing_header_param_lowers() {
+        let wat_src = r#"(module
+          (func $f (export "f") (param $n i32) (result i32)
+            (local $acc i32)
+            (block $done
+              (loop $l
+                (br_if $done (i32.eqz (local.get $n)))
+                (local.set $acc (i32.add (local.get $acc) (local.get $n)))
+                (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+                (br $l)))
+            (local.get $acc)))"#;
+        let bytes = wat::parse_str(wat_src).expect("wat assembles");
+        let mut wasm = portal_pc_waffle_frontend::from_wasm_bytes(
+            &bytes,
+            &portal_pc_waffle_frontend::FrontendOptions::default(),
+        )
+        .expect("wasm parses");
+        portal_pc_waffle_frontend::expand_all_funcs(&mut wasm).expect("expand");
+
+        let mut target = VaffleTarget::new();
+        let errors = lower_waffle_module(&wasm, &mut target, &WaffleImportConfig::default());
+        assert!(
+            errors.is_empty(),
+            "loop with forward block-param reference must lower: {errors:?}"
+        );
+        assert_eq!(target.module.funcs.len(), 1);
     }
 }

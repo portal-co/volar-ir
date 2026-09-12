@@ -104,6 +104,36 @@ pub fn lower_vaffle_to_ir_owned<P: Clone>(module: Module<P>) -> (IRBlocks<P>, IR
     ctx.finish()
 }
 
+/// Extract the entry function's per-param-bit sides from a VAFFLE module.
+///
+/// The vaffle arena is bit-level, so each entry-block param `ValueId` is one
+/// bit; its stamped side (e.g. a vc entry-param visibility from
+/// [`crate::lower_waffle_module_with_vc`]) is that input bit's side. The
+/// returned vector is in param order and matches the boolar block-param bit
+/// layout one-to-one, so it can be fed directly to
+/// `volar_ir_passes::lower_ir_to_boolar::SideInputs::param_sides` for the
+/// entry block. This is the Stage-C bridge that surfaces input sides as an
+/// explicit lowering output (param sides cannot ride on IR nodes —
+/// `IRBlock::params` is types-only and `BIrBlock::params` is a bare count).
+///
+/// Returns `None` if the module has no entry body. Non-entry-block params
+/// are internal (spill/ABI) and carry no caller-visible side, so only the
+/// entry block is reported.
+pub fn entry_param_sides<P: Clone>(module: &Module<P>) -> Option<Vec<Option<volar_side::SideId>>> {
+    let body = module.funcs.iter().find_map(|f| match f {
+        FuncDecl::Body(b) => Some(b),
+        _ => None,
+    })?;
+    let entry = &body.blocks[body.entry.0];
+    Some(
+        entry
+            .params
+            .iter()
+            .map(|(vid, _)| body.values[vid.0].side)
+            .collect(),
+    )
+}
+
 /// Lower a VAFFLE module that may contain a statement-free entry body.
 ///
 /// `control_prov` must be the existing frontend/control provenance for the
@@ -178,6 +208,12 @@ struct BlockEmitter<P: Clone = ()> {
     params: Vec<IRTypeId>,
     stmts: Vec<volar_ir_common::Node<IRStmt, P>>,
     current_prov: Option<P>,
+    /// Side stamped on subsequently emitted stmts, mirroring
+    /// `current_prov`. Set from each source vaffle node's `.side` so the
+    /// side annotations placed on vaffle arena nodes (e.g. vc entry-param
+    /// tags) survive into the lowered IR; `None` when the source node is
+    /// untagged.
+    current_side: Option<volar_side::SideId>,
     next_var: u32,
 }
 
@@ -188,11 +224,17 @@ impl<P: Clone> BlockEmitter<P> {
             params,
             stmts: Vec::new(),
             current_prov: None,
+            current_side: None,
             next_var,
         }
     }
     fn set_prov(&mut self, prov: P) {
         self.current_prov = Some(prov);
+    }
+    /// Set the side context for subsequently emitted stmts (the mirror of
+    /// [`BlockEmitter::set_prov`]).
+    fn set_side(&mut self, side: Option<volar_side::SideId>) {
+        self.current_side = side;
     }
     fn emit(&mut self, stmt: IRStmt) -> IRVarId {
         let id = IRVarId(self.next_var);
@@ -200,7 +242,7 @@ impl<P: Clone> BlockEmitter<P> {
         let prov = self.current_prov.clone()
             .expect("BlockEmitter::emit called before set_prov — every emitted stmt must trace back to a source value's provenance");
         self.stmts
-            .push(volar_ir_common::Node::new(stmt, prov, None));
+            .push(volar_ir_common::Node::new(stmt, prov, self.current_side));
         id
     }
     fn finish(self, terminator: IRTerminator) -> IRBlock<P> {
@@ -824,6 +866,10 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         let own_layout = info.own_layout.clone();
         let callee_layout = info.callee_layout.clone();
 
+        // Resolve every arena value's effective side once (memoized sweep);
+        // the per-stmt loop then looks up each value's side in O(1).
+        let value_sides = compute_effective_sides(&body.values);
+
         let sp_packs = n_packs(self.pointer_bits);
         let n_param_words = info.n_param_words;
         let n_params = info.n_params;
@@ -992,6 +1038,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 for &svid in before_call.iter() {
                     future_uses.consume_value(&body.values[svid.0].kind);
                     current_em.set_prov(body.values[svid.0].prov.clone());
+                    current_em.set_side(value_sides[svid.0]);
                     match &body.values[svid.0].kind {
                         Value::Op(Stmt::StorageRead {
                             storage: StorageId::ALLOCA,
@@ -1118,6 +1165,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     Some(call_vid) => {
                         future_uses.consume_value(&body.values[call_vid.0].kind);
                         current_em.set_prov(body.values[call_vid.0].prov.clone());
+                        current_em.set_side(body.values[call_vid.0].side);
                         if let Value::Call {
                             func: callee_fid,
                             args: call_args,
@@ -1283,6 +1331,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             let mut cont_em = BlockEmitter::new(cont_params);
                             // Continuation infrastructure gets the call stmt's provenance.
                             cont_em.set_prov(body.values[call_vid.0].prov.clone());
+                            cont_em.set_side(body.values[call_vid.0].side);
 
                             // Unpack SP.
                             let cont_sp_word_ids: Vec<IRVarId> =
@@ -1619,10 +1668,37 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     }
 
     pub(crate) fn finish(self) -> (IRBlocks<P>, IRTypes) {
+        // The oracle/action declarations were cloned from the VAFFLE module
+        // carrying *module-table* TypeIds; remap them through `type_map` so
+        // they reference the IR type table like the statements they
+        // validate.
+        let remap = |tids: &[TypeId]| -> alloc::vec::Vec<TypeId> {
+            tids.iter()
+                .map(|tid| self.type_map[tid.0 as usize])
+                .collect()
+        };
+        let oracles = self
+            .oracles
+            .iter()
+            .map(|o| volar_ir_common::OracleDecl {
+                name: o.name.clone(),
+                params: remap(&o.params),
+                results: remap(&o.results),
+            })
+            .collect();
+        let actions = self
+            .actions
+            .iter()
+            .map(|a| volar_ir_common::ActionDecl {
+                name: a.name.clone(),
+                params: remap(&a.params),
+                results: remap(&a.results),
+            })
+            .collect();
         (
             IRBlocks {
-                oracles: self.oracles,
-                actions: self.actions,
+                oracles,
+                actions,
                 rngs: alloc::vec![],
                 blocks: self.blocks,
                 pre_init: self.pre_init,
@@ -1896,6 +1972,60 @@ fn collect_use_counts<P: Clone>(
     let mut uses = UseCounts::new(values.len());
     collect_uses_into(values, stmt_ids, term, &mut uses);
     uses
+}
+
+/// Resolve the effective side of every vaffle arena value in one bottom-up
+/// sweep, returning a side per `ValueId` index.
+///
+/// A value's effective side is its own stamped side if it has one (an
+/// introduction point such as a vc entry param or a public constant),
+/// otherwise the `volar_side::propagate` join of its operands' effective
+/// sides. This is where side *propagation* happens for the vaffle→IRBlocks
+/// lowering: the vaffle emitter stamps only introduction points (derived ops
+/// are emitted with `side: None`), so the join is computed here at the
+/// boundary, where the whole arena is available.
+///
+/// The sweep is memoized and iterative, not naive recursion: arithmetic ops
+/// (e.g. I32Mul) lower to large polys with heavily shared sub-expressions
+/// (carry chains), so a recursive re-join of each shared operand's subtree
+/// would blow up exponentially on the DAG. Computing sides in `ValueId`
+/// order (SSA operands always precede their uses) visits each value once.
+fn compute_effective_sides<P: Clone>(
+    values: &[volar_ir_common::Node<Value, P>],
+) -> Vec<Option<volar_side::SideId>> {
+    struct JoinSink {
+        operands: Vec<ValueId>,
+    }
+    impl UseSink for JoinSink {
+        fn add_use(&mut self, v: usize) {
+            self.operands.push(ValueId(v));
+        }
+    }
+    let mut sides: Vec<Option<volar_side::SideId>> = Vec::with_capacity(values.len());
+    for node in values {
+        if node.side.is_some() {
+            sides.push(node.side);
+            continue;
+        }
+        let mut sink = JoinSink { operands: vec![] };
+        collect_value_uses(&node.kind, &mut sink);
+        if sink.operands.is_empty() {
+            // Introduction point with no stamped side: untagged.
+            sides.push(None);
+            continue;
+        }
+        // Operands are SSA values that normally precede this one, so their
+        // sides are already computed. Hand-built (non-SSA) arenas can carry
+        // a forward reference; an operand whose side is not yet computed is
+        // treated as untagged (None) rather than panicking.
+        let operand_sides: Vec<Option<volar_side::SideId>> = sink
+            .operands
+            .iter()
+            .map(|o| sides.get(o.0).copied().flatten())
+            .collect();
+        sides.push(volar_side::propagate(&operand_sides));
+    }
+    sides
 }
 
 fn collect_uses_into<P: Clone, S: UseSink>(

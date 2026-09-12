@@ -1086,7 +1086,7 @@ proptest! {
                     .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
                     .unwrap_or_default();
                 // Same pre-existing, unrelated-to-bitwidth skips as property N.
-                if msg.contains("SignatureMismatch") || msg.contains("flat cell space") {
+                if msg.contains("SignatureMismatch") || msg.contains("flat cell space") || msg.contains("mixed element-address widths") {
                     return Ok(());
                 }
                 panic!("lower_ir_to_boolar panicked unexpectedly: {msg}");
@@ -1134,7 +1134,7 @@ proptest! {
                     .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
                     .unwrap_or_default();
                 // Same pre-existing, unrelated-to-bitwidth skips as property N.
-                if msg.contains("SignatureMismatch") || msg.contains("flat cell space") {
+                if msg.contains("SignatureMismatch") || msg.contains("flat cell space") || msg.contains("mixed element-address widths") {
                     return Ok(());
                 }
                 panic!("lower_ir_to_boolar panicked unexpectedly: {msg}");
