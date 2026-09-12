@@ -20,13 +20,46 @@ fn main() {
     // Function count for the ok/failed tally (includes declarations/imports).
     let total = module.funcs.len();
 
-    let mut target =
-        volar_vaffle_target::VaffleTarget::with_pointer_width(vaffle::PointerWidth::Bits32);
-    let mut config = volar_vaffle_target::WaffleImportConfig::new();
-    if let Some(b) = bits {
-        config = config.with_memory_address_bits(b);
+    let config = {
+        let mut c = volar_vaffle_target::WaffleImportConfig::new();
+        if let Some(b) = bits {
+            c = c.with_memory_address_bits(b);
+        }
+        c
+    };
+
+    // Lower function-by-function so a hard panic in the lowering (a bug, not
+    // a clean UnsupportedOp) is reported as a gap entry instead of killing
+    // the scan.
+    let mut errors: Vec<(String, volar_vaffle_target::waffle_lower::UnsupportedOp)> = Vec::new();
+    for (func, decl) in module.funcs.entries() {
+        if matches!(decl, portal_pc_waffle_ir::FuncDecl::Import(..)) {
+            continue;
+        }
+        let name = decl.name().to_string();
+        let mut target =
+            volar_vaffle_target::VaffleTarget::with_pointer_width(vaffle::PointerWidth::Bits32);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            volar_vaffle_target::waffle_lower::lower_waffle_function_lazy(
+                &module, func, &mut target, &config,
+            )
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => errors.push((name, e)),
+            Err(panic) => {
+                let msg = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "(no message)".into());
+                errors.push((
+                    name,
+                    volar_vaffle_target::waffle_lower::UnsupportedOp(format!("PANIC: {msg}")),
+                ));
+            }
+        }
     }
-    let errors = volar_vaffle_target::lower_waffle_module(&module, &mut target, &config);
 
     // Histogram by error constructor (first token of the message).
     let mut hist: BTreeMap<String, (usize, Vec<String>, Vec<String>)> = BTreeMap::new();

@@ -703,7 +703,19 @@ fn lower_op(
 
         // ---- I32 arithmetic --------------------------------------------
         Operator::I32Add => tgt.add(get(0)?, get(1)?),
-        Operator::I32Sub => tgt.sub(get(0)?, get(1)?),
+        Operator::I32Sub => {
+            let (a, b) = (get(0)?, get(1)?);
+            if a.bits.len() != 32 || b.bits.len() != 32 {
+                return Err(UnsupportedOp(alloc::format!(
+                    "I32Sub width mismatch: {} vs {} bits (lhs def: {:?}, rhs def: {:?})",
+                    a.bits.len(),
+                    b.bits.len(),
+                    body.values[args[0]],
+                    body.values[args[1]],
+                )));
+            }
+            tgt.sub(a, b)
+        }
         Operator::I32Mul => tgt.mul(get(0)?, get(1)?),
         Operator::I32DivS => tgt.sdiv(get(0)?, get(1)?),
         Operator::I32DivU => tgt.udiv(get(0)?, get(1)?),
@@ -898,47 +910,47 @@ fn lower_op(
         Operator::I64Eqz => {
             let z = tgt.iconst(LirType::U64, 0);
             let c = tgt.icmp(IcmpPred::Eq, get(0)?, z);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64Eq => {
             let c = tgt.icmp(IcmpPred::Eq, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64Ne => {
             let c = tgt.icmp(IcmpPred::Ne, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64LtS => {
             let c = tgt.icmp(IcmpPred::Slt, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64LtU => {
             let c = tgt.icmp(IcmpPred::Ult, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64GtS => {
             let c = tgt.icmp(IcmpPred::Sgt, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64GtU => {
             let c = tgt.icmp(IcmpPred::Ugt, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64LeS => {
             let c = tgt.icmp(IcmpPred::Sle, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64LeU => {
             let c = tgt.icmp(IcmpPred::Ule, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64GeS => {
             let c = tgt.icmp(IcmpPred::Sge, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
         Operator::I64GeU => {
             let c = tgt.icmp(IcmpPred::Uge, get(0)?, get(1)?);
-            tgt.zext(c, LirType::U64)
+            tgt.zext(c, LirType::U32)
         }
 
         // ---- Conversions -----------------------------------------------
