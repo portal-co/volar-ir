@@ -113,6 +113,17 @@ pub enum PrefixUnrollOutcome {
     Residual(UnrollError),
 }
 
+/// Result of splicing concrete straight-line prefixes throughout a CFG.
+///
+/// Every replaced block retains its original block id and parameter interface;
+/// predecessor targets therefore remain valid. This is the middle-of-CFG
+/// counterpart to [`unroll_ir_prefix_with_limits`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CfgSegmentUnroll {
+    /// Number of block-local prefixes that crossed at least one CFG edge.
+    pub spliced_segments: usize,
+}
+
 impl Default for UnrollLimits {
     fn default() -> Self {
         Self {
@@ -339,6 +350,157 @@ fn remap_block_targets(term: IRTerminator, old_zero: u32) -> IRTerminator {
                 .collect(),
         },
         other => other,
+    }
+}
+
+/// Unroll `blocks` into a single combinational circuit under the default
+/// resource caps. See [`unroll_ir_everything_with_limits`].
+/// Splice concrete prefixes at every block in `blocks` before movfuscation.
+///
+/// A symbolic branch ends only that block-local walk: previously emitted
+/// statements remain in the replacement block, and its original block id and
+/// parameters are retained. Failed or bounded walks therefore remain valid
+/// loops/CFGs for movfuscation rather than being discarded. `max_steps` and
+/// `max_states` apply independently to each candidate block.
+pub fn unroll_cfg_segments_with_limits<P: Clone>(
+    blocks: &mut IRBlocks<P>,
+    types: &IRTypes,
+    limits: UnrollLimits,
+) -> CfgSegmentUnroll {
+    let mut result = CfgSegmentUnroll::default();
+    for origin in 0..blocks.blocks.len() {
+        let snapshot = blocks.clone();
+        if let Some(prefix) =
+            unroll_one_cfg_segment(&snapshot, types, IRBlockId(origin as u32), limits)
+        {
+            blocks.blocks[origin] = prefix;
+            result.spliced_segments += 1;
+        }
+    }
+    result
+}
+
+fn unroll_one_cfg_segment<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+    origin: IRBlockId,
+    limits: UnrollLimits,
+) -> Option<IRBlock<P>> {
+    let entry = blocks.blocks.get(origin.0 as usize)?;
+    let mut dest = IRBlock {
+        params: entry.params.clone(),
+        stmts: vec![],
+        terminator: entry.terminator.clone(),
+    };
+    let mut current = origin;
+    let mut args: Vec<IRVarId> = (0..entry.params.len()).map(|i| IRVarId(i as u32)).collect();
+    let mut visited: BTreeSet<(u32, Vec<Option<Constant>>)> = BTreeSet::new();
+    let mut steps = 0usize;
+
+    loop {
+        if steps >= limits.max_steps {
+            dest.terminator = jump_to(current, args);
+            return (steps > 1).then_some(dest);
+        }
+        steps += 1;
+        let block = blocks.blocks.get(current.0 as usize)?;
+        if args.len() != block.params.len() {
+            dest.terminator = jump_to(current, args);
+            return (steps > 1).then_some(dest);
+        }
+        let fingerprint: Vec<Option<Constant>> = {
+            let consts = concrete_consts(&dest, types);
+            args.iter().map(|v| consts.get(&v.0).copied()).collect()
+        };
+        if visited.contains(&(current.0, fingerprint.clone())) || visited.len() >= limits.max_states
+        {
+            dest.terminator = jump_to(current, args);
+            return (steps > 1).then_some(dest);
+        }
+        visited.insert((current.0, fingerprint));
+
+        let mut remap = BTreeMap::new();
+        for (i, &arg) in args.iter().enumerate() {
+            remap.insert(i as u32, arg);
+        }
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            let old = block.params.len() as u32 + i as u32;
+            let stmt = stmt
+                .kind
+                .clone()
+                .map_var(
+                    &mut remap,
+                    &mut |r, v: IRVarId| Ok::<_, Infallible>(*r.get(&v.0).unwrap_or(&v)),
+                    &mut |_, ty| Ok(ty),
+                    &mut |_, storage| Ok(storage),
+                )
+                .ok()?;
+            let new =
+                dest.push_stmt_with_side(stmt, block.stmts[i].prov.clone(), block.stmts[i].side);
+            remap.insert(old, new);
+        }
+        fold_dest_mut(&mut dest, types);
+        let term = remap_terminator(&block.terminator, &remap);
+        let consts = concrete_consts(&dest, types);
+        let target = match &term {
+            IRTerminator::Jmp { target } => target,
+            IRTerminator::JumpCond {
+                condition,
+                then_target,
+                else_target,
+            } => match consts.get(&condition.0) {
+                Some(c) => {
+                    if c.lo & 1 != 0 {
+                        then_target
+                    } else {
+                        else_target
+                    }
+                }
+                None => {
+                    dest.terminator = term;
+                    return (steps > 1).then_some(dest);
+                }
+            },
+            IRTerminator::JumpTable { index, cases } => {
+                match consts.get(&index.0).and_then(|c| cases.get(c)) {
+                    Some(target) => target,
+                    None => {
+                        dest.terminator = term;
+                        return (steps > 1).then_some(dest);
+                    }
+                }
+            }
+            _ => {
+                dest.terminator = term;
+                return (steps > 1).then_some(dest);
+            }
+        };
+        match target.dest {
+            IRBlockTargetId::Return => {
+                dest.terminator = IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, target.args.clone()),
+                };
+                return (steps > 1).then_some(dest);
+            }
+            IRBlockTargetId::Block(id) => {
+                current = id;
+                args = target.args.clone();
+            }
+            IRBlockTargetId::Dyn(id) => match consts.get(&id.0) {
+                Some(c) => {
+                    current = IRBlockId(c.lo as u32);
+                    args = target.args.clone();
+                }
+                None => {
+                    dest.terminator = term;
+                    return (steps > 1).then_some(dest);
+                }
+            },
+            _ => {
+                dest.terminator = term;
+                return (steps > 1).then_some(dest);
+            }
+        }
     }
 }
 
@@ -980,6 +1142,58 @@ mod tests {
             }
             other => panic!("expected Jmp Return, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cfg_segment_unroll_splices_a_middle_block_without_retargeting_predecessors() {
+        let types = bit_types();
+        // 0 → 1 → 2, where 1's branch is concrete. The pass must leave block
+        // ids intact: block 0 still targets 1, while block 1 now returns 2.
+        let blocks: IRBlocks<()> = IRBlocks::new(vec![
+            IRBlock {
+                params: vec![bit()],
+                stmts: vec![],
+                terminator: jmp(IRBlockTargetId::Block(IRBlockId(1)), vec![IRVarId(0)]),
+            },
+            IRBlock {
+                params: vec![bit()],
+                stmts: vec![Node::new(const_bit(1), (), None)],
+                terminator: IRTerminator::JumpCond {
+                    condition: IRVarId(1),
+                    then_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(2)),
+                        vec![IRVarId(0)],
+                    ),
+                    else_target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+                },
+            },
+            IRBlock {
+                params: vec![bit()],
+                stmts: vec![],
+                terminator: IRTerminator::JumpCond {
+                    condition: IRVarId(0),
+                    then_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(2)),
+                        vec![IRVarId(0)],
+                    ),
+                    else_target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+                },
+            },
+        ]);
+        let mut out = blocks.clone();
+        let report = unroll_cfg_segments_with_limits(&mut out, &types, UnrollLimits::default());
+        assert!(report.spliced_segments >= 1);
+        // The pass may also splice block 0's reachable concrete prefix, but
+        // it never changes the block count or block-1's parameter interface.
+        assert_eq!(out.blocks.len(), blocks.blocks.len());
+        // Block 1's concrete branch was crossed, so its replacement now
+        // carries block 2's residual symbolic terminator under block 1's
+        // original parameter interface.
+        match &out.blocks[1].terminator {
+            IRTerminator::JumpCond { condition, .. } => assert_eq!(*condition, IRVarId(0)),
+            other => panic!("middle residual not retained: {other:?}"),
+        }
+        assert_eq!(out.blocks[1].params, blocks.blocks[1].params);
     }
 
     #[test]

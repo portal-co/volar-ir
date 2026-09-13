@@ -48,6 +48,7 @@ pub use to_reversible::{
     WireWatchlist, to_reversible, to_reversible_with_mode, translate_watchlist,
 };
 pub use unroll_ir::{
-    PrefixUnroll, PrefixUnrollOutcome, UnrollError, UnrollLimits, unroll_ir_everything,
-    unroll_ir_everything_with_limits, unroll_ir_prefix_with_limits,
+    CfgSegmentUnroll, PrefixUnroll, PrefixUnrollOutcome, UnrollError, UnrollLimits,
+    unroll_cfg_segments_with_limits, unroll_ir_everything, unroll_ir_everything_with_limits,
+    unroll_ir_prefix_with_limits,
 };

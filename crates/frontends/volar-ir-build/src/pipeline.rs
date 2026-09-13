@@ -481,6 +481,21 @@ impl Pipeline<VolarIrStage> {
         self.apply(UnrollIrEverything { limits })
     }
 
+    /// Splice concrete prefixes throughout the CFG before movfuscation.
+    ///
+    /// Every replacement preserves its original block id and parameter
+    /// interface, so predecessor targets remain valid. Symbolic or bounded
+    /// segments stay as residual loops; no path is truncated.
+    pub fn unroll_cfg_segments_before_movfuscation(
+        mut self,
+        limits: volar_ir_passes::UnrollLimits,
+    ) -> (Self, volar_ir_passes::CfgSegmentUnroll) {
+        let (mut blocks, types) = self.into_data();
+        let report = volar_ir_passes::unroll_cfg_segments_with_limits(&mut blocks, &types, limits);
+        self = Self::from_data((blocks, types));
+        (self, report)
+    }
+
     /// Attempt concrete unrolling before movfuscation.
     ///
     /// When the whole CFG reaches `Return` within `limits`, the returned
