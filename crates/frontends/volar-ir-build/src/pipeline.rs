@@ -257,14 +257,25 @@ impl PipelinePass<VolarIrStage> for Movfuscate {
 
 /// Unroll Volar IR into a combinational circuit (`is_circuit()`). Requires
 /// concrete control flow; fails closed otherwise.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UnrollIrEverything;
+#[derive(Debug, Clone, Copy)]
+pub struct UnrollIrEverything {
+    /// Explicit compiler-resource caps for this finite concrete-control walk.
+    pub limits: volar_ir_passes::UnrollLimits,
+}
+
+impl Default for UnrollIrEverything {
+    fn default() -> Self {
+        Self {
+            limits: volar_ir_passes::UnrollLimits::default(),
+        }
+    }
+}
 
 impl PipelinePass<VolarIrStage> for UnrollIrEverything {
     type Output = VolarIrStage;
 
     fn apply(self, (blocks, types): (IRBlocks, IRTypes)) -> Result<(IRBlocks, IRTypes), BoxError> {
-        let blocks = volar_ir_passes::unroll_ir_everything(&blocks, &types)?;
+        let blocks = volar_ir_passes::unroll_ir_everything_with_limits(&blocks, &types, self.limits)?;
         Ok((blocks, types))
     }
 }
@@ -429,9 +440,19 @@ impl Pipeline<VolarIrStage> {
         self.apply(Movfuscate)
     }
 
-    /// Unroll Volar IR into a combinational circuit (concrete CF required).
+    /// Unroll Volar IR into a combinational circuit under conservative default
+    /// resource limits (concrete control flow required).
     pub fn unroll_ir(self) -> Result<Self, BoxError> {
-        self.apply(UnrollIrEverything)
+        self.apply(UnrollIrEverything::default())
+    }
+
+    /// Unroll Volar IR under caller-supplied concrete-control resource caps.
+    /// Exceeding a cap fails closed; it never truncates the program.
+    pub fn unroll_ir_with_limits(
+        self,
+        limits: volar_ir_passes::UnrollLimits,
+    ) -> Result<Self, BoxError> {
+        self.apply(UnrollIrEverything { limits })
     }
 
     /// Lower Volar IR → saved LIR.
