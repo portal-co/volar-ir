@@ -291,8 +291,9 @@ pub fn lower_ir_to_boolar_with_sides<P: Clone>(
     types: &IRTypes,
     sides: &SideInputs,
 ) -> BIrBlocks<P> {
-    try_lower_ir_to_boolar_with_sides(blocks, types, sides)
-        .unwrap_or_else(|error| panic!("lower_ir_to_boolar_with_sides: invalid external primitive: {error:?}"))
+    try_lower_ir_to_boolar_with_sides(blocks, types, sides).unwrap_or_else(|error| {
+        panic!("lower_ir_to_boolar_with_sides: invalid external primitive: {error:?}")
+    })
 }
 
 /// Fallible variant of [`lower_ir_to_boolar_with_sides`].
@@ -311,8 +312,9 @@ pub fn lower_ir_to_boolar_with_tables_and_sides<P: Clone>(
     types: &IRTypes,
     sides: &SideInputs,
 ) -> (BIrBlocks<P>, LoweredTables) {
-    try_lower_ir_to_boolar_side_inner(blocks, types, sides)
-        .unwrap_or_else(|error| panic!("lower_ir_to_boolar_with_sides: invalid external primitive: {error:?}"))
+    try_lower_ir_to_boolar_side_inner(blocks, types, sides).unwrap_or_else(|error| {
+        panic!("lower_ir_to_boolar_with_sides: invalid external primitive: {error:?}")
+    })
 }
 
 /// Shared driver for the side-aware entry points: identical to
@@ -370,7 +372,11 @@ fn try_lower_ir_to_boolar_side_inner<P: Clone>(
             // even blocks with no explicit param sides (empty slice seeds
             // all-None params but still propagates stmt-node sides).
             static EMPTY: &[Option<volar_side::SideId>] = &[];
-            let param_sides = sides.param_sides.get(&bi).map(|v| v.as_slice()).or(Some(EMPTY));
+            let param_sides = sides
+                .param_sides
+                .get(&bi)
+                .map(|v| v.as_slice())
+                .or(Some(EMPTY));
             let (b, vb) = lower_block_with_var_bits(
                 block,
                 types,
@@ -696,7 +702,17 @@ fn lower_stmt<P: Clone>(
             // width, but still needs one Boolar wire per bit of `ty`.
             let w = ir_type_bits(&types.0[ty.0 as usize], types);
             let bits: Vec<IRVarId> = (0..w)
-                .map(|j| lower_poly_bit(coeffs, constant, j, var_bits, emitter, prov.clone(), stmt_side))
+                .map(|j| {
+                    lower_poly_bit(
+                        coeffs,
+                        constant,
+                        j,
+                        var_bits,
+                        emitter,
+                        prov.clone(),
+                        stmt_side,
+                    )
+                })
                 .collect();
             var_bits.insert(ir_var_idx, bits);
         }
@@ -1210,7 +1226,13 @@ fn stmt_operands(stmt: &BIrStmt) -> Vec<IRVarId> {
         BIrStmt::OracleProjectedBit { call, .. } | BIrStmt::ActionBit { call, .. } => vec![*call],
         // A direct oracle/action bit derives from its argument wires.
         BIrStmt::OracleBit { args, .. } => args.clone(),
-        BIrStmt::ActionStoreBit { guard, args, fallback, addr, .. } => {
+        BIrStmt::ActionStoreBit {
+            guard,
+            args,
+            fallback,
+            addr,
+            ..
+        } => {
             let mut v = vec![*guard, *fallback];
             v.extend_from_slice(args);
             v.extend_from_slice(addr);
@@ -1306,7 +1328,12 @@ impl<P: Clone> Emitter<P> {
     /// Emit a constant/introduction wire with an explicit side, overriding
     /// the (vacuous, no-operand) join. Used for `Zero`/`One`/introduction
     /// points whose side the caller knows.
-    fn emit_with_side(&mut self, stmt: BIrStmt, prov: P, side: Option<volar_side::SideId>) -> IRVarId {
+    fn emit_with_side(
+        &mut self,
+        stmt: BIrStmt,
+        prov: P,
+        side: Option<volar_side::SideId>,
+    ) -> IRVarId {
         let id = IRVarId(self.next_var);
         let side = if self.side_tracking { side } else { None };
         self.stmts
@@ -1328,13 +1355,7 @@ impl<P: Clone> Emitter<P> {
         self.emit_poly_gate(PolyGateKind::Xor, a, b, prov)
     }
 
-    fn emit_poly_gate(
-        &mut self,
-        kind: PolyGateKind,
-        a: IRVarId,
-        b: IRVarId,
-        prov: P,
-    ) -> IRVarId {
+    fn emit_poly_gate(&mut self, kind: PolyGateKind, a: IRVarId, b: IRVarId, prov: P) -> IRVarId {
         let key = PolyGateKey::new(kind, a, b);
         if let Some(existing) = self.poly_gates.as_ref().and_then(|cache| cache.get(key)) {
             return existing;
@@ -1386,17 +1407,9 @@ struct PolyGateKey {
 impl PolyGateKey {
     fn new(kind: PolyGateKind, a: IRVarId, b: IRVarId) -> Self {
         if a.0 <= b.0 {
-            Self {
-                kind,
-                lo: a,
-                hi: b,
-            }
+            Self { kind, lo: a, hi: b }
         } else {
-            Self {
-                kind,
-                lo: b,
-                hi: a,
-            }
+            Self { kind, lo: b, hi: a }
         }
     }
 }
@@ -2198,7 +2211,11 @@ mod tests {
         assert_eq!(b.stmts.len(), 8);
         for node in &b.stmts {
             assert!(matches!(&node.kind, BIrStmt::Zero | BIrStmt::One));
-            assert_eq!(node.side, Some(const_side), "constant bit must inherit stmt side");
+            assert_eq!(
+                node.side,
+                Some(const_side),
+                "constant bit must inherit stmt side"
+            );
         }
     }
 }

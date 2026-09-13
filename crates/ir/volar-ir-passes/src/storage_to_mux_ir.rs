@@ -290,7 +290,17 @@ fn emit_poly<P: Clone>(
     ty: IRTypeId,
     prov: P,
 ) -> u32 {
-    push_typed(block, var_types, IRStmt::Poly { ty, coeffs, constant }, ty, prov)
+    push_typed(
+        block,
+        var_types,
+        IRStmt::Poly {
+            ty,
+            coeffs,
+            constant,
+        },
+        ty,
+        prov,
+    )
 }
 
 /// `a AND b` (both Bit-typed).
@@ -306,7 +316,14 @@ fn emit_and_bit<P: Clone>(
     key.sort();
     let mut coeffs = PolyCoeffs::new();
     coeffs.insert(key, 1u8);
-    emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 0 }, bit_ty, prov)
+    emit_poly(
+        block,
+        var_types,
+        coeffs,
+        Constant { hi: 0, lo: 0 },
+        bit_ty,
+        prov,
+    )
 }
 
 /// `NOT a` (Bit-typed) = `1 + a` in GF(2).
@@ -319,7 +336,14 @@ fn emit_not_bit<P: Clone>(
 ) -> u32 {
     let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![IRVarId(a)], 1);
-    emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 1 }, bit_ty, prov)
+    emit_poly(
+        block,
+        var_types,
+        coeffs,
+        Constant { hi: 0, lo: 1 },
+        bit_ty,
+        prov,
+    )
 }
 
 /// `val XOR const_k` (field addition in GF(2^n)), result typed `ty`.
@@ -370,7 +394,14 @@ fn emit_gate<P: Clone>(
     key.sort();
     let mut coeffs = PolyCoeffs::new();
     coeffs.insert(key, 1u8);
-    emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 0 }, ty, prov)
+    emit_poly(
+        block,
+        var_types,
+        coeffs,
+        Constant { hi: 0, lo: 0 },
+        ty,
+        prov,
+    )
 }
 
 /// `a + b` — field addition, both operands typed `ty`.
@@ -385,7 +416,14 @@ fn emit_field_add<P: Clone>(
     let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![IRVarId(a)], 1);
     coeffs.insert(vec![IRVarId(b)], 1);
-    emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 0 }, ty, prov)
+    emit_poly(
+        block,
+        var_types,
+        coeffs,
+        Constant { hi: 0, lo: 0 },
+        ty,
+        prov,
+    )
 }
 
 /// `1` iff `val == const_k`.
@@ -466,9 +504,25 @@ fn mux_read<P: Clone>(
             lo: i as u128,
         };
         let eq_i = emit_eq_const(
-            block, var_types, types, bit_ty, addr, const_i, addr_ty, prov.clone(),
+            block,
+            var_types,
+            types,
+            bit_ty,
+            addr,
+            const_i,
+            addr_ty,
+            prov.clone(),
         )?;
-        acc = mux(block, var_types, bit_ty, eq_i, cell, acc, val_ty, prov.clone());
+        acc = mux(
+            block,
+            var_types,
+            bit_ty,
+            eq_i,
+            cell,
+            acc,
+            val_ty,
+            prov.clone(),
+        );
     }
     Ok(acc)
 }
@@ -495,9 +549,25 @@ fn mux_write<P: Clone>(
                 lo: i as u128,
             };
             let eq_i = emit_eq_const(
-                block, var_types, types, bit_ty, addr, const_i, addr_ty, prov.clone(),
+                block,
+                var_types,
+                types,
+                bit_ty,
+                addr,
+                const_i,
+                addr_ty,
+                prov.clone(),
             )?;
-            Ok(mux(block, var_types, bit_ty, eq_i, src, cell, val_ty, prov.clone()))
+            Ok(mux(
+                block,
+                var_types,
+                bit_ty,
+                eq_i,
+                src,
+                cell,
+                val_ty,
+                prov.clone(),
+            ))
         })
         .collect()
 }
@@ -525,7 +595,15 @@ where
     }
     values
         .into_iter()
-        .map(|c| push_typed(block, var_types, IRStmt::Const(c, cfg.ty), cfg.ty, P::default()))
+        .map(|c| {
+            push_typed(
+                block,
+                var_types,
+                IRStmt::Const(c, cfg.ty),
+                cfg.ty,
+                P::default(),
+            )
+        })
         .collect()
 }
 
@@ -557,10 +635,7 @@ fn remap_terminator(term: &IRTerminator, remap: &[u32]) -> IRTerminator {
         },
         IRTerminator::JumpTable { index, cases } => IRTerminator::JumpTable {
             index: IRVarId(remap[index.0 as usize]),
-            cases: cases
-                .iter()
-                .map(|(c, t)| (*c, remap_target(t)))
-                .collect(),
+            cases: cases.iter().map(|(c, t)| (*c, remap_target(t))).collect(),
         },
         _ => panic!("storage_to_mux_ir: unsupported IRTerminator variant"),
     }
@@ -700,8 +775,7 @@ mod tests {
             ty: bit_ty,
             num_cells: 2,
         };
-        let rewritten =
-            storage_to_mux_ir(&blocks, &mut types, &cfg).expect("pass should succeed");
+        let rewritten = storage_to_mux_ir(&blocks, &mut types, &cfg).expect("pass should succeed");
         assert!(rewritten.is_circuit());
         for node in &rewritten.blocks[0].stmts {
             assert!(

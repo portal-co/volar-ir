@@ -237,11 +237,7 @@ mod tests {
 
     // Evaluate a GF(3) polynomial (PolyCoeffs<mono>, constant) at a
     // point given as a map var_index → value (0, 1, or 2).
-    fn eval_gf3(
-        coeffs: &PolyCoeffs<IRVarId>,
-        constant: Constant,
-        point: &[(IRVarId, u8)],
-    ) -> u8 {
+    fn eval_gf3(coeffs: &PolyCoeffs<IRVarId>, constant: Constant, point: &[(IRVarId, u8)]) -> u8 {
         let lookup = |v: &IRVarId| -> u8 {
             point
                 .iter()
@@ -278,11 +274,7 @@ mod tests {
     }
 
     // Evaluate a GF(2) polynomial at a 0/1 point.
-    fn eval_gf2(
-        coeffs: &PolyCoeffs<IRVarId>,
-        constant: Constant,
-        point: &[(IRVarId, u8)],
-    ) -> u8 {
+    fn eval_gf2(coeffs: &PolyCoeffs<IRVarId>, constant: Constant, point: &[(IRVarId, u8)]) -> u8 {
         let lookup = |v: &IRVarId| -> u8 {
             point
                 .iter()

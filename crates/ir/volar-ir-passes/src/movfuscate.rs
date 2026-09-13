@@ -99,10 +99,7 @@ fn bit_width_for_eq(ir_types: &[IRType], ty: IRTypeId) -> usize {
             _ => panic!("bit_width_for_eq: unsupported primitive type {:?}", p),
         },
         IRType::Vec(n, inner) => *n * bit_width_for_eq(ir_types, *inner),
-        IRType::Tuple(parts) => parts
-            .iter()
-            .map(|&p| bit_width_for_eq(ir_types, p))
-            .sum(),
+        IRType::Tuple(parts) => parts.iter().map(|&p| bit_width_for_eq(ir_types, p)).sum(),
         IRType::Block { .. } => 32,
         other => panic!("bit_width_for_eq: unsupported type {:?}", other),
     }

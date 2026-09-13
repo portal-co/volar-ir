@@ -434,11 +434,14 @@ fn fold_biir_terminator_dead_branch(
 // ============================================================================
 
 /// A structural key for one CSE-able Boolar statement. Commutative gates
-/// carry a sorted operand pair; external, storage, and RNG statements are
-/// deliberately never keyed (`Rng`/`RngBit` are fresh samples per
-/// occurrence, `OracleBit`/`ActionBit` carry replay identity, and storage
-/// and action statements have side effects).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// carry a sorted operand pair. ORACLES are pure (a named pure function of
+/// its args), so `OracleCall` and `OracleBit` are keyed by name + args;
+/// `occurrence` is only replay identity for distinct call SITES, so it is
+/// deliberately NOT part of the key — two calls computing the same pure
+/// function of the same args ARE the same value. Only ACTIONS (side
+/// effects) and RNG (fresh samples per occurrence) are never keyed, plus
+/// storage statements (side effects).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum CseKey {
     Zero,
     One,
@@ -446,9 +449,11 @@ enum CseKey {
     Or(IRVarId, IRVarId),
     Xor(IRVarId, IRVarId),
     Not(IRVarId),
+    OracleCall(alloc::string::String, alloc::vec::Vec<IRVarId>),
+    OracleBit(alloc::string::String, alloc::vec::Vec<IRVarId>, usize),
 }
 
-/// The CSE key of a pure Boolean statement, if it has one.
+/// The CSE key of a pure statement, if it has one.
 fn cse_key(kind: &BIrStmt) -> Option<CseKey> {
     let sorted = |a: IRVarId, b: IRVarId| if a <= b { (a, b) } else { (b, a) };
     Some(match kind {
@@ -467,6 +472,14 @@ fn cse_key(kind: &BIrStmt) -> Option<CseKey> {
             CseKey::Xor(a, b)
         }
         BIrStmt::Not(a) => CseKey::Not(*a),
+        // Pure named oracles: same name + same args => same value. The
+        // occurrence counter is replay identity, not part of the value.
+        BIrStmt::OracleCall { name, args, .. } => {
+            CseKey::OracleCall(name.clone(), args.clone())
+        }
+        BIrStmt::OracleBit {
+            name, args, bit, ..
+        } => CseKey::OracleBit(name.clone(), args.clone(), *bit),
         _ => return None,
     })
 }
@@ -610,8 +623,11 @@ fn renumber_biir_terminator(term: &mut BIrTerminator, remap: &BTreeMap<IRVarId, 
 
 
 /// Whether a Boolar statement is pure: removing it when its result is
-/// unused has no observable effect. External, storage, and RNG statements
-/// are effectful and always kept.
+/// unused has no observable effect. Oracles (`OracleCall`, `OracleBit`,
+/// `OracleProjectedBit`) are pure named functions of their args, so they
+/// are removable when unused. Only ACTIONS (side effects), storage
+/// statements (side effects), and RNG (fresh samples per occurrence) are
+/// effectful and always kept.
 fn biir_is_pure(kind: &BIrStmt) -> bool {
     matches!(
         kind,
@@ -621,6 +637,9 @@ fn biir_is_pure(kind: &BIrStmt) -> bool {
             | BIrStmt::Or(_, _)
             | BIrStmt::Xor(_, _)
             | BIrStmt::Not(_)
+            | BIrStmt::OracleCall { .. }
+            | BIrStmt::OracleBit { .. }
+            | BIrStmt::OracleProjectedBit { .. }
     )
 }
 
@@ -870,9 +889,9 @@ mod tests {
     }
 
     #[test]
-    fn cse_keeps_effectful_statements() {
-        // Two OracleBit calls with the same name/args/bit but distinct
-        // occurrences must NOT be CSE'd (replay identity).
+    fn cse_dedupes_pure_oracles_across_occurrences() {
+        // Two OracleBit calls with the same name/args/bit but DISTINCT
+        // occurrences compute the same pure value, so they ARE CSE'd.
         let mut blocks = BIrBlocks {
             blocks: vec![BIrBlock {
                 params: 1,
@@ -897,7 +916,72 @@ mod tests {
             }],
             pre_init: vec![],
         };
+        assert!(cse_biir_blocks(&mut blocks));
+        // rv2 aliases rv1; the terminator's second arg is rewritten.
+        assert_eq!(
+            blocks.blocks[0].terminator,
+            BIrTerminator::Jmp(BIrTarget {
+                block: IRBlockTargetId::Return,
+                args: vec![IRVarId(1), IRVarId(1)],
+            })
+        );
+    }
+
+    #[test]
+    fn cse_keeps_actions_and_rng() {
+        // ActionBit with the same call handle + bit but distinct
+        // occurrences is NOT CSE-able (actions have side effects), and
+        // RngBit is never keyed (fresh sample per occurrence).
+        let mut blocks = BIrBlocks {
+            blocks: vec![BIrBlock {
+                params: 1,
+                stmts: vec![
+                    node(BIrStmt::RngBit {
+                        name: "r".into(),
+                        bit: 0,
+                        occurrence: 0,
+                    }),
+                    node(BIrStmt::RngBit {
+                        name: "r".into(),
+                        bit: 0,
+                        occurrence: 1,
+                    }),
+                ],
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: vec![IRVarId(1), IRVarId(2)],
+                }),
+            }],
+            pre_init: vec![],
+        };
         assert!(!cse_biir_blocks(&mut blocks));
+    }
+
+    #[test]
+    fn dce_removes_unused_pure_oracles() {
+        // An unused OracleBit is pure, so DCE removes it (unlike actions /
+        // RNG / storage).
+        let mut blocks = BIrBlocks {
+            blocks: vec![BIrBlock {
+                params: 1,
+                stmts: vec![
+                    node(BIrStmt::OracleBit {
+                        name: "f".into(),
+                        args: vec![IRVarId(0)],
+                        bit: 0,
+                        occurrence: 0,
+                    }),
+                    node(BIrStmt::And(IRVarId(0), IRVarId(0))),
+                ],
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: vec![IRVarId(2)],
+                }),
+            }],
+            pre_init: vec![],
+        };
+        assert!(dce_biir_blocks(&mut blocks));
+        assert_eq!(blocks.blocks[0].stmts.len(), 1);
     }
 
     #[test]

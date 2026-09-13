@@ -7,9 +7,9 @@ description = "Text-format serialisation and parsing for volar-lir types and Sav
 repository.workspace = true
 
 [dependencies]
-volar-lir        = { git = "https://github.com/portal-co/volar-ir" }
-volar-lir-saved  = { git = "https://github.com/portal-co/volar-ir" }
-volar-ir-common  = { git = "https://github.com/portal-co/volar-ir" }
+volar-lir        = { git = "https://github.com/portal-co/volar-ir.git" }
+volar-lir-saved  = { git = "https://github.com/portal-co/volar-ir.git" }
+volar-ir-common  = { git = "https://github.com/portal-co/volar-ir.git" }
 
 [features]
 default = []
@@ -17,5 +17,5 @@ default = []
 parse = []
 
 [dev-dependencies]
-volar-log = { path = "../../../../volar/crates/helper/volar-log" }
-volar-lir-saved = { git = "https://github.com/portal-co/volar-ir" }
+volar-log = { git = "https://github.com/portal-co/volar.git" }
+volar-lir-saved = { git = "https://github.com/portal-co/volar-ir.git" }
