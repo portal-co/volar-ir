@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod apply_gadgets;
+pub mod cfg_layout;
 pub mod dispatch_accumulator;
 pub mod from_reversible;
 pub mod fuse_to_circuit;
@@ -18,6 +19,7 @@ pub mod to_reversible;
 pub mod unroll_ir;
 
 pub use apply_gadgets::{GadgetApplication, apply_gadgets};
+pub use cfg_layout::{CfgLayoutReport, layout_cfg_for_movfuscation};
 pub use from_reversible::{
     CircuitTransformError, hardcode_circuit_inputs, remove_circuit_outputs, to_boolar_circuit,
 };
