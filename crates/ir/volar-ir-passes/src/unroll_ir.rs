@@ -28,8 +28,8 @@ use core::convert::Infallible;
 use core::fmt;
 
 use volar_ir::ir::{
-    IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId,
-    IRTypes, IRVarId,
+    IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId, IRTypes,
+    IRVarId,
 };
 use volar_ir_common::{Constant, PolyCoeffs, Stmt, StorageId};
 use volar_ir_opt::common::{
@@ -92,12 +92,253 @@ pub struct UnrollLimits {
     pub max_steps: usize,
 }
 
+/// Result of prefix-unrolling a CFG before movfuscation.
+///
+/// `blocks` is always executable: on a partial result, block zero is the
+/// concrete prefix and its terminator enters the retained residual CFG. No
+/// instruction is dropped and no iteration is silently bounded.
+#[derive(Clone, Debug)]
+pub struct PrefixUnroll<P: Clone> {
+    pub blocks: IRBlocks<P>,
+    pub outcome: PrefixUnrollOutcome,
+}
+
+/// Why prefix unrolling stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefixUnrollOutcome {
+    /// The concrete walk reached `Return`; `blocks` is a circuit.
+    Complete,
+    /// A residual CFG remains, beginning at a symbolic-control boundary or
+    /// an unroll resource/non-finiteness boundary.
+    Residual(UnrollError),
+}
+
 impl Default for UnrollLimits {
     fn default() -> Self {
         Self {
             max_states: 4096,
             max_steps: 100_000,
         }
+    }
+}
+
+/// Unroll the concrete prefix of `blocks`, retaining an executable residual
+/// CFG at the first symbolic or resource-limited boundary.
+///
+/// This is the pre-movfuscation form: callers can movfuscate the returned
+/// residual CFG regardless of whether the prefix completed. It differs from
+/// [`unroll_ir_everything_with_limits`], which rejects any non-complete walk.
+pub fn unroll_ir_prefix_with_limits<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+    limits: UnrollLimits,
+) -> PrefixUnroll<P> {
+    if blocks.is_circuit() {
+        return PrefixUnroll {
+            blocks: blocks.clone(),
+            outcome: PrefixUnrollOutcome::Complete,
+        };
+    }
+    if blocks.blocks.is_empty() {
+        return PrefixUnroll {
+            blocks: blocks.clone(),
+            outcome: PrefixUnrollOutcome::Residual(UnrollError::NonFiniteControl),
+        };
+    }
+
+    let entry = &blocks.blocks[0];
+    let mut prefix = IRBlock {
+        params: entry.params.clone(),
+        stmts: vec![],
+        terminator: IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
+        },
+    };
+    let mut current = IRBlockId(0);
+    let mut args: Vec<IRVarId> = (0..entry.params.len()).map(|i| IRVarId(i as u32)).collect();
+    let mut visited: BTreeSet<(u32, Vec<Option<Constant>>)> = BTreeSet::new();
+    let mut steps = 0usize;
+
+    loop {
+        let residual = |prefix: IRBlock<P>, reason: UnrollError, term: IRTerminator| {
+            prefix_result(blocks, prefix, term, reason)
+        };
+        if steps >= limits.max_steps {
+            return residual(prefix, UnrollError::ResourceLimit, jump_to(current, args));
+        }
+        steps += 1;
+        let Some(block) = blocks.blocks.get(current.0 as usize) else {
+            return residual(
+                prefix,
+                UnrollError::NonFiniteControl,
+                jump_to(current, args),
+            );
+        };
+        if args.len() != block.params.len() {
+            return residual(
+                prefix,
+                UnrollError::NonFiniteControl,
+                jump_to(current, args),
+            );
+        }
+        let fingerprint: Vec<Option<Constant>> = {
+            let consts = concrete_consts(&prefix, types);
+            args.iter().map(|v| consts.get(&v.0).copied()).collect()
+        };
+        if visited.contains(&(current.0, fingerprint.clone())) || visited.len() >= limits.max_states
+        {
+            return residual(prefix, UnrollError::ResourceLimit, jump_to(current, args));
+        }
+        visited.insert((current.0, fingerprint));
+
+        let mut remap = BTreeMap::new();
+        for (i, &arg) in args.iter().enumerate() {
+            remap.insert(i as u32, arg);
+        }
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            let old = block.params.len() as u32 + i as u32;
+            let remapped = stmt
+                .kind
+                .clone()
+                .map_var(
+                    &mut remap,
+                    &mut |r, v: IRVarId| Ok::<_, Infallible>(*r.get(&v.0).unwrap_or(&v)),
+                    &mut |_, ty| Ok(ty),
+                    &mut |_, storage| Ok(storage),
+                )
+                .unwrap();
+            let new = prefix.push_stmt_with_side(remapped, stmt.prov.clone(), stmt.side);
+            remap.insert(old, new);
+        }
+        fold_dest_mut(&mut prefix, types);
+        let term = remap_terminator(&block.terminator, &remap);
+        let consts = concrete_consts(&prefix, types);
+        let next = match &term {
+            IRTerminator::Jmp { target } => target,
+            IRTerminator::JumpCond {
+                condition,
+                then_target,
+                else_target,
+            } => match consts.get(&condition.0) {
+                Some(c) => {
+                    if c.lo & 1 != 0 {
+                        then_target
+                    } else {
+                        else_target
+                    }
+                }
+                None => {
+                    return residual(prefix, UnrollError::SymbolicBranch { block: current }, term);
+                }
+            },
+            IRTerminator::JumpTable { index, cases } => match consts
+                .get(&index.0)
+                .and_then(|c| cases.get(c))
+            {
+                Some(target) => target,
+                None => {
+                    return residual(prefix, UnrollError::SymbolicSwitch { block: current }, term);
+                }
+            },
+            _ => return residual(prefix, UnrollError::SymbolicBranch { block: current }, term),
+        };
+        match next.dest {
+            IRBlockTargetId::Return => {
+                prefix.terminator = IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, next.args.clone()),
+                };
+                let mut out = IRBlocks {
+                    oracles: blocks.oracles.clone(),
+                    actions: blocks.actions.clone(),
+                    rngs: blocks.rngs.clone(),
+                    blocks: vec![prefix],
+                    pre_init: blocks.pre_init.clone(),
+                };
+                fold_ir_blocks(&mut out, types);
+                return PrefixUnroll {
+                    blocks: out,
+                    outcome: PrefixUnrollOutcome::Complete,
+                };
+            }
+            IRBlockTargetId::Block(id) => {
+                current = id;
+                args = next.args.clone();
+            }
+            IRBlockTargetId::Dyn(id) => match consts.get(&id.0) {
+                Some(c) => {
+                    current = IRBlockId(c.lo as u32);
+                    args = next.args.clone();
+                }
+                None => {
+                    return residual(prefix, UnrollError::SymbolicBranch { block: current }, term);
+                }
+            },
+            _ => return residual(prefix, UnrollError::SymbolicBranch { block: current }, term),
+        }
+    }
+}
+
+fn jump_to(block: IRBlockId, args: Vec<IRVarId>) -> IRTerminator {
+    IRTerminator::Jmp {
+        target: IRBranchTarget::new(IRBlockTargetId::Block(block), args),
+    }
+}
+
+fn prefix_result<P: Clone>(
+    original: &IRBlocks<P>,
+    mut prefix: IRBlock<P>,
+    term: IRTerminator,
+    reason: UnrollError,
+) -> PrefixUnroll<P> {
+    let n = original.blocks.len() as u32;
+    prefix.terminator = remap_block_targets(term, n);
+    let mut rest: Vec<IRBlock<P>> = original.blocks[1..].to_vec();
+    rest.push(original.blocks[0].clone());
+    for block in &mut rest {
+        block.terminator = remap_block_targets(block.terminator.clone(), n);
+    }
+    let mut out = IRBlocks {
+        oracles: original.oracles.clone(),
+        actions: original.actions.clone(),
+        rngs: original.rngs.clone(),
+        blocks: vec![prefix],
+        pre_init: original.pre_init.clone(),
+    };
+    out.blocks.extend(rest);
+    PrefixUnroll {
+        blocks: out,
+        outcome: PrefixUnrollOutcome::Residual(reason),
+    }
+}
+
+fn remap_block_targets(term: IRTerminator, old_zero: u32) -> IRTerminator {
+    let remap_target = |mut target: IRBranchTarget| {
+        if matches!(target.dest, IRBlockTargetId::Block(IRBlockId(0))) {
+            target.dest = IRBlockTargetId::Block(IRBlockId(old_zero));
+        }
+        target
+    };
+    match term {
+        IRTerminator::Jmp { target } => IRTerminator::Jmp {
+            target: remap_target(target),
+        },
+        IRTerminator::JumpCond {
+            condition,
+            then_target,
+            else_target,
+        } => IRTerminator::JumpCond {
+            condition,
+            then_target: remap_target(then_target),
+            else_target: remap_target(else_target),
+        },
+        IRTerminator::JumpTable { index, cases } => IRTerminator::JumpTable {
+            index,
+            cases: cases
+                .into_iter()
+                .map(|(k, target)| (k, remap_target(target)))
+                .collect(),
+        },
+        other => other,
     }
 }
 
@@ -738,6 +979,56 @@ mod tests {
                 );
             }
             other => panic!("expected Jmp Return, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefix_unroll_retains_symbolic_residual_cfg() {
+        let types = bit_types();
+        // The concrete entry is spliced, then block 1 remains a symbolic loop
+        // suitable for movfuscation.
+        let blocks: IRBlocks<()> = IRBlocks::new(vec![
+            IRBlock {
+                params: vec![bit()],
+                stmts: vec![Node::new(const_bit(1), (), None)],
+                terminator: jmp(IRBlockTargetId::Block(IRBlockId(1)), vec![IRVarId(0)]),
+            },
+            IRBlock {
+                params: vec![bit()],
+                stmts: vec![],
+                terminator: IRTerminator::JumpCond {
+                    condition: IRVarId(0),
+                    then_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        vec![IRVarId(0)],
+                    ),
+                    else_target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+                },
+            },
+        ]);
+        let out = unroll_ir_prefix_with_limits(&blocks, &types, UnrollLimits::default());
+        assert_eq!(
+            out.outcome,
+            PrefixUnrollOutcome::Residual(UnrollError::SymbolicBranch {
+                block: IRBlockId(1)
+            })
+        );
+        assert_eq!(
+            out.blocks.blocks.len(),
+            3,
+            "prefix + retained block 1 + relocated block 0"
+        );
+        assert_eq!(out.blocks.blocks[0].stmts.len(), 1);
+        match &out.blocks.blocks[0].terminator {
+            IRTerminator::JumpCond {
+                then_target,
+                else_target,
+                ..
+            } => {
+                assert_eq!(then_target.dest, IRBlockTargetId::Block(IRBlockId(1)));
+                assert_eq!(else_target.dest, IRBlockTargetId::Return);
+            }
+            other => panic!("expected retained symbolic terminator, got {other:?}"),
         }
     }
 

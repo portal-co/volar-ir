@@ -39,11 +39,11 @@
 //!   fields it's unaware of, each pass is now self-contained (e.g.
 //!   [`InlineVaffleEverything`] carries its own `entries`).
 
+use std::marker::PhantomData;
 #[cfg(feature = "llvm")]
 use std::path::Path;
 #[cfg(feature = "llvm")]
 use std::path::PathBuf;
-use std::marker::PhantomData;
 
 use volar_circuit_source::{
     CircuitSourceBackend, EmitOptions, SourcePackage, emit_bool_circuit, emit_volar_circuit,
@@ -177,7 +177,9 @@ where
     S::Data: core::fmt::Debug,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Pipeline").field("data", &self.data).finish()
+        f.debug_struct("Pipeline")
+            .field("data", &self.data)
+            .finish()
     }
 }
 
@@ -226,7 +228,10 @@ pub struct FoldIr;
 impl PipelinePass<VolarIrStage> for FoldIr {
     type Output = VolarIrStage;
 
-    fn apply(self, (mut blocks, types): (IRBlocks, IRTypes)) -> Result<(IRBlocks, IRTypes), BoxError> {
+    fn apply(
+        self,
+        (mut blocks, types): (IRBlocks, IRTypes),
+    ) -> Result<(IRBlocks, IRTypes), BoxError> {
         loop {
             let folded = volar_ir_opt::ir::fold_ir_blocks(&mut blocks, &types);
             let deadcode = volar_ir_opt::ir::dce_ir_blocks(&mut blocks, &types);
@@ -246,7 +251,10 @@ pub struct Movfuscate;
 impl PipelinePass<VolarIrStage> for Movfuscate {
     type Output = VolarIrStage;
 
-    fn apply(self, (blocks, mut types): (IRBlocks, IRTypes)) -> Result<(IRBlocks, IRTypes), BoxError> {
+    fn apply(
+        self,
+        (blocks, mut types): (IRBlocks, IRTypes),
+    ) -> Result<(IRBlocks, IRTypes), BoxError> {
         // The pipeline owns this stage, so transfer its large Poly payloads
         // into the step circuit instead of routing through the legacy
         // borrowed compatibility API.
@@ -263,6 +271,19 @@ pub struct UnrollIrEverything {
     pub limits: volar_ir_passes::UnrollLimits,
 }
 
+/// Outcome of attempting concrete CFG unrolling before movfuscation.
+///
+/// A failed attempt intentionally preserves the original CFG, allowing the
+/// caller to movfuscate the residual loop instead of treating a finite-prefix
+/// optimization failure as a compilation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreMovfuscationUnroll {
+    /// Concrete control reached `Return`; the result is a circuit.
+    Complete,
+    /// An executable residual CFG was retained after the concrete prefix.
+    RetainedLoop(volar_ir_passes::UnrollError),
+}
+
 impl Default for UnrollIrEverything {
     fn default() -> Self {
         Self {
@@ -275,7 +296,8 @@ impl PipelinePass<VolarIrStage> for UnrollIrEverything {
     type Output = VolarIrStage;
 
     fn apply(self, (blocks, types): (IRBlocks, IRTypes)) -> Result<(IRBlocks, IRTypes), BoxError> {
-        let blocks = volar_ir_passes::unroll_ir_everything_with_limits(&blocks, &types, self.limits)?;
+        let blocks =
+            volar_ir_passes::unroll_ir_everything_with_limits(&blocks, &types, self.limits)?;
         Ok((blocks, types))
     }
 }
@@ -301,7 +323,8 @@ impl PipelinePass<VolarIrStage> for LowerToBoolar {
     type Output = BoolarStage;
 
     fn apply(self, (blocks, types): (IRBlocks, IRTypes)) -> Result<BIrBlocks, BoxError> {
-        volar_ir_passes::lower_ir_to_boolar::try_lower_ir_to_boolar(&blocks, &types).map_err(box_err)
+        volar_ir_passes::lower_ir_to_boolar::try_lower_ir_to_boolar(&blocks, &types)
+            .map_err(box_err)
     }
 }
 
@@ -315,7 +338,10 @@ pub struct StorageToMuxIr(pub volar_ir_passes::StorageToMuxConfig);
 impl PipelinePass<VolarIrStage> for StorageToMuxIr {
     type Output = VolarIrStage;
 
-    fn apply(self, (blocks, mut types): (IRBlocks, IRTypes)) -> Result<(IRBlocks, IRTypes), BoxError> {
+    fn apply(
+        self,
+        (blocks, mut types): (IRBlocks, IRTypes),
+    ) -> Result<(IRBlocks, IRTypes), BoxError> {
         let blocks = volar_ir_passes::storage_to_mux_ir(&blocks, &mut types, &self.0)?;
         Ok((blocks, types))
     }
@@ -453,6 +479,28 @@ impl Pipeline<VolarIrStage> {
         limits: volar_ir_passes::UnrollLimits,
     ) -> Result<Self, BoxError> {
         self.apply(UnrollIrEverything { limits })
+    }
+
+    /// Attempt concrete unrolling before movfuscation.
+    ///
+    /// When the whole CFG reaches `Return` within `limits`, the returned
+    /// pipeline is a circuit. Symbolic control, a non-finite loop, or a
+    /// resource cap retains an executable residual CFG after the concrete
+    /// prefix; callers can then call [`Self::movfuscate`] on that loop.
+    /// It never emits a truncated path.
+    pub fn try_unroll_before_movfuscation(
+        self,
+        limits: volar_ir_passes::UnrollLimits,
+    ) -> (Self, PreMovfuscationUnroll) {
+        let (blocks, types) = self.into_data();
+        let result = volar_ir_passes::unroll_ir_prefix_with_limits(&blocks, &types, limits);
+        let outcome = match result.outcome {
+            volar_ir_passes::PrefixUnrollOutcome::Complete => PreMovfuscationUnroll::Complete,
+            volar_ir_passes::PrefixUnrollOutcome::Residual(err) => {
+                PreMovfuscationUnroll::RetainedLoop(err)
+            }
+        };
+        (Self::from_data((result.blocks, types)), outcome)
     }
 
     /// Lower Volar IR → saved LIR.
@@ -602,9 +650,8 @@ impl Pipeline<VaffleStage> {
         .map_err(|e| format!("WAFFLE parse failed: {e}"))?;
         // WASM linear-memory addresses remain a 32-bit ABI even though the
         // generic VAFFLE target defaults to the host-friendly 64-bit ABI.
-        let mut target = volar_vaffle_target::VaffleTarget::with_pointer_width(
-            vaffle::PointerWidth::Bits32,
-        );
+        let mut target =
+            volar_vaffle_target::VaffleTarget::with_pointer_width(vaffle::PointerWidth::Bits32);
         volar_vaffle_target::lower_waffle_module(&waffle_module, &mut target, &import_config);
         Ok(Self::from_data(target.module))
     }
@@ -702,11 +749,8 @@ impl Pipeline<VaffleStage> {
         let context = inkwell::context::Context::create();
         let llvm_module = load_llvm_module(&context, &path)?;
         let entry_refs: Vec<&str> = entries.iter().copied().collect();
-        let module = volar_llvm_vaffle_import::import_module_with_config(
-            &llvm_module,
-            &entry_refs,
-            config,
-        )?;
+        let module =
+            volar_llvm_vaffle_import::import_module_with_config(&llvm_module, &entry_refs, config)?;
         Ok(Self::from_data(module))
     }
 

@@ -17,7 +17,7 @@ pub mod storage_to_mux_ir;
 pub mod to_reversible;
 pub mod unroll_ir;
 
-pub use apply_gadgets::{apply_gadgets, GadgetApplication};
+pub use apply_gadgets::{GadgetApplication, apply_gadgets};
 pub use from_reversible::{
     CircuitTransformError, hardcode_circuit_inputs, remove_circuit_outputs, to_boolar_circuit,
 };
@@ -34,9 +34,9 @@ pub use lower_to_circuit::{
 pub use movfuscate::{
     MovfuscAccumInfo, MovfuscAccumInit, MovfuscAccumStep, MovfuscBlockBoundary, movfuscate_biir,
     movfuscate_biir_with_control_provenance, movfuscate_ir, movfuscate_ir_owned,
-    movfuscate_ir_with_boundary,
-    movfuscate_ir_with_control_provenance, pc_bits_needed, remap_movfusc_accum_info,
-    remap_movfusc_boundaries, remap_movfusc_boundary, thread_synthetic_slots,
+    movfuscate_ir_with_boundary, movfuscate_ir_with_control_provenance, pc_bits_needed,
+    remap_movfusc_accum_info, remap_movfusc_boundaries, remap_movfusc_boundary,
+    thread_synthetic_slots,
 };
 pub use raise_to_z3::raise_bits_to_z3;
 pub use storage_to_mux_boolar::{
@@ -48,5 +48,6 @@ pub use to_reversible::{
     WireWatchlist, to_reversible, to_reversible_with_mode, translate_watchlist,
 };
 pub use unroll_ir::{
-    UnrollError, UnrollLimits, unroll_ir_everything, unroll_ir_everything_with_limits,
+    PrefixUnroll, PrefixUnrollOutcome, UnrollError, UnrollLimits, unroll_ir_everything,
+    unroll_ir_everything_with_limits, unroll_ir_prefix_with_limits,
 };
