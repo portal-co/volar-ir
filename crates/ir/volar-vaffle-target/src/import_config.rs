@@ -87,6 +87,27 @@ impl WaffleImportConfig {
         )
     }
 
+    /// Map the fixed-shape TLS 1.3 secret-mixing imports to pure circuit
+    /// oracles. Their realization is deliberately performed by Volar VC;
+    /// registering them as evaluator actions would disclose key material to
+    /// the action host.
+    pub fn with_portal_tls13_oracles(self) -> Self {
+        use volar_ir_common::tls13_extern;
+
+        self.with_oracle(
+            tls13_extern::sha256_64::WAFFLE_IMPORT,
+            tls13_extern::sha256_64::ORACLE_NAME,
+        )
+        .with_oracle(
+            tls13_extern::hmac_sha256_32_32::WAFFLE_IMPORT,
+            tls13_extern::hmac_sha256_32_32::ORACLE_NAME,
+        )
+        .with_oracle(
+            tls13_extern::x25519_step::WAFFLE_IMPORT,
+            tls13_extern::x25519_step::ORACLE_NAME,
+        )
+    }
+
     /// Like [`with_oracle`](Self::with_oracle), but attaches `side` to every
     /// call/output value emitted at this oracle's call sites.
     pub fn with_oracle_side(
