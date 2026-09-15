@@ -5,8 +5,8 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use volar_ir::ir::{IRTypeId, IRVarId};
-use volar_ir_common::Constant;
+use volar_ir::ir::IRTypeId;
+use volar_ir_common::{Constant, StorageId, VirtStorageRole};
 
 use crate::bytecode::{BytecodeEntry, HandlerImmSchema, VirtBytecode};
 use crate::canon::{BlockImmediates, HandlerKey};
@@ -33,7 +33,17 @@ pub struct VirtOutput<B> {
     /// virtualised module (before the original entry-block arguments).
     /// Empty when no keyed commitment was requested.
     pub key_params: Vec<(Constant, IRTypeId)>,
-}
+    /// Every [`StorageId`] the virtualised module consumes, paired with the
+    /// role it plays: bytecode table + handler register, per-type register
+    /// files, and (when committed) the commitment/key spaces.
+    ///
+    /// Populated in both legacy and registry modes — in registry mode these
+    /// are exactly the IDs the pass allocated from the caller's
+    /// [`volar_ir_common::StorageRegistry`]. Downstream passes
+    /// (`storage_to_mux`, region tagging, source naming) should consult this
+    /// list rather than re-deriving the layout.
+    pub consumed_storages: Vec<(StorageId, VirtStorageRole)>,
+} 
 
 /// Intermediate table built by canonicalising every block.
 ///

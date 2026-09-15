@@ -31,7 +31,10 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType,
     IRTypeId, IRTypes, IRVarId,
 };
-use volar_ir_common::{Constant, PolyCoeffs, Stmt, StorageId, Type as PrimType};
+use volar_ir_common::{
+    Constant, PolyCoeffs, Stmt, StorageId, StoragePurpose, StorageRegistry, Type as PrimType,
+    VirtStorageRole,
+};
 
 use crate::canon::{BlockImmediates, IrHandlerKey, ZERO_CONSTANT, canonicalize_ir_block};
 use crate::ctx::{DedupTable, VirtOutput};
@@ -41,6 +44,67 @@ use crate::hash::{
 use crate::preinit::{CommitmentPreInit, build_ir_storage_init, merge_pre_init};
 use crate::split::plan_adaptive_split;
 use crate::{DedupPolicy, DispatchMode, VirtualizeConfig};
+
+// ============================================================================
+// Optional storage-registry context threaded through the pass.
+// ============================================================================
+
+/// Registry mode: allocate every storage the virtualised module needs from
+/// a [`StorageRegistry`] instead of deriving IDs by arithmetic from
+/// `VirtualizeConfig::bytecode_storage`.
+///
+/// The purpose constructor maps each `(role, detail)` pair to the caller's
+/// purpose vocabulary — e.g. `|role, detail| StoragePurpose::Virt { role,
+/// detail }` for the in-repo vocabulary. The numeric value of
+/// `cfg.bytecode_storage` (and, for the committed variant, of
+/// `CommitmentConfig`'s storage fields) is **ignored** in this mode; the
+/// allocated IDs are reported in [`VirtOutput::consumed_storages`].
+pub(crate) struct VirtStorageReg<'a, RP, F: FnMut(VirtStorageRole, u32) -> RP> {
+    pub(crate) registry: &'a mut StorageRegistry<RP>,
+    pub(crate) purpose: F,
+}
+
+impl<'a, RP, F: FnMut(VirtStorageRole, u32) -> RP> VirtStorageReg<'a, RP, F> {
+    /// Reserve the contiguous bytecode region and return its base.
+    /// `role(k)` gives the `(VirtStorageRole, detail)` for offset `k`
+    /// within the region, so the registry's per-ID purposes match
+    /// [`VirtOutput::consumed_storages`] reporting exactly (offset 0 is
+    /// the handler register on the IR path; the first `handler_bits`
+    /// offsets are handler-index bits on the BIR path).
+    pub(crate) fn alloc_bytecode_region(
+        &mut self,
+        size: u32,
+        role: impl Fn(u32) -> (VirtStorageRole, u32),
+    ) -> StorageId
+    where
+        RP: Clone,
+    {
+        // Destructure so the closure borrows only `purpose`, not `self`.
+        let VirtStorageReg { registry, purpose } = self;
+        registry
+            .register_block_with(
+                |off| {
+                    let (r, d) = role(off);
+                    (purpose)(r, d)
+                },
+                size,
+            )
+            .base
+    }
+
+    /// Allocate one per-type register-file storage.
+    pub(crate) fn alloc_register_file(&mut self, ty: IRTypeId) -> StorageId {
+        self.registry
+            .register((self.purpose)(VirtStorageRole::RegisterFile, ty.0))
+    }
+
+    /// Allocate the commitment table space (`detail == 0`) or its key
+    /// space (`detail == 1`).
+    pub(crate) fn alloc_commitment(&mut self, detail: u32) -> StorageId {
+        self.registry
+            .register((self.purpose)(VirtStorageRole::Commitment, detail))
+    }
+}
 
 // ============================================================================
 // Uninhabited sentinel used so `virtualize_ir` need not be generic.
@@ -79,6 +143,12 @@ impl IrHashAlgorithm for NoOpHashAlgorithm {
 /// threaded through to the setup-block and handler emitters.
 pub(crate) struct CommitmentCtx<'a, H: IrHashAlgorithm> {
     config: &'a CommitmentConfig<H>,
+    /// Effective commitment table space: `config.commitment_storage` in
+    /// legacy mode, or a freshly registered space in registry mode.
+    commitment_storage: StorageId,
+    /// Effective key space: `config.key_storage` in legacy mode, or a
+    /// freshly registered space in registry mode.
+    key_storage: Option<StorageId>,
     /// Pre-computed native hash for each original block, in block order.
     /// `per_block[i]` is the `Constant`-encoded hash of block `i`'s entry.
     per_block: Vec<Constant>,
@@ -142,7 +212,40 @@ pub fn virtualize_ir<P: Clone + Default>(
     types: &mut IRTypes,
     cfg: &VirtualizeConfig,
 ) -> VirtOutput<IRBlocks<P>> {
-    virtualize_ir_impl::<P, NoOpHashAlgorithm>(blocks, types, cfg, None)
+    virtualize_ir_impl::<P, NoOpHashAlgorithm, StoragePurpose, _>(
+        blocks,
+        types,
+        cfg,
+        None,
+        None::<VirtStorageReg<'_, StoragePurpose, fn(VirtStorageRole, u32) -> StoragePurpose>>,
+    )
+}
+
+/// Like [`virtualize_ir`], but allocates every storage the virtualised
+/// module needs (bytecode region, per-type register files) from
+/// `registry` instead of deriving IDs from `cfg.bytecode_storage` by
+/// arithmetic. The numeric value of `cfg.bytecode_storage` is ignored;
+/// the allocated IDs are reported in [`VirtOutput::consumed_storages`]
+/// and recorded in the registry under `purpose(role, detail)`.
+pub fn virtualize_ir_with_registry<P, RP, F>(
+    blocks: &IRBlocks<P>,
+    types: &mut IRTypes,
+    cfg: &VirtualizeConfig,
+    registry: &mut StorageRegistry<RP>,
+    purpose: F,
+) -> VirtOutput<IRBlocks<P>>
+where
+    P: Clone + Default,
+    RP: Clone,
+    F: FnMut(VirtStorageRole, u32) -> RP,
+{
+    virtualize_ir_impl::<P, NoOpHashAlgorithm, RP, F>(
+        blocks,
+        types,
+        cfg,
+        None,
+        Some(VirtStorageReg { registry, purpose }),
+    )
 }
 
 /// Virtualise an [`IRBlocks`] module with per-PC bytecode commitment.
@@ -163,19 +266,62 @@ pub fn virtualize_ir_committed<P: Clone + Default, H: IrHashAlgorithm>(
     cfg: &VirtualizeConfig,
     commitment_cfg: &CommitmentConfig<H>,
 ) -> VirtOutput<IRBlocks<P>> {
-    virtualize_ir_impl(blocks, types, cfg, Some(commitment_cfg))
+    virtualize_ir_impl::<P, H, StoragePurpose, _>(
+        blocks,
+        types,
+        cfg,
+        Some(commitment_cfg),
+        None::<VirtStorageReg<'_, StoragePurpose, fn(VirtStorageRole, u32) -> StoragePurpose>>,
+    )
+}
+
+/// Like [`virtualize_ir_committed`], but allocates every storage the
+/// virtualised module needs (bytecode region, register files, commitment
+/// table and key space) from `registry`. The numeric values of
+/// `cfg.bytecode_storage`, `commitment_cfg.commitment_storage`, and
+/// `commitment_cfg.key_storage` are ignored; the allocated IDs are
+/// reported in [`VirtOutput::consumed_storages`] and recorded in the
+/// registry under `purpose(role, detail)`.
+pub fn virtualize_ir_committed_with_registry<P, H, RP, F>(
+    blocks: &IRBlocks<P>,
+    types: &mut IRTypes,
+    cfg: &VirtualizeConfig,
+    commitment_cfg: &CommitmentConfig<H>,
+    registry: &mut StorageRegistry<RP>,
+    purpose: F,
+) -> VirtOutput<IRBlocks<P>>
+where
+    P: Clone + Default,
+    H: IrHashAlgorithm,
+    RP: Clone,
+    F: FnMut(VirtStorageRole, u32) -> RP,
+{
+    virtualize_ir_impl(
+        blocks,
+        types,
+        cfg,
+        Some(commitment_cfg),
+        Some(VirtStorageReg { registry, purpose }),
+    )
 }
 
 // ============================================================================
 // Core implementation
 // ============================================================================
 
-fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
+fn virtualize_ir_impl<P, H, RP, F>(
     blocks: &IRBlocks<P>,
     types: &mut IRTypes,
     cfg: &VirtualizeConfig,
     commitment: Option<&CommitmentConfig<H>>,
-) -> VirtOutput<IRBlocks<P>> {
+    reg: Option<VirtStorageReg<'_, RP, F>>,
+) -> VirtOutput<IRBlocks<P>>
+where
+    P: Clone + Default,
+    H: IrHashAlgorithm,
+    RP: Clone,
+    F: FnMut(VirtStorageRole, u32) -> RP,
+{
     assert!(
         matches!(cfg.dedup, DedupPolicy::ConstantsAndTargets),
         "volar-ir-virt: only DedupPolicy::ConstantsAndTargets is implemented"
@@ -215,12 +361,13 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
 
     let split_plan = plan_adaptive_split(&cse_blocks, &cfg.adaptive_split);
     if cfg.adaptive_split.enabled && !split_plan.layout.regions.is_empty() {
-        return crate::adaptive_emit::virtualize_ir_adaptive::<P, H>(
+        return crate::adaptive_emit::virtualize_ir_adaptive::<P, H, RP, F>(
             &cse_blocks,
             types,
             cfg,
             split_plan,
             blocks_in,
+            reg,
         );
     }
 
@@ -240,8 +387,26 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
     // Compute the bytecode layout *first* so we know which StorageIds
     // the bytecode range occupies; the register file is placed strictly
     // *above* that range to avoid collisions.
-    let layout = GlobalLayout::from_dedup(&dedup, addr_ty, bit_ty, cfg.bytecode_storage);
-    let reg_storage_base = layout.next_free_storage_after_bytecode(cfg.bytecode_storage);
+    //
+    // Registry mode: reserve one contiguous block for the whole bytecode
+    // region (handler register + per-handler slots) and re-base the layout
+    // onto it; the numeric value of `cfg.bytecode_storage` is ignored.
+    let mut reg = reg;
+    let bytecode_base = match &mut reg {
+        Some(r) => {
+            let region_size = GlobalLayout::from_dedup(&dedup, addr_ty, bit_ty, StorageId(0))
+                .next_free_storage_after_bytecode(StorageId(0));
+            r.alloc_bytecode_region(region_size, |off| {
+                if off == 0 {
+                    (VirtStorageRole::HandlerSlot, 0)
+                } else {
+                    (VirtStorageRole::BytecodeTable, off)
+                }
+            })
+        }
+        None => cfg.bytecode_storage,
+    };
+    let layout = GlobalLayout::from_dedup(&dedup, addr_ty, bit_ty, bytecode_base);
 
     // Allocate per-type register storages starting at reg_storage_base.
     // All &mut types operations must finish BEFORE creating `ir_types_slice`.
@@ -258,15 +423,36 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
         commitment.map(|cfg| cfg.algorithm.output_type_id(types));
 
     // Now safe to use `&types.0` for reg allocation and commitment hashing.
-    let reg_alloc = RegAlloc::build(&cse_blocks, reg_storage_base, &types.0);
+    let reg_alloc = match &mut reg {
+        Some(r) => RegAlloc::build_with(
+            &cse_blocks,
+            &mut |ty| r.alloc_register_file(ty),
+            &types.0,
+        ),
+        None => RegAlloc::build(
+            &cse_blocks,
+            layout.next_free_storage_after_bytecode(bytecode_base),
+            &types.0,
+        ),
+    };
 
     // Build commitment context (pre-computes native hashes for every block).
+    // Registry mode allocates fresh commitment/key spaces, ignoring the
+    // numeric values in the commitment config.
     let commitment_ctx: Option<CommitmentCtx<'_, H>> =
-        commitment
-            .zip(commitment_hash_ty)
-            .map(|(cfg, hash_output_ty)| {
-                build_commitment_ctx(
-                    cfg,
+        match commitment.zip(commitment_hash_ty) {
+            Some((ccfg, hash_output_ty)) => {
+                let (cs, ks) = match &mut reg {
+                    Some(r) => (
+                        r.alloc_commitment(0),
+                        ccfg.key_storage.map(|_| r.alloc_commitment(1)),
+                    ),
+                    None => (ccfg.commitment_storage, ccfg.key_storage),
+                };
+                Some(build_commitment_ctx(
+                    ccfg,
+                    cs,
+                    ks,
                     &cse_blocks,
                     &dedup,
                     &layout,
@@ -275,8 +461,30 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
                     hash_output_ty,
                     commitment_key_type_ids.clone(),
                     commitment_key_schema.clone(),
-                )
-            });
+                ))
+            }
+            None => None,
+        };
+
+    // Every storage this module consumes, for downstream passes
+    // (`storage_to_mux`, region tagging, source naming).
+    let mut consumed_storages: Vec<(StorageId, VirtStorageRole)> = Vec::new();
+    consumed_storages.push((bytecode_base, VirtStorageRole::HandlerSlot));
+    {
+        let region_end = layout.next_free_storage_after_bytecode(bytecode_base);
+        for raw in (bytecode_base.0 + 1)..region_end {
+            consumed_storages.push((StorageId(raw), VirtStorageRole::BytecodeTable));
+        }
+    }
+    for &sid in reg_alloc.storage_per_type.values() {
+        consumed_storages.push((sid, VirtStorageRole::RegisterFile));
+    }
+    if let Some(ctx) = &commitment_ctx {
+        consumed_storages.push((ctx.commitment_storage, VirtStorageRole::Commitment));
+        if let Some(ks) = ctx.key_storage {
+            consumed_storages.push((ks, VirtStorageRole::Commitment));
+        }
+    }
 
     // Key params the caller must supply as the first entry-block arguments.
     let key_params: Vec<(Constant, IRTypeId)> = commitment
@@ -308,13 +516,14 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
         addr_ty,
         bit_ty,
         cfg,
+        bytecode_base,
         types,
         commitment_ctx.as_ref(),
         &ctrl_prov,
     );
 
     let commitment_preinit = commitment_ctx.as_ref().map(|ctx| CommitmentPreInit {
-        storage: ctx.config.commitment_storage,
+        storage: ctx.commitment_storage,
         hash_output_ty: ctx.hash_output_ty,
         per_block: &ctx.per_block,
     });
@@ -323,7 +532,7 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
         &dedup,
         &layout,
         &reg_alloc,
-        cfg.bytecode_storage,
+        bytecode_base,
         addr_ty,
         &types.0,
         commitment_preinit,
@@ -351,6 +560,7 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
         blocks_in,
         key_params,
         n_appended_regions: 0,
+        consumed_storages,
     }
 }
 
@@ -437,7 +647,7 @@ pub(crate) struct RegAlloc {
     /// register.
     pub(crate) return_regs: Vec<RegRef>,
     /// Dedicated [`StorageId`] for each type's register file.
-    storage_per_type: BTreeMap<IRTypeId, StorageId>,
+    pub(crate) storage_per_type: BTreeMap<IRTypeId, StorageId>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -447,9 +657,31 @@ pub(crate) struct RegRef {
 }
 
 impl RegAlloc {
+    /// Legacy entry: bump-allocate per-type register-file storages starting
+    /// at `storage_base`.
     pub(crate) fn build<P: Clone>(
         blocks: &IRBlocks<P>,
         storage_base: u32,
+        ir_types: &[IRType],
+    ) -> Self {
+        let mut next = storage_base;
+        Self::build_with(
+            blocks,
+            &mut |_ty| {
+                let id = StorageId(next);
+                next += 1;
+                id
+            },
+            ir_types,
+        )
+    }
+
+    /// Allocate the register file with caller-supplied storage IDs: `alloc`
+    /// is invoked once per register-file type, in a deterministic order
+    /// (param types by [`IRTypeId`], then any return-only types likewise).
+    pub(crate) fn build_with<P: Clone>(
+        blocks: &IRBlocks<P>,
+        alloc: &mut dyn FnMut(IRTypeId) -> StorageId,
         ir_types: &[IRType],
     ) -> Self {
         let mut per_block_params: Vec<Vec<RegRef>> = Vec::with_capacity(blocks.blocks.len());
@@ -522,19 +754,17 @@ impl RegAlloc {
             }
         }
 
-        // Assign a StorageId to each type used.  The caller passes in
-        // a base above the bytecode range so the two never collide.
+        // Assign a StorageId to each type used via the caller's allocator
+        // (legacy bump base, or a StorageRegistry in registry mode — either
+        // way the bytecode range and register file never collide).
         let mut storage_per_type: BTreeMap<IRTypeId, StorageId> = BTreeMap::new();
         {
-            let mut next_sid = storage_base;
             for &ty in max_param_idx.keys() {
-                storage_per_type.insert(ty, StorageId(next_sid));
-                next_sid += 1;
+                storage_per_type.insert(ty, alloc(ty));
             }
             for &ty in &return_arg_tys {
                 if !storage_per_type.contains_key(&ty) {
-                    storage_per_type.insert(ty, StorageId(next_sid));
-                    next_sid += 1;
+                    storage_per_type.insert(ty, alloc(ty));
                 }
             }
         }
@@ -870,6 +1100,7 @@ fn emit_output_ir<P: Clone, H: IrHashAlgorithm>(
     addr_ty: IRTypeId,
     bit_ty: IRTypeId,
     cfg: &VirtualizeConfig,
+    bytecode_base: StorageId,
     types: &mut IRTypes,
     commitment: Option<&CommitmentCtx<'_, H>>,
     ctrl_prov: &P,
@@ -900,7 +1131,7 @@ fn emit_output_ir<P: Clone, H: IrHashAlgorithm>(
 
     let dd = cfg.direct_dispatch.then(|| DirectDispatch {
         dedup,
-        bytecode_storage: cfg.bytecode_storage,
+        bytecode_storage: bytecode_base,
     });
 
     // --- handlers (+ arm sub-blocks) ---
@@ -915,7 +1146,7 @@ fn emit_output_ir<P: Clone, H: IrHashAlgorithm>(
             reg_alloc,
             addr_ty,
             bit_ty,
-            cfg.bytecode_storage,
+            bytecode_base,
             types,
             &mut next_sub_bid,
             dd.as_ref(),
@@ -933,7 +1164,7 @@ fn emit_output_ir<P: Clone, H: IrHashAlgorithm>(
         let return_block = emit_return_block(reg_alloc, &return_arg_tys, addr_ty, ctrl_prov);
         let init_dispatch = emit_dispatch_block_with_base(
             dedup,
-            cfg.bytecode_storage,
+            bytecode_base,
             addr_ty,
             DD_HANDLER_BID_BASE,
             ctrl_prov,
@@ -946,7 +1177,7 @@ fn emit_output_ir<P: Clone, H: IrHashAlgorithm>(
         // Layout: SETUP | DISPATCHER | RETURN | DISPATCH | handlers | subblocks
         let dispatcher = emit_dispatcher_block(addr_ty, bit_ty, ctrl_prov);
         let return_block = emit_return_block(reg_alloc, &return_arg_tys, addr_ty, ctrl_prov);
-        let dispatch = emit_dispatch_block(dedup, cfg.bytecode_storage, addr_ty, ctrl_prov);
+        let dispatch = emit_dispatch_block(dedup, bytecode_base, addr_ty, ctrl_prov);
         all_blocks = Vec::with_capacity(4 + n_handlers + extra_subblocks.len());
         all_blocks.push(setup);
         all_blocks.push(dispatcher);
@@ -1003,7 +1234,7 @@ pub(crate) fn emit_setup_block<P: Clone, H: IrHashAlgorithm>(
 
     // 0. Write key params to key_storage so handlers can read them back.
     if let Some(ctx) = commitment {
-        if let (Some(key_storage), false) = (ctx.config.key_storage, ctx.key_type_ids.is_empty()) {
+        if let (Some(key_storage), false) = (ctx.key_storage, ctx.key_type_ids.is_empty()) {
             for (k_idx, &key_ty) in ctx.key_type_ids.iter().enumerate() {
                 let addr = b.push(Stmt::Const(const_u32(k_idx as u32), addr_ty));
                 b.push(Stmt::StorageWrite {
@@ -2299,7 +2530,7 @@ fn emit_commitment_check_ir<H: IrHashAlgorithm>(
 ) -> IRVarId {
     // 0. Read key words from key_storage (one StorageRead per key word).
     let mut key_vars: Vec<(IRVarId, IRTypeId)> = Vec::with_capacity(ctx.key_type_ids.len());
-    if let Some(key_storage) = ctx.config.key_storage {
+    if let Some(key_storage) = ctx.key_storage {
         for (k_idx, &key_ty) in ctx.key_type_ids.iter().enumerate() {
             let addr = b.push(Stmt::Const(const_u32(k_idx as u32), addr_ty));
             let kv = b.push(Stmt::StorageRead {
@@ -2346,7 +2577,7 @@ fn emit_commitment_check_ir<H: IrHashAlgorithm>(
     // 4. Read expected commitment from commitment_storage.
     let hash_ty = ctx.hash_output_ty;
     let expected = b.push(Stmt::StorageRead {
-        storage: ctx.config.commitment_storage,
+        storage: ctx.commitment_storage,
         ty: hash_ty,
         addr: pc,
     });
@@ -2381,6 +2612,8 @@ fn emit_commitment_check_ir<H: IrHashAlgorithm>(
 /// creating the context).
 fn build_commitment_ctx<'a, P: Clone, H: IrHashAlgorithm>(
     config: &'a CommitmentConfig<H>,
+    commitment_storage: StorageId,
+    key_storage: Option<StorageId>,
     cse_blocks: &IRBlocks<P>,
     dedup: &DedupTable<IrHandlerKey>,
     layout: &GlobalLayout,
@@ -2423,6 +2656,8 @@ fn build_commitment_ctx<'a, P: Clone, H: IrHashAlgorithm>(
 
     CommitmentCtx {
         config,
+        commitment_storage,
+        key_storage,
         per_block,
         hash_output_ty,
         key_type_ids,

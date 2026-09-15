@@ -199,6 +199,15 @@ impl<P: Clone> StorageRegistry<P> {
     /// chosen. Returns the empty block (`len == 0`, base at the cursor)
     /// for `n == 0`.
     pub fn register_block(&mut self, purpose: P, n: u32) -> StorageBlock {
+        self.register_block_with(|_| purpose.clone(), n)
+    }
+
+    /// Allocate a contiguous block of `n` IDs with a per-offset purpose:
+    /// `purpose(k)` is recorded for `base + k`. Use this when one reserved
+    /// region contains distinguishable roles (e.g. a handler register
+    /// followed by bytecode slots) so the registry's record matches
+    /// fine-grained reporting exactly.
+    pub fn register_block_with(&mut self, mut purpose: impl FnMut(u32) -> P, n: u32) -> StorageBlock {
         if n == 0 {
             return StorageBlock {
                 base: StorageId(self.next),
@@ -216,7 +225,7 @@ impl<P: Clone> StorageRegistry<P> {
             break;
         }
         for k in 0..n {
-            self.by_id.insert(StorageId(base + k), purpose.clone());
+            self.by_id.insert(StorageId(base + k), purpose(k));
         }
         self.advance_cursor_past(base, n);
         StorageBlock {
@@ -393,6 +402,42 @@ mod tests {
         let empty = reg.register_block(StoragePurpose::Default, 0);
         assert_eq!(empty.len, 0);
         assert_eq!(reg.len(), 1 + 3 + 2 + 1);
+    }
+
+    #[test]
+    fn register_block_with_records_per_offset_purposes() {
+        let mut reg = StorageRegistry::<StoragePurpose>::new();
+        let blk = reg.register_block_with(
+            |off| {
+                if off == 0 {
+                    StoragePurpose::Virt {
+                        role: VirtStorageRole::HandlerSlot,
+                        detail: 0,
+                    }
+                } else {
+                    StoragePurpose::Virt {
+                        role: VirtStorageRole::BytecodeTable,
+                        detail: off,
+                    }
+                }
+            },
+            3,
+        );
+        assert_eq!(blk.base, StorageId(0));
+        assert_eq!(
+            reg.purpose_of(StorageId(0)),
+            Some(&StoragePurpose::Virt {
+                role: VirtStorageRole::HandlerSlot,
+                detail: 0
+            })
+        );
+        assert_eq!(
+            reg.purpose_of(StorageId(2)),
+            Some(&StoragePurpose::Virt {
+                role: VirtStorageRole::BytecodeTable,
+                detail: 2
+            })
+        );
     }
 
     #[test]

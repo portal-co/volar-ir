@@ -316,7 +316,7 @@ pub(crate) fn build_bir_storage_init(
     }
 
     BirVirtStorageInit {
-        pre_init: lanes_to_bir_pre_init(lanes),
+        pre_init: lanes_to_bir_pre_init(lanes, pc_bits),
         bytecode: virt_bytecode_from_dedup(dedup),
     }
 }
@@ -337,13 +337,24 @@ fn lane_mut_bool<'a>(
         .or_insert_with(|| vec![false; total_rows])
 }
 
-fn lanes_to_bir_pre_init(lanes: BTreeMap<StorageId, Vec<bool>>) -> Vec<BIrPreInitSegment> {
+/// Convert per-storage data lanes into pre-init segments.
+///
+/// `addr_bits` is the lanes' element-address width (`pc_bits` for virt
+/// bytecode lanes). The segment `addr` must be a full-width base address:
+/// `add_to_address` computes element `i`'s address from it, and an
+/// under-width base silently produces element-0 at the *empty* address
+/// while readers use fixed-width all-false — a latent dispatch loop that
+/// single-block (`pc_bits == 0`) inputs never expose.
+fn lanes_to_bir_pre_init(
+    lanes: BTreeMap<StorageId, Vec<bool>>,
+    addr_bits: usize,
+) -> Vec<BIrPreInitSegment> {
     lanes
         .into_iter()
         .map(|(storage, data)| BIrPreInitSegment {
             storage,
             lane: LaneId(0),
-            addr: vec![],
+            addr: vec![false; addr_bits],
             data,
         })
         .collect()

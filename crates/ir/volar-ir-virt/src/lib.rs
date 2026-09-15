@@ -51,7 +51,7 @@ pub mod preinit;
 pub mod split;
 
 pub use adaptive_cfg::AdaptiveSplitConfig;
-pub use bir::virtualize_bir;
+pub use bir::{virtualize_bir, virtualize_bir_with_registry};
 pub use bytecode::{
     AppendedRegionKind, AppendedRegionMeta, BytecodeEntry, BytecodeRowKind, HandlerImmSchema,
     OperandMode, TripCount, VirtBytecode,
@@ -59,7 +59,10 @@ pub use bytecode::{
 pub use canon::{BirHandlerKey, BlockImmediates, HandlerKey, ImmediateKind, IrHandlerKey};
 pub use ctx::VirtOutput;
 pub use hash::{CommitmentConfig, IrEmitter, IrHashAlgorithm, SipHash48, XorFoldHash32};
-pub use ir::{virtualize_ir, virtualize_ir_committed};
+pub use ir::{
+    virtualize_ir, virtualize_ir_committed, virtualize_ir_committed_with_registry,
+    virtualize_ir_with_registry,
+};
 pub use split::plan_adaptive_split;
 
 use volar_ir_common::StorageId;

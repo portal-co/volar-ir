@@ -8,7 +8,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType,
     IRTypeId, IRTypes, IRVarId,
 };
-use volar_ir_common::{Stmt, StorageId, Type as PrimType};
+use volar_ir_common::{Stmt, StorageId, Type as PrimType, VirtStorageRole};
 
 use crate::VirtualizeConfig;
 use crate::bytecode::AppendedRegionKind;
@@ -19,9 +19,9 @@ use crate::canon::{
 use crate::ctx::{DedupTable, VirtOutput};
 use crate::hash::IrHashAlgorithm;
 use crate::ir::{
-    GlobalLayout, HandlerSchema, IRBlockUnfinished, RETURN_BID, RegAlloc, const_u32,
-    emit_dispatch_block_with_base, emit_dispatcher_block, emit_handler_block, emit_prologue_stmts,
-    emit_return_block, emit_setup_block,
+    GlobalLayout, HandlerSchema, IRBlockUnfinished, RETURN_BID, RegAlloc, VirtStorageReg,
+    const_u32, emit_dispatch_block_with_base, emit_dispatcher_block, emit_handler_block,
+    emit_prologue_stmts, emit_return_block, emit_setup_block,
 };
 use crate::layout::{AdaptiveSplitPlan, BlockCompositePlan, SegmentInvoke};
 use crate::preinit::{build_ir_storage_init_adaptive, merge_pre_init};
@@ -32,21 +32,56 @@ const ADAPTIVE_SUB_RETURN_BID: u32 = 6;
 const ADAPTIVE_REROLL_DRIVER_BID: u32 = 7;
 const ADAPTIVE_HANDLER_BID_BASE: u32 = 8;
 
-pub(super) fn virtualize_ir_adaptive<P: Clone + Default, H: IrHashAlgorithm>(
+pub(super) fn virtualize_ir_adaptive<P, H, RP, F>(
     cse_blocks: &IRBlocks<P>,
     types: &mut IRTypes,
     cfg: &VirtualizeConfig,
     split_plan: AdaptiveSplitPlan,
     blocks_in: usize,
-) -> VirtOutput<IRBlocks<P>> {
+    reg: Option<VirtStorageReg<'_, RP, F>>,
+) -> VirtOutput<IRBlocks<P>>
+where
+    P: Clone + Default,
+    H: IrHashAlgorithm,
+    RP: Clone,
+    F: FnMut(VirtStorageRole, u32) -> RP,
+{
     let addr_ty = types.intern(IRType::Primitive(PrimType::_32));
     let bit_ty = types.intern(IRType::Primitive(PrimType::Bit));
 
     let per_block_canon = build_outer_canon_keys(cse_blocks, &split_plan.block_plans);
     let dedup = DedupTable::build(per_block_canon);
-    let layout = GlobalLayout::from_dedup(&dedup, addr_ty, bit_ty, cfg.bytecode_storage);
-    let reg_storage_base = layout.next_free_storage_after_bytecode(cfg.bytecode_storage);
-    let reg_alloc = RegAlloc::build(cse_blocks, reg_storage_base, &types.0);
+
+    // Registry mode: reserve one contiguous block for the bytecode region
+    // and re-base onto it, mirroring `virtualize_ir_impl`.
+    let mut reg = reg;
+    let bytecode_base = match &mut reg {
+        Some(r) => {
+            let region_size = GlobalLayout::from_dedup(&dedup, addr_ty, bit_ty, StorageId(0))
+                .next_free_storage_after_bytecode(StorageId(0));
+            r.alloc_bytecode_region(region_size, |off| {
+                if off == 0 {
+                    (VirtStorageRole::HandlerSlot, 0)
+                } else {
+                    (VirtStorageRole::BytecodeTable, off)
+                }
+            })
+        }
+        None => cfg.bytecode_storage,
+    };
+    let layout = GlobalLayout::from_dedup(&dedup, addr_ty, bit_ty, bytecode_base);
+    let reg_alloc = match &mut reg {
+        Some(r) => RegAlloc::build_with(
+            cse_blocks,
+            &mut |ty| r.alloc_register_file(ty),
+            &types.0,
+        ),
+        None => RegAlloc::build(
+            cse_blocks,
+            layout.next_free_storage_after_bytecode(bytecode_base),
+            &types.0,
+        ),
+    };
 
     let ctrl_prov: P = cse_blocks
         .blocks
@@ -65,7 +100,7 @@ pub(super) fn virtualize_ir_adaptive<P: Clone + Default, H: IrHashAlgorithm>(
     all_handler_keys.extend(reroll_bodies.keys.clone());
 
     let merged_layout =
-        GlobalLayout::from_keys(&all_handler_keys, addr_ty, bit_ty, cfg.bytecode_storage);
+        GlobalLayout::from_keys(&all_handler_keys, addr_ty, bit_ty, bytecode_base);
 
     let out_blocks = emit_adaptive_module::<P, H>(
         cse_blocks,
@@ -77,16 +112,30 @@ pub(super) fn virtualize_ir_adaptive<P: Clone + Default, H: IrHashAlgorithm>(
         addr_ty,
         bit_ty,
         cfg,
+        bytecode_base,
         types,
         &ctrl_prov,
     );
+
+    // Every storage this module consumes, for downstream passes.
+    let mut consumed_storages: Vec<(StorageId, VirtStorageRole)> = Vec::new();
+    consumed_storages.push((bytecode_base, VirtStorageRole::HandlerSlot));
+    {
+        let region_end = merged_layout.next_free_storage_after_bytecode(bytecode_base);
+        for raw in (bytecode_base.0 + 1)..region_end {
+            consumed_storages.push((StorageId(raw), VirtStorageRole::BytecodeTable));
+        }
+    }
+    for &sid in reg_alloc.storage_per_type.values() {
+        consumed_storages.push((sid, VirtStorageRole::RegisterFile));
+    }
 
     let storage_init = build_ir_storage_init_adaptive(
         cse_blocks,
         &dedup,
         &merged_layout,
         &reg_alloc,
-        cfg.bytecode_storage,
+        bytecode_base,
         addr_ty,
         &types.0,
         &split_plan,
@@ -103,6 +152,7 @@ pub(super) fn virtualize_ir_adaptive<P: Clone + Default, H: IrHashAlgorithm>(
         blocks_in,
         key_params: Vec::new(),
         n_appended_regions: split_plan.layout.regions.len(),
+        consumed_storages,
     }
 }
 
@@ -230,6 +280,7 @@ fn emit_adaptive_module<P: Clone, H: IrHashAlgorithm>(
     addr_ty: IRTypeId,
     bit_ty: IRTypeId,
     cfg: &VirtualizeConfig,
+    bytecode_base: StorageId,
     types: &mut IRTypes,
     ctrl_prov: &P,
 ) -> IRBlocks<P> {
@@ -249,7 +300,7 @@ fn emit_adaptive_module<P: Clone, H: IrHashAlgorithm>(
     let return_block = emit_return_block(reg_alloc, &return_arg_tys, addr_ty, ctrl_prov);
     let dispatch = emit_dispatch_block_with_base(
         dedup,
-        cfg.bytecode_storage,
+        bytecode_base,
         addr_ty,
         ADAPTIVE_HANDLER_BID_BASE,
         ctrl_prov,
@@ -286,7 +337,7 @@ fn emit_adaptive_module<P: Clone, H: IrHashAlgorithm>(
                 reg_alloc,
                 addr_ty,
                 bit_ty,
-                cfg.bytecode_storage,
+                bytecode_base,
                 types,
                 &mut next_sub_bid,
                 None,

@@ -14,10 +14,11 @@ use volar_ir::{
     boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId},
     ir::{IRBlockId, IRBlockTargetId, IRVarId},
 };
-use volar_ir_common::StorageId;
+use volar_ir_common::{StorageId, StoragePurpose, StorageRegistry, VirtStorageRole};
 
 use crate::canon::{BirHandlerKey, BlockImmediates, canonicalize_bir_block};
 use crate::ctx::{DedupTable, VirtOutput};
+use crate::ir::VirtStorageReg;
 use crate::preinit::{build_bir_storage_init, merge_bir_pre_init};
 use crate::{DedupPolicy, DispatchMode, VirtualizeConfig};
 
@@ -38,6 +39,43 @@ pub fn virtualize_bir<P: Clone + Default>(
     blocks: &BIrBlocks<P>,
     cfg: &VirtualizeConfig,
 ) -> VirtOutput<BIrBlocks<P>> {
+    virtualize_bir_impl(
+        blocks,
+        cfg,
+        None::<VirtStorageReg<'_, StoragePurpose, fn(VirtStorageRole, u32) -> StoragePurpose>>,
+    )
+}
+
+/// Like [`virtualize_bir`], but allocates the whole bytecode region
+/// (handler-index bits + per-handler target slots) from `registry` instead
+/// of deriving IDs from `cfg.bytecode_storage` by arithmetic. The numeric
+/// value of `cfg.bytecode_storage` is ignored; the allocated IDs are
+/// reported in [`VirtOutput::consumed_storages`] and recorded in the
+/// registry under `purpose(role, detail)`.
+pub fn virtualize_bir_with_registry<P, RP, F>(
+    blocks: &BIrBlocks<P>,
+    cfg: &VirtualizeConfig,
+    registry: &mut StorageRegistry<RP>,
+    purpose: F,
+) -> VirtOutput<BIrBlocks<P>>
+where
+    P: Clone + Default,
+    RP: Clone,
+    F: FnMut(VirtStorageRole, u32) -> RP,
+{
+    virtualize_bir_impl(blocks, cfg, Some(VirtStorageReg { registry, purpose }))
+}
+
+fn virtualize_bir_impl<P, RP, F>(
+    blocks: &BIrBlocks<P>,
+    cfg: &VirtualizeConfig,
+    reg: Option<VirtStorageReg<'_, RP, F>>,
+) -> VirtOutput<BIrBlocks<P>>
+where
+    P: Clone + Default,
+    RP: Clone,
+    F: FnMut(VirtStorageRole, u32) -> RP,
+{
     assert!(
         matches!(cfg.dedup, DedupPolicy::ConstantsAndTargets),
         "volar-ir-virt v1 only implements DedupPolicy::ConstantsAndTargets"
@@ -83,7 +121,37 @@ pub fn virtualize_bir<P: Clone + Default>(
     // wide at subsequent StorageIds.
 
     // Compute per-handler slot layout (just target slots for BIR v1).
-    let layout = BirSlotLayout::from_dedup(&dedup, handler_bits, pc_bits, cfg.bytecode_storage);
+    // Registry mode: reserve one contiguous block for the whole region and
+    // re-base onto it, ignoring `cfg.bytecode_storage`'s numeric value.
+    let mut reg = reg;
+    let bytecode_base = match &mut reg {
+        Some(r) => {
+            let region_size =
+                BirSlotLayout::from_dedup(&dedup, handler_bits, pc_bits, StorageId(0)).total;
+            r.alloc_bytecode_region(region_size, |off| {
+                if (off as usize) < handler_bits {
+                    (VirtStorageRole::HandlerSlot, off)
+                } else {
+                    (VirtStorageRole::BytecodeTable, off)
+                }
+            })
+        }
+        None => cfg.bytecode_storage,
+    };
+    let layout = BirSlotLayout::from_dedup(&dedup, handler_bits, pc_bits, bytecode_base);
+
+    // Every storage this module consumes, for downstream passes.
+    let mut consumed_storages: Vec<(StorageId, VirtStorageRole)> = Vec::new();
+    for k in 0..handler_bits as u32 {
+        consumed_storages.push((StorageId(bytecode_base.0 + k), VirtStorageRole::HandlerSlot));
+    }
+    for row in &layout.per_handler {
+        for &slot_base in row {
+            for k in 0..pc_bits as u32 {
+                consumed_storages.push((StorageId(slot_base.0 + k), VirtStorageRole::BytecodeTable));
+            }
+        }
+    }
 
     // Derive ctrl_prov from the first statement in any input block.
     let ctrl_prov: P = blocks
@@ -102,6 +170,7 @@ pub fn virtualize_bir<P: Clone + Default>(
         &dedup,
         &layout,
         cfg,
+        bytecode_base,
         pc_bits,
         handler_bits,
         &ctrl_prov,
@@ -110,7 +179,7 @@ pub fn virtualize_bir<P: Clone + Default>(
     let storage_init = build_bir_storage_init(
         &dedup,
         &layout.per_handler,
-        cfg.bytecode_storage,
+        bytecode_base,
         handler_bits,
         pc_bits,
     );
@@ -138,6 +207,7 @@ pub fn virtualize_bir<P: Clone + Default>(
         blocks_in,
         key_params: alloc::vec![],
         n_appended_regions: 0,
+        consumed_storages,
     }
 }
 
@@ -193,6 +263,9 @@ struct BirSlotLayout {
     /// `per_handler[h]` = list of target-slot base storage ids (each is
     /// a `pc_bits`-wide stored value).
     pub(crate) per_handler: Vec<Vec<StorageId>>,
+    /// Total storages in the bytecode region: `handler_bits` for the
+    /// handler index plus `pc_bits` per target slot.
+    pub(crate) total: u32,
 }
 
 impl BirSlotLayout {
@@ -216,7 +289,10 @@ impl BirSlotLayout {
             }
             per_handler.push(slots);
         }
-        Self { per_handler }
+        Self {
+            per_handler,
+            total: next_slot - base.0,
+        }
     }
 }
 
@@ -291,6 +367,7 @@ fn emit_output_bir<P: Clone>(
     dedup: &DedupTable<BirHandlerKey>,
     layout: &BirSlotLayout,
     cfg: &VirtualizeConfig,
+    bytecode_base: StorageId,
     pc_bits: usize,
     handler_bits: usize,
     ctrl_prov: &P,
@@ -350,7 +427,7 @@ fn emit_output_bir<P: Clone>(
     // ---- Dispatcher + interior nodes -------------------------------------
     let (dispatcher, interior_blocks) = emit_dispatcher_blocks::<P>(
         common_params,
-        cfg.bytecode_storage,
+        bytecode_base,
         pc_bits,
         handler_bits,
         &handler_ids,
