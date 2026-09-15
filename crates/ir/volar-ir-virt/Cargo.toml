@@ -14,4 +14,4 @@ volar-provenance.workspace = true
 volar-lir.workspace = true
 
 [dev-dependencies]
-volar-fuzz = { git = "https://github.com/portal-co/volar-ir.git" }
+volar-fuzz = { git = "https://github.com/portal-co/volar-ir" }

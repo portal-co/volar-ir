@@ -40,35 +40,35 @@ description = "Volar IR and VAFFLE: a reusable compiler IR, lowering pipeline (V
 repository = "https://github.com/portal-co/volar-ir.git"
 
 [workspace.dependencies]
-volar-ir-config        = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-ir               = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-ir-passes        = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-ir-opt           = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-ir-virt          = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-ir-text          = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-vaffle                 = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-vaffle-target    = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-ir-common        = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-provenance       = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-side             = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-lir              = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-lir-text         = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-lir-saved        = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-lir-test-corpus  = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
+volar-ir-config        = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-ir               = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-ir-passes        = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-ir-opt           = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-ir-virt          = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-ir-text          = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+vaffle                 = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-vaffle-target    = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-ir-common        = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-provenance       = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-side             = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-lir              = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-lir-text         = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-lir-saved        = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-lir-test-corpus  = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
 volar-ssa-lir-replay   = { path = "crates/ir/volar-ssa-lir-replay", version = "0.1.0" }
-volar-fuzz             = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-c-backend         = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-llvm-backend      = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
-volar-wasm-backend      = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
+volar-fuzz             = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-c-backend         = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-llvm-backend      = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
+volar-wasm-backend      = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
 volar-circuit-source    = { path = "crates/backends/volar-circuit-source", version = "0.1.0" }
 volar-noir-backend      = { path = "crates/backends/volar-noir-backend", version = "0.1.0" }
 volar-pod2-backend      = { path = "crates/backends/volar-pod2-backend", version = "0.1.0" }
-volar-ir-build          = { git = "https://github.com/portal-co/volar-ir.git", version = "0.1.0" }
+volar-ir-build          = { git = "https://github.com/portal-co/volar-ir", version = "0.1.0" }
 volar-llvm-vaffle-import = { path = "crates/frontends/volar-llvm-vaffle-import", version = "0.1.0" }
 volar-llvm-ir-import    = { path = "crates/frontends/volar-llvm-ir-import", version = "0.1.0" }
 
-portal-pc-waffle-ir       = { version = "0.6.0-alpha.1", git = "https://github.com/portal-co/waffle-.git" }
-portal-pc-waffle-frontend = { version = "0.6.0-alpha.1", git = "https://github.com/portal-co/waffle-.git" }
+portal-pc-waffle-ir       = { version = "0.6.0-alpha.1", git = "https://github.com/portal-co/waffle-" }
+portal-pc-waffle-frontend = { version = "0.6.0-alpha.1", git = "https://github.com/portal-co/waffle-" }
 wax-meta                  = { version = "0.1.0", git = "https://github.com/portal-co/portal-container.git" }
 
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
