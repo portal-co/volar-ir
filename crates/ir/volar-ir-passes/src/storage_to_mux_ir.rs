@@ -38,7 +38,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypeId,
     IRTypes, IRVarId, PrimType as Type,
 };
-use volar_ir_common::{Constant, PolyCoeffs, StorageId};
+use volar_ir_common::{Constant, PolyCoeffs, StorageId, StorageRegistry};
 
 /// Which storage id to eliminate, the value type of each cell, and the
 /// declared cell count.
@@ -51,6 +51,28 @@ pub struct StorageToMuxConfig {
     pub storage: StorageId,
     pub ty: IRTypeId,
     pub num_cells: usize,
+}
+
+impl StorageToMuxConfig {
+    /// Build a config for the first storage in `registry` whose purpose
+    /// matches `pred` (e.g. "the virt register file" or "WASM memory 0"),
+    /// instead of a hard-coded numeric id. `ty`/`num_cells` stay with the
+    /// caller — the registry coordinates *which* space, not its shape.
+    pub fn for_purpose<P>(
+        registry: &StorageRegistry<P>,
+        pred: impl Fn(StorageId, &P) -> bool,
+        ty: IRTypeId,
+        num_cells: usize,
+    ) -> Option<Self> {
+        registry
+            .iter()
+            .find(|(id, purpose)| pred(*id, purpose))
+            .map(|(id, _)| StorageToMuxConfig {
+                storage: id,
+                ty,
+                num_cells,
+            })
+    }
 }
 
 /// Why a Volar IR storage-to-MUX promotion failed.

@@ -265,6 +265,17 @@ pub enum VirtStorageRole {
     Commitment,
 }
 
+impl core::fmt::Display for VirtStorageRole {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            VirtStorageRole::BytecodeTable => f.write_str("bytecode"),
+            VirtStorageRole::RegisterFile => f.write_str("regfile"),
+            VirtStorageRole::HandlerSlot => f.write_str("handler"),
+            VirtStorageRole::Commitment => f.write_str("commitment"),
+        }
+    }
+}
+
 /// In-repo purpose vocabulary for [`StorageRegistry`].
 ///
 /// Extensible within the repo; the registry itself treats `P` as opaque
@@ -306,6 +317,24 @@ pub enum StoragePurpose {
     },
     /// Anything else; free-form label for diagnostics/naming.
     Other(String),
+}
+
+impl core::fmt::Display for StoragePurpose {
+    /// Human-readable label suitable for diagnostics and backend storage
+    /// naming (e.g. `volar-circuit-source`'s `WireNames`).
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            StoragePurpose::Default => f.write_str("default"),
+            StoragePurpose::Stack => f.write_str("stack"),
+            StoragePurpose::AllocaMarker => f.write_str("alloca"),
+            StoragePurpose::WasmMemory { index } => write!(f, "wasm-memory-{index}"),
+            StoragePurpose::LlvmGlobal { name } => write!(f, "global-{name}"),
+            StoragePurpose::Virt { role, detail } => write!(f, "virt-{role}-{detail}"),
+            StoragePurpose::VaffleSsaSpill => f.write_str("ssa-spill"),
+            StoragePurpose::Remapped { from } => write!(f, "remapped-from-{}", from.0),
+            StoragePurpose::Other(label) => f.write_str(label),
+        }
+    }
 }
 
 #[cfg(test)]

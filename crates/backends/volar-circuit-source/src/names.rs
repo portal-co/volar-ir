@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use volar_ir::ir::IRVarId;
-use volar_ir_common::StorageId;
+use volar_ir_common::{StorageId, StoragePurpose, StorageRegistry};
 
 use crate::error::EmitError;
 
@@ -40,6 +40,20 @@ impl WireNames {
 
     pub fn is_explicit_var(&self, id: IRVarId) -> bool {
         self.vars.contains_key(&id)
+    }
+
+    /// Name every storage recorded in a purpose registry, without
+    /// overriding names already set. Labels come from each purpose's
+    /// `Display` (e.g. `stack`, `wasm-memory-0`, `virt-regfile-3`), so
+    /// backend output is human-readable for free.
+    pub fn name_storages_from_purposes(
+        &mut self,
+        registry: &StorageRegistry<StoragePurpose>,
+    ) -> &mut Self {
+        for (id, purpose) in registry.iter() {
+            self.storages.entry(id).or_insert_with(|| purpose.to_string());
+        }
+        self
     }
 }
 
@@ -86,5 +100,31 @@ pub fn require_ident(name: &str, reason: &str) -> Result<(), EmitError> {
             name: name.to_string(),
             reason: reason.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use volar_ir_common::{StoragePurpose, StorageRegistry, VirtStorageRole};
+
+    #[test]
+    fn name_storages_from_purposes_fills_without_overriding() {
+        let mut registry = StorageRegistry::<StoragePurpose>::new();
+        let stack = registry.register(StoragePurpose::Stack);
+        let mem = registry.register(StoragePurpose::WasmMemory { index: 3 });
+        let virt = registry.register(StoragePurpose::Virt {
+            role: VirtStorageRole::RegisterFile,
+            detail: 2,
+        });
+
+        let mut names = WireNames::new();
+        names.name_storage(stack, "custom-stack");
+        names.name_storages_from_purposes(&registry);
+
+        // Pre-set name wins; the rest come from the purposes' Display.
+        assert_eq!(names.storage(stack), Some("custom-stack"));
+        assert_eq!(names.storage(mem), Some("wasm-memory-3"));
+        assert_eq!(names.storage(virt), Some("virt-regfile-2"));
     }
 }

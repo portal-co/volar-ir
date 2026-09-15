@@ -51,6 +51,7 @@ use volar_circuit_source::{
 use volar_ir::boolar::BIrBlocks;
 use volar_ir::circuit::{BCircuit, VCircuit};
 use volar_ir::ir::{IRBlocks, IRTypes};
+use volar_ir_common::{StoragePurpose, StorageRegistry};
 use volar_ir::rcircuit::RCircuit;
 use volar_lir_saved::{RecordingTarget, SavedLirModule};
 
@@ -140,6 +141,13 @@ pub trait PipelinePass<From: PipelineStage> {
 /// An IR-transform pipeline currently holding stage `S`'s data.
 pub struct Pipeline<S: PipelineStage> {
     data: S::Data,
+    /// Per-module storage registry (sidecar metadata, one per module):
+    /// passes and frontends that allocate storage spaces MAY record them
+    /// here, and callers can query it to address those spaces afterwards
+    /// (e.g. hand a virt register file to `storage_to_mux`, or name
+    /// storages at `emit_source`). The IR itself is unaffected; the
+    /// registry is threaded unchanged through every [`Pipeline::apply`].
+    storage_registry: StorageRegistry<StoragePurpose>,
     _stage: PhantomData<S>,
 }
 
@@ -150,8 +158,39 @@ impl<S: PipelineStage> Pipeline<S> {
     pub fn from_data(data: S::Data) -> Self {
         Pipeline {
             data,
+            storage_registry: StorageRegistry::new(),
             _stage: PhantomData,
         }
+    }
+
+    /// Like [`Pipeline::from_data`], but seeds the sidecar storage
+    /// registry (e.g. from a registry-mode frontend or pass) instead of
+    /// starting empty.
+    pub fn from_data_with_registry(
+        data: S::Data,
+        storage_registry: StorageRegistry<StoragePurpose>,
+    ) -> Self {
+        Pipeline {
+            data,
+            storage_registry,
+            _stage: PhantomData,
+        }
+    }
+
+    /// The module's storage registry (sidecar metadata).
+    pub fn storage_registry(&self) -> &StorageRegistry<StoragePurpose> {
+        &self.storage_registry
+    }
+
+    /// Mutable access to the module's storage registry, for passes that
+    /// allocate storage spaces outside the [`PipelinePass`] shape.
+    pub fn storage_registry_mut(&mut self) -> &mut StorageRegistry<StoragePurpose> {
+        &mut self.storage_registry
+    }
+
+    /// Unwrap into the stage data and the storage registry separately.
+    pub fn into_parts(self) -> (S::Data, StorageRegistry<StoragePurpose>) {
+        (self.data, self.storage_registry)
     }
 
     /// Unwrap the pipeline's current data.
@@ -166,7 +205,11 @@ impl<S: PipelineStage> Pipeline<S> {
 
     /// Apply any pass whose input stage is `S`.
     pub fn apply<P: PipelinePass<S>>(self, pass: P) -> Result<Pipeline<P::Output>, BoxError> {
-        Ok(Pipeline::from_data(pass.apply(self.data)?))
+        let storage_registry = self.storage_registry;
+        Ok(Pipeline::from_data_with_registry(
+            pass.apply(self.data)?,
+            storage_registry,
+        ))
     }
 }
 
@@ -467,9 +510,11 @@ impl Pipeline<VolarIrStage> {
         backend: &B,
         opt: &EmitOptions,
     ) -> Result<SourcePackage, BoxError> {
-        let (blocks, types) = self.into_data();
+        let ((blocks, types), registry) = self.into_parts();
+        let mut opt = opt.clone();
+        opt.wires.name_storages_from_purposes(&registry);
         let circuit = VCircuit::try_from_ir(&blocks).map_err(box_err)?;
-        emit_volar_circuit(&circuit, &types, backend, opt).map_err(box_err)
+        emit_volar_circuit(&circuit, &types, backend, &opt).map_err(box_err)
     }
 }
 
@@ -524,8 +569,10 @@ impl Pipeline<BoolarCircuitStage> {
         backend: &B,
         opt: &EmitOptions,
     ) -> Result<SourcePackage, BoxError> {
-        let circuit = self.into_data();
-        emit_bool_circuit(&circuit, backend, opt).map_err(box_err)
+        let (circuit, registry) = self.into_parts();
+        let mut opt = opt.clone();
+        opt.wires.name_storages_from_purposes(&registry);
+        emit_bool_circuit(&circuit, backend, &opt).map_err(box_err)
     }
 }
 
@@ -997,5 +1044,80 @@ mod tests {
             Ok(_) => panic!("expected a symbolic-branch error"),
             Err(e) => assert!(e.to_string().contains("symbolic branch")),
         }
+    }
+
+    #[test]
+    fn storage_registry_sidecar_threads_through_apply() {
+        use volar_ir_common::{StorageId, StoragePurpose, StorageRegistry};
+
+        let types = bit_types();
+        let blocks: IRBlocks<()> = IRBlocks::new(vec![IRBlock {
+            params: vec![],
+            stmts: vec![Node::new(
+                IRStmt::Const(Constant { hi: 0, lo: 1 }, IRTypeId(0)),
+                (),
+                None,
+            )],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+            },
+        }]);
+
+        let mut registry = StorageRegistry::<StoragePurpose>::new();
+        let claimed = registry.register(StoragePurpose::Stack);
+        let pipeline = Pipeline::from_data_with_registry((blocks, types), registry);
+
+        // The sidecar survives a pass application and stays queryable.
+        let pipeline = pipeline.lower_to_boolar().expect("lower");
+        assert_eq!(
+            pipeline.storage_registry().purpose_of(claimed),
+            Some(&StoragePurpose::Stack)
+        );
+        let (_data, registry) = pipeline.into_parts();
+        assert_eq!(
+            registry.purpose_of(claimed),
+            Some(&StoragePurpose::Stack)
+        );
+    }
+
+    #[test]
+    fn storage_to_mux_config_for_purpose_finds_registered_storage() {
+        use volar_ir_common::{StoragePurpose, StorageRegistry, VirtStorageRole};
+
+        let mut registry = StorageRegistry::<StoragePurpose>::new();
+        let _stack = registry.register(StoragePurpose::Stack);
+        let regfile = registry.register(StoragePurpose::Virt {
+            role: VirtStorageRole::RegisterFile,
+            detail: 0,
+        });
+
+        let cfg = volar_ir_passes::StorageToMuxConfig::for_purpose(
+            &registry,
+            |_, p| {
+                matches!(
+                    p,
+                    StoragePurpose::Virt {
+                        role: VirtStorageRole::RegisterFile,
+                        ..
+                    }
+                )
+            },
+            IRTypeId(0),
+            4,
+        )
+        .expect("a register file is registered");
+        assert_eq!(cfg.storage, regfile);
+        assert_eq!(cfg.num_cells, 4);
+
+        // No match → None (caller decides the fallback).
+        assert!(
+            volar_ir_passes::StorageToMuxConfig::for_purpose(
+                &registry,
+                |_, p| matches!(p, StoragePurpose::VaffleSsaSpill),
+                IRTypeId(0),
+                1,
+            )
+            .is_none()
+        );
     }
 }
