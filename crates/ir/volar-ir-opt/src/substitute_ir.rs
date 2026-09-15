@@ -15,7 +15,8 @@ use volar_ir::ir::{
     IRVarId,
 };
 use volar_ir_common::{
-    Constant, IrType, Stmt, StorageAllocator, StorageId, Type as PrimType, TypeId, TypeRemapper,
+    Constant, IrType, Stmt, StorageAllocator, StorageId, StorageRegistry, Type as PrimType,
+    TypeId, TypeRemapper,
 };
 
 use crate::common::{apply_aliases_to_stmt, stmt_output_type};
@@ -80,9 +81,55 @@ pub fn substitute_ir_blocks(
 ) -> usize {
     let mut total = 0;
     for sub in subs {
-        total += apply_one(blocks, types, sub, allocator);
+        total += apply_one(blocks, types, sub, &mut |_from| allocator.alloc());
     }
     total
+}
+
+/// Registry-mode [`substitute_ir_blocks`]: the module's storages are
+/// adopted into `registry` (one registry per module) under
+/// `purpose(from)`, and every guest storage is remapped to a freshly
+/// registered space (also `purpose(from)`) — never the scan-max + bump
+/// range, which a guest module can silently collide with when it used
+/// the same allocator seed convention.
+///
+/// In-repo callers pass `|from| StoragePurpose::Remapped { from }`.
+///
+/// Returns number of call sites substituted.
+pub fn substitute_ir_blocks_with_registry<RP>(
+    blocks: &mut IRBlocks,
+    types: &mut IRTypes,
+    subs: &[IrSubstitution],
+    registry: &mut StorageRegistry<RP>,
+    mut purpose: impl FnMut(StorageId) -> RP,
+) -> usize {
+    registry.adopt_in_use(storages_in_use(blocks), &mut purpose);
+    let mut total = 0;
+    for sub in subs {
+        total += apply_one(blocks, types, sub, &mut |from| {
+            registry.register(purpose(from))
+        });
+    }
+    total
+}
+
+/// Every `StorageId` referenced by `blocks` (statements + pre-init).
+fn storages_in_use(blocks: &IRBlocks) -> Vec<StorageId> {
+    let mut out = Vec::new();
+    for block in &blocks.blocks {
+        for stmt in &block.stmts {
+            match &stmt.kind {
+                Stmt::StorageRead { storage, .. } | Stmt::StorageWrite { storage, .. } => {
+                    out.push(*storage);
+                }
+                _ => {}
+            }
+        }
+    }
+    for seg in &blocks.pre_init {
+        out.push(seg.storage);
+    }
+    out
 }
 
 /// Build a [`StorageAllocator`] starting above all `StorageId`s in use in `blocks`.
@@ -99,7 +146,7 @@ fn apply_one(
     blocks: &mut IRBlocks,
     types: &mut IRTypes,
     sub: &IrSubstitution,
-    allocator: &mut StorageAllocator,
+    fresh: &mut dyn FnMut(StorageId) -> StorageId,
 ) -> usize {
     let (repl_blocks, repl_types) = sub.repl();
 
@@ -121,26 +168,24 @@ fn apply_one(
     }
 
     // ── 3. Allocate storages ─────────────────────────────────────────────────
-    let spill_storage = allocator.alloc();
+    let spill_storage = fresh(StorageId::DEFAULT);
     let mut storage_map: BTreeMap<u32, StorageId> = BTreeMap::new();
     storage_map.insert(StorageId::DEFAULT.0, spill_storage);
-    storage_map.insert(StorageId::STACK.0, allocator.alloc());
+    storage_map.insert(StorageId::STACK.0, fresh(StorageId::STACK));
     if let IrSubstitution::Rng {
         state_storage_guest,
         ..
     } = sub
     {
-        storage_map
-            .entry(state_storage_guest.0)
-            .or_insert_with(|| allocator.alloc());
+        let guest = *state_storage_guest;
+        storage_map.entry(guest.0).or_insert_with(|| fresh(guest));
     }
     for rb in &repl_blocks.blocks {
         for stmt in &rb.stmts {
             match &stmt.kind {
                 Stmt::StorageRead { storage, .. } | Stmt::StorageWrite { storage, .. } => {
-                    storage_map
-                        .entry(storage.0)
-                        .or_insert_with(|| allocator.alloc());
+                    let from = *storage;
+                    storage_map.entry(from.0).or_insert_with(|| fresh(from));
                 }
                 _ => {}
             }
@@ -868,7 +913,10 @@ fn scan_max_storage(blocks: &IRBlocks) -> u32 {
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use super::{IrSubstitution, ir_storage_allocator, substitute_ir_blocks};
+    use super::{
+        IrSubstitution, ir_storage_allocator, substitute_ir_blocks,
+        substitute_ir_blocks_with_registry,
+    };
     use alloc::{string::ToString, vec, vec::Vec};
     use volar_ir::ir::{
         IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypes,
@@ -895,6 +943,146 @@ mod tests {
     }
 
     type IRStmt = volar_ir::ir::IRStmt;
+
+    /// Host + oracle-substitution fixture, returning the pieces the legacy
+    /// and registry paths each need (`host` must be cloned per path).
+    fn oracle_fixture() -> (IRBlocks, IRTypes, [IrSubstitution; 1]) {
+        let (mut types, u64_ty, _) = types_with_u64();
+        let result_ty = types.intern(IrType::Tuple(vec![u64_ty]));
+        let host_stmts = vec![
+            IRStmt::OracleCall {
+                name: "h".to_string(),
+                args: vec![],
+                output_tys: vec![u64_ty],
+                result_ty,
+            },
+            IRStmt::OracleOutput {
+                call: IRVarId(0),
+                idx: 0,
+                ty: u64_ty,
+            },
+        ];
+        let mut host = IRBlocks::new(vec![block(host_stmts, ret())]);
+        host.oracles.push(OracleDecl {
+            name: "h".to_string(),
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        // Replacement: reads cont from spill[0], writes 99 to spill[1],
+        // exits via Dyn.
+        let cont_var = IRVarId(0);
+        let repl_stmts = vec![
+            Stmt::Const(Constant { hi: 0, lo: 0 }, types.primitive(Type::_64)),
+            Stmt::StorageRead {
+                storage: StorageId::DEFAULT,
+                ty: types.intern(IrType::Block { params: vec![] }),
+                addr: IRVarId(0),
+            },
+            Stmt::Const(Constant { hi: 0, lo: 1 }, types.primitive(Type::_64)),
+            Stmt::Const(Constant { hi: 0, lo: 99 }, u64_ty),
+            Stmt::StorageWrite {
+                storage: StorageId::DEFAULT,
+                src: IRVarId(3),
+                ty: u64_ty,
+                addr: IRVarId(2),
+            },
+        ];
+        let repl_term = IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Dyn(cont_var), vec![]),
+        };
+        let mut repl = IRBlocks::new(vec![block(repl_stmts, repl_term)]);
+        repl.oracles.push(OracleDecl {
+            name: "h".to_string(),
+            params: vec![],
+            results: vec![u64_ty],
+        });
+        let subs = [IrSubstitution::Oracle {
+            name: "h".to_string(),
+            replacement: repl,
+            types: types.clone(),
+        }];
+        (host, types, subs)
+    }
+
+    /// Every storage id an `IRBlocks` references (stmts + pre-init).
+    fn used_storages(blocks: &IRBlocks) -> std::collections::BTreeSet<StorageId> {
+        let mut out = std::collections::BTreeSet::new();
+        for b in &blocks.blocks {
+            for s in &b.stmts {
+                if let Stmt::StorageRead { storage, .. } | Stmt::StorageWrite { storage, .. } =
+                    &s.kind
+                {
+                    out.insert(*storage);
+                }
+            }
+        }
+        for seg in &blocks.pre_init {
+            out.insert(seg.storage);
+        }
+        out
+    }
+
+    #[test]
+    fn substitute_with_registry_remaps_guest_storages_dense_and_tagged() {
+        use volar_fuzz::interpreter::ir::eval_ir_with_storage;
+        use volar_ir_common::{StoragePurpose, StorageRegistry};
+
+        // Legacy path for comparison.
+        let (mut host_legacy, mut types_legacy, subs_legacy) = oracle_fixture();
+        let mut alloc = ir_storage_allocator(&host_legacy);
+        let n_legacy = substitute_ir_blocks(&mut host_legacy, &mut types_legacy, &subs_legacy, &mut alloc);
+
+        // Registry path.
+        let (mut host, mut types, subs) = oracle_fixture();
+        let mut registry = StorageRegistry::<StoragePurpose>::new();
+        let count = substitute_ir_blocks_with_registry(
+            &mut host,
+            &mut types,
+            &subs,
+            &mut registry,
+            |from| StoragePurpose::Remapped { from },
+        );
+        assert_eq!(count, 1);
+        assert_eq!(count, n_legacy);
+
+        // Host had no storages to adopt; the guest's DEFAULT and the
+        // scratch STACK each got a dense registered space (0 and 1).
+        let registered: std::collections::BTreeMap<StorageId, &StoragePurpose> =
+            registry.iter().collect();
+        assert_eq!(registered.len(), 2, "spill + stack scratch, got {registered:?}");
+        assert_eq!(
+            registry.purpose_of(StorageId(0)),
+            Some(&StoragePurpose::Remapped {
+                from: StorageId::DEFAULT
+            })
+        );
+        assert_eq!(
+            registry.purpose_of(StorageId(1)),
+            Some(&StoragePurpose::Remapped {
+                from: StorageId::STACK
+            })
+        );
+
+        // Every storage the substituted module touches is one of those
+        // registered spaces — the guest's raw DEFAULT/STACK ids are gone
+        // (they were remapped, not shared).
+        for id in used_storages(&host) {
+            assert!(
+                matches!(
+                    registry.purpose_of(id),
+                    Some(StoragePurpose::Remapped { .. })
+                ),
+                "substituted module uses unregistered storage {id:?}"
+            );
+        }
+
+        // Semantics: both substituted modules evaluate identically (the
+        // replacement writes 99 to the spill slot; the continuation
+        // returns it).
+        let (legacy_out, _) = eval_ir_with_storage(&host_legacy, &types_legacy, &[]);
+        let (reg_out, _) = eval_ir_with_storage(&host, &types, &[]);
+        assert_eq!(reg_out, legacy_out, "registry substitution diverged from legacy");
+    }
 
     fn types_with_u64() -> (IRTypes, TypeId, TypeId) {
         let mut t = IRTypes::new();

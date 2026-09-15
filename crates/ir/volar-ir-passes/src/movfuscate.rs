@@ -57,7 +57,9 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::{vec, vec::Vec};
-use volar_ir_common::{Constant, PolyCoeffs, PreInitSegment, StorageId, Type};
+use volar_ir_common::{
+    Constant, PolyCoeffs, PreInitSegment, StorageId, StoragePurpose, StorageRegistry, Type,
+};
 
 use volar_ir::{
     boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
@@ -1601,6 +1603,11 @@ struct IrCtx<P: Clone = ()> {
     /// How a block's own param at position `k` resolves to a physical
     /// state slot — see [`SlotAllocation`].
     slot_alloc: SlotAllocation,
+    /// Registry mode: source storage → (Block-value lane, plain-value
+    /// lane), allocated from a `StorageRegistry` by
+    /// [`movfuscate_ir_with_registry`]. `None` selects the legacy
+    /// even/odd doubling (`2n` / `2n+1`).
+    lane_map: Option<BTreeMap<u32, (StorageId, StorageId)>>,
 }
 
 impl<P: Clone> IrCtx<P> {
@@ -1613,6 +1620,7 @@ impl<P: Clone> IrCtx<P> {
         pc_width: usize,
         ctrl_prov: P,
         slot_alloc: SlotAllocation,
+        lane_map: Option<BTreeMap<u32, (StorageId, StorageId)>>,
     ) -> Self {
         let var_types = combined_param_types.clone();
         Self {
@@ -1628,6 +1636,31 @@ impl<P: Clone> IrCtx<P> {
             pc_width,
             block_var_to_bits: BTreeMap::new(),
             slot_alloc,
+            lane_map,
+        }
+    }
+
+    /// The storage lane holding `Block`-typed values from source storage
+    /// `src` (legacy: `2n`; registry mode: the registered Block lane).
+    fn block_lane(&self, src: StorageId) -> StorageId {
+        match &self.lane_map {
+            Some(m) => m
+                .get(&src.0)
+                .expect("movfuscate_ir: lane_map missing a source storage")
+                .0,
+            None => StorageId(src.0 * 2),
+        }
+    }
+
+    /// The storage lane holding non-`Block` values from source storage
+    /// `src` (legacy: `2n+1`; registry mode: the registered plain lane).
+    fn plain_lane(&self, src: StorageId) -> StorageId {
+        match &self.lane_map {
+            Some(m) => m
+                .get(&src.0)
+                .expect("movfuscate_ir: lane_map missing a source storage")
+                .1,
+            None => StorageId(src.0 * 2 + 1),
         }
     }
 
@@ -2220,7 +2253,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                         },
                         vec_pc_ty,
                     );
-                    let new_storage = StorageId(storage.0 * 2);
+                    let new_storage = self.block_lane(*storage);
                     let write_addr = *addr;
                     // Gate the write's own effective value on `is_active`:
                     // mid-block statements (including this one) run on
@@ -2253,7 +2286,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                     continue;
                 } else {
                     // Non-block write: remap to odd storage lane.
-                    let new_storage = StorageId(storage.0 * 2 + 1);
+                    let new_storage = self.plain_lane(*storage);
                     let res_ty = infer_stmt_result_type(
                         &mapped,
                         &self.var_types,
@@ -2294,7 +2327,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                 let ty_idx = ty.0 as usize;
                 if matches!(self.ir_types[ty_idx], IRType::Block { .. }) {
                     // Read Vec(pc_width, Bit) from even lane.
-                    let new_storage = StorageId(storage.0 * 2);
+                    let new_storage = self.block_lane(*storage);
                     let merged = self.push_typed(
                         IRStmt::StorageRead {
                             storage: new_storage,
@@ -2330,7 +2363,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
                     continue;
                 } else {
                     // Non-block read: remap to odd storage lane.
-                    let new_storage = StorageId(storage.0 * 2 + 1);
+                    let new_storage = self.plain_lane(*storage);
                     let res_ty = infer_stmt_result_type(
                         &mapped,
                         &self.var_types,
@@ -2830,7 +2863,64 @@ pub fn movfuscate_ir<P: Clone>(blocks: &IRBlocks<P>, types: &mut IRTypes) -> IRB
     // their input should use `movfuscate_ir_owned`, which transfers Poly
     // monomial buffers instead of first cloning the entire source program.
     let mut working = blocks.clone();
-    movfuscate_ir_impl(&mut working, types, &[], None).0
+    movfuscate_ir_impl(&mut working, types, &[], None, None).0
+}
+
+/// Registry-mode [`movfuscate_ir`]: each source storage's (Block-value,
+/// plain-value) lane pair is allocated from `registry` under
+/// `purpose(from)` — dense, purpose-tagged, and immune to the legacy
+/// even/odd doubling's unbounded remap (`2n` overflows for source IDs
+/// above `u32::MAX / 2` and rewrites a range another consumer may own).
+///
+/// In-repo callers pass `|from| StoragePurpose::Remapped { from }`.
+pub fn movfuscate_ir_with_registry<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &mut IRTypes,
+    registry: &mut StorageRegistry<StoragePurpose>,
+) -> IRBlocks<P> {
+    movfuscate_ir_with_registry_purpose(blocks, types, registry, |from| {
+        StoragePurpose::Remapped { from }
+    })
+}
+
+/// [`movfuscate_ir_with_registry`] generic over the purpose vocabulary.
+pub fn movfuscate_ir_with_registry_purpose<P: Clone, RP>(
+    blocks: &IRBlocks<P>,
+    types: &mut IRTypes,
+    registry: &mut StorageRegistry<RP>,
+    mut purpose: impl FnMut(StorageId) -> RP,
+) -> IRBlocks<P> {
+    if blocks.blocks.len() < 2 {
+        // Single-block input passes through unchanged (no lanes needed).
+        return movfuscate_ir(blocks, types);
+    }
+    let mut sources: Vec<StorageId> = Vec::new();
+    for b in &blocks.blocks {
+        for s in &b.stmts {
+            match &s.kind {
+                IRStmt::StorageRead { storage, .. } | IRStmt::StorageWrite { storage, .. } => {
+                    sources.push(*storage)
+                }
+                _ => {}
+            }
+        }
+    }
+    for seg in &blocks.pre_init {
+        sources.push(seg.storage);
+    }
+    sources.sort();
+    sources.dedup();
+    registry.adopt_in_use(sources.iter().copied(), &mut purpose);
+    let lane_map: BTreeMap<u32, (StorageId, StorageId)> = sources
+        .iter()
+        .map(|&src| {
+            let block_lane = registry.register(purpose(src));
+            let plain_lane = registry.register(purpose(src));
+            (src.0, (block_lane, plain_lane))
+        })
+        .collect();
+    let mut working = blocks.clone();
+    movfuscate_ir_impl(&mut working, types, &[], None, Some(lane_map)).0
 }
 
 /// Owned counterpart to [`movfuscate_ir`].
@@ -2848,7 +2938,7 @@ pub fn movfuscate_ir_owned<P: Clone>(mut blocks: IRBlocks<P>, types: &mut IRType
         types.intern(IRType::Primitive(Type::Bit));
         return blocks;
     }
-    movfuscate_ir_impl(&mut blocks, types, &[], None).0
+    movfuscate_ir_impl(&mut blocks, types, &[], None, None).0
 }
 
 /// As [`movfuscate_ir`], but permits a statement-free multi-block circuit.
@@ -2861,7 +2951,7 @@ pub fn movfuscate_ir_with_control_provenance<P: Clone>(
     control_prov: &P,
 ) -> IRBlocks<P> {
     let mut working = blocks.clone();
-    movfuscate_ir_impl(&mut working, types, &[], Some(control_prov)).0
+    movfuscate_ir_impl(&mut working, types, &[], Some(control_prov), None).0
 }
 
 /// As [`movfuscate_ir`], but additionally returns each original block's own
@@ -2878,7 +2968,7 @@ pub fn movfuscate_ir_with_boundary<P: Clone>(
 ) -> (IRBlocks<P>, Vec<MovfuscBlockBoundary>, MovfuscAccumInfo) {
     let mut working = blocks.clone();
     let (result, boundaries, accum_info, _watch) =
-        movfuscate_ir_impl(&mut working, types, &[], None);
+        movfuscate_ir_impl(&mut working, types, &[], None, None);
     (result, boundaries, accum_info)
 }
 
@@ -2899,7 +2989,7 @@ pub fn movfuscate_ir_with_boundary_and_watch<P: Clone>(
     Vec<(usize, u32, u32)>,
 ) {
     let mut working = blocks.clone();
-    movfuscate_ir_impl(&mut working, types, watch, None)
+    movfuscate_ir_impl(&mut working, types, watch, None, None)
 }
 
 /// Diagnostic (temporary, not used by any real pipeline): dumps
@@ -2970,6 +3060,7 @@ fn movfuscate_ir_impl<P: Clone>(
     types: &mut IRTypes,
     watch: &[(usize, u32)],
     control_prov: Option<&P>,
+    lane_map: Option<BTreeMap<u32, (StorageId, StorageId)>>,
 ) -> (
     IRBlocks<P>,
     Vec<MovfuscBlockBoundary>,
@@ -3052,6 +3143,7 @@ fn movfuscate_ir_impl<P: Clone>(
         pc_width,
         ctrl_prov,
         slot_alloc,
+        lane_map.clone(),
     );
     let (mut result, block_ranges, accum_info, watch_results) =
         movfuscate(ctx, blocks, state_slot_types, return_slot_types, watch);
@@ -3068,10 +3160,20 @@ fn movfuscate_ir_impl<P: Clone>(
         .iter()
         .map(|seg| {
             let is_block = matches!(types.0[seg.ty.0 as usize], IRType::Block { .. });
-            let new_storage = if is_block {
-                StorageId(seg.storage.0 * 2)
-            } else {
-                StorageId(seg.storage.0 * 2 + 1)
+            let new_storage = match &lane_map {
+                Some(m) => {
+                    let (block_lane, plain_lane) = m
+                        .get(&seg.storage.0)
+                        .expect("movfuscate_ir: lane_map missing a pre-init storage");
+                    if is_block { *block_lane } else { *plain_lane }
+                }
+                None => {
+                    if is_block {
+                        StorageId(seg.storage.0 * 2)
+                    } else {
+                        StorageId(seg.storage.0 * 2 + 1)
+                    }
+                }
             };
             PreInitSegment {
                 storage: new_storage,
@@ -4977,5 +5079,128 @@ mod tests {
             "both rounds' own producer exports must accumulate"
         );
         assert_eq!(boundary[1].synthetic_in, vec![1, 2]);
+    }
+
+    // =========================================================================
+    // Registry-mode storage lanes
+    // =========================================================================
+
+    /// Two-block identity module with a high-ID storage write+read — the
+    /// legacy even/odd doubling overflows `u32` for this source id
+    /// (`0x9000_0000 * 2` in debug builds), while the registry path
+    /// allocates dense lane ids instead.
+    fn high_id_storage_module() -> (IRBlocks, IRTypes) {
+        const HIGH: u32 = 0x9000_0000;
+        let types = IRTypes(std::vec![IRType::Primitive(Type::Bit)]);
+        let bit = IRTypeId(0);
+        let blocks = IRBlocks::new(std::vec![
+            IRBlock {
+                params: std::vec![bit],
+                stmts: std::vec![
+                    IRStmt::Const(Constant { hi: 0, lo: 0 }, bit),
+                    IRStmt::StorageWrite {
+                        storage: StorageId(HIGH),
+                        src: IRVarId(0),
+                        ty: bit,
+                        addr: IRVarId(1),
+                    },
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(0)],
+                    ),
+                },
+            },
+            IRBlock {
+                params: std::vec![bit],
+                stmts: std::vec![
+                    IRStmt::Const(Constant { hi: 0, lo: 0 }, bit),
+                    IRStmt::StorageRead {
+                        storage: StorageId(HIGH),
+                        ty: bit,
+                        addr: IRVarId(1),
+                    },
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Return,
+                        std::vec![IRVarId(2)],
+                    ),
+                },
+            },
+        ]);
+        (blocks, types)
+    }
+
+    #[test]
+    fn movfuscate_with_registry_assigns_dense_lanes_and_preserves_semantics() {
+        use volar_fuzz::interpreter::ir::eval_ir_with_storage;
+        use volar_ir_common::{StoragePurpose, StorageRegistry};
+
+        let (blocks, types) = high_id_storage_module();
+        let mut registry = StorageRegistry::<StoragePurpose>::new();
+        let mut types_out = types.clone();
+        let out = movfuscate_ir_with_registry(&blocks, &mut types_out, &mut registry);
+
+        // The source storage's lane pair is registered dense (nowhere near
+        // the doubling range) and purpose-tagged; the source id itself was
+        // adopted (recorded, but never re-issued as a lane).
+        let mut lane_ids: std::vec::Vec<StorageId> = registry
+            .iter()
+            .filter(|(id, p)| {
+                matches!(p, StoragePurpose::Remapped { from } if from != id)
+            })
+            .map(|(id, _)| id)
+            .collect();
+        lane_ids.sort();
+        assert_eq!(lane_ids.len(), 2, "two registered lanes");
+        for id in &lane_ids {
+            assert!(id.0 < 64, "dense lane id, got {id:?}");
+        }
+        assert_eq!(
+            registry.purpose_of(StorageId(0x9000_0000)),
+            Some(&StoragePurpose::Remapped {
+                from: StorageId(0x9000_0000)
+            }),
+            "source id must be adopted, not re-issued"
+        );
+
+        // Every storage the movfuscated output touches is one of the two
+        // registered lanes (never the high source id).
+        for b in &out.blocks {
+            for s in &b.stmts {
+                if let IRStmt::StorageRead { storage, .. }
+                | IRStmt::StorageWrite { storage, .. } = &s.kind
+                {
+                    assert!(
+                        matches!(
+                            registry.purpose_of(*storage),
+                            Some(StoragePurpose::Remapped { .. })
+                        ),
+                        "output storage {storage:?} is not a registered lane"
+                    );
+                    assert_ne!(*storage, StorageId(0x9000_0000));
+                }
+            }
+        }
+
+        // Semantics: identity on the stored bit. Movfuscated params are
+        // [pc bits (=1 here, starts 0)] ++ entry params.
+        for a in [false, true] {
+            let inputs = std::vec![std::vec![a]];
+            let (want, _) = eval_ir_with_storage(&blocks, &types, &inputs);
+            let mut movf_inputs = std::vec![std::vec![false]];
+            movf_inputs.extend(inputs.iter().cloned());
+            let (got, _) = eval_ir_with_storage(&out, &types_out, &movf_inputs);
+            assert_eq!(want.as_deref(), Some(&[std::vec![a]][..]));
+            assert_eq!(got, want, "registry movfuscation diverged on {a}");
+        }
     }
 }

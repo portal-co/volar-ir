@@ -141,7 +141,7 @@ impl<P> StorageRegistry<P> {
     pub fn claim_all_in_use(
         &mut self,
         ids: impl IntoIterator<Item = StorageId>,
-        purpose: impl Fn(StorageId) -> P,
+        mut purpose: impl FnMut(StorageId) -> P,
     ) -> Result<(), StorageClaimError>
     where
         P: Clone,
@@ -161,6 +161,22 @@ impl<P> StorageRegistry<P> {
             self.by_id.insert(id, purpose(id));
         }
         Ok(())
+    }
+
+    /// Claim every not-yet-registered ID in `ids` under `purpose(id)`,
+    /// leaving already-registered IDs (and their purposes) untouched.
+    /// Idempotent — use when adopting foreign IR whose storages may
+    /// partially overlap what this registry already knows, so that later
+    /// [`register`](StorageRegistry::register) calls can never hand out an
+    /// ID the foreign module uses.
+    pub fn adopt_in_use(
+        &mut self,
+        ids: impl IntoIterator<Item = StorageId>,
+        mut purpose: impl FnMut(StorageId) -> P,
+    ) {
+        for id in ids {
+            self.by_id.entry(id).or_insert_with(|| purpose(id));
+        }
     }
 
     /// Look up the purpose recorded for `id`, if any.
@@ -402,6 +418,26 @@ mod tests {
         let empty = reg.register_block(StoragePurpose::Default, 0);
         assert_eq!(empty.len, 0);
         assert_eq!(reg.len(), 1 + 3 + 2 + 1);
+    }
+
+    #[test]
+    fn adopt_in_use_fills_gaps_without_overwriting() {
+        let mut reg = StorageRegistry::<StoragePurpose>::new();
+        reg.register(StoragePurpose::Stack);
+        reg.adopt_in_use(
+            [StorageId(0), StorageId(5), StorageId(2)],
+            StoragePurpose::default_for_test,
+        );
+        // Already-registered id keeps its original purpose.
+        assert_eq!(reg.purpose_of(StorageId(0)), Some(&StoragePurpose::Stack));
+        // New ids adopted; register() skips every adopted id.
+        assert!(reg.purpose_of(StorageId(5)).is_some());
+        assert!(reg.purpose_of(StorageId(2)).is_some());
+        let fresh = reg.register(StoragePurpose::Default);
+        assert_eq!(fresh, StorageId(1));
+        // Idempotent.
+        reg.adopt_in_use([StorageId(0)], StoragePurpose::default_for_test);
+        assert_eq!(reg.purpose_of(StorageId(0)), Some(&StoragePurpose::Stack));
     }
 
     #[test]

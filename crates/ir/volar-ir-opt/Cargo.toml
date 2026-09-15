@@ -11,3 +11,6 @@ volar-ir.workspace = true
 volar-ir-common.workspace = true
 vaffle.workspace = true
 volar-provenance.workspace = true
+
+[dev-dependencies]
+volar-fuzz = { workspace = true }

@@ -9,7 +9,7 @@
 
 use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
 use vaffle::{Block, FuncBody, FuncDecl, FuncId, Module, SigDecl, Value};
-use volar_ir_common::{Node, Stmt, StorageAllocator, TypeRemapper};
+use volar_ir_common::{Node, Stmt, StorageAllocator, StorageId, StorageRegistry, TypeRemapper};
 use volar_provenance::DualProvenanceHandler;
 
 /// One substitution entry for a VAFFLE module.
@@ -76,6 +76,47 @@ pub fn substitute_vaffle(module: &mut Module, subs: &[VaffleSubstitution]) -> us
         total += apply_one(module, sub);
     }
     total
+}
+
+/// Registry-mode [`substitute_vaffle`]: adopts the host module's and every
+/// replacement body's storages into `registry` (one registry per module)
+/// under `purpose(from)`, so the combined module's spaces are all on
+/// record and later [`StorageRegistry::register`] calls can never collide
+/// with them.
+///
+/// Guest storages are deliberately NOT remapped: VAFFLE storage spaces
+/// like the alloca marker / stack are shared cross-crate protocols (see
+/// `vaffle::StackFrameConvention`), not per-substitution scratch — unlike
+/// [`crate::substitute_ir::substitute_ir_blocks_with_registry`], which
+/// remaps the IR-level scratch spaces.
+pub fn substitute_vaffle_with_registry<RP>(
+    module: &mut Module,
+    subs: &[VaffleSubstitution],
+    registry: &mut StorageRegistry<RP>,
+    mut purpose: impl FnMut(StorageId) -> RP,
+) -> usize {
+    registry.adopt_in_use(vaffle_storages_in_use(module), &mut purpose);
+    for sub in subs {
+        registry.adopt_in_use(vaffle_storages_in_use(sub.replacement()), &mut purpose);
+    }
+    substitute_vaffle(module, subs)
+}
+
+/// Every `StorageId` referenced by any function body in `module`.
+fn vaffle_storages_in_use(module: &Module) -> Vec<StorageId> {
+    let mut out = Vec::new();
+    for func in &module.funcs {
+        if let FuncDecl::Body(body) = func {
+            for v in &body.values {
+                if let Value::Op(Stmt::StorageRead { storage, .. })
+                | Value::Op(Stmt::StorageWrite { storage, .. }) = &v.kind
+                {
+                    out.push(*storage);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Apply all substitutions to a host `Module<P>`, merging replacement `Module<Q>`s,
@@ -663,7 +704,7 @@ pub fn vaffle_storage_allocator(module: &Module) -> StorageAllocator {
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use super::{VaffleSubstitution, substitute_vaffle};
+    use super::{VaffleSubstitution, substitute_vaffle, substitute_vaffle_with_registry};
     use alloc::{string::ToString, vec};
     use std::collections::BTreeMap;
     use vaffle::{Block, BlockId, FuncBody, FuncDecl, Module, SigDecl, Terminator, Value, ValueId};
@@ -926,6 +967,109 @@ mod tests {
         assert!(
             host.funcs.len() > orig_func_count,
             "replacement function should have been appended"
+        );
+    }
+
+    /// Host oracle-call module carrying a storage write to id 7, plus a
+    /// const-42 replacement carrying a storage read from id 9.
+    fn storage_fixtures() -> (Module, [VaffleSubstitution; 1]) {
+        use volar_ir_common::StorageId;
+
+        let (mut host, _) = host_with_oracle_call();
+        let u64_ty = host.types.primitive(Type::_64);
+        let FuncDecl::Body(body) = &mut host.funcs[0] else {
+            panic!("expected a function body");
+        };
+        body.values.push(Node::new(
+            Value::Op(Stmt::Const(Constant { hi: 0, lo: 7 }, u64_ty)),
+            (),
+            None,
+        )); // v2
+        body.values.push(Node::new(
+            Value::Op(Stmt::StorageWrite {
+                storage: StorageId(7),
+                src: ValueId(1),
+                ty: u64_ty,
+                addr: ValueId(2),
+            }),
+            (),
+            None,
+        )); // v3
+        body.blocks[0].stmts.push(ValueId(2));
+        body.blocks[0].stmts.push(ValueId(3));
+
+        let mut repl = replacement_const42();
+        let u64_ty = repl.types.primitive(Type::_64);
+        let FuncDecl::Body(body) = &mut repl.funcs[0] else {
+            panic!("expected a function body");
+        };
+        body.values.push(Node::new(
+            Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, u64_ty)),
+            (),
+            None,
+        )); // v1
+        body.values.push(Node::new(
+            Value::Op(Stmt::StorageRead {
+                storage: StorageId(9),
+                ty: u64_ty,
+                addr: ValueId(1),
+            }),
+            (),
+            None,
+        )); // v2
+        body.blocks[0].stmts.push(ValueId(1));
+        body.blocks[0].stmts.push(ValueId(2));
+
+        let subs = [VaffleSubstitution::Oracle {
+            name: "hash".to_string(),
+            replacement: repl,
+        }];
+        (host, subs)
+    }
+
+    #[test]
+    fn substitute_vaffle_with_registry_adopts_without_remapping() {
+        use volar_ir_common::{StorageId, StoragePurpose, StorageRegistry};
+
+        // Registry path.
+        let (mut host, subs) = storage_fixtures();
+        let mut registry = StorageRegistry::<StoragePurpose>::new();
+        let n = substitute_vaffle_with_registry(
+            &mut host,
+            &subs,
+            &mut registry,
+            |from| StoragePurpose::Remapped { from },
+        );
+        assert_eq!(n, 1);
+
+        // Host + guest storages are on record (adopted)...
+        assert!(registry.purpose_of(StorageId(7)).is_some());
+        assert!(registry.purpose_of(StorageId(9)).is_some());
+
+        // ...but NOT remapped: VAFFLE storage spaces are shared protocols,
+        // so the combined module still references the original ids.
+        let used: std::collections::BTreeSet<StorageId> = host
+            .funcs
+            .iter()
+            .flat_map(|f| match f {
+                FuncDecl::Body(b) => b.values.iter().collect::<vec::Vec<_>>(),
+                _ => vec![],
+            })
+            .filter_map(|v| match &v.kind {
+                Value::Op(Stmt::StorageRead { storage, .. })
+                | Value::Op(Stmt::StorageWrite { storage, .. }) => Some(*storage),
+                _ => None,
+            })
+            .collect();
+        assert!(used.contains(&StorageId(7)));
+        assert!(used.contains(&StorageId(9)));
+
+        // Output identical to the plain substitution (adopt-only).
+        let (mut host_plain, subs_plain) = storage_fixtures();
+        substitute_vaffle(&mut host_plain, &subs_plain);
+        assert_eq!(
+            alloc::format!("{:?}", host.funcs),
+            alloc::format!("{:?}", host_plain.funcs)
         );
     }
 }
