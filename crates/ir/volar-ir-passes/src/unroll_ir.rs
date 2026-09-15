@@ -124,6 +124,23 @@ pub struct CfgSegmentUnroll {
     pub spliced_segments: usize,
 }
 
+impl UnrollLimits {
+    /// Disable compiler-resource caps for a compilation that must either fully
+    /// unroll its statically finite control flow or fail for a semantic reason.
+    ///
+    /// This is intentionally not a bounded MUX-unroll: it merely removes this
+    /// pass's artificial `ResourceLimit` exit. Host allocation failure and an
+    /// actually non-finite control walk remain failures. Use it only for a
+    /// deliberately self-contained circuit artifact whose caller accepts its
+    /// full materialized size.
+    pub const fn unbounded() -> Self {
+        Self {
+            max_states: usize::MAX,
+            max_steps: usize::MAX,
+        }
+    }
+}
+
 impl Default for UnrollLimits {
     fn default() -> Self {
         Self {
@@ -511,6 +528,21 @@ pub fn unroll_ir_everything<P: Clone>(
     types: &IRTypes,
 ) -> Result<IRBlocks<P>, UnrollError> {
     unroll_ir_everything_with_limits(blocks, types, UnrollLimits::default())
+}
+
+/// Unroll all statically finite control flow without this pass imposing a
+/// compiler-resource limit.
+///
+/// This is for intentionally self-contained circuit artifacts: in particular,
+/// a circuit-provider key derivation, encryption, or decryption program must
+/// never silently become a bounded approximation before it is composed into a
+/// garbled circuit. It still rejects symbolic or non-finite control; it does
+/// not make an unbounded program representable.
+pub fn unroll_ir_everything_unbounded<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &IRTypes,
+) -> Result<IRBlocks<P>, UnrollError> {
+    unroll_ir_everything_with_limits(blocks, types, UnrollLimits::unbounded())
 }
 
 /// Unroll `blocks` into a single `is_circuit()` block by walking only
@@ -989,6 +1021,24 @@ mod tests {
         assert!(out.is_circuit());
         assert_eq!(out.blocks[0].params, blocks.blocks[0].params);
         assert!(out.blocks[0].stmts.is_empty());
+    }
+
+    #[test]
+    fn unbounded_limits_disable_only_the_artificial_resource_cap() {
+        assert_eq!(UnrollLimits::unbounded().max_states, usize::MAX);
+        assert_eq!(UnrollLimits::unbounded().max_steps, usize::MAX);
+
+        let types = bit_types();
+        let blocks: IRBlocks<()> = IRBlocks::new(std::vec![IRBlock {
+            params: std::vec![bit()],
+            stmts: std::vec![],
+            terminator: jmp(IRBlockTargetId::Return, std::vec![IRVarId(0)]),
+        }]);
+        assert!(
+            unroll_ir_everything_unbounded(&blocks, &types)
+                .unwrap()
+                .is_circuit()
+        );
     }
 
     #[test]

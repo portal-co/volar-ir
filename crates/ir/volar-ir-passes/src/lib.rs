@@ -51,6 +51,6 @@ pub use to_reversible::{
 };
 pub use unroll_ir::{
     CfgSegmentUnroll, PrefixUnroll, PrefixUnrollOutcome, UnrollError, UnrollLimits,
-    unroll_cfg_segments_with_limits, unroll_ir_everything, unroll_ir_everything_with_limits,
-    unroll_ir_prefix_with_limits,
+    unroll_cfg_segments_with_limits, unroll_ir_everything, unroll_ir_everything_unbounded,
+    unroll_ir_everything_with_limits, unroll_ir_prefix_with_limits,
 };
