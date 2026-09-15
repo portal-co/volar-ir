@@ -2605,8 +2605,11 @@ impl<'ctx> Importer<'ctx> {
     }
 
     /// LLVM `null` uses the otherwise-unassigned tagged-global pattern:
-    /// tag = 1, global ID = 0, address = 0. Importer-created globals begin
-    /// at [`GLOBAL_STORAGE_BASE`], so dispatch never matches this identity.
+    /// tag = 1, global ID = 0, address = 0. Importer-created globals never
+    /// receive id 0 — they begin at [`GLOBAL_STORAGE_BASE`] in legacy mode,
+    /// and registry mode reserves `StorageId(0)` up front (see
+    /// [`Importer::with_storage_registry`]) — so dispatch never matches
+    /// this identity.
     /// `dispatch_read` maps such an unmatched tagged pointer to zeros and
     /// `dispatch_write` leaves every candidate untouched; it can therefore
     /// never alias stack slot zero.

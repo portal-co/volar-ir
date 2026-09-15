@@ -447,6 +447,9 @@ impl StorageId {
     /// terminator-arg type is assigned its own `StorageId` in the range
     /// `[VIRT_REGISTERS_BASE, VIRT_REGISTERS_BASE + n_types)`.  Register
     /// indices live at the address level within that storage.
+    #[deprecated(
+        note = "fixed-range storage allocation is superseded by StorageRegistry; use volar-ir-virt's *_with_registry entry points, which allocate the register file from a registry"
+    )]
     pub const VIRT_REGISTERS_BASE: u32 = 3;
     /// Base ID for WASM linear memories.  Memory `i` uses `StorageId(MEMORY_BASE + i)`.
     pub const MEMORY_BASE: u32 = 16;
@@ -465,6 +468,12 @@ impl StorageId {
     /// Dedicated marker space for a frontend's `alloca` (e.g.
     /// `volar-llvm-vaffle-import`'s `Value::StackAlloc`/`PtrLoad`/
     /// `PtrStore`/`PtrOffset`).
+    ///
+    /// This is the numeric value of
+    /// [`vaffle::StackFrameConvention::LEGACY`]'s `alloca_marker` — new
+    /// code should thread the typed convention handle (or register fresh
+    /// spaces in a `StorageRegistry`) rather than matching this constant
+    /// numerically.
     ///
     /// Deliberately *not* [`STACK`]: `volar-vaffle-target/src/lower_to_ir.rs`
     /// rebases every `StorageRead`/`StorageWrite` tagged `ALLOCA` onto the

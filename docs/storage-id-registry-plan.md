@@ -1,7 +1,12 @@
 # Plan: Runtime `StorageId` Registry (Packed Storages Without Fixed Ranges)
 
-**Status:** Draft for review — review decisions from §6 incorporated.
-No code changed.
+**Status:** Landed — Phases 0–5 implemented. `StorageRegistry` in
+`crates/ir/volar-ir-common/src/storage_registry.rs`,
+`StackFrameConvention` in `crates/ir/vaffle/src/lib.rs`, registry-mode
+entry points in `volar-ir-virt` / `volar-llvm-vaffle-import` /
+`volar-wasm-circuit-import` / `volar-vaffle-target` / `volar-ir-opt` /
+`volar-ir-passes`, pipeline sidecar in `volar-ir-build`, and
+`docs/agent-context/storage-registry.md` as the ongoing reference.
 **Scope:** This worktree only — all paths below are relative to the repo root.
 **Kind:** Coordination-layer refactor. No change to the serialized IR
 representation, the `(StorageId, TypeId, addr)` slot semantics, or any

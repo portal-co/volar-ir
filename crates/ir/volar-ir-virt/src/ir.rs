@@ -206,7 +206,8 @@ impl IrEmitter for BlockEmitter<'_> {
 ///   type list (which defines the function's return shape).
 /// * The input must not read or write any `StorageId` colliding with
 ///   the bytecode storage or the per-type register-file storages
-///   (allocated at `StorageId::VIRT_REGISTERS_BASE..`).
+///   (allocated above the bytecode range, or from the registry when
+///   using [`virtualize_ir_with_registry`]).
 pub fn virtualize_ir<P: Clone + Default>(
     blocks: &IRBlocks<P>,
     types: &mut IRTypes,

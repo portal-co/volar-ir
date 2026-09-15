@@ -41,6 +41,7 @@ not this repo's.
 |---|---|---|
 | Pipeline overview | `docs/pipeline.md` | Always — first thing before editing |
 | IR types, storage, Poly semantics | `docs/agent-context/ir-types-storage.md` | Working on IR, lowering, evaluators, store-forward, fuzzer generators |
+| Storage registry (packed storages) | `docs/agent-context/storage-registry.md` | Allocating `StorageId`s, adding a pass/frontend that needs its own storage space, composing modules from multiple producers |
 | IR `map`/`as_ref`/`as_mut` conventions | `docs/agent-context/ir-map-conventions.md` | Adding IR variants, writing IR transformations |
 | Boolar IR pass conflicts | `docs/agent-context/boolar-ir-conflicts.md` | Touching more than one Boolar IR pass in the same change |
 | Provenance pipeline | `docs/agent-context/provenance-pipeline.md` | Adding provenance to passes, writing `ProvenanceHandler` impls |

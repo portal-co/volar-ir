@@ -45,6 +45,11 @@ pub struct IrLoweringConfig {
 
 ## Storage Semantics (Type-Discriminated Slots)
 
+> **Allocating a new storage space?** Don't pick a numeric `StorageId`
+> by convention — register it in the module's `StorageRegistry` (see
+> `docs/agent-context/storage-registry.md`). Everything below describes
+> the *meaning* of storage keys, which is unchanged.
+
 Storage in Volar IR is keyed by `(StorageId, TypeId, address)`. Each such triple is an **independent slot**: writing `_8` to `(S1, addr=0)` does not affect a read of `Bit` from `(S1, addr=0)`, because different `TypeId`s are distinct namespaces within the same `StorageId`.
 
 This design enables:
