@@ -2159,6 +2159,7 @@ dependencies = [
  "portal-pc-waffle-frontend",
  "portal-pc-waffle-ir",
  "vaffle",
+ "volar-fuzz",
  "volar-ir",
  "volar-ir-common",
  "volar-ir-opt",

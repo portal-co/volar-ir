@@ -220,6 +220,18 @@ impl<'a, P: Clone> BitCircuitBuilder for VecBuilder<'a, P> {
 /// functions can be reached via a VAFFLE-internal (and therefore
 /// possibly recursive) call.
 pub fn ssa_ify_module<P: Clone>(module: &Module<P>) -> Module<P> {
+    ssa_ify_module_with_spill(module, StorageId::VAFFLE_SSA_SPILL)
+}
+
+/// [`ssa_ify_module`] with a caller-chosen cross-block spill storage
+/// space (e.g. one registered from a
+/// [`volar_ir_common::StorageRegistry`] as
+/// [`volar_ir_common::StoragePurpose::VaffleSsaSpill`]) instead of the
+/// legacy [`StorageId::VAFFLE_SSA_SPILL`] constant.
+pub fn ssa_ify_module_with_spill<P: Clone>(
+    module: &Module<P>,
+    spill_storage: StorageId,
+) -> Module<P> {
     let mut types = module.types.clone();
     let bit_tid = types.bit();
     let addr_tid = types.intern(IrType::Vec(SPILL_ADDR_BITS, bit_tid));
@@ -253,6 +265,7 @@ pub fn ssa_ify_module<P: Clone>(module: &Module<P>) -> Module<P> {
                 bit_tid,
                 sp_step,
                 fi == 0,
+                spill_storage,
             )),
             // `FuncDecl` is `#[non_exhaustive]` (defined in the `vaffle`
             // crate, matched here from a different crate) -- wildcard
@@ -280,6 +293,14 @@ pub fn ssa_ify_module<P: Clone>(module: &Module<P>) -> Module<P> {
 /// particular `Stmt::Poly` coefficient maps — is not first cloned solely for
 /// the borrowed compatibility API.
 pub fn ssa_ify_module_owned<P: Clone>(mut module: Module<P>) -> Module<P> {
+    ssa_ify_module_owned_with_spill(module, StorageId::VAFFLE_SSA_SPILL)
+}
+
+/// Consuming counterpart to [`ssa_ify_module_with_spill`].
+pub fn ssa_ify_module_owned_with_spill<P: Clone>(
+    mut module: Module<P>,
+    spill_storage: StorageId,
+) -> Module<P> {
     let bit_tid = module.types.bit();
     let addr_tid = module.types.intern(IrType::Vec(SPILL_ADDR_BITS, bit_tid));
     let sp_step = compute_sp_step(&module);
@@ -298,6 +319,7 @@ pub fn ssa_ify_module_owned<P: Clone>(mut module: Module<P>) -> Module<P> {
                 bit_tid,
                 sp_step,
                 fi == 0,
+                spill_storage,
             )),
             // `FuncDecl` is `#[non_exhaustive]` (defined in the `vaffle`
             // crate, matched here from a different crate) -- wildcard
@@ -327,6 +349,28 @@ pub fn ssa_ify_function<P: Clone>(
     sp_step: u128,
     is_entry: bool,
 ) -> FuncBody<P> {
+    ssa_ify_function_with_spill(
+        module,
+        body,
+        addr_tid,
+        bit_tid,
+        sp_step,
+        is_entry,
+        StorageId::VAFFLE_SSA_SPILL,
+    )
+}
+
+/// [`ssa_ify_function`] with a caller-chosen cross-block spill storage
+/// space instead of the legacy [`StorageId::VAFFLE_SSA_SPILL`] constant.
+pub fn ssa_ify_function_with_spill<P: Clone>(
+    module: &Module<P>,
+    body: &FuncBody<P>,
+    addr_tid: TypeId,
+    bit_tid: TypeId,
+    sp_step: u128,
+    is_entry: bool,
+    spill_storage: StorageId,
+) -> FuncBody<P> {
     let func_sigs = module_func_sigs(&module.funcs);
     ssa_ify_function_owned(
         module,
@@ -341,6 +385,7 @@ pub fn ssa_ify_function<P: Clone>(
         bit_tid,
         sp_step,
         is_entry,
+        spill_storage,
     )
 }
 
@@ -352,6 +397,7 @@ fn ssa_ify_function_owned<P: Clone>(
     bit_tid: TypeId,
     sp_step: u128,
     is_entry: bool,
+    spill_storage: StorageId,
 ) -> FuncBody<P> {
     let mut blocks = body.blocks;
     let mut values = body.values;
@@ -479,7 +525,7 @@ fn ssa_ify_function_owned<P: Clone>(
         new_stmts.push(values.len() as u32);
         values.push(Node::new(
             Value::Op(Stmt::StorageWrite {
-                storage: StorageId::VAFFLE_SSA_SPILL,
+                storage: spill_storage,
                 src: vid,
                 ty,
                 addr: ValueId(addr_vid as usize),
@@ -527,7 +573,7 @@ fn ssa_ify_function_owned<P: Clone>(
             let reload_vid = values.len();
             values.push(Node::new(
                 Value::Op(Stmt::StorageRead {
-                    storage: StorageId::VAFFLE_SSA_SPILL,
+                    storage: spill_storage,
                     ty,
                     addr: ValueId(addr_vid),
                 }),
@@ -1224,6 +1270,7 @@ mod tests {
             bit_tid,
             sp_step,
             true,
+            StorageId::VAFFLE_SSA_SPILL,
         );
 
         assert_eq!(alloc::format!("{borrowed:?}"), alloc::format!("{owned:?}"));

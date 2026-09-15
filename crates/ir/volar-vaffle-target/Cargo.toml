@@ -26,3 +26,4 @@ lazy-ir-plan = ["dep:portal-lazy-transform"]
 
 [dev-dependencies]
 volar-lir-test-corpus = { workspace = true }
+volar-fuzz = { workspace = true }

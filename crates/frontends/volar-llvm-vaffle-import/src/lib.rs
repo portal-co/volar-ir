@@ -71,12 +71,12 @@ use inkwell::values::{
 };
 
 use vaffle::{
-    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, PointerWidth, SigDecl, SigId, Target,
-    Terminator, Value, ValueId,
+    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, PointerWidth, SigDecl, SigId,
+    StackFrameConvention, Target, Terminator, Value, ValueId,
 };
 use volar_ir_common::{
-    Constant, IrType, Node, PolyCoeffs, Stmt, StorageAllocator, StorageId, Type, TypeId,
-    TypeTable,
+    Constant, IrType, Node, PolyCoeffs, Stmt, StorageAllocator, StorageId, StoragePurpose,
+    StorageRegistry, Type, TypeId, TypeTable,
 };
 use volar_lir::circuits::{self, BitCircuitBuilder};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
@@ -232,6 +232,51 @@ pub fn import_module_with_config<'ctx>(
         worklist.extend(called);
     }
     Ok(importer.finish())
+}
+
+/// Registry-mode variant of [`import_module_with_config`].
+///
+/// The module's storage spaces are coordinated through `registry` (one
+/// registry per module, see `volar_ir_common::storage_registry`):
+///
+/// * the alloca-marker / stack spaces of [`StackFrameConvention::LEGACY`]
+///   are claimed (failing closed if another consumer already owns them);
+/// * `StorageId(0)` is reserved — the `null` pointer's tagged encoding is
+///   global-ID 0, so no global may receive it;
+/// * every global gets a dense, purpose-tagged [`StoragePurpose::LlvmGlobal`]
+///   space (keeping the `GLOBAL_ID_BITS` pointer-value encoding valid by
+///   construction).
+///
+/// Returns the module together with the registry so the caller keeps the
+/// complete storage ownership record.
+pub fn import_module_with_registry<'ctx>(
+    llvm_module: &LlvmModule<'ctx>,
+    entries: &[&str],
+    config: LlvmImportConfig,
+    registry: StorageRegistry<StoragePurpose>,
+) -> IResult<(Module, StorageRegistry<StoragePurpose>)> {
+    let mut importer = Importer::new(pointer_width_from_layout(llvm_module, config)?)
+        .with_storage_registry(registry)?;
+    importer.register_all_globals(llvm_module)?;
+    let mut worklist: Vec<FunctionValue<'ctx>> = Vec::new();
+    for &name in entries {
+        let f = llvm_module.get_function(name).ok_or_else(|| {
+            ImportError::Unsupported(format!("entry function `{name}` does not exist"))
+        })?;
+        importer.func_id(f)?;
+        worklist.push(f);
+    }
+    let mut done: std::collections::HashSet<PointerValue<'ctx>> = Default::default();
+    while let Some(f) = worklist.pop() {
+        let key = f.as_global_value().as_pointer_value();
+        if done.contains(&key) {
+            continue;
+        }
+        done.insert(key);
+        let called = importer.import_function(f)?;
+        worklist.extend(called);
+    }
+    Ok(importer.finish_registry())
 }
 
 /// Structural import followed by [`volar_ir_opt::inline_vaffle::inline_vaffle_everything`].
@@ -477,6 +522,14 @@ struct Importer<'ctx> {
     func_ids: HashMap<PointerValue<'ctx>, FuncId>,
     storage_for_global: HashMap<PointerValue<'ctx>, StorageId>,
     storage_alloc: StorageAllocator,
+    /// The alloca-marker → stack-frame protocol handle: alloca accesses are
+    /// tagged `convention.alloca_marker` (legacy `StorageId::ALLOCA`) for
+    /// `volar-vaffle-target`'s lowering to rebase onto `convention.stack`.
+    convention: StackFrameConvention,
+    /// Registry mode: when set, per-global storage spaces are registered
+    /// here (dense, purpose-tagged) instead of bump-allocated from
+    /// [`GLOBAL_STORAGE_BASE`].
+    storage_registry: Option<StorageRegistry<StoragePurpose>>,
     bit_tid: TypeId,
     byte_tid: TypeId,
     /// Type stamped on `StorageId::ALLOCA` address `Stmt::Const`s
@@ -520,10 +573,32 @@ impl<'ctx> Importer<'ctx> {
             // VIRT_*/memory(_) (stack-alloca'd data uses StorageId::ALLOCA
             // directly, via `stack_load`/`stack_store`, not this allocator).
             storage_alloc: StorageAllocator::new(GLOBAL_STORAGE_BASE),
+            convention: StackFrameConvention::LEGACY,
+            storage_registry: None,
             bit_tid,
             byte_tid,
             addr_tid,
         }
+    }
+
+    /// Registry-mode constructor: claims the well-known alloca/stack
+    /// spaces and reserves `StorageId(0)` (the `null` pointer's tagged
+    /// encoding is global-ID 0 — a global must never receive it), then
+    /// hands out dense, purpose-tagged global spaces from `registry`.
+    /// The registry is returned by [`Importer::finish_registry`] so the
+    /// caller keeps the module's storage ownership record.
+    fn with_storage_registry(
+        mut self,
+        mut registry: StorageRegistry<StoragePurpose>,
+    ) -> IResult<Self> {
+        StackFrameConvention::registered(&mut registry, true).map_err(|e| {
+            ImportError::Unsupported(format!("stack frame convention spaces: {e}"))
+        })?;
+        registry
+            .claim(StorageId::DEFAULT, StoragePurpose::Default)
+            .map_err(|e| ImportError::Unsupported(format!("null-tag reservation: {e}")))?;
+        self.storage_registry = Some(registry);
+        Ok(self)
     }
 
     fn finish(self) -> Module {
@@ -537,6 +612,16 @@ impl<'ctx> Importer<'ctx> {
             exports: self.exports,
             pre_init: Vec::new(),
         }
+    }
+
+    /// Registry-mode counterpart to [`Importer::finish`]: also returns the
+    /// module's storage registry.
+    fn finish_registry(mut self) -> (Module, StorageRegistry<StoragePurpose>) {
+        let registry = self
+            .storage_registry
+            .take()
+            .expect("finish_registry requires registry mode");
+        (self.finish(), registry)
     }
 
     fn global_addr_bits(&self) -> usize {
@@ -731,7 +816,12 @@ impl<'ctx> Importer<'ctx> {
         if let Some(&id) = self.storage_for_global.get(&key) {
             return Ok(id);
         }
-        let id = self.storage_alloc.alloc();
+        let id = match &mut self.storage_registry {
+            Some(registry) => registry.register(StoragePurpose::LlvmGlobal {
+                name: global.get_name().to_string_lossy().into_owned(),
+            }),
+            None => self.storage_alloc.alloc(),
+        };
         self.storage_for_global.insert(key, id);
         Ok(id)
     }
@@ -2349,7 +2439,7 @@ impl<'ctx> Importer<'ctx> {
             let bit = fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageRead {
-                    storage: StorageId::ALLOCA,
+                    storage: self.convention.alloca_marker,
                     ty: self.bit_tid,
                     addr,
                 }),
@@ -2392,7 +2482,7 @@ impl<'ctx> Importer<'ctx> {
             fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageWrite {
-                    storage: StorageId::ALLOCA,
+                    storage: self.convention.alloca_marker,
                     src: bit,
                     ty: self.bit_tid,
                     addr,
@@ -2578,7 +2668,7 @@ impl<'ctx> Importer<'ctx> {
             let bit = fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageRead {
-                    storage: StorageId::ALLOCA,
+                    storage: self.convention.alloca_marker,
                     ty: self.bit_tid,
                     addr,
                 }),
@@ -2610,7 +2700,7 @@ impl<'ctx> Importer<'ctx> {
             fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageWrite {
-                    storage: StorageId::ALLOCA,
+                    storage: self.convention.alloca_marker,
                     src: bit,
                     ty: self.bit_tid,
                     addr,
@@ -2803,8 +2893,15 @@ impl<'ctx> Importer<'ctx> {
     /// complete by the time any function body is walked, since
     /// `import_module` registers every module global up front.
     fn dispatch_candidates(&self) -> IResult<Vec<StorageId>> {
-        let candidates: Vec<StorageId> = (GLOBAL_STORAGE_BASE..self.storage_alloc.next)
-            .map(StorageId)
+        // The assigned set itself, sorted for deterministic dispatch order
+        // -- NOT a contiguity assumption over the allocator's range, which
+        // registry mode (dense, skipping claimed ids) deliberately breaks.
+        let candidates: Vec<StorageId> = self
+            .storage_for_global
+            .values()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect();
         if candidates.len() > MAX_DISPATCH_CANDIDATES {
             return Err(ImportError::Unsupported(format!(

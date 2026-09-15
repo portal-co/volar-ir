@@ -30,7 +30,7 @@ use volar_ir::{
     circuit::VCircuit,
     ir::{Constant, IRStmt, IRTypeId, IRTypes, IRVarId, PreInitSegment, StorageId},
 };
-use volar_ir_common::{IrType, PolyCoeffs};
+use volar_ir_common::{IrType, PolyCoeffs, StoragePurpose, StorageRegistry};
 use volar_lir::{
     BitCircuitBuilder, IcmpPred,
     circuits::{
@@ -190,6 +190,34 @@ pub fn import_module<'a>(
         memories,
         types,
     })
+}
+
+/// Registry-mode variant of [`import_module`] (claim mode): every declared
+/// WASM linear memory keeps its external
+/// [`StorageId::memory`](volar_ir::ir::StorageId::memory) indexing
+/// convention, but the space is *claimed* in `registry` (one registry per
+/// module) under [`StoragePurpose::WasmMemory`] — failing closed with a
+/// named error if another consumer already owns it, instead of silently
+/// sharing the space.
+pub fn import_module_with_registry<'a>(
+    wasm: &'a WModule<'a>,
+    entry: &str,
+    options: WasmCircuitImportOptions,
+    registry: &mut StorageRegistry<StoragePurpose>,
+) -> Result<WasmCircuitArtifact, ImportError> {
+    for (memory, _) in wasm.memories.entries() {
+        registry
+            .claim(
+                StorageId::memory(memory.index() as u32),
+                StoragePurpose::WasmMemory {
+                    index: memory.index() as u32,
+                },
+            )
+            .map_err(|e| {
+                ImportError::Unsupported(alloc::format!("wasm linear memory storage: {e}"))
+            })?;
+    }
+    import_module(wasm, entry, options)
 }
 
 #[derive(Clone, Debug)]
@@ -1425,5 +1453,73 @@ mod tests {
         assert_eq!(artifact.pre_init.len(), 1);
         assert_eq!(artifact.pre_init[0].offset, 3);
         assert_eq!(artifact.pre_init[0].data.len(), 2);
+    }
+
+    #[test]
+    fn registry_mode_claims_memory_spaces() {
+        let bytes = wat::parse_str(
+            "(module
+                (memory 1)
+                (data (i32.const 3) \"\\01\\02\")
+                (func (export \"load\") (result i32)
+                    i32.const 3
+                    i32.load8_u))",
+        )
+        .unwrap();
+        let module = WModule::from_wasm_bytes(&bytes, &FrontendOptions::default()).unwrap();
+        let mut registry = StorageRegistry::<StoragePurpose>::new();
+        let artifact = import_module_with_registry(
+            &module,
+            "load",
+            WasmCircuitImportOptions::default(),
+            &mut registry,
+        )
+        .unwrap();
+        // The legacy `StorageId::memory(0)` id is preserved, now with a
+        // purpose recorded in the module's registry.
+        assert_eq!(artifact.pre_init[0].storage, StorageId::memory(0));
+        assert_eq!(
+            registry.purpose_of(StorageId::memory(0)),
+            Some(&StoragePurpose::WasmMemory { index: 0 })
+        );
+    }
+
+    #[test]
+    fn registry_mode_fails_closed_on_memory_collision() {
+        let bytes = wat::parse_str(
+            "(module
+                (memory 1)
+                (func (export \"load\") (result i32)
+                    i32.const 0
+                    i32.load8_u))",
+        )
+        .unwrap();
+        let module = WModule::from_wasm_bytes(&bytes, &FrontendOptions::default()).unwrap();
+        let mut registry = StorageRegistry::<StoragePurpose>::new();
+        // Another consumer already owns the space `memory(0)` maps to.
+        registry
+            .claim(
+                StorageId::memory(0),
+                StoragePurpose::Other("foreign".to_string()),
+            )
+            .unwrap();
+        let err = import_module_with_registry(
+            &module,
+            "load",
+            WasmCircuitImportOptions::default(),
+            &mut registry,
+        )
+        .unwrap_err();
+        match err {
+            ImportError::Unsupported(msg) => {
+                assert!(msg.contains("wasm linear memory storage"), "{msg}")
+            }
+            other => panic!("expected Unsupported collision error, got {other:?}"),
+        }
+        // The foreign claim is untouched.
+        assert_eq!(
+            registry.purpose_of(StorageId::memory(0)),
+            Some(&StoragePurpose::Other("foreign".to_string()))
+        );
     }
 }

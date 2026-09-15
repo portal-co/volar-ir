@@ -2018,3 +2018,128 @@ bb4:
     assert!(has_table, "expected a Terminator::Table for rustc match");
     let _ = context;
 }
+
+#[test]
+fn registry_mode_assigns_dense_purpose_tagged_global_storages() {
+    let context = Context::create();
+    let module2 = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            br#"
+@g = global i8 7
+
+define i8 @load_g() {
+  %v = load i8, ptr @g
+  ret i8 %v
+}
+"#
+            .as_ref(),
+            "g.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let mut registry = volar_ir_common::StorageRegistry::new();
+    let (out, registry) = volar_llvm_vaffle_import::import_module_with_registry(
+        &module2,
+        &["load_g"],
+        LlvmImportConfig::default(),
+        registry,
+    )
+    .expect("registry-mode import");
+    registry_has_expected_well_knowns(&registry);
+
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let mut global_storages: Vec<StorageId> = body
+        .values
+        .iter()
+        .filter_map(|v| match &v.kind {
+            Value::Op(Stmt::StorageRead { storage, .. })
+            | Value::Op(Stmt::StorageWrite { storage, .. })
+                if *storage != volar_ir_common::StorageId::ALLOCA =>
+            {
+                Some(*storage)
+            }
+            _ => None,
+        })
+        .collect();
+    global_storages.sort();
+    global_storages.dedup();
+    assert_eq!(
+        global_storages.len(),
+        1,
+        "expected exactly one global storage, got {global_storages:?}"
+    );
+    let id = global_storages[0];
+    // Dense and purpose-tagged — never 0 (the `null` pointer's reserved
+    // tag) and outside the legacy 64+ bump range.
+    assert_ne!(id, StorageId::DEFAULT);
+    assert!(
+        id.0 < 64,
+        "registry-issued global ids must be dense, got {id:?}"
+    );
+    match registry.purpose_of(id) {
+        Some(volar_ir_common::StoragePurpose::LlvmGlobal { name }) => {
+            assert_eq!(name, "g")
+        }
+        other => panic!("global storage {id:?} has wrong purpose: {other:?}"),
+    }
+    let _ = context;
+}
+
+fn registry_has_expected_well_knowns(
+    registry: &volar_ir_common::StorageRegistry<volar_ir_common::StoragePurpose>,
+) {
+    use volar_ir_common::StoragePurpose;
+    assert_eq!(
+        registry.purpose_of(StorageId::ALLOCA),
+        Some(&StoragePurpose::AllocaMarker)
+    );
+    assert_eq!(
+        registry.purpose_of(StorageId::STACK),
+        Some(&StoragePurpose::Stack)
+    );
+    assert_eq!(
+        registry.purpose_of(StorageId::DEFAULT),
+        Some(&StoragePurpose::Default)
+    );
+}
+
+#[test]
+fn registry_mode_fails_closed_when_convention_spaces_taken() {
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            br#"
+@g = global i8 7
+
+define i8 @load_g() {
+  %v = load i8, ptr @g
+  ret i8 %v
+}
+"#
+            .as_ref(),
+            "g.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let mut registry = volar_ir_common::StorageRegistry::new();
+    registry
+        .claim(
+            StorageId::ALLOCA,
+            volar_ir_common::StoragePurpose::Other("foreign".to_string()),
+        )
+        .unwrap();
+    let err = volar_llvm_vaffle_import::import_module_with_registry(
+        &module,
+        &["load_g"],
+        LlvmImportConfig::default(),
+        registry,
+    )
+    .unwrap_err();
+    match err {
+        volar_llvm_vaffle_import::ImportError::Unsupported(msg) => {
+            assert!(msg.contains("stack frame convention"), "{msg}")
+        }
+        other => panic!("expected Unsupported collision error, got {other:?}"),
+    }
+    let _ = context;
+}

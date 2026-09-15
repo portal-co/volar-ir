@@ -55,13 +55,17 @@ use alloc::{
 };
 
 use vaffle::{
-    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, Target, Terminator, Value, ValueId,
+    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, StackFrameConvention, Target,
+    Terminator, Value, ValueId,
 };
 use volar_ir::ir::{
     ActionDecl, IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt,
     IRTerminator, IRTypeId, IRTypes, IRVarId, OracleDecl,
 };
-use volar_ir_common::{Constant, IrType, PolyCoeffs, Stmt, StorageId, Type, TypeId};
+use volar_ir_common::{
+    Constant, IrType, PolyCoeffs, Stmt, StorageClaimError, StorageId, StoragePurpose,
+    StorageRegistry, Type, TypeId,
+};
 use volar_lir::circuits::{
     bc_add, frame_read_cont, frame_reload, frame_spill, frame_write_cont, frame_write_ret, n_packs,
     pack_bits, unpack_words, BitCircuitBuilder, FrameLayout, StackPtr, StorageEmitter, PACK_W,
@@ -86,10 +90,40 @@ use volar_lir::circuits::{
 /// expanded by call-site splitting).  The first function in the module is
 /// treated as the entry point.
 pub fn lower_vaffle_to_ir<P: Clone>(module: &Module<P>) -> (IRBlocks<P>, IRTypes) {
+    lower_vaffle_to_ir_with_convention(module, &StackFrameConvention::LEGACY)
+}
+
+/// [`lower_vaffle_to_ir`] with an explicit [`StackFrameConvention`]:
+/// accesses tagged `convention.alloca_marker` are rebased onto the
+/// runtime frame in `convention.stack`, instead of the legacy
+/// [`StorageId::ALLOCA`] → [`StorageId::STACK`] pair.
+pub fn lower_vaffle_to_ir_with_convention<P: Clone>(
+    module: &Module<P>,
+    convention: &StackFrameConvention,
+) -> (IRBlocks<P>, IRTypes) {
     let ssa_module = crate::vaffle_ssa::ssa_ify_module(module);
-    let mut ctx = LowerCtx::new(&ssa_module);
+    let mut ctx = LowerCtx::new_with_convention(&ssa_module, *convention);
     ctx.lower_all();
     ctx.finish()
+}
+
+/// Registry-mode [`lower_vaffle_to_ir`]: claims the
+/// [`StackFrameConvention::LEGACY`] spaces and registers a
+/// [`StoragePurpose::VaffleSsaSpill`] cross-block spill space in
+/// `registry` (one registry per module), failing closed if the
+/// convention's spaces are already owned by another consumer. The legacy
+/// numeric values are preserved, so the lowered IR is identical to
+/// [`lower_vaffle_to_ir`]'s when the claims succeed.
+pub fn lower_vaffle_to_ir_with_registry<P: Clone>(
+    module: &Module<P>,
+    registry: &mut StorageRegistry<StoragePurpose>,
+) -> Result<(IRBlocks<P>, IRTypes), StorageClaimError> {
+    let convention = StackFrameConvention::registered(registry, true)?;
+    let spill = registry.register(StoragePurpose::VaffleSsaSpill);
+    let ssa_module = crate::vaffle_ssa::ssa_ify_module_with_spill(module, spill);
+    let mut ctx = LowerCtx::new_with_convention(&ssa_module, convention);
+    ctx.lower_all();
+    Ok(ctx.finish())
 }
 
 /// Consuming counterpart to [`lower_vaffle_to_ir`].
@@ -396,6 +430,10 @@ struct FuncInfo {
 
 pub(crate) struct LowerCtx<'m, P: Clone = ()> {
     module: &'m Module<P>,
+    /// The alloca-marker → runtime-stack protocol: reads/writes tagged
+    /// `convention.alloca_marker` are rebased onto the frame in
+    /// `convention.stack`. Other storages pass through untouched.
+    convention: StackFrameConvention,
     pointer_bits: usize,
     types: IRTypes,
     /// Maps VAFFLE TypeId → IR TypeId (index = VAFFLE TypeId.0).
@@ -430,6 +468,13 @@ pub(crate) struct LowerCtx<'m, P: Clone = ()> {
 
 impl<'m, P: Clone> LowerCtx<'m, P> {
     pub(crate) fn new(module: &'m Module<P>) -> Self {
+        Self::new_with_convention(module, StackFrameConvention::LEGACY)
+    }
+
+    pub(crate) fn new_with_convention(
+        module: &'m Module<P>,
+        convention: StackFrameConvention,
+    ) -> Self {
         let pointer_bits = module.pointer_width.bits();
         let mut types = IRTypes::new();
         types.push(IrType::Primitive(Type::Bit)); // index 0 = BIT_TID
@@ -465,6 +510,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
 
         LowerCtx {
             module,
+            convention,
             pointer_bits,
             types,
             type_map,
@@ -517,7 +563,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             spill_base: n_ret_words as u64,
             n_spill: 0,
             size: n_ret_words as u64,
-            storage: StorageId::STACK,
+            storage: self.convention.stack,
         };
 
         FuncInfo {
@@ -619,7 +665,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 spill_base: 0,
                 n_spill: 0,
                 size: callee_size,
-                storage: StorageId::STACK,
+                storage: self.convention.stack,
             };
 
             // Own layout: this function's call-spill slots (packed words).
@@ -640,7 +686,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 spill_base,
                 n_spill: n_spill_words,
                 size: own_size,
-                storage: StorageId::STACK,
+                storage: self.convention.stack,
             };
 
             let alloca_budget = compute_alloca_budget(body, &self.types, &self.type_map);
@@ -994,10 +1040,10 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     current_em.set_prov(body.values[svid.0].prov.clone());
                     match &body.values[svid.0].kind {
                         Value::Op(Stmt::StorageRead {
-                            storage: StorageId::ALLOCA,
+                            storage,
                             ty,
                             addr,
-                        }) => {
+                        }) if *storage == self.convention.alloca_marker => {
                             let local_addr = val_map.get(addr.0).unwrap_or(IRVarId(0));
                             let real_addr =
                                 rebase_stack_addr(
@@ -1007,18 +1053,18 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                     self.pointer_bits,
                                 );
                             let id = current_em.emit(IRStmt::StorageRead {
-                                storage: StorageId::STACK,
+                                storage: self.convention.stack,
                                 ty: self.type_map[ty.0 as usize],
                                 addr: real_addr,
                             });
                             val_map.insert(svid.0, id);
                         }
                         Value::Op(Stmt::StorageWrite {
-                            storage: StorageId::ALLOCA,
+                            storage,
                             src,
                             ty,
                             addr,
-                        }) => {
+                        }) if *storage == self.convention.alloca_marker => {
                             let local_addr = val_map.get(addr.0).unwrap_or(IRVarId(0));
                             let real_addr =
                                 rebase_stack_addr(
@@ -1029,7 +1075,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                 );
                             let ir_src = val_map.get(src.0).unwrap_or(IRVarId(0));
                             let id = current_em.emit(IRStmt::StorageWrite {
-                                storage: StorageId::STACK,
+                                storage: self.convention.stack,
                                 src: ir_src,
                                 ty: self.type_map[ty.0 as usize],
                                 addr: real_addr,
@@ -3324,6 +3370,176 @@ mod tests {
             block_writes, 0,
             "tail call must not write a new continuation (Block-lane write count = {})",
             block_writes
+        );
+    }
+
+    /// Minimal single-function module with one ALLOCA-tagged write+read.
+    fn alloca_marker_module() -> vaffle::Module {
+        use vaffle::*;
+        use volar_ir_common::Stmt;
+
+        let mut types = volar_ir_common::TypeTable::new();
+        let bit_tid = types.intern(volar_ir_common::IrType::Primitive(
+            volar_ir_common::Type::Bit,
+        ));
+        let addr_tid = types.intern(volar_ir_common::IrType::Primitive(
+            volar_ir_common::Type::_32,
+        ));
+        let sig = SigDecl {
+            params: vec![bit_tid],
+            results: vec![bit_tid],
+        };
+        let mut vals = std::vec::Vec::new();
+        vals.push(Value::Param {
+            block: BlockId(0),
+            ty: bit_tid,
+            idx: 0,
+        }); // 0
+        vals.push(Value::Op(Stmt::Const(
+            Constant { hi: 0, lo: 0 },
+            addr_tid,
+        ))); // 1: store address
+        vals.push(Value::Op(Stmt::StorageWrite {
+            storage: StorageId::ALLOCA,
+            src: ValueId(0),
+            ty: bit_tid,
+            addr: ValueId(1),
+        })); // 2
+        vals.push(Value::Op(Stmt::Const(
+            Constant { hi: 0, lo: 0 },
+            addr_tid,
+        ))); // 3: reload address
+        vals.push(Value::Op(Stmt::StorageRead {
+            storage: StorageId::ALLOCA,
+            ty: bit_tid,
+            addr: ValueId(3),
+        })); // 4
+        let body = FuncBody {
+            sig: SigId(0),
+            blocks: std::vec![Block {
+                params: std::vec![(ValueId(0), bit_tid)],
+                stmts: std::vec![
+                    ValueId(1),
+                    ValueId(2),
+                    ValueId(3),
+                    ValueId(4),
+                ],
+                terminator: Terminator::Return {
+                    values: std::vec![ValueId(4)],
+                },
+            }],
+            values: vals
+                .into_iter()
+                .map(|v| volar_ir_common::Node::new(v, (), None))
+                .collect(),
+            entry: BlockId(0),
+        };
+        vaffle::Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
+            types,
+            oracles: std::vec![],
+            actions: std::vec![],
+            funcs: std::vec![vaffle::FuncDecl::Body(body)],
+            sigs: std::vec![sig],
+            exports: alloc::collections::BTreeMap::new(),
+            pre_init: std::vec![],
+        }
+    }
+
+    #[test]
+    fn lower_with_registry_claims_convention_and_spill_spaces() {
+        use volar_ir_common::{StoragePurpose, StorageRegistry};
+
+        let module = alloca_marker_module();
+        let mut registry = StorageRegistry::<StoragePurpose>::new();
+        let (ir_blocks_reg, types_reg) =
+            lower_vaffle_to_ir_with_registry(&module, &mut registry)
+                .expect("registry-mode lowering");
+        let (ir_blocks_legacy, types_legacy) = lower_vaffle_to_ir(&module);
+
+        // Convention spaces claimed under their legacy numeric values.
+        assert_eq!(
+            registry.purpose_of(StorageId::ALLOCA),
+            Some(&StoragePurpose::AllocaMarker)
+        );
+        assert_eq!(
+            registry.purpose_of(StorageId::STACK),
+            Some(&StoragePurpose::Stack)
+        );
+        // The spill space is freshly registered (dense id, purpose-tagged),
+        // NOT the legacy VAFFLE_SSA_SPILL constant — nothing outside the
+        // lowering ever references the scratch space numerically.
+        let spill_ids: alloc::vec::Vec<StorageId> = registry
+            .iter()
+            .filter(|(_, p)| matches!(p, StoragePurpose::VaffleSsaSpill))
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(spill_ids.len(), 1, "exactly one spill space");
+        let spill = spill_ids[0];
+        assert!(spill.0 < 64, "dense registry id, got {spill:?}");
+        assert_ne!(spill, StorageId::VAFFLE_SSA_SPILL);
+
+        // The registry-mode output's storage ops touch only the claimed
+        // stack space and the registered spill space; the ALLOCA marker is
+        // fully rebased away (structural invariant).
+        for b in &ir_blocks_reg.blocks {
+            for s in &b.stmts {
+                match &s.kind {
+                    IRStmt::StorageRead { storage, .. }
+                    | IRStmt::StorageWrite { storage, .. } => {
+                        assert_ne!(*storage, StorageId::ALLOCA);
+                        assert!(
+                            *storage == StorageId::STACK || *storage == spill,
+                            "unexpected storage {storage:?} in registry-mode output"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Semantics preservation: both lowered modules compute the
+        // identity function on the 1-bit input.
+        for a in [false, true] {
+            let inputs = std::vec![std::vec![a]];
+            let (legacy_out, _) =
+                volar_fuzz::interpreter::ir::eval_ir_with_storage(
+                    &ir_blocks_legacy,
+                    &types_legacy,
+                    &inputs,
+                );
+            let (reg_out, _) = volar_fuzz::interpreter::ir::eval_ir_with_storage(
+                &ir_blocks_reg,
+                &types_reg,
+                &inputs,
+            );
+            assert_eq!(
+                legacy_out.as_deref(),
+                Some(&[std::vec![a]][..]),
+                "legacy lowering broke semantics on input {a}"
+            );
+            assert_eq!(
+                reg_out, legacy_out,
+                "registry-mode lowering diverged from legacy on input {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_with_registry_fails_closed_on_convention_collision() {
+        use volar_ir_common::{StoragePurpose, StorageRegistry};
+
+        let module = alloca_marker_module();
+        let mut registry = StorageRegistry::<StoragePurpose>::new();
+        registry
+            .claim(StorageId::STACK, StoragePurpose::Other(alloc::string::String::from("foreign")))
+            .unwrap();
+        let err = lower_vaffle_to_ir_with_registry(&module, &mut registry).unwrap_err();
+        assert_eq!(err.id, StorageId::STACK);
+        // The foreign claim is untouched.
+        assert_eq!(
+            registry.purpose_of(StorageId::STACK),
+            Some(&StoragePurpose::Other(alloc::string::String::from("foreign")))
         );
     }
 }
