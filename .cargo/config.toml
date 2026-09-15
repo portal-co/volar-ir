@@ -1,0 +1,35 @@
+# Worktree self-containment patches.
+#
+# This branch (`feat/packed-storages`) lives in a standalone worktree whose
+# parent directories have no `.cargo/config.toml`. The workspace's own
+# crates depend on each other via `git = "https://github.com/portal-co/volar-ir"`
+# (see commit f1e8ae4), which without these patches would silently build
+# *stale git checkouts* of sibling crates instead of the worktree's local
+# sources. Patch the complete set — partial patching would mix local and
+# git versions of the same workspace.
+#
+# Per the repo's agent instructions, in-repo patches must be migrated to a
+# parent `.cargo/config.toml` when this work lands back in a checkout that
+# has one (the base repo's parent config already patches this source).
+
+[patch.'https://github.com/portal-co/volar-ir']
+volar-ir = { path = "crates/ir/volar-ir" }
+volar-ir-common = { path = "crates/ir/volar-ir-common" }
+volar-ir-config = { path = "crates/ir/volar-ir-config" }
+volar-ir-passes = { path = "crates/ir/volar-ir-passes" }
+volar-ir-opt = { path = "crates/ir/volar-ir-opt" }
+volar-ir-virt = { path = "crates/ir/volar-ir-virt" }
+volar-ir-text = { path = "crates/ir/volar-ir-text" }
+vaffle = { path = "crates/ir/vaffle" }
+volar-vaffle-target = { path = "crates/ir/volar-vaffle-target" }
+volar-provenance = { path = "crates/ir/volar-provenance" }
+volar-side = { path = "crates/ir/volar-side" }
+volar-lir = { path = "crates/ir/volar-lir" }
+volar-lir-text = { path = "crates/ir/volar-lir-text" }
+volar-lir-saved = { path = "crates/ir/volar-lir-saved" }
+volar-lir-test-corpus = { path = "crates/ir/volar-lir-test-corpus" }
+volar-fuzz = { path = "crates/fuzz/volar-fuzz" }
+volar-c-backend = { path = "crates/backends/volar-c-backend" }
+volar-llvm-backend = { path = "crates/backends/volar-llvm-backend" }
+volar-wasm-backend = { path = "crates/backends/volar-wasm-backend" }
+volar-ir-build = { path = "crates/frontends/volar-ir-build" }

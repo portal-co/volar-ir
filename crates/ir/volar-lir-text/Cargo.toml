@@ -17,5 +17,5 @@ default = []
 parse = []
 
 [dev-dependencies]
-volar-log = { path = "../../../../volar/crates/helper/volar-log" }
+volar-log = { git = "https://github.com/portal-co/volar" }
 volar-lir-saved = { git = "https://github.com/portal-co/volar-ir" }

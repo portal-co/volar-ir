@@ -17,10 +17,10 @@ volar-llvm-vaffle-import = { path = "../../frontends/volar-llvm-vaffle-import" }
 volar-ssa-lir-replay = { path = "../../ir/volar-ssa-lir-replay" }
 volar-llvm-backend = { git = "https://github.com/portal-co/volar-ir" }
 volar-llvm-plugin-api = { path = "../volar-llvm-plugin-api" }
-volar-llvm-jumpthread = { path = "../../../../llvm-bridge/crates/volar-llvm-jumpthread" }
-volar-llvm-pass-support = { path = "../../../../llvm-bridge/crates/volar-llvm-pass-support" }
+volar-llvm-jumpthread = { path = "../../../vendor/llvm-bridge/crates/volar-llvm-jumpthread" }
+volar-llvm-pass-support = { path = "../../../vendor/llvm-bridge/crates/volar-llvm-pass-support" }
 volar-llvm-constchain = { git = "https://github.com/portal-co/llvm-bridge" }
 inkwell = { workspace = true }
 
 [build-dependencies]
-volar-llvm-pass-build = { path = "../../../../llvm-bridge/crates/volar-llvm-pass-build" }
+volar-llvm-pass-build = { path = "../../../vendor/llvm-bridge/crates/volar-llvm-pass-build" }

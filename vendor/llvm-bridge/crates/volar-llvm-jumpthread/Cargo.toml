@@ -1,0 +1,12 @@
+[package]
+name = "volar-llvm-jumpthread"
+version = "0.1.0"
+edition = "2024"
+description = "DFA jump threading: unfolds a dispatch/state-machine loop into its concrete control flow when a discriminator's reachable states are statically enumerable"
+
+[dependencies]
+inkwell = { version = "0.10.0", default-features = false, features = ["llvm22-1"] }
+
+[dev-dependencies]
+inkwell = { version = "0.10.0", features = ["llvm22-1"] }
+tempfile = "3"

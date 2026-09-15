@@ -1,0 +1,9 @@
+[package]
+name = "volar-llvm-pass-support"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime helpers shared by LLVM New-PM pass-plugin crates: panic-safe entry-point wrapping and marker-call scanning"
+
+[dependencies]
+inkwell = { version = "0.10.0", default-features = false, features = ["llvm22-1"] }
+volar-llvm-constchain = { git = "https://github.com/portal-co/llvm-bridge.git" }

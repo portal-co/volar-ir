@@ -1,7 +1,10 @@
 #![no_std]
 
 use alloc::{string::String, vec::Vec};
-use volar_ir_common::{ActionDecl, Node, OracleDecl, PreInitSegment, Stmt, TypeId, TypeTable};
+use volar_ir_common::{
+    ActionDecl, Node, OracleDecl, PreInitSegment, Stmt, StorageClaimError, StorageId,
+    StoragePurpose, StorageRegistry, TypeId, TypeTable,
+};
 
 extern crate alloc;
 
@@ -205,6 +208,71 @@ impl<V> Terminator<V> {
                 default_target: default_target.as_mut(),
             },
         }
+    }
+}
+
+/// The alloca-marker → runtime-stack-frame storage protocol, as a typed
+/// handle instead of a pair of magic constants.
+///
+/// Frontends (e.g. `volar-llvm-vaffle-import`) tag stack-frame accesses
+/// with the `alloca_marker` space; `volar-vaffle-target`'s lowering rebases
+/// every access tagged `alloca_marker` onto the enclosing function's real
+/// runtime frame, re-tagged `stack`. Both sides must hold the *same* handle
+/// — that is what makes the protocol explicit rather than a numeric
+/// coincidence.
+///
+/// [`StackFrameConvention::LEGACY`] preserves the historical numeric values
+/// ([`StorageId::ALLOCA`] / [`StorageId::STACK`]), so hand-built modules,
+/// fuzzer output, and existing text fixtures remain valid. New pipelines
+/// can [`registered`](StackFrameConvention::registered) fresh spaces
+/// instead; either way the *values* are what end up in the IR — the
+/// registry stays ephemeral.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct StackFrameConvention {
+    /// Marker space frontends tag alloca accesses with (legacy:
+    /// [`StorageId::ALLOCA`]).
+    pub alloca_marker: StorageId,
+    /// Runtime frame space the marker rebases onto (legacy:
+    /// [`StorageId::STACK`]).
+    pub stack: StorageId,
+}
+
+impl StackFrameConvention {
+    /// The historical numeric values: `{ ALLOCA, STACK }`.
+    pub const LEGACY: StackFrameConvention = StackFrameConvention {
+        alloca_marker: StorageId::ALLOCA,
+        stack: StorageId::STACK,
+    };
+
+    /// Register both spaces in `registry` and return the handle.
+    ///
+    /// With `legacy_values: true` this *claims* the legacy numbers
+    /// (failing loudly on collision); with `false` it registers fresh ones.
+    /// Note that with `legacy_values: true` a failed second claim leaves
+    /// the first in place — adopt-or-fail atomically by cloning the
+    /// registry first if that matters to your pipeline.
+    pub fn registered(
+        registry: &mut StorageRegistry<StoragePurpose>,
+        legacy_values: bool,
+    ) -> Result<Self, StorageClaimError> {
+        if legacy_values {
+            registry.claim(StorageId::ALLOCA, StoragePurpose::AllocaMarker)?;
+            registry.claim(StorageId::STACK, StoragePurpose::Stack)?;
+            Ok(Self::LEGACY)
+        } else {
+            let alloca_marker = registry.register(StoragePurpose::AllocaMarker);
+            let stack = registry.register(StoragePurpose::Stack);
+            Ok(StackFrameConvention {
+                alloca_marker,
+                stack,
+            })
+        }
+    }
+}
+
+impl Default for StackFrameConvention {
+    fn default() -> Self {
+        Self::LEGACY
     }
 }
 

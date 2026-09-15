@@ -12,6 +12,11 @@ pub use generated::{
     ActionDecl, Constant, Node, OracleDecl, PreInitSegment, RngDecl, StorageId, Type, TypeId,
 };
 
+pub mod storage_registry;
+pub use storage_registry::{
+    StorageBlock, StorageClaimError, StoragePurpose, StorageRegistry, VirtStorageRole,
+};
+
 use alloc::vec::Vec;
 
 /// Canonical sparse coefficient collection for [`Stmt::Poly`].

@@ -1,0 +1,8 @@
+[package]
+name = "volar-llvm-pass-build"
+version = "0.1.0"
+edition = "2024"
+description = "Build-dependencies-only helpers shared by LLVM New-PM pass-plugin crates: llvm-config probing and C++ plugin-shim source generation"
+
+[dependencies]
+cc = "1"

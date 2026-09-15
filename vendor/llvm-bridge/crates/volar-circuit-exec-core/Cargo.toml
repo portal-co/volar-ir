@@ -1,0 +1,11 @@
+[package]
+name = "volar-circuit-exec-core"
+version = "0.1.0"
+edition = "2024"
+description = "Frontend-neutral Boolean emission and finite-control planning for circuit importers"
+
+[features]
+default = ["alloc"]
+alloc = []
+
+[dependencies]

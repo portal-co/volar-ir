@@ -12,7 +12,7 @@ volar-ir-common.workspace = true
 volar-lir.workspace = true
 portal-pc-waffle-ir.workspace = true
 portal-pc-waffle-frontend.workspace = true
-volar-circuit-exec-core = { path = "../../../../llvm-bridge/crates/volar-circuit-exec-core" }
+volar-circuit-exec-core = { path = "../../../vendor/llvm-bridge/crates/volar-circuit-exec-core" }
 
 [dev-dependencies]
 wat = "1.212.0"
