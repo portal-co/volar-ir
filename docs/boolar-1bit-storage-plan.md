@@ -1,5 +1,8 @@
 # Plan: Boolar IR storage is always 1 bit
 
+> **Current circuit path:** movfuscated execution produces one typed step;
+> [`pipeline.md`](pipeline.md) defines the external state driver and Boolar adapter.
+
 **Status:** Landed — all six phases implemented and committed. The only
 deliberate deviation from the draft: the Phase 4 storage round-trip property
 (`prop_d2_lower_ir_storage_roundtrip_preserves_semantics`) compares full

@@ -1,5 +1,8 @@
 # Cross-function call numeric correctness (`lower_to_ir.rs`)
 
+> **Current circuit path:** concrete CFGs may unroll; movfuscated CFGs produce
+> one typed step as specified in [`pipeline.md`](pipeline.md).
+
 **Status: landed.** `unroll_ir_everything` and `movfuscate_ir` both used to
 reject *any* call-preserving (`Pipeline::from_llvm`, not `_inlined`)
 cross-function call as "not statically finite" / a param-count mismatch,

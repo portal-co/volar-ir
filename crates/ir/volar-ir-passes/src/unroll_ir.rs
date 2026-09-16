@@ -11,8 +11,9 @@
 //! Data values may stay symbolic. The result is one **non-looped** block
 //! (`is_circuit()`, terminator `Jmp Return`).
 //!
-//! This is *not* [`crate::lower_to_circuit`], which MUX-unrolls a movfuscated
-//! self-loop with a numeric budget and is valid for a symbolic PC.
+//! This is distinct from [`crate::movfuscated_to_circuit`], which exposes
+//! one symbolic-PC transition as a typed step boundary for an external
+//! driver; it never duplicates loop iterations.
 //!
 //! Error cases align with `volar-circuit-exec-core::ControlError`:
 //! `NonFiniteControl` (repeating a `(block, concrete-env)` key) and

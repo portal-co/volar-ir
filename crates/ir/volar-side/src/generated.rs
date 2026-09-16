@@ -47,4 +47,3 @@ impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<SideId, D>
         Ok(SideId(self.0.to_native()))
     }
 }
-

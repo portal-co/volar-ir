@@ -23,7 +23,8 @@
 //! # Preconditions
 //!
 //! Requires already-fused, single-block, `Jmp(Return)`-terminated Boolar IR
-//! (`is_circuit()`) — run `movfuscate_biir` / `lower_to_circuit` first.
+//! (`is_circuit()`) — validate an already straight-line program with
+//! [`BCircuit::try_from_ir`](volar_ir::circuit::BCircuit::try_from_ir) first.
 //! Fails closed with [`StorageToMuxBoolarError::AddressTooNarrow`] if any
 //! read/write's address vector is too short to distinguish `num_cells`
 //! distinct indices; this is a real, mechanically-checkable bound, unlike
@@ -55,7 +56,7 @@ pub struct StorageToMuxBoolarConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageToMuxBoolarError {
     /// The input isn't a single `Jmp(Return)`-terminated block; run
-    /// `movfuscate_biir` / `lower_to_circuit` first.
+    /// `BCircuit::try_from_ir` first.
     NotSingleBlockCircuit,
     /// `num_cells` was zero.
     ZeroCells,
@@ -72,7 +73,7 @@ impl core::fmt::Display for StorageToMuxBoolarError {
         match self {
             StorageToMuxBoolarError::NotSingleBlockCircuit => write!(
                 f,
-                "storage_to_mux_boolar requires single-block circuit-shaped Boolar IR; run movfuscate_biir or lower_to_circuit first"
+                "storage_to_mux_boolar requires a single-block circuit-shaped Boolar IR; validate an already straight-line program first"
             ),
             StorageToMuxBoolarError::ZeroCells => {
                 write!(f, "storage_to_mux_boolar: num_cells must be nonzero")

@@ -93,7 +93,9 @@ proptest! {
     fn prop_d2_lower_ir_storage_roundtrip_preserves_semantics(
         (ir, types, inputs) in gen_ir_extended_and_inputs()
     ) {
-        use volar_ir_passes::lower_ir_to_boolar_with_lane_table;
+        use volar_ir_passes::lower_ir_to_boolar::{
+            ExternalLoweringError, try_lower_ir_to_boolar_with_lane_table,
+        };
 
         let ir_outputs = match eval_ir(&ir, &types, &inputs) {
             Some(v) => v,
@@ -112,10 +114,15 @@ proptest! {
         // 64-bit flat cell space; lowering fails closed on those. Skip them,
         // but fail loudly on any *other* unexpected panic.
         let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            lower_ir_to_boolar_with_lane_table(&ir, &types)
+            try_lower_ir_to_boolar_with_lane_table(&ir, &types)
         }));
         let (boolar, lane_table) = match lowered {
-            Ok(pair) => pair,
+            Ok(Ok(pair)) => pair,
+            Ok(Err(
+                ExternalLoweringError::StorageAddressWidthMismatch { .. }
+                | ExternalLoweringError::InvalidStorageAddress { .. },
+            )) => return Ok(()), // not representable in Boolar's flat-cell model
+            Ok(Err(error)) => panic!("lower_ir_to_boolar rejected a valid external source: {error:?}"),
             Err(payload) => {
                 let msg = payload
                     .downcast_ref::<String>()
@@ -125,7 +132,7 @@ proptest! {
                 if msg.contains("flat cell space") || msg.contains("mixed element-address widths") {
                     return Ok(()); // not representable in Boolar storage model
                 }
-                panic!("lower_ir_to_boolar_with_lane_table panicked unexpectedly: {msg}");
+                panic!("try_lower_ir_to_boolar_with_lane_table panicked unexpectedly: {msg}");
             }
         };
         // Lane table is dense: lanes form a contiguous `0..n` range.
@@ -483,89 +490,71 @@ use volar_ir::ir::{
     IRTypes, IRVarId,
 };
 use volar_ir_common::{Constant, IrType, Node, PolyCoeffs, Type};
-use volar_ir_passes::{LoweringMode, lower_to_circuit_ir};
+use volar_ir_passes::{
+    MovfuscationWatch, MovfuscationWatchlist, movfuscated_to_vstep_circuit_with_control_provenance,
+    movfuscate_ir_with_metadata,
+};
 
 use crate::interpreter::ir::{
     StorageMap, apply_pre_init, eval_ir_circuit_step, eval_ir_with_storage,
 };
 
-/// Movfuscate `blocks`, lower to a single-step-per-call circuit, and drive it
-/// via `eval_ir_circuit_step` (one call = one raw movfuscated step) until its
-/// own termination flag fires or `MAX_STEPS` is exceeded. Returns `None` on
-/// a non-halt or a degenerate (`n <= 1` block) input -- the caller decides
-/// whether that's a skip or a failure.
-///
-/// `orig_inputs[i]` seeds block 0's own param `i` -- resolved to its real
-/// combined-circuit slot via `movfuscate_ir_with_boundary_and_watch`'s
-/// `watch` mechanism, since a param's physical slot offset is NOT simply its
-/// own original index once other blocks' params may occupy earlier-assigned
-/// slots at the same or an earlier position.
+/// Drive the typed one-step boundary externally until it reports termination.
+/// The circuit itself contains exactly one movfuscated body.
 fn run_movfuscated(
     blocks: &IRBlocks<()>,
     types: &IRTypes,
     orig_inputs: &[IrValue],
 ) -> Option<Vec<IrValue>> {
-    let mut mut_types = types.clone();
-    let watch: Vec<(usize, u32)> = (0..orig_inputs.len() as u32).map(|v| (0usize, v)).collect();
-    let (movfuscated, _boundary, _accum_info, watch_results) =
-        volar_ir_passes::movfuscate::movfuscate_ir_with_boundary_and_watch(
-            blocks,
-            &mut mut_types,
-            &watch,
-        );
-
-    if !movfuscated.is_movfuscated() {
-        // Single-block input (n <= 1): movfuscate_ir_with_boundary_and_watch
-        // returns the block unchanged -- nothing to differentially test here.
+    if blocks.blocks.len() <= 1 {
         return None;
     }
+    let mut mut_types = types.clone();
+    let watchlist = MovfuscationWatchlist {
+        values: (0..orig_inputs.len() as u32)
+            .map(|var| MovfuscationWatch {
+                block: 0,
+                var: IRVarId(var),
+            })
+            .collect(),
+    };
+    let program = movfuscate_ir_with_metadata(blocks, &mut mut_types, &watchlist).ok()?;
+    let step = movfuscated_to_vstep_circuit_with_control_provenance(&program, &mut_types, &()).ok()?;
+    let circuit = step.circuit;
+    let step_blocks = circuit.clone().to_ir_blocks();
+    let block = &step_blocks.blocks[0];
 
-    let bit_ty = mut_types
-        .0
-        .iter()
-        .position(|t| matches!(t, IrType::Primitive(Type::Bit)))
-        .map(|i| IRTypeId(i as u32))
-        .expect("Bit type must already be interned by movfuscate_ir");
-
-    let circuit = lower_to_circuit_ir(&movfuscated, &bit_ty, 1, LoweringMode::WithTerminationFlag);
-
-    let param_widths: Vec<usize> = circuit.blocks[0]
+    let param_widths: Vec<usize> = circuit
         .params
         .iter()
         .map(|&tid| bit_width(tid, &mut_types))
         .collect();
-
     let mut state: Vec<IrValue> = param_widths.iter().map(|&w| vec![false; w]).collect();
-    for &(orig_block, orig_var, combined_var) in &watch_results {
-        if orig_block == 0 {
-            state[combined_var as usize] = orig_inputs[orig_var as usize].clone();
+    for (source, combined) in &program.watches.entries {
+        if source.block == 0 {
+            state[combined.0 as usize] = orig_inputs[source.var.0 as usize].clone();
         }
     }
 
     let mut storage: StorageMap = StorageMap::new();
-    apply_pre_init(&mut storage, &circuit.pre_init, &mut_types);
+    apply_pre_init(&mut storage, &step_blocks.pre_init, &mut_types);
 
     const MAX_STEPS: usize = 64;
-    let mut done = false;
-    let mut step = 0usize;
     let mut outputs: Vec<IrValue> = Vec::new();
-    while !done && step < MAX_STEPS {
+    for _ in 0..MAX_STEPS {
         outputs = eval_ir_circuit_step(
-            &circuit.blocks[0],
+            block,
             &mut_types,
-            &circuit.oracles,
+            &step_blocks.oracles,
             &state,
             &mut storage,
         );
-        done = outputs[0].iter().any(|&b| b);
-        state = outputs[1..1 + param_widths.len()].to_vec();
-        step += 1;
+        if outputs.first()?.first().copied()? {
+            return Some(outputs[1 + circuit.boundary.next_state.len()..].to_vec());
+        }
+        state = outputs[1..1 + circuit.boundary.next_state.len()].to_vec();
     }
-
-    if !done {
-        return None;
-    }
-    Some(outputs[1 + param_widths.len()..].to_vec())
+    None
 }
 
 // `gen_ir_diamond_and_inputs`/`gen_ir_multiblock_and_inputs` were tried here
@@ -1165,29 +1154,20 @@ proptest! {
 // shape for real, non-foldable control flow -- this is the "arbitrary CFG"
 // counterpart to property O's concrete/unrollable one.
 //
-// Rather than driving the movfuscated self-loop to real completion (which
-// needs `movfuscate_ir_with_boundary_and_watch`'s slot-resolving "watch"
-// mechanism -- see property M's `run_movfuscated`), this checks a narrower
+// Rather than driving the movfuscated self-loop to real completion, this
+// checks a narrower
 // but sufficient invariant for bitwidth bugs specifically: for ONE
 // arbitrary (fully-random, not tied to any real initial state) full state
 // vector, do `eval_ir_circuit_step` (plain interpreter) and `eval_biir`
 // (after `lower_ir_to_boolar`) compute the identical one-step result on the
-// exact same single-iteration-budgeted circuit
-// (`lower_to_circuit_ir(..., 1, LoweringMode::WithTerminationFlag)`)? A
+// exact same typed one-step circuit? A
 // bitwidth mismatch in either movfuscate's own state packing or
 // `lower_ir_to_boolar`'s translation of it shows up here without needing to
 // reason about multi-step convergence at all.
 // ============================================================================
 
-use volar_ir_passes::movfuscate::movfuscate_ir_with_control_provenance;
-
 /// Cycle `seed` (padding with `false` if empty) to exactly `total` bits,
-/// then split into `widths`-shaped `IrValue`s. Turns an already-shrinkable
-/// proptest value (`inputs`, from the *original* program's own param
-/// generation) into a same-shaped "arbitrary state" input for the
-/// *movfuscated* circuit, whose own param count/widths are only known
-/// after movfuscating -- not something a `Strategy` can size upfront
-/// without duplicating `movfuscate_ir`'s own slot-layout logic.
+/// then split into `widths`-shaped `IrValue`s.
 fn cycle_to_widths(seed: &[bool], widths: &[usize]) -> Vec<IrValue> {
     let total: usize = widths.iter().sum();
     let bits: Vec<bool> = if seed.is_empty() {
@@ -1204,29 +1184,28 @@ fn cycle_to_widths(seed: &[bool], widths: &[usize]) -> Vec<IrValue> {
     out
 }
 
-/// Movfuscate `ir`, budget it to exactly one self-loop iteration, and
-/// evaluate that single step both ways. `None` means this input has no
-/// real control flow to movfuscate (`is_movfuscated()` is false for an
-/// already-single, linear block) or hit a known-unrelated lowering limit
-/// (same skip list as property N/O).
+/// Run one typed Volar step and the Boolar adapter on the same arbitrary
+/// movfuscated state. This proves the adapter observes the exact allocation
+/// and boundary emitted by the Volar core.
 fn one_step_via_movfuscate(
     ir: &IRBlocks<()>,
     types: &IRTypes,
     seed: &[bool],
 ) -> Option<(Vec<bool>, Vec<bool>)> {
-    let mut mut_types = types.clone();
-    let movfuscated = movfuscate_ir_with_control_provenance(ir, &mut mut_types, &());
-    if !movfuscated.is_movfuscated() {
+    if ir.blocks.len() <= 1 {
         return None;
     }
-    let bit_ty = mut_types
-        .0
-        .iter()
-        .position(|t| matches!(t, IrType::Primitive(Type::Bit)))
-        .map(|i| IRTypeId(i as u32))?;
-    let circuit = lower_to_circuit_ir(&movfuscated, &bit_ty, 1, LoweringMode::WithTerminationFlag);
-
-    let param_widths: Vec<usize> = circuit.blocks[0]
+    let mut mut_types = types.clone();
+    let program = movfuscate_ir_with_metadata(
+        ir,
+        &mut mut_types,
+        &MovfuscationWatchlist::default(),
+    )
+    .ok()?;
+    let step = movfuscated_to_vstep_circuit_with_control_provenance(&program, &mut_types, &()).ok()?;
+    let circuit = step.circuit;
+    let step_blocks = circuit.clone().to_ir_blocks();
+    let param_widths: Vec<usize> = circuit
         .params
         .iter()
         .map(|&tid| bit_width(tid, &mut_types))
@@ -1234,42 +1213,23 @@ fn one_step_via_movfuscate(
     let state = cycle_to_widths(seed, &param_widths);
 
     let mut storage_ir: StorageMap = StorageMap::new();
-    apply_pre_init(&mut storage_ir, &circuit.pre_init, &mut_types);
+    apply_pre_init(&mut storage_ir, &step_blocks.pre_init, &mut_types);
     let ir_step_out = eval_ir_circuit_step(
-        &circuit.blocks[0],
+        &step_blocks.blocks[0],
         &mut_types,
-        &circuit.oracles,
+        &step_blocks.oracles,
         &state,
         &mut storage_ir,
     );
 
-    let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        lower_ir_to_boolar(&circuit, &mut_types)
-    }));
-    let boolar = match lowered {
-        Ok(b) => b,
-        Err(payload) => {
-            let msg = payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| {
-                    payload
-                        .downcast_ref::<&'static str>()
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_default();
-            if msg.contains("SignatureMismatch")
-                || msg.contains("flat cell space")
-                || msg.contains("mixed element-address widths")
-            {
-                return None;
-            }
-            panic!("lower_ir_to_boolar panicked unexpectedly: {msg}");
-        }
-    };
-    let flat_state = bit_flatten(&state);
-    let boolar_step_out = eval_biir(&boolar, &flat_state)?;
-
+    let lowered = volar_ir_passes::lower_vstep_to_bstep(
+        &circuit,
+        &mut_types,
+        &volar_ir_passes::StepValueWatchlist::default(),
+    )
+    .ok()?;
+    let boolar = lowered.circuit.to_bir_blocks();
+    let boolar_step_out = eval_biir(&boolar, &bit_flatten(&state))?;
     Some((bit_flatten(&ir_step_out), boolar_step_out))
 }
 

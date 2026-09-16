@@ -282,6 +282,11 @@ fn render_rust_types(types: &[&GeneratedType]) -> String {
             _ => unreachable!("validated generated type"),
         }
     }
+    // Renderers separate definitions with a blank line. Do not leave that
+    // separator as a spurious blank final line in generated Rust files.
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
     out
 }
 
