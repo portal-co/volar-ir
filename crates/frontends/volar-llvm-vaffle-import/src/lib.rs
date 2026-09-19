@@ -275,7 +275,8 @@ pub fn import_module_with_config<'ctx>(
 ) -> IResult<Module> {
     config.validate()?;
     let pointer_width = pointer_width_from_layout(llvm_module, config.clone())?;
-    let mut importer = Importer::new(pointer_width, config.externals);
+    let mut importer = Importer::new(pointer_width, config.externals.clone());
+    importer.validate_configured_external_symbols(llvm_module)?;
     // Eagerly assign every module global its `StorageId` before walking any
     // function body, so `dispatch_read`/`dispatch_write` (runtime
     // storage-identity dispatch for a pointer whose provenance isn't
@@ -609,6 +610,21 @@ impl<'ctx> Importer<'ctx> {
             externals,
             addr_tid,
         }
+    }
+
+    /// Validate every configured mapping against the module before walking
+    /// reachable bodies. A misspelled mapping must not silently succeed just
+    /// because no imported call happened to reference it.
+    fn validate_configured_external_symbols(&self, llvm_module: &LlvmModule<'ctx>) -> IResult<()> {
+        for (symbol, external) in &self.externals {
+            let callee = llvm_module.get_function(symbol).ok_or_else(|| {
+                ImportError::Unsupported(format!(
+                    "configured external `{symbol}` is not declared by the LLVM module"
+                ))
+            })?;
+            self.validate_configured_external_declaration(callee, symbol, external)?;
+        }
+        Ok(())
     }
 
     fn finish(self) -> Module {

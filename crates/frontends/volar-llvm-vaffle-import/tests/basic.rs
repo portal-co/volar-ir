@@ -61,6 +61,35 @@ entry:
 }
 
 #[test]
+fn configured_llvm_external_rejects_unresolved_symbol() {
+    let source = r#"
+define i32 @entry(i32 %x) {
+entry:
+  ret i32 %x
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "missing-external.ll",
+        ))
+        .unwrap();
+    let error = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default()
+            .with_oracle_execution("pure", OracleExecutionPolicy::legacy_evaluator()),
+    )
+    .expect_err("a configured external must name a module declaration");
+    assert!(
+        error
+            .to_string()
+            .contains("is not declared by the LLVM module")
+    );
+}
+
+#[test]
 fn configured_llvm_external_rejects_variadic_declaration() {
     let source = r#"
 declare i32 @pure(i32, ...)
