@@ -61,6 +61,36 @@ entry:
 }
 
 #[test]
+fn configured_llvm_action_requires_i1_guard_and_matching_fallback() {
+    let source = r#"
+declare i32 @act(i8, i32, i64)
+define i32 @entry(i8 %guard, i32 %arg, i64 %fallback) {
+entry:
+  %a = call i32 @act(i8 %guard, i32 %arg, i64 %fallback)
+  ret i32 %a
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "extern-action-shape.ll",
+        ))
+        .unwrap();
+    let error = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default().with_action_execution(
+            "act",
+            1,
+            ActionExecutionPolicy::legacy_evaluator(),
+        ),
+    )
+    .expect_err("action ABI must be validated");
+    assert!(error.to_string().contains("guard must be i1"));
+}
+
+#[test]
 fn configured_llvm_oracle_and_action_preserve_execution_metadata() {
     let source = r#"
 declare i32 @pure(i32)

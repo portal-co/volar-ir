@@ -1961,6 +1961,19 @@ impl<'ctx> Importer<'ctx> {
                         "configured action `{symbol}` expects guard + {n_args} args + 1 fallback"
                     )));
                 }
+                let guard_value = call_value_operand(instr, 0, "configured action guard")?;
+                if self.llvm_bit_width(guard_value.get_type())? != 1 {
+                    return Err(ImportError::Unsupported(format!(
+                        "configured action `{symbol}` guard must be i1"
+                    )));
+                }
+                let fallback_value =
+                    call_value_operand(instr, (n_args + 1) as u32, "configured action fallback")?;
+                if fallback_value.get_type() != result_type {
+                    return Err(ImportError::Unsupported(format!(
+                        "configured action `{symbol}` fallback type must match its result type"
+                    )));
+                }
                 let guard = args[0];
                 let action_params = params[1..1 + n_args].to_vec();
                 let fallback = args[n_args + 1];
