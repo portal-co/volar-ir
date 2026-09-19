@@ -26,3 +26,5 @@ lazy-ir-plan = ["dep:portal-lazy-transform"]
 
 [dev-dependencies]
 volar-lir-test-corpus = { workspace = true }
+volar-llvm-vaffle-import = { path = "../../frontends/volar-llvm-vaffle-import" }
+inkwell = { workspace = true }
