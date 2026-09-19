@@ -1,4 +1,5 @@
 use alloc::{collections::BTreeMap, string::String};
+use volar_ir_common::{ActionExecutionPolicy, OracleExecutionPolicy};
 use volar_side::SideId;
 
 /// How a WAFFLE function import maps to an oracle or action.
@@ -6,6 +7,9 @@ pub enum WaffleImportKind {
     /// Pure oracle — all WAFFLE params → `OracleDecl::params`; WAFFLE results → `OracleDecl::results`.
     Oracle {
         name: String,
+        /// Explicit executor/reveal/fingerprint policy copied into the
+        /// declaration emitted for this import.
+        execution: OracleExecutionPolicy,
         /// Side to attach to the call/output values emitted at each call
         /// site, if any (see `volar-side`).
         side: Option<SideId>,
@@ -15,6 +19,9 @@ pub enum WaffleImportKind {
     ///   results = [result_0 .. result_{n_results-1}]
     Action {
         name: String,
+        /// Explicit executor/reveal/fingerprint policy copied into the
+        /// declaration emitted for this import.
+        execution: ActionExecutionPolicy,
         n_args: usize,
         /// Side to attach to the call/output values emitted at each call
         /// site, if any (see `volar-side`).
@@ -50,6 +57,7 @@ impl WaffleImportConfig {
             waffle_name.into(),
             WaffleImportKind::Oracle {
                 name: oracle_name.into(),
+                execution: OracleExecutionPolicy::legacy_evaluator(),
                 side: None,
             },
         );
@@ -66,6 +74,45 @@ impl WaffleImportConfig {
             waffle_name.into(),
             WaffleImportKind::Action {
                 name: action_name.into(),
+                execution: ActionExecutionPolicy::legacy_evaluator(),
+                n_args,
+                side: None,
+            }
+        );
+        self
+    }
+
+    /// Map an import to an oracle with its explicit declaration policy.
+    pub fn with_oracle_execution(
+        mut self,
+        waffle_name: impl Into<String>,
+        oracle_name: impl Into<String>,
+        execution: OracleExecutionPolicy,
+    ) -> Self {
+        self.imports.insert(
+            waffle_name.into(),
+            WaffleImportKind::Oracle {
+                name: oracle_name.into(),
+                execution,
+                side: None,
+            },
+        );
+        self
+    }
+
+    /// Map an import to an action with its explicit declaration policy.
+    pub fn with_action_execution(
+        mut self,
+        waffle_name: impl Into<String>,
+        action_name: impl Into<String>,
+        n_args: usize,
+        execution: ActionExecutionPolicy,
+    ) -> Self {
+        self.imports.insert(
+            waffle_name.into(),
+            WaffleImportKind::Action {
+                name: action_name.into(),
+                execution,
                 n_args,
                 side: None,
             },
@@ -120,6 +167,7 @@ impl WaffleImportConfig {
             waffle_name.into(),
             WaffleImportKind::Oracle {
                 name: oracle_name.into(),
+                execution: OracleExecutionPolicy::legacy_evaluator(),
                 side: Some(side),
             },
         );
@@ -139,9 +187,10 @@ impl WaffleImportConfig {
             waffle_name.into(),
             WaffleImportKind::Action {
                 name: action_name.into(),
+                execution: ActionExecutionPolicy::legacy_evaluator(),
                 n_args,
                 side: Some(side),
-            },
+            }
         );
         self
     }

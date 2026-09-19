@@ -244,7 +244,9 @@ pub fn lower_waffle_module_with_metadata(
                 _ => continue,
             };
             match kind {
-                WaffleImportKind::Oracle { name, .. } => {
+                WaffleImportKind::Oracle {
+                    name, execution, ..
+                } => {
                     let params: alloc::vec::Vec<_> = wasm_params
                         .iter()
                         .filter_map(|&t| waffle_ty(t).ok())
@@ -260,10 +262,15 @@ pub fn lower_waffle_module_with_metadata(
                         params,
                         results,
 
-                        execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
+                        execution: *execution,
                     });
                 }
-                WaffleImportKind::Action { name, n_args, .. } => {
+                WaffleImportKind::Action {
+                    name,
+                    execution,
+                    n_args,
+                    ..
+                } => {
                     let action_params: alloc::vec::Vec<_> = wasm_params
                         .iter()
                         .skip(1) // skip guard
@@ -281,7 +288,7 @@ pub fn lower_waffle_module_with_metadata(
                         params: action_params,
                         results,
 
-                        execution: volar_ir_common::ActionExecutionPolicy::legacy_evaluator(),
+                        execution: *execution,
                     });
                 }
             }
@@ -1033,6 +1040,7 @@ fn lower_op(
                     WaffleImportKind::Oracle {
                         name: oracle_name,
                         side,
+                        ..
                     } => {
                         tgt.set_side(*side);
                         // Emit the oracle as an IR-level `OracleCall` (not a
@@ -1047,6 +1055,7 @@ fn lower_op(
                         name: action_name,
                         n_args,
                         side,
+                        ..
                     } => {
                         let guard_vv = all_arg_vals[0].clone();
                         let guard_bit = or_bits(tgt, &guard_vv.bits);
@@ -2757,6 +2766,35 @@ mod tests {
     }
 
     #[test]
+    fn test_oracle_and_action_registration_with_explicit_policy() {
+        use volar_ir_common::{
+            ActionExecutionPolicy, ExternalExecutor, ExternalRevealPolicy, OracleExecutionKind,
+            OracleExecutionPolicy,
+        };
+
+        let wasm = build_oracle_action_module();
+        let oracle_policy = OracleExecutionPolicy {
+            execution: OracleExecutionKind::Assigned,
+            executor: ExternalExecutor::Garbler,
+            reveal: ExternalRevealPolicy::BothRoles,
+            fingerprint: [0xA1; 32],
+        };
+        let action_policy = ActionExecutionPolicy {
+            executor: ExternalExecutor::Garbler,
+            reveal: ExternalRevealPolicy::BothRoles,
+            fingerprint: [0xB2; 32],
+        };
+        let config = WaffleImportConfig::new()
+            .with_oracle_execution("oracle_hash", "hash", oracle_policy)
+            .with_action_execution("action_send", "send", 1, action_policy);
+        let mut target = VaffleTarget::new();
+        let errors = lower_waffle_module(&wasm, &mut target, &config);
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+        assert_eq!(target.module.oracles[0].execution, oracle_policy);
+        assert_eq!(target.module.actions[0].execution, action_policy);
+    }
+
+    #[test]
     fn test_oracle_and_action_registration() {
         let wasm = build_oracle_action_module();
         let config = WaffleImportConfig::new()
@@ -2793,6 +2831,16 @@ mod tests {
             target.module.actions[0].results.len(),
             1,
             "action has 1 result"
+        );
+
+        // The default convenience builder remains explicitly legacy.
+        assert_eq!(
+            target.module.oracles[0].execution,
+            volar_ir_common::OracleExecutionPolicy::legacy_evaluator()
+        );
+        assert_eq!(
+            target.module.actions[0].execution,
+            volar_ir_common::ActionExecutionPolicy::legacy_evaluator()
         );
 
         // The caller function should have lowered successfully.

@@ -1681,7 +1681,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 params: remap(&o.params),
                 results: remap(&o.results),
 
-                execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
+                execution: o.execution,
             })
             .collect();
         let actions = self
@@ -1692,7 +1692,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 params: remap(&a.params),
                 results: remap(&a.results),
 
-                execution: volar_ir_common::ActionExecutionPolicy::legacy_evaluator(),
+                execution: a.execution,
             })
             .collect();
         (
