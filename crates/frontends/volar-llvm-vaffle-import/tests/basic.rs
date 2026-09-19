@@ -61,6 +61,36 @@ entry:
 }
 
 #[test]
+fn configured_llvm_external_rejects_defined_callee() {
+    let source = r#"
+define i32 @pure(i32 %x) {
+entry:
+  ret i32 %x
+}
+define i32 @entry(i32 %x) {
+entry:
+  %result = call i32 @pure(i32 %x)
+  ret i32 %result
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "defined-external.ll",
+        ))
+        .unwrap();
+    let error = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default()
+            .with_oracle_execution("pure", OracleExecutionPolicy::legacy_evaluator()),
+    )
+    .expect_err("configured externals must not shadow defined LLVM functions");
+    assert!(error.to_string().contains("must target a declaration"));
+}
+
+#[test]
 fn configured_llvm_external_declaration_must_match_registered_abi() {
     let source = r#"
 declare i32 @act(i1, i32, i32)

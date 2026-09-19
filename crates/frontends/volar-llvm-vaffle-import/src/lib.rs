@@ -1864,6 +1864,11 @@ impl<'ctx> Importer<'ctx> {
         symbol: &str,
         external: &LlvmExternalImportKind,
     ) -> IResult<()> {
+        if callee.get_first_basic_block().is_some() {
+            return Err(ImportError::Unsupported(format!(
+                "configured external `{symbol}` must target a declaration, not a defined LLVM function"
+            )));
+        }
         let signature = callee.get_type();
         if signature.is_var_arg() {
             return Err(ImportError::Unsupported(format!(
