@@ -16,7 +16,7 @@ volar-lir.workspace = true
 portal-pc-waffle-ir.workspace = true
 portal-pc-waffle-frontend.workspace = true
 wax-meta.workspace = true
-portal-lazy-transform = { git = "https://github.com/portal-co/portal-lazy-transform", optional = true }
+portal-lazy-transform = { git = "https://github.com/portal-co/portal-lazy-transform.git", optional = true }
 
 [features]
 # Opt-in lazy VAFFLE-to-IR entry point built on portal-lazy-transform. Off by
