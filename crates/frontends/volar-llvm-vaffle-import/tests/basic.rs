@@ -26,6 +26,41 @@ fn parse(source: &str) -> Context {
 }
 
 #[test]
+fn configured_llvm_oracle_reuses_one_declaration() {
+    let source = r#"
+declare i32 @pure(i32)
+define i32 @entry(i32 %x) {
+entry:
+  %a = call i32 @pure(i32 %x)
+  %b = call i32 @pure(i32 %a)
+  ret i32 %b
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "extern-consistency.ll",
+        ))
+        .unwrap();
+    let imported = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default().with_oracle_execution(
+            "pure",
+            OracleExecutionPolicy {
+                execution: OracleExecutionKind::Assigned,
+                executor: ExternalExecutor::Evaluator,
+                reveal: ExternalRevealPolicy::BothRoles,
+                fingerprint: [0x11; 32],
+            },
+        ),
+    )
+    .expect("repeated calls reuse one declaration");
+    assert_eq!(imported.oracles.len(), 1);
+}
+
+#[test]
 fn configured_llvm_oracle_and_action_preserve_execution_metadata() {
     let source = r#"
 declare i32 @pure(i32)

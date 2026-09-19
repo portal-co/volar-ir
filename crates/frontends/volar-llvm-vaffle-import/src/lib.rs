@@ -1829,6 +1829,60 @@ impl<'ctx> Importer<'ctx> {
         Ok(called)
     }
 
+    fn register_configured_oracle(
+        &mut self,
+        symbol: &str,
+        params: &[TypeId],
+        results: &[TypeId],
+        execution: OracleExecutionPolicy,
+    ) -> IResult<()> {
+        if let Some(existing) = self.oracles.iter().find(|decl| decl.name == symbol) {
+            if existing.params != params
+                || existing.results != results
+                || existing.execution != execution
+            {
+                return Err(ImportError::Unsupported(format!(
+                    "configured oracle `{symbol}` has inconsistent call signatures or execution policy"
+                )));
+            }
+            return Ok(());
+        }
+        self.oracles.push(OracleDecl {
+            name: symbol.into(),
+            params: params.to_vec(),
+            results: results.to_vec(),
+            execution,
+        });
+        Ok(())
+    }
+
+    fn register_configured_action(
+        &mut self,
+        symbol: &str,
+        params: &[TypeId],
+        results: &[TypeId],
+        execution: ActionExecutionPolicy,
+    ) -> IResult<()> {
+        if let Some(existing) = self.actions.iter().find(|decl| decl.name == symbol) {
+            if existing.params != params
+                || existing.results != results
+                || existing.execution != execution
+            {
+                return Err(ImportError::Unsupported(format!(
+                    "configured action `{symbol}` has inconsistent call signatures or execution policy"
+                )));
+            }
+            return Ok(());
+        }
+        self.actions.push(ActionDecl {
+            name: symbol.into(),
+            params: params.to_vec(),
+            results: results.to_vec(),
+            execution,
+        });
+        Ok(())
+    }
+
     /// Lower a direct configured LLVM declaration to a real Volar external
     /// primitive, preserving its explicit execution policy in the module
     /// declaration table. The present ABI supports scalar integer inputs and
@@ -1878,14 +1932,7 @@ impl<'ctx> Importer<'ctx> {
         let cur = fctx.current;
         let (call, output) = match external {
             LlvmExternalImportKind::Oracle { execution } => {
-                if !self.oracles.iter().any(|decl| decl.name == symbol) {
-                    self.oracles.push(OracleDecl {
-                        name: symbol.into(),
-                        params,
-                        results: output_tys.clone(),
-                        execution,
-                    });
-                }
+                self.register_configured_oracle(symbol, &params, &output_tys, execution)?;
                 let call = fctx.emit(
                     cur,
                     Value::Op(Stmt::OracleCall {
@@ -1917,14 +1964,7 @@ impl<'ctx> Importer<'ctx> {
                 let guard = args[0];
                 let action_params = params[1..1 + n_args].to_vec();
                 let fallback = args[n_args + 1];
-                if !self.actions.iter().any(|decl| decl.name == symbol) {
-                    self.actions.push(ActionDecl {
-                        name: symbol.into(),
-                        params: action_params,
-                        results: output_tys.clone(),
-                        execution,
-                    });
-                }
+                self.register_configured_action(symbol, &action_params, &output_tys, execution)?;
                 let call = fctx.emit(
                     cur,
                     Value::Op(Stmt::ActionCall {
