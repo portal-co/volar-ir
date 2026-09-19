@@ -6,7 +6,10 @@
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use vaffle::{FuncDecl, PointerWidth, Terminator, Value};
-use volar_ir_common::{Stmt, StorageId};
+use volar_ir_common::{
+    ActionExecutionPolicy, ExternalExecutor, ExternalRevealPolicy, OracleExecutionKind,
+    OracleExecutionPolicy, Stmt, StorageId,
+};
 use volar_llvm_vaffle_import::{
     LlvmImportConfig, import_module, import_module_inlined, import_module_with_config,
 };
@@ -20,6 +23,59 @@ fn parse(source: &str) -> Context {
         ))
         .expect("valid LLVM IR fixture");
     context
+}
+
+#[test]
+fn configured_llvm_oracle_and_action_preserve_execution_metadata() {
+    let source = r#"
+declare i32 @pure(i32)
+declare i32 @act(i1, i32, i32)
+define i32 @entry(i32 %x, i1 %guard) {
+entry:
+  %o = call i32 @pure(i32 %x)
+  %a = call i32 @act(i1 %guard, i32 %o, i32 %x)
+  ret i32 %a
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "extern.ll",
+        ))
+        .expect("valid LLVM external fixture");
+    let oracle_policy = OracleExecutionPolicy {
+        execution: OracleExecutionKind::Assigned,
+        executor: ExternalExecutor::Garbler,
+        reveal: ExternalRevealPolicy::BothRoles,
+        fingerprint: [0x11; 32],
+    };
+    let action_policy = ActionExecutionPolicy {
+        executor: ExternalExecutor::Garbler,
+        reveal: ExternalRevealPolicy::BothRoles,
+        fingerprint: [0x22; 32],
+    };
+    let config = LlvmImportConfig::default()
+        .with_oracle_execution("pure", oracle_policy)
+        .with_action_execution("act", 1, action_policy);
+    let imported = import_module_with_config(&module, &["entry"], config).unwrap();
+    assert_eq!(imported.oracles.len(), 1);
+    assert_eq!(imported.actions.len(), 1);
+    assert_eq!(imported.oracles[0].name, "pure");
+    assert_eq!(imported.oracles[0].execution, oracle_policy);
+    assert_eq!(imported.actions[0].name, "act");
+    assert_eq!(imported.actions[0].execution, action_policy);
+    let FuncDecl::Body(body) = &imported.funcs[imported.exports.get("entry").unwrap().0] else {
+        panic!("entry must have a body");
+    };
+    assert!(body.values.iter().any(|node| matches!(
+        node.kind,
+        Value::Op(Stmt::OracleCall { ref name, .. }) if name == "pure"
+    )));
+    assert!(body.values.iter().any(|node| matches!(
+        node.kind,
+        Value::Op(Stmt::ActionCall { ref name, .. }) if name == "act"
+    )));
 }
 
 #[test]
@@ -149,6 +205,7 @@ entry:
         &["pointer_array"],
         LlvmImportConfig {
             pointer_width: Some(PointerWidth::Bits32),
+            ..Default::default()
         },
     )
     .expect("matching 32-bit layout imports");
@@ -168,6 +225,7 @@ entry:
         &["pointer_array"],
         LlvmImportConfig {
             pointer_width: Some(PointerWidth::Bits64),
+            ..Default::default()
         },
     )
     .expect_err("an incompatible pointer ABI must not be silently overridden");
