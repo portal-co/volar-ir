@@ -2,10 +2,13 @@
 // @ai: assisted
 //! Constant-folding and boolean-simplification pass for Boolar IR.
 
-use alloc::collections::BTreeMap;
-use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
+use alloc::{collections::BTreeMap, vec::Vec};
+use volar_ir::boolar::{
+    BIrBlock, BIrBlocks, BIrPreInitSegment, BIrStmt, BIrTarget, BIrTerminator, LaneId,
+};
 use volar_ir::circuit::BCircuit;
 use volar_ir::ir::{IRBlockTargetId, IRVarId};
+use volar_ir_common::{StorageAccess, StorageId, StorageTable};
 
 use crate::common::canon_alias;
 
@@ -34,6 +37,124 @@ pub fn fold_biir_blocks<P: Clone>(blocks: &mut BIrBlocks<P>) -> bool {
 /// Constants are propagated through Boolean statements and aliases are
 /// rewritten in both later statements and circuit outputs. Returns `true` if
 /// the circuit was modified.
+/// Replace Boolar reads from a proven read-only static image with constants.
+///
+/// The sidecar is deliberately separate from the serialized Boolar carrier.
+/// A read folds only when every address wire has a known constant value;
+/// unknown or read-write storage remains untouched.
+pub fn fold_readonly_storage_biir_blocks<P: Clone>(
+    blocks: &mut BIrBlocks<P>,
+    storage_access: &StorageTable,
+) -> bool {
+    let image = blocks.pre_init.clone();
+    let mut changed = false;
+    for block in &mut blocks.blocks {
+        changed |= fold_readonly_storage_biir_stmts(
+            block.params,
+            &mut block.stmts,
+            &image,
+            storage_access,
+        );
+    }
+    changed
+}
+
+/// As [`fold_readonly_storage_biir_blocks`], for a fused circuit.
+pub fn fold_readonly_storage_biir_circuit<P: Clone>(
+    circuit: &mut BCircuit<P>,
+    storage_access: &StorageTable,
+) -> bool {
+    let image = circuit.pre_init.clone();
+    fold_readonly_storage_biir_stmts(circuit.params, &mut circuit.stmts, &image, storage_access)
+}
+
+fn fold_readonly_storage_biir_stmts<P: Clone>(
+    params: u32,
+    stmts: &mut [volar_ir_common::Node<BIrStmt, P>],
+    image: &[BIrPreInitSegment],
+    storage_access: &StorageTable,
+) -> bool {
+    let mut constants = BTreeMap::new();
+    let mut changed = false;
+    for (index, node) in stmts.iter_mut().enumerate() {
+        let output = IRVarId(params + index as u32);
+        let replacement = match &node.kind {
+            BIrStmt::StorageRead {
+                storage,
+                lane,
+                addr,
+            } if storage_access.access_of(*storage) == StorageAccess::ReadOnly => addr
+                .iter()
+                .map(|var| constants.get(var).copied())
+                .collect::<Option<Vec<_>>>()
+                .map(|address| readonly_bir_image_value(image, *storage, *lane, &address)),
+            _ => None,
+        };
+        if let Some(value) = replacement {
+            node.kind = if value { BIrStmt::One } else { BIrStmt::Zero };
+            constants.insert(output, value);
+            changed = true;
+        } else {
+            match node.kind {
+                BIrStmt::Zero => {
+                    constants.insert(output, false);
+                }
+                BIrStmt::One => {
+                    constants.insert(output, true);
+                }
+                _ => {}
+            }
+        }
+    }
+    changed
+}
+
+fn readonly_bir_image_value(
+    image: &[BIrPreInitSegment],
+    storage: StorageId,
+    lane: LaneId,
+    address: &[bool],
+) -> bool {
+    let mut value = false;
+    for segment in image {
+        if segment.storage != storage || segment.lane != lane {
+            continue;
+        }
+        for (offset, &initialized) in segment.data.iter().enumerate() {
+            if add_to_address(&segment.addr, offset) == address {
+                value = initialized;
+            }
+        }
+    }
+    value
+}
+
+fn add_to_address(addr: &[bool], mut addend: usize) -> Vec<bool> {
+    let mut out = addr.to_vec();
+    let mut bit = 0usize;
+    while addend != 0 {
+        if bit == out.len() {
+            out.push(false);
+        }
+        if addend & 1 != 0 {
+            let mut carry = true;
+            let mut at = bit;
+            while carry {
+                if at == out.len() {
+                    out.push(false);
+                }
+                let next = out[at] ^ carry;
+                carry &= out[at];
+                out[at] = next;
+                at += 1;
+            }
+        }
+        addend >>= 1;
+        bit += 1;
+    }
+    out
+}
+
 pub fn fold_biir_circuit<P: Clone>(circuit: &mut BCircuit<P>) -> bool {
     let mut any_changed = false;
     loop {
@@ -436,6 +557,44 @@ mod tests {
 
     fn node(stmt: BIrStmt) -> Node<BIrStmt> {
         Node::new(stmt, (), None)
+    }
+
+    #[test]
+    fn readonly_constant_storage_read_folds() {
+        use volar_ir_common::{StorageDecl, StorageTable};
+
+        let storage = StorageId(4);
+        let mut blocks = BIrBlocks {
+            blocks: vec![BIrBlock {
+                params: 0,
+                stmts: vec![
+                    node(BIrStmt::One),
+                    node(BIrStmt::StorageRead {
+                        storage,
+                        lane: LaneId(0),
+                        addr: vec![IRVarId(0)],
+                    }),
+                ],
+                terminator: BIrTerminator::Jmp(BIrTarget {
+                    block: IRBlockTargetId::Return,
+                    args: vec![IRVarId(1)],
+                }),
+            }],
+            pre_init: vec![BIrPreInitSegment {
+                storage,
+                lane: LaneId(0),
+                addr: vec![true],
+                data: vec![true],
+            }],
+        };
+        let sidecar = StorageTable {
+            entries: vec![StorageDecl {
+                storage,
+                access: StorageAccess::ReadOnly,
+            }],
+        };
+        assert!(fold_readonly_storage_biir_blocks(&mut blocks, &sidecar));
+        assert_eq!(blocks.blocks[0].stmts[1].kind, BIrStmt::One);
     }
 
     #[test]
