@@ -11,13 +11,17 @@ use std::path::Path;
 use volar_fuzz::interpreter::biir::eval_biir;
 use volar_ir::boolar::{BIrBlocks, BIrStmt};
 use volar_ir::ir::StorageId;
+use volar_ir_common::StorageAccess;
 use volar_ir_virt::{DispatchMode, VirtualizeConfig, virtualize_bir};
 
 fn fixture_dir() -> std::path::PathBuf {
     let path = std::env::var_os("VOLAR_IR_RETROP_FIXTURE_DIR")
         .map(std::path::PathBuf::from)
         .expect("set VOLAR_IR_RETROP_FIXTURE_DIR to an absolute retrop-emit-volar/fixtures path");
-    assert!(path.is_absolute(), "VOLAR_IR_RETROP_FIXTURE_DIR must be absolute");
+    assert!(
+        path.is_absolute(),
+        "VOLAR_IR_RETROP_FIXTURE_DIR must be absolute"
+    );
     path
 }
 
@@ -49,6 +53,20 @@ fn storage_ids(blocks: &BIrBlocks<()>) -> BTreeSet<StorageId> {
     ids
 }
 
+fn written_storage_ids(blocks: &BIrBlocks<()>) -> BTreeSet<StorageId> {
+    blocks
+        .blocks
+        .iter()
+        .flat_map(|block| block.stmts.iter())
+        .filter_map(|stmt| match &stmt.kind {
+            BIrStmt::StorageWrite { storage, .. } | BIrStmt::ActionStoreBit { storage, .. } => {
+                Some(*storage)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn check_fixture(name: &str) {
     let path = fixture_dir().join(name);
     let bytes = std::fs::metadata(&path)
@@ -58,7 +76,11 @@ fn check_fixture(name: &str) {
     let stmts: usize = circuit.blocks.iter().map(|block| block.stmts.len()).sum();
     let storages = storage_ids(&circuit);
 
-    assert_eq!(circuit.blocks.len(), 1, "retrop fixtures are one-step circuits");
+    assert_eq!(
+        circuit.blocks.len(),
+        1,
+        "retrop fixtures are one-step circuits"
+    );
     let params = circuit.blocks[0].params as usize;
     let config = VirtualizeConfig {
         dispatch: DispatchMode::Public,
@@ -70,6 +92,18 @@ fn check_fixture(name: &str) {
     // but cannot show a handler-deduplication win.
     assert_eq!(virtualized.blocks_in, 1);
     assert_eq!(virtualized.n_handlers, 1);
+    let readonly: BTreeSet<_> = virtualized
+        .storage_access
+        .entries
+        .iter()
+        .filter(|entry| entry.access == StorageAccess::ReadOnly)
+        .map(|entry| entry.storage)
+        .collect();
+    assert!(
+        !readonly.is_empty(),
+        "virt must declare its bytecode read-only"
+    );
+    assert!(readonly.is_disjoint(&written_storage_ids(&virtualized.blocks)));
 
     let inputs = vec![false; params];
     let expected = eval_biir(&circuit, &inputs).expect("original fixture evaluates");

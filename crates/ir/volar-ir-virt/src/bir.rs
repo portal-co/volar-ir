@@ -14,7 +14,7 @@ use volar_ir::{
     boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId},
     ir::{IRBlockId, IRBlockTargetId, IRVarId},
 };
-use volar_ir_common::StorageId;
+use volar_ir_common::{StorageAccess, StorageId, StorageTable};
 
 use crate::canon::{BirHandlerKey, BlockImmediates, canonicalize_bir_block};
 use crate::ctx::{DedupTable, VirtOutput};
@@ -133,12 +133,25 @@ pub fn virtualize_bir<P: Clone + Default>(
 
     VirtOutput {
         blocks: final_blocks,
+        storage_access: storage_access_for_bir(&storage_init.pre_init, cfg.bytecode_storage),
         bytecode: Some(storage_init.bytecode),
         n_handlers,
         blocks_in,
         key_params: alloc::vec![],
         n_appended_regions: 0,
     }
+}
+
+fn storage_access_for_bir(
+    pre_init: &[volar_ir::boolar::BIrPreInitSegment],
+    bytecode_storage: StorageId,
+) -> StorageTable {
+    let mut table = StorageTable::default();
+    table.set(bytecode_storage, StorageAccess::ReadOnly);
+    for segment in pre_init {
+        table.set(segment.storage, StorageAccess::ReadOnly);
+    }
+    table
 }
 
 // ============================================================================

@@ -12,7 +12,132 @@ pub use generated::{
     ActionDecl, Constant, Node, OracleDecl, PreInitSegment, RngDecl, StorageId, Type, TypeId,
 };
 
+/// Whether a storage namespace may be mutated by a producer.
+///
+/// This metadata is intentionally carried as a sidecar by compatibility-
+/// sensitive IR containers. An absent declaration is conservatively read-write.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub enum StorageAccess {
+    /// The producer guarantees there are no storage writes to this namespace.
+    ReadOnly,
+    /// Reads and writes may occur; this is the conservative default.
+    #[default]
+    ReadWrite,
+}
+
+/// One storage namespace declaration.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct StorageDecl {
+    pub storage: StorageId,
+    pub access: StorageAccess,
+}
+
+/// Sidecar storage mutability facts. This is not part of the serialized IR
+/// carrier layout, so existing rkyv/text consumers remain compatible.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub struct StorageTable {
+    pub entries: Vec<StorageDecl>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StorageTableError {
+    NotStrictlyOrdered {
+        previous: StorageId,
+        current: StorageId,
+    },
+}
+
+impl core::fmt::Display for StorageTableError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotStrictlyOrdered { previous, current } => write!(
+                f,
+                "storage declarations must be strictly ordered: {current:?} follows {previous:?}"
+            ),
+        }
+    }
+}
+
+impl StorageTable {
+    /// An empty sidecar carries no stronger fact than legacy IR: all
+    /// storages remain conservatively read-write.
+    pub const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn access_of(&self, storage: StorageId) -> StorageAccess {
+        self.entries
+            .binary_search_by_key(&storage, |entry| entry.storage)
+            .map(|index| self.entries[index].access)
+            .unwrap_or(StorageAccess::ReadWrite)
+    }
+
+    /// Insert or replace a declaration while preserving canonical order.
+    pub fn set(&mut self, storage: StorageId, access: StorageAccess) {
+        match self
+            .entries
+            .binary_search_by_key(&storage, |entry| entry.storage)
+        {
+            Ok(index) => self.entries[index].access = access,
+            Err(index) => self.entries.insert(index, StorageDecl { storage, access }),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), StorageTableError> {
+        for pair in self.entries.windows(2) {
+            if pair[0].storage >= pair[1].storage {
+                return Err(StorageTableError::NotStrictlyOrdered {
+                    previous: pair[0].storage,
+                    current: pair[1].storage,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 use alloc::vec::Vec;
+
+#[cfg(test)]
+mod storage_access_tests {
+    use alloc::vec;
+
+    use super::*;
+
+    #[test]
+    fn absent_storage_is_read_write_and_set_is_canonical() {
+        let mut table = StorageTable::new();
+        assert_eq!(table.access_of(StorageId(4)), StorageAccess::ReadWrite);
+        table.set(StorageId(8), StorageAccess::ReadOnly);
+        table.set(StorageId(2), StorageAccess::ReadOnly);
+        table.set(StorageId(8), StorageAccess::ReadWrite);
+        assert_eq!(table.entries[0].storage, StorageId(2));
+        assert_eq!(table.entries[1].storage, StorageId(8));
+        assert!(table.validate().is_ok());
+    }
+
+    #[test]
+    fn validator_rejects_duplicate_entries() {
+        let table = StorageTable {
+            entries: vec![
+                StorageDecl {
+                    storage: StorageId(3),
+                    access: StorageAccess::ReadOnly,
+                },
+                StorageDecl {
+                    storage: StorageId(3),
+                    access: StorageAccess::ReadWrite,
+                },
+            ],
+        };
+        assert!(matches!(
+            table.validate(),
+            Err(StorageTableError::NotStrictlyOrdered { .. })
+        ));
+    }
+}
 
 /// Canonical sparse coefficient collection for [`Stmt::Poly`].
 ///

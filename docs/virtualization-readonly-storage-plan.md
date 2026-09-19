@@ -66,7 +66,7 @@ requiring native code generation or compilation just to test an IR transform.
 
 ### A module-owned storage declaration table
 
-Add shared, rkyv/text-schema-visible types in `volar-ir-common`:
+Add shared sidecar types in `volar-ir-common`:
 
 ```rust
 pub enum StorageAccess {
@@ -99,12 +99,12 @@ Only an explicit `ReadOnly` declaration establishes the optimization and
 protocol-selection guarantee. An explicit `ReadWrite` entry is permitted for
 explanatory producer metadata but has the same semantics as the default.
 
-`StorageTable` belongs on every persisted module/circuit carrier that has
-program-scoped storage: `vaffle::Module`, `IRBlocks`, `BIrBlocks`, `BCircuit`,
-and any saved/lazy wrapper which owns or serializes one of those values. Do
-not put it on individual storage statements, `TypeId`s, or `LaneId`s. Update
-the schema source and regenerate `generated.rs`; never hand-edit generated
-files.
+`StorageTable` is a compatibility sidecar owned by a producing transform or
+consumer API rather than a field in persisted module/circuit carriers. The
+first carrier is `VirtOutput`; consumers that preserve the fact across their
+own APIs must carry that same sidecar explicitly. This keeps existing
+rkyv/text formats and old blobs compatible. Do not put it on individual
+storage statements, `TypeId`s, or `LaneId`s.
 
 ### Meaning of immutable
 
@@ -191,27 +191,26 @@ reports the expected one-handler result.
 
 ### Phase 1 — add and propagate the storage table
 
-1. Add `StorageAccess`, `StorageDecl`, and `StorageTable` to the schema input;
-   generate common/IR/Boolar/VAFFLE code and update portable text parsing and
-   printing. Define a single source-of-truth textual section rather than
-   duplicating access facts in `pre_init` syntax.
-2. Add default-empty/read-write storage tables to every constructor and
-   provenance mapper. Update all full struct literals, rkyv round-trips, text
-   round-trips, and saved-module wrappers mechanically.
-3. Thread the table through VAFFLE → Volar IR → Boolar → fused circuit
-   lowering, circuit conversion, optimizers, substitution, unrolling,
-   movfuscation, and virtualization. ID remappers must use a common table
-   helper rather than rebuilding ad hoc maps.
-4. Regenerate the retrop rkyv fixtures after the dependency/API update and
-   run retrop's own golden-vector equivalence suite. This is compatibility
-   migration, not a change to CPU semantics.
+1. Add `StorageAccess`, `StorageDecl`, and `StorageTable` as ordinary shared
+   Rust types, outside generated persisted schemas. The table starts empty and
+   treats absent IDs as read-write.
+2. Add explicit sidecar-bearing result/view types at APIs that can prove the
+   fact. Start with virtualization; later frontends and consumers carry a
+   `StorageTable` alongside the legacy IR value instead of changing that
+   value's serialized layout.
+3. Thread sidecars deliberately through VAFFLE → Volar IR → Boolar only where
+   the caller needs the fact. ID remappers use a common table helper rather
+   than rebuilding ad hoc maps.
+4. Existing retrop rkyv fixtures stay decodable unchanged; run retrop's own
+   golden-vector equivalence suite only when changing its generator, not for
+   this sidecar addition.
 5. Update `docs/agent-context/ir-types-storage.md` with the access contract,
    default, image semantics, and validation rule. Keep it separate from the
    existing typed-slot aliasing/invalidation rule, which does not change.
 
-Success criterion: a read-only declaration round-trips unchanged through all
-supported representations, while an undeclared legacy storage behaves exactly
-as read-write storage did before this work.
+Success criterion: a read-only sidecar survives its owning transform API,
+while every undeclared legacy storage behaves exactly as read-write storage did
+before this work.
 
 ### Phase 2 — enforce declared mutability
 
@@ -325,7 +324,7 @@ observably distinct.
 
 | Area | Required evidence |
 |---|---|
-| Data model | defaults are read-write; duplicate/conflicting entries fail; schema/text/rkyv preserve declarations |
+| Data model | defaults are read-write; duplicate/conflicting entries fail; sidecar APIs preserve declarations without changing schema/text/rkyv layouts |
 | Validation | direct writes, action stores/targets, Boolar action-store bits, and reversible mutations to read-only storage fail with actionable errors |
 | Semantics | evaluate IR/Boolar before and after metadata-preserving transforms; declarations alone never change output |
 | Folding | concrete read-only initialized reads fold; read-write and unresolved-address reads do not |

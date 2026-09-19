@@ -6,7 +6,7 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
 use volar_ir::ir::{IRTypeId, IRVarId};
-use volar_ir_common::Constant;
+use volar_ir_common::{Constant, StorageTable};
 
 use crate::bytecode::{BytecodeEntry, HandlerImmSchema, VirtBytecode};
 use crate::canon::{BlockImmediates, HandlerKey};
@@ -16,6 +16,9 @@ use crate::canon::{BlockImmediates, HandlerKey};
 pub struct VirtOutput<B> {
     /// The rewritten IR (or BIR) module.
     pub blocks: B,
+    /// Compatibility sidecar describing storage mutation guarantees. The
+    /// legacy IR carrier remains unchanged; consumers opt into these facts.
+    pub storage_access: StorageTable,
     /// Structured bytecode table derived from the same data as `pre_init`.
     pub bytecode: Option<VirtBytecode>,
     /// Number of unique handlers after deduplication.

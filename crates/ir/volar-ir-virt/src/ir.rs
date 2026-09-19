@@ -31,7 +31,9 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType,
     IRTypeId, IRTypes, IRVarId,
 };
-use volar_ir_common::{Constant, PolyCoeffs, Stmt, StorageId, Type as PrimType};
+use volar_ir_common::{
+    Constant, PolyCoeffs, Stmt, StorageAccess, StorageId, StorageTable, Type as PrimType,
+};
 
 use crate::canon::{BlockImmediates, IrHandlerKey, ZERO_CONSTANT, canonicalize_ir_block};
 use crate::ctx::{DedupTable, VirtOutput};
@@ -346,12 +348,25 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
 
     VirtOutput {
         blocks: final_blocks,
+        storage_access: storage_access_for_ir(&storage_init.pre_init, cfg.bytecode_storage),
         bytecode: Some(storage_init.bytecode),
         n_handlers,
         blocks_in,
         key_params,
         n_appended_regions: 0,
     }
+}
+
+pub(crate) fn storage_access_for_ir(
+    pre_init: &[volar_ir_common::PreInitSegment],
+    bytecode_storage: StorageId,
+) -> StorageTable {
+    let mut table = StorageTable::default();
+    table.set(bytecode_storage, StorageAccess::ReadOnly);
+    for segment in pre_init {
+        table.set(segment.storage, StorageAccess::ReadOnly);
+    }
+    table
 }
 
 fn validate_input<P: Clone>(_blocks: &IRBlocks<P>) {
@@ -2151,10 +2166,7 @@ fn remap_vars(vs: &[IRVarId], canonical_var: &[IRVarId]) -> Vec<IRVarId> {
     vs.iter().map(|v| remap_var(*v, canonical_var)).collect()
 }
 
-fn remap_coeffs(
-    coeffs: &PolyCoeffs<IRVarId>,
-    canonical_var: &[IRVarId],
-) -> PolyCoeffs<IRVarId> {
+fn remap_coeffs(coeffs: &PolyCoeffs<IRVarId>, canonical_var: &[IRVarId]) -> PolyCoeffs<IRVarId> {
     let mut out = PolyCoeffs::new();
     for (key, &c) in coeffs {
         let mut new_key: Vec<IRVarId> = key.iter().map(|v| remap_var(*v, canonical_var)).collect();

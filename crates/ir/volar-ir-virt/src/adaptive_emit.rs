@@ -21,7 +21,7 @@ use crate::hash::IrHashAlgorithm;
 use crate::ir::{
     GlobalLayout, HandlerSchema, IRBlockUnfinished, RETURN_BID, RegAlloc, const_u32,
     emit_dispatch_block_with_base, emit_dispatcher_block, emit_handler_block, emit_prologue_stmts,
-    emit_return_block, emit_setup_block,
+    emit_return_block, emit_setup_block, storage_access_for_ir,
 };
 use crate::layout::{AdaptiveSplitPlan, BlockCompositePlan, SegmentInvoke};
 use crate::preinit::{build_ir_storage_init_adaptive, merge_pre_init};
@@ -98,6 +98,7 @@ pub(super) fn virtualize_ir_adaptive<P: Clone + Default, H: IrHashAlgorithm>(
             pre_init: merged_pre_init,
             ..out_blocks
         },
+        storage_access: storage_access_for_ir(&storage_init.pre_init, cfg.bytecode_storage),
         bytecode: Some(storage_init.bytecode),
         n_handlers: all_handler_keys.len(),
         blocks_in,
