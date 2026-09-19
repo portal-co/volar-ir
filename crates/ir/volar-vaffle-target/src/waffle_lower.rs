@@ -357,6 +357,11 @@ pub fn lower_waffle_module_with_metadata(
     // ("<module>.<field>"), not in `FuncDecl::Import`'s (empty) name field —
     // resolve through `waffle_import_func_names`.
     let import_names = waffle_import_func_names(wasm);
+    // Registration must be atomic at the declaration-table level: an invalid
+    // later mapping cannot leave an earlier external usable in a target whose
+    // lowering returned errors.
+    let initial_oracles = target.module.oracles.len();
+    let initial_actions = target.module.actions.len();
     let mut errors = Vec::new();
     for import_name in config.imports.keys() {
         if !import_names.values().any(|name| name == import_name) {
@@ -384,6 +389,8 @@ pub fn lower_waffle_module_with_metadata(
         }
     }
     if !errors.is_empty() {
+        target.module.oracles.truncate(initial_oracles);
+        target.module.actions.truncate(initial_actions);
         return errors;
     }
 

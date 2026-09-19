@@ -19,6 +19,41 @@ fn lower(source: &str, config: WaffleImportConfig) -> Vec<(String, String)> {
 }
 
 #[test]
+fn configured_wasm_external_rejection_leaves_no_partial_declarations() {
+    let source = r#"(module
+      (import "portal" "pure" (func $pure (param i32) (result i32)))
+      (func (export "entry") (param i32) (result i32)
+        (call $pure (local.get 0))))"#;
+    let bytes = wat::parse_str(source).expect("WAT assembles");
+    let mut wasm = portal_pc_waffle_frontend::from_wasm_bytes(
+        &bytes,
+        &portal_pc_waffle_frontend::FrontendOptions::default(),
+    )
+    .expect("WASM parses");
+    portal_pc_waffle_frontend::expand_all_funcs(&mut wasm).expect("WASM functions expand");
+    let mut target = VaffleTarget::new();
+    let errors = lower_waffle_module(
+        &wasm,
+        &mut target,
+        &WaffleImportConfig::new()
+            .with_oracle_execution(
+                "portal.pure",
+                "pure",
+                OracleExecutionPolicy::legacy_evaluator(),
+            )
+            .with_action_execution(
+                "portal.missing",
+                "missing",
+                0,
+                ActionExecutionPolicy::legacy_evaluator(),
+            ),
+    );
+    assert_eq!(errors.len(), 1);
+    assert!(target.module.oracles.is_empty());
+    assert!(target.module.actions.is_empty());
+}
+
+#[test]
 fn configured_wasm_external_rejects_unresolved_import() {
     let errors = lower(
         r#"(module (func (export "entry") (result i32) (i32.const 0)))"#,
