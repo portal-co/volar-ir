@@ -7,11 +7,12 @@ description.workspace = true
 repository.workspace = true
 
 [dependencies]
-volar-ir.workspace = true
+volar-ir = { workspace = true, features = ["rkyv"] }
 volar-ir-common.workspace = true
 volar-ir-passes.workspace = true
 volar-provenance.workspace = true
 volar-lir.workspace = true
 
 [dev-dependencies]
-volar-fuzz = { git = "https://github.com/portal-co/volar-ir.git" }
+volar-fuzz.workspace = true
+rkyv.workspace = true

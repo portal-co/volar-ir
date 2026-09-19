@@ -181,7 +181,7 @@ merge.
 Initial manual command shape (the exact test name may change):
 
 ```sh
-VOLAR_IR_RETROP_FIXTURE_DIR=../retrop/crates/retrop-emit-volar/fixtures \
+VOLAR_IR_RETROP_FIXTURE_DIR="$(cd ../retrop/crates/retrop-emit-volar/fixtures && pwd)" \
   cargo test -p volar-ir-virt --test retrop_fixtures -- --ignored --nocapture
 ```
 
