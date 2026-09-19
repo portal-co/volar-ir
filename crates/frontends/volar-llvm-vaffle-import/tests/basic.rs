@@ -61,6 +61,33 @@ entry:
 }
 
 #[test]
+fn configured_llvm_external_rejects_variadic_declaration() {
+    let source = r#"
+declare i32 @pure(i32, ...)
+define i32 @entry(i32 %x) {
+entry:
+  %result = call i32 (i32, ...) @pure(i32 %x)
+  ret i32 %result
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "variadic-external.ll",
+        ))
+        .unwrap();
+    let error = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default()
+            .with_oracle_execution("pure", OracleExecutionPolicy::legacy_evaluator()),
+    )
+    .expect_err("configured externals must have a fixed ABI");
+    assert!(error.to_string().contains("must not be variadic"));
+}
+
+#[test]
 fn configured_llvm_external_rejects_defined_callee() {
     let source = r#"
 define i32 @pure(i32 %x) {
