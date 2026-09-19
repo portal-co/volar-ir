@@ -1091,10 +1091,12 @@ checksum = "c2a69ee997a6282f8462abf1e0d8c38c965e968799e912b3bed8c9e8a28c2f9f"
 [[package]]
 name = "portal-lazy-transform"
 version = "0.1.0"
+source = "git+https://github.com/portal-co/portal-lazy-transform.git#f81b87c66a266db54c2b080e1d177358e140effa"
 
 [[package]]
 name = "portal-pc-waffle-entity"
 version = "0.6.0-alpha.1"
+source = "git+https://github.com/portal-co/waffle-.git#0f1258ad11160c804c4d33a5977dd2814d3b2413"
 dependencies = [
  "arena-traits",
  "serde",
@@ -1103,6 +1105,7 @@ dependencies = [
 [[package]]
 name = "portal-pc-waffle-frontend"
 version = "0.6.0-alpha.1"
+source = "git+https://github.com/portal-co/waffle-.git#0f1258ad11160c804c4d33a5977dd2814d3b2413"
 dependencies = [
  "anyhow",
  "hashbrown 0.15.5",
@@ -1117,6 +1120,7 @@ dependencies = [
 [[package]]
 name = "portal-pc-waffle-ir"
 version = "0.6.0-alpha.1"
+source = "git+https://github.com/portal-co/waffle-.git#0f1258ad11160c804c4d33a5977dd2814d3b2413"
 dependencies = [
  "anyhow",
  "arena-traits",
@@ -1801,6 +1805,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vaffle"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "rkyv",
+ "volar-ir-common",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1812,8 +1825,17 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "volar-ir-common",
- "volar-lir",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-lir-test-corpus",
+]
+
+[[package]]
+name = "volar-c-backend"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "volar-ir-common",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -1834,15 +1856,30 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "proptest",
- "vaffle",
+ "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-ir",
  "volar-ir-common",
- "volar-ir-opt",
- "volar-ir-passes",
- "volar-ir-virt",
- "volar-lir",
+ "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-passes 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-virt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-lir-test-corpus",
- "volar-vaffle-target",
+ "volar-vaffle-target 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+]
+
+[[package]]
+name = "volar-fuzz"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "arbitrary",
+ "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-passes 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-virt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-vaffle-target 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -1853,9 +1890,9 @@ dependencies = [
  "log",
  "rkyv",
  "volar-ir-common",
- "volar-lir",
- "volar-provenance",
- "volar-side",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-side 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -1869,17 +1906,17 @@ dependencies = [
  "portal-pc-waffle-frontend",
  "portal-pc-waffle-ir",
  "rkyv",
- "vaffle",
+ "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-circuit-source",
- "volar-fuzz",
+ "volar-fuzz 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-ir",
  "volar-ir-common",
- "volar-ir-opt",
- "volar-ir-passes",
- "volar-lir-saved",
+ "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-passes 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir-saved 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-llvm-ir-import",
  "volar-llvm-vaffle-import",
- "volar-vaffle-target",
+ "volar-vaffle-target 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "wat",
 ]
 
@@ -1888,7 +1925,7 @@ name = "volar-ir-common"
 version = "0.1.0"
 dependencies = [
  "rkyv",
- "volar-side",
+ "volar-side 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -1896,13 +1933,29 @@ name = "volar-ir-config"
 version = "0.1.0"
 
 [[package]]
+name = "volar-ir-config"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+
+[[package]]
 name = "volar-ir-opt"
 version = "0.1.0"
 dependencies = [
- "vaffle",
+ "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-ir",
  "volar-ir-common",
- "volar-provenance",
+ "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+]
+
+[[package]]
+name = "volar-ir-opt"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -1911,10 +1964,23 @@ version = "0.1.0"
 dependencies = [
  "volar-ir",
  "volar-ir-common",
- "volar-ir-config",
- "volar-ir-opt",
- "volar-lir",
- "volar-provenance",
+ "volar-ir-config 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+]
+
+[[package]]
+name = "volar-ir-passes"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-config 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -1937,12 +2003,24 @@ dependencies = [
 name = "volar-ir-virt"
 version = "0.1.0"
 dependencies = [
- "volar-fuzz",
+ "volar-fuzz 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-ir",
  "volar-ir-common",
- "volar-ir-passes",
- "volar-lir",
- "volar-provenance",
+ "volar-ir-passes 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+]
+
+[[package]]
+name = "volar-ir-virt"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-passes 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -1951,7 +2029,17 @@ version = "0.1.0"
 dependencies = [
  "rkyv",
  "volar-ir-common",
- "volar-side",
+ "volar-side 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+]
+
+[[package]]
+name = "volar-lir"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "rkyv",
+ "volar-ir-common",
+ "volar-side 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -1959,7 +2047,16 @@ name = "volar-lir-saved"
 version = "0.1.0"
 dependencies = [
  "rkyv",
- "volar-lir",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+]
+
+[[package]]
+name = "volar-lir-saved"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "rkyv",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -1969,8 +2066,8 @@ dependencies = [
  "tempfile",
  "volar-ir",
  "volar-ir-common",
- "volar-ir-passes",
- "volar-lir",
+ "volar-ir-passes 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -1978,8 +2075,8 @@ name = "volar-lir-text"
 version = "0.1.0"
 dependencies = [
  "volar-ir-common",
- "volar-lir",
- "volar-lir-saved",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir-saved 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-log",
 ]
 
@@ -1991,10 +2088,20 @@ dependencies = [
  "tempfile",
  "volar-ir",
  "volar-ir-common",
- "volar-ir-passes",
- "volar-lir",
+ "volar-ir-passes 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-lir-test-corpus",
  "volar-log",
+]
+
+[[package]]
+name = "volar-llvm-backend"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "inkwell",
+ "volar-ir-common",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -2019,7 +2126,7 @@ dependencies = [
  "inkwell",
  "volar-ir",
  "volar-ir-common",
- "volar-lir",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-llvm-import-core",
 ]
 
@@ -2050,8 +2157,8 @@ name = "volar-llvm-plugin"
 version = "0.1.0"
 dependencies = [
  "inkwell",
- "vaffle",
- "volar-llvm-backend",
+ "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-llvm-backend 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-llvm-constchain",
  "volar-llvm-jumpthread",
  "volar-llvm-pass-build",
@@ -2070,10 +2177,10 @@ name = "volar-llvm-vaffle-import"
 version = "0.1.0"
 dependencies = [
  "inkwell",
- "vaffle",
+ "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-ir-common",
- "volar-ir-opt",
- "volar-lir",
+ "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-llvm-constchain",
 ]
 
@@ -2086,7 +2193,7 @@ name = "volar-noir-backend"
 version = "0.1.0"
 dependencies = [
  "volar-circuit-source",
- "volar-fuzz",
+ "volar-fuzz 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-ir",
  "volar-ir-build",
  "volar-ir-common",
@@ -2097,7 +2204,7 @@ name = "volar-pod2-backend"
 version = "0.1.0"
 dependencies = [
  "volar-circuit-source",
- "volar-fuzz",
+ "volar-fuzz 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-ir",
  "volar-ir-build",
  "volar-ir-common",
@@ -2108,6 +2215,11 @@ name = "volar-provenance"
 version = "0.1.0"
 
 [[package]]
+name = "volar-provenance"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+
+[[package]]
 name = "volar-riscv-test-programs"
 version = "0.1.0"
 dependencies = [
@@ -2115,7 +2227,7 @@ dependencies = [
  "portal-pc-waffle-frontend",
  "portal-pc-waffle-ir",
  "rv-asm",
- "volar-vaffle-target",
+ "volar-vaffle-target 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "wasmtime",
  "wat",
 ]
@@ -2128,18 +2240,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "volar-side"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "rkyv",
+]
+
+[[package]]
 name = "volar-ssa-lir-replay"
 version = "0.1.0"
 dependencies = [
  "inkwell",
  "tempfile",
- "vaffle",
- "volar-c-backend",
+ "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-c-backend 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-ir-common",
- "volar-lir",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-lir-test-corpus",
- "volar-llvm-backend",
- "volar-provenance",
+ "volar-llvm-backend 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-provenance 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
 ]
 
 [[package]]
@@ -2149,13 +2269,29 @@ dependencies = [
  "portal-lazy-transform",
  "portal-pc-waffle-frontend",
  "portal-pc-waffle-ir",
- "vaffle",
+ "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-ir",
  "volar-ir-common",
- "volar-ir-opt",
- "volar-lir",
+ "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-lir-test-corpus",
- "volar-side",
+ "volar-side 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "wax-meta",
+]
+
+[[package]]
+name = "volar-vaffle-target"
+version = "0.1.0"
+source = "git+https://github.com/portal-co/volar-ir.git#f1e8ae43262fa11b9b02d9f3fcd4f3397380420a"
+dependencies = [
+ "portal-pc-waffle-frontend",
+ "portal-pc-waffle-ir",
+ "vaffle 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-opt 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-side 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "wax-meta",
 ]
 
@@ -2165,9 +2301,9 @@ version = "0.1.0"
 dependencies = [
  "volar-ir",
  "volar-ir-common",
- "volar-ir-passes",
- "volar-lir",
- "volar-lir-saved",
+ "volar-ir-passes 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
+ "volar-lir-saved 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "volar-lir-test-corpus",
  "wasm-encoder 0.240.0",
  "wasmtime",
@@ -2183,7 +2319,7 @@ dependencies = [
  "volar-circuit-exec-core",
  "volar-ir",
  "volar-ir-common",
- "volar-lir",
+ "volar-lir 0.1.0 (git+https://github.com/portal-co/volar-ir.git)",
  "wat",
 ]
 
@@ -2612,6 +2748,7 @@ dependencies = [
 [[package]]
 name = "wax-core"
 version = "0.1.0"
+source = "git+https://github.com/portal-co/wax.git#249323b6cb2c7ff3f4700dd3ed27f0145fb5c352"
 dependencies = [
  "impl-trait-for-tuples",
  "wasm-encoder 0.240.0",
@@ -2621,6 +2758,7 @@ dependencies = [
 [[package]]
 name = "wax-meta"
 version = "0.1.0"
+source = "git+https://github.com/portal-co/portal-container.git#b3d2fce46407e8b7102ed5a385f8ff951259b7b4"
 dependencies = [
  "sha3",
 ]
@@ -2769,11 +2907,55 @@ dependencies = [
 ]
 
 [[patch.unused]]
-name = "portal-solutions-sdk"
-version = "0.0.2"
+name = "portal-solutions-asm-arm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-riscv32"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-jsc-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-cfg"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ll-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-tac"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-util"
+version = "0.8.0-pre.11"
 
 [[patch.unused]]
 name = "ephemera"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-build"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-c-backend-spec-tests"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-channel"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2793,7 +2975,19 @@ name = "volar-compiler-passes"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "volar-discipline"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "volar-dyn"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-fold"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-iop"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2801,11 +2995,35 @@ name = "volar-ir-lir-target"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "volar-ir-tester"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "volar-lir-codegen"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "volar-macros"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-net"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-oram"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-oram-core"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "volar-primitives"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-riscv-e2e"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2817,48 +3035,24 @@ name = "volar-spec-dyn"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "volar-verifier-fold"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-verifier-iop-runtime"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "volar-weaver"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-jsc-common"
-version = "0.8.0-pre.11"
+name = "xtask"
+version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-jsc-generator"
-version = "0.8.0-pre.10"
-
-[[patch.unused]]
-name = "portal-jsc-simpl-js"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-cfg"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ll-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-opt-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-tac"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-util"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-solutions-swibb"
-version = "0.6.0-alpha.1"
+name = "portal-pc-asm-common"
+version = "0.1.1"
 
 [[patch.unused]]
 name = "os-abi-codegen"
@@ -2901,11 +3095,23 @@ name = "os-daemon-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "os-daemon-shim"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "os-darwin-wasi"
 version = "0.1.0"
 
 [[patch.unused]]
 name = "os-host-api"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-interposer"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-jit-core"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2926,6 +3132,14 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "os-rewrite-macho"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-shim-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-shim-handler"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2957,285 +3171,73 @@ name = "os-unix-wasi"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "ast-traits"
+name = "lazy-repo-crypto"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "cfg-traits"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "register-machine-traits"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "sift-trait"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "siftify"
+name = "lazy-repo-std"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "ssa-canon"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-cc"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-impls"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-pliron-compat"
+name = "vane-aarch64"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "ssa-reloop"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-reloop2"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-rust"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-trace"
+name = "vane-riscv"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "ssa-traits"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-translation"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "tac-traits"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "type-onion"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "dreamcomp-ir-plugin-host"
+name = "portal-jit-host-names"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcomp-plugin-common"
+name = "portal-solutions-blitz-aarch64"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-arena"
+name = "portal-solutions-blitz-arm"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-codegen"
+name = "portal-solutions-blitz-c"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-core"
+name = "portal-solutions-blitz-common"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-cps"
+name = "portal-solutions-blitz-i686"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-cps-c-backend"
+name = "portal-solutions-blitz-js"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-e2e-tests"
+name = "portal-solutions-blitz-opt"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-edu"
+name = "portal-solutions-blitz-riscv32"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-fast-ir"
+name = "portal-solutions-blitz-x86-64"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-lower"
+name = "thin-mcp"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-mini-target"
+name = "lazy-repo-crypto"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-minibc"
+name = "lazy-repo-std"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dreamcompiler-minibc-c-interp"
+name = "portal-jit-host-names"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc-interp"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-pc-waffle"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-backend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-fuzzing"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-hooking"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-lowering"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes-shared"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "pit-gen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-lang-generic"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-rust-generic"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-aarch64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-jvm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-regalloc"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-riscv64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-semantics"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86-64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86-64-shim"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-container-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-container-select"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-container-wasm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "wax-tags"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "px-wsdom"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-axum"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-core"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-dom"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-javascript"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-macros"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-macros-decl"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "portal-pc-asm-common"
-version = "0.1.1"
-
-[[patch.unused]]
-name = "portal-progress"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-progress-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-progress-lazy-transform"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-progress-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-progress-tui"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-progress-wasm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-progress-web"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-core"
-version = "0.5.0-alpha.1"

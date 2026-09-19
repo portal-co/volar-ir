@@ -17,10 +17,10 @@ volar-llvm-vaffle-import = { path = "../../frontends/volar-llvm-vaffle-import" }
 volar-ssa-lir-replay = { path = "../../ir/volar-ssa-lir-replay" }
 volar-llvm-backend = { git = "https://github.com/portal-co/volar-ir.git" }
 volar-llvm-plugin-api = { path = "../volar-llvm-plugin-api" }
-volar-llvm-jumpthread = { git = "ssh://git@github.com/portal-co/llvm-bridge.git" }
-volar-llvm-pass-support = { git = "ssh://git@github.com/portal-co/llvm-bridge.git" }
+volar-llvm-jumpthread = { git = "https://github.com/portal-co/llvm-bridge.git" }
+volar-llvm-pass-support = { git = "https://github.com/portal-co/llvm-bridge.git" }
 volar-llvm-constchain = { git = "https://github.com/portal-co/llvm-bridge.git" }
 inkwell = { workspace = true }
 
 [build-dependencies]
-volar-llvm-pass-build = { git = "ssh://git@github.com/portal-co/llvm-bridge.git" }
+volar-llvm-pass-build = { git = "https://github.com/portal-co/llvm-bridge.git" }
