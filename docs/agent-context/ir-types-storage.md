@@ -51,6 +51,25 @@ This design enables:
 - **Efficient stack lowering**: a single `StorageId` can represent a stack frame with typed fields at distinct type-slots, without requiring separate `StorageId`s for each field.
 - **Storage remapping**: optimization passes (e.g. store-to-load forwarding) can safely forward within a `(StorageId, TypeId)` pair without cross-type interference.
 
+### Storage-access sidecars
+
+A `StorageId` has no mutability bit in the persisted IR, text format, or rkyv
+layout. Compatibility-sensitive producers instead carry a `StorageTable`
+sidecar. An absent entry is conservatively `ReadWrite`; only an explicit
+`ReadOnly` entry proves that the producing program has no IR-visible write to
+that entire storage ID (across every `TypeId`/`LaneId`). `pre_init` supplies an
+initial image, not an access guarantee.
+
+`virtualize_ir` and `virtualize_bir` expose their generated table through
+`VirtOutput::storage_access`. Bytecode and handler-slot storage is read-only;
+register/key storage remains read-write. Consumers must carry the sidecar
+explicitly if they need the fact after their own transform. Validate it with
+`validate_ir_storage_access` / `validate_bir_storage_access` before relying on
+it. `fold_readonly_storage_ir_blocks` and
+`fold_readonly_storage_biir_blocks` fold only a read-only storage access whose
+address resolves to a static `pre_init` cell (or the normal zero default);
+symbolic addresses and undeclared storage stay unchanged.
+
 ### Invalidation policy
 
 A `StorageWrite` to `(S, T, addr)` invalidates all cached reads for the same `(S, T)` pair regardless of address (conservative on address aliasing), but does NOT invalidate entries for `(S, T')` where `T' != T`. **Do not change this policy.**

@@ -1,6 +1,9 @@
 # Plan: virtualization fixtures and immutable storage
 
-**Status:** proposed.
+**Status:** in progress. The compatibility sidecar, virtualization producer,
+structural validation, static IR/Boolar read folding, and opt-in M6502 fixture
+harness are landed. Protocol selection, wider sidecar propagation, and the
+Z80/movfuscation fixture chain remain.
 
 **Goal:** make storage mutability explicit enough that a producer can prove a
 storage namespace is immutable, then use virtualized bytecode as the first

@@ -57,7 +57,9 @@ pub use bytecode::{
     OperandMode, TripCount, VirtBytecode,
 };
 pub use canon::{BirHandlerKey, BlockImmediates, HandlerKey, ImmediateKind, IrHandlerKey};
-pub use ctx::VirtOutput;
+pub use ctx::{
+    StorageAccessViolation, VirtOutput, validate_bir_storage_access, validate_ir_storage_access,
+};
 pub use hash::{CommitmentConfig, IrEmitter, IrHashAlgorithm, SipHash48, XorFoldHash32};
 pub use ir::{virtualize_ir, virtualize_ir_committed};
 pub use split::plan_adaptive_split;
