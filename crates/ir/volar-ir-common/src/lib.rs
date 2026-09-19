@@ -59,6 +59,47 @@ impl core::fmt::Display for StorageTableError {
 }
 
 impl StorageTable {
+    /// Merge `other` conservatively: an ID stays read-only only when both
+    /// sides prove it read-only; any read-write fact wins.
+    pub fn merge_conservative(&mut self, other: &StorageTable) {
+        for declaration in &other.entries {
+            let existing = self
+                .entries
+                .binary_search_by_key(&declaration.storage, |entry| entry.storage)
+                .ok()
+                .map(|index| self.entries[index].access);
+            let access = match (existing, declaration.access) {
+                (None, access) => access,
+                (Some(StorageAccess::ReadOnly), StorageAccess::ReadOnly) => StorageAccess::ReadOnly,
+                _ => StorageAccess::ReadWrite,
+            };
+            self.set(declaration.storage, access);
+        }
+    }
+
+    /// Return a copy whose storage IDs are transformed by `map`.
+    ///
+    /// Colliding source IDs are merged conservatively: read-only survives only
+    /// when every source ID mapped to the result is read-only.
+    pub fn remap(&self, mut map: impl FnMut(StorageId) -> StorageId) -> Self {
+        let mut result = StorageTable::new();
+        for declaration in &self.entries {
+            let storage = map(declaration.storage);
+            let existing = result
+                .entries
+                .binary_search_by_key(&storage, |entry| entry.storage)
+                .ok()
+                .map(|index| result.entries[index].access);
+            let access = match (existing, declaration.access) {
+                (None, access) => access,
+                (Some(StorageAccess::ReadOnly), StorageAccess::ReadOnly) => StorageAccess::ReadOnly,
+                _ => StorageAccess::ReadWrite,
+            };
+            result.set(storage, access);
+        }
+        result
+    }
+
     /// An empty sidecar carries no stronger fact than legacy IR: all
     /// storages remain conservatively read-write.
     pub const fn new() -> Self {
@@ -116,6 +157,22 @@ mod storage_access_tests {
         assert_eq!(table.entries[0].storage, StorageId(2));
         assert_eq!(table.entries[1].storage, StorageId(8));
         assert!(table.validate().is_ok());
+    }
+
+    #[test]
+    fn remapping_or_merging_facts_is_conservative() {
+        let mut table = StorageTable::new();
+        table.set(StorageId(1), StorageAccess::ReadOnly);
+        table.set(StorageId(2), StorageAccess::ReadOnly);
+        assert_eq!(
+            table.remap(|_| StorageId(7)).access_of(StorageId(7)),
+            StorageAccess::ReadOnly
+        );
+        table.set(StorageId(2), StorageAccess::ReadWrite);
+        assert_eq!(
+            table.remap(|_| StorageId(7)).access_of(StorageId(7)),
+            StorageAccess::ReadWrite
+        );
     }
 
     #[test]
@@ -327,10 +384,8 @@ impl<V> IntoIterator for PolyCoeffs<V> {
 
 impl<'a, V> IntoIterator for &'a PolyCoeffs<V> {
     type Item = (&'a Vec<V>, &'a u8);
-    type IntoIter = core::iter::Map<
-        core::slice::Iter<'a, (Vec<V>, u8)>,
-        fn(&(Vec<V>, u8)) -> (&Vec<V>, &u8),
-    >;
+    type IntoIter =
+        core::iter::Map<core::slice::Iter<'a, (Vec<V>, u8)>, fn(&(Vec<V>, u8)) -> (&Vec<V>, &u8)>;
 
     fn into_iter(self) -> Self::IntoIter {
         fn as_pair<V>(entry: &(Vec<V>, u8)) -> (&Vec<V>, &u8) {
@@ -368,11 +423,7 @@ mod poly_coeffs_tests {
 
     #[test]
     fn from_iter_canonicalizes_and_keeps_the_last_coefficient() {
-        let coeffs = PolyCoeffs::from_iter([
-            (vec![3], 3u8),
-            (vec![1], 1u8),
-            (vec![3], 7u8),
-        ]);
+        let coeffs = PolyCoeffs::from_iter([(vec![3], 3u8), (vec![1], 1u8), (vec![3], 7u8)]);
 
         assert_eq!(
             coeffs.into_iter().collect::<Vec<_>>(),
@@ -390,15 +441,15 @@ mod poly_coeffs_tests {
         });
         assert_eq!(outer_ptr, coeffs.0.as_ptr());
         assert_eq!(
-            coeffs.iter().map(|(key, value)| (key.clone(), *value)).collect::<Vec<_>>(),
+            coeffs
+                .iter()
+                .map(|(key, value)| (key.clone(), *value))
+                .collect::<Vec<_>>(),
             vec![(vec![2], 3), (vec![3], 7)]
         );
 
         coeffs.remap_monomials_in_place(|monomial| monomial[0] = 9);
-        assert_eq!(
-            coeffs.into_iter().collect::<Vec<_>>(),
-            vec![(vec![9], 7)]
-        );
+        assert_eq!(coeffs.into_iter().collect::<Vec<_>>(), vec![(vec![9], 7)]);
     }
 
     #[test]

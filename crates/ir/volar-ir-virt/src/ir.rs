@@ -36,7 +36,7 @@ use volar_ir_common::{
 };
 
 use crate::canon::{BlockImmediates, IrHandlerKey, ZERO_CONSTANT, canonicalize_ir_block};
-use crate::ctx::{DedupTable, VirtOutput};
+use crate::ctx::{DedupTable, VirtOutput, validate_ir_storage_access};
 use crate::hash::{
     CommitmentConfig, IrEmitter, IrHashAlgorithm, bytes_to_constant, constant_to_le_bytes,
 };
@@ -346,9 +346,15 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
         }
     };
 
+    let storage_access = storage_access_for_ir(&storage_init.pre_init, cfg.bytecode_storage);
+    assert!(
+        validate_ir_storage_access(&final_blocks, &storage_access).is_ok(),
+        "virtualize_ir emitted a write to its read-only storage sidecar"
+    );
+
     VirtOutput {
         blocks: final_blocks,
-        storage_access: storage_access_for_ir(&storage_init.pre_init, cfg.bytecode_storage),
+        storage_access,
         bytecode: Some(storage_init.bytecode),
         n_handlers,
         blocks_in,

@@ -16,7 +16,7 @@ use crate::canon::{
     BlockImmediates, IrHandlerKey, canon_ir_stmt_public, canon_ir_terminator_public,
     canonicalize_ir_block, canonicalize_stmt_slice,
 };
-use crate::ctx::{DedupTable, VirtOutput};
+use crate::ctx::{DedupTable, VirtOutput, validate_ir_storage_access};
 use crate::hash::IrHashAlgorithm;
 use crate::ir::{
     GlobalLayout, HandlerSchema, IRBlockUnfinished, RETURN_BID, RegAlloc, const_u32,
@@ -93,12 +93,19 @@ pub(super) fn virtualize_ir_adaptive<P: Clone + Default, H: IrHashAlgorithm>(
     );
     let merged_pre_init = merge_pre_init(&cse_blocks.pre_init, &storage_init.pre_init);
 
+    let blocks = IRBlocks {
+        pre_init: merged_pre_init,
+        ..out_blocks
+    };
+    let storage_access = storage_access_for_ir(&storage_init.pre_init, cfg.bytecode_storage);
+    assert!(
+        validate_ir_storage_access(&blocks, &storage_access).is_ok(),
+        "adaptive virtualization emitted a write to its read-only storage sidecar"
+    );
+
     VirtOutput {
-        blocks: IRBlocks {
-            pre_init: merged_pre_init,
-            ..out_blocks
-        },
-        storage_access: storage_access_for_ir(&storage_init.pre_init, cfg.bytecode_storage),
+        blocks,
+        storage_access,
         bytecode: Some(storage_init.bytecode),
         n_handlers: all_handler_keys.len(),
         blocks_in,

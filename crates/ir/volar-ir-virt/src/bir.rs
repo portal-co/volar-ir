@@ -17,7 +17,7 @@ use volar_ir::{
 use volar_ir_common::{StorageAccess, StorageId, StorageTable};
 
 use crate::canon::{BirHandlerKey, BlockImmediates, canonicalize_bir_block};
-use crate::ctx::{DedupTable, VirtOutput};
+use crate::ctx::{DedupTable, VirtOutput, validate_bir_storage_access};
 use crate::preinit::{build_bir_storage_init, merge_bir_pre_init};
 use crate::{DedupPolicy, DispatchMode, VirtualizeConfig};
 
@@ -131,9 +131,15 @@ pub fn virtualize_bir<P: Clone + Default>(
         }
     };
 
+    let storage_access = storage_access_for_bir(&storage_init.pre_init, cfg.bytecode_storage);
+    assert!(
+        validate_bir_storage_access(&final_blocks, &storage_access).is_ok(),
+        "virtualize_bir emitted a write to its read-only storage sidecar"
+    );
+
     VirtOutput {
         blocks: final_blocks,
-        storage_access: storage_access_for_bir(&storage_init.pre_init, cfg.bytecode_storage),
+        storage_access,
         bytecode: Some(storage_init.bytecode),
         n_handlers,
         blocks_in,
