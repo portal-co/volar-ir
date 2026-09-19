@@ -11,7 +11,9 @@ use volar_ir::ir::{
     IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypes,
     IRVarId,
 };
-use volar_ir_common::{Constant, Node, PolyCoeffs, Stmt, TypeId};
+use volar_ir_common::{
+    Constant, Node, PolyCoeffs, PreInitSegment, Stmt, StorageAccess, StorageTable, TypeId,
+};
 
 use crate::common::{
     apply_aliases_to_stmt, canon_alias, constant_is_zero, constant_rol, constant_ror,
@@ -36,6 +38,73 @@ pub fn fold_ir_blocks<P: Clone>(blocks: &mut IRBlocks<P>, types: &IRTypes) -> bo
         }
     }
     any_changed
+}
+
+/// Replace reads from a proven read-only static image with constants.
+///
+/// `storage_access` is a compatibility sidecar, not serialized IR metadata;
+/// absent entries are read-write and therefore never fold. This pass only
+/// resolves addresses produced by an earlier `Const` in the same block. A
+/// missing cell in the pre-initialized image has the normal zero value.
+/// Symbolic addresses remain storage reads.
+pub fn fold_readonly_storage_ir_blocks<P: Clone>(
+    blocks: &mut IRBlocks<P>,
+    storage_access: &StorageTable,
+) -> bool {
+    let image = blocks.pre_init.clone();
+    let mut any_changed = false;
+    for block in &mut blocks.blocks {
+        let mut constants = BTreeMap::new();
+        let base = block.params.len() as u32;
+        for (index, node) in block.stmts.iter_mut().enumerate() {
+            let output = IRVarId(base + index as u32);
+            let replacement = match &node.kind {
+                Stmt::StorageRead { storage, ty, addr }
+                    if storage_access.access_of(*storage) == StorageAccess::ReadOnly =>
+                {
+                    constants.get(addr).and_then(|address| {
+                        readonly_image_value(&image, *storage, *ty, *address)
+                            .map(|value| (value, *ty))
+                    })
+                }
+                _ => None,
+            };
+            if let Some((value, ty)) = replacement {
+                node.kind = Stmt::Const(value, ty);
+                constants.insert(output, value);
+                any_changed = true;
+            } else if let Stmt::Const(value, _) = node.kind {
+                constants.insert(output, value);
+            }
+        }
+    }
+    any_changed
+}
+
+fn readonly_image_value(
+    pre_init: &[PreInitSegment],
+    storage: volar_ir_common::StorageId,
+    ty: TypeId,
+    address: Constant,
+) -> Option<Constant> {
+    if address.hi != 0 {
+        return None;
+    }
+    let address = usize::try_from(address.lo).ok()?;
+    let mut value = Constant { hi: 0, lo: 0 };
+    for segment in pre_init {
+        if segment.storage != storage || segment.ty != ty {
+            continue;
+        }
+        if let Some(index) = address.checked_sub(segment.offset) {
+            if let Some(&initialized) = segment.data.get(index) {
+                // Match interpreter initialization order: later overlapping
+                // segments override earlier values.
+                value = initialized;
+            }
+        }
+    }
+    Some(value)
 }
 
 /// Remove statements whose result is never referenced by anything live
@@ -2110,6 +2179,67 @@ mod cse_tests {
             "different Stmt variants must never be treated as duplicates"
         );
         assert_eq!(blocks.blocks[0].stmts.len(), 2);
+    }
+
+    #[test]
+    fn readonly_constant_storage_reads_fold_but_mutable_reads_do_not() {
+        use volar_ir_common::{StorageDecl, StorageId};
+
+        let ty = bit();
+        let address = Constant { hi: 0, lo: 2 };
+        let block = IRBlock {
+            params: alloc::vec![],
+            stmts: alloc::vec![
+                Node::new(Stmt::Const(address, ty), (), None),
+                Node::new(
+                    Stmt::StorageRead {
+                        storage: StorageId(7),
+                        ty,
+                        addr: IRVarId(0),
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(
+                    Stmt::StorageRead {
+                        storage: StorageId(8),
+                        ty,
+                        addr: IRVarId(0),
+                    },
+                    (),
+                    None,
+                ),
+            ],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    alloc::vec![IRVarId(1), IRVarId(2)],
+                ),
+            },
+        };
+        let mut blocks = IRBlocks::new(alloc::vec![block]);
+        blocks.pre_init = alloc::vec![PreInitSegment {
+            storage: StorageId(7),
+            ty,
+            offset: 2,
+            data: alloc::vec![Constant { hi: 0, lo: 1 }],
+        }];
+        let sidecar = StorageTable {
+            entries: alloc::vec![StorageDecl {
+                storage: StorageId(7),
+                access: StorageAccess::ReadOnly,
+            }],
+        };
+
+        assert!(fold_readonly_storage_ir_blocks(&mut blocks, &sidecar));
+        assert!(matches!(
+            blocks.blocks[0].stmts[1].kind,
+            Stmt::Const(Constant { lo: 1, .. }, _)
+        ));
+        assert!(matches!(
+            blocks.blocks[0].stmts[2].kind,
+            Stmt::StorageRead { .. }
+        ));
     }
 
     /// Storage reads are explicitly out of scope (left to
