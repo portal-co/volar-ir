@@ -98,9 +98,7 @@ impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for Type {
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Type, D>
-    for ArchivedType
-{
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Type, D> for ArchivedType {
     fn deserialize(&self, _: &mut D) -> Result<Type, D::Error> {
         Ok(match self {
             ArchivedType::Bit => Type::Bit,
@@ -125,8 +123,7 @@ pub struct Constant {
 }
 
 #[cfg(feature = "rkyv")]
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-#[derive(rkyv::bytecheck::CheckBytes)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, rkyv::bytecheck::CheckBytes)]
 #[bytecheck(crate = rkyv::bytecheck)]
 #[repr(C)]
 pub struct ArchivedConstant {
@@ -146,7 +143,8 @@ unsafe impl rkyv::Portable for ArchivedConstant
 where
     <u128 as rkyv::Archive>::Archived: rkyv::Portable,
     <u128 as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for Constant {
@@ -178,8 +176,7 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Constant, D>
-    for ArchivedConstant
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Constant, D> for ArchivedConstant
 where
     <u128 as rkyv::Archive>::Archived: rkyv::Deserialize<u128, D>,
     <u128 as rkyv::Archive>::Archived: rkyv::Deserialize<u128, D>,
@@ -192,12 +189,387 @@ where
     }
 }
 
+/// Public MPC party assigned to execute an external primitive.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ExternalExecutor {
+    Garbler,
+    Evaluator,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, rkyv::bytecheck::CheckBytes)]
+#[bytecheck(crate = rkyv::bytecheck)]
+#[repr(u8)]
+pub enum ArchivedExternalExecutor {
+    Garbler,
+    Evaluator,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(Clone, Copy, Debug)]
+pub enum ExternalExecutorResolver {
+    Garbler,
+    Evaluator,
+}
+
+#[cfg(feature = "rkyv")]
+unsafe impl rkyv::Portable for ArchivedExternalExecutor {}
+
+#[cfg(feature = "rkyv")]
+impl rkyv::Archive for ExternalExecutor {
+    type Archived = ArchivedExternalExecutor;
+    type Resolver = ExternalExecutorResolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let archived = match resolver {
+            ExternalExecutorResolver::Garbler => ArchivedExternalExecutor::Garbler,
+            ExternalExecutorResolver::Evaluator => ArchivedExternalExecutor::Evaluator,
+        };
+        // SAFETY: `archived` is a fully initialized repr(u8) discriminant.
+        unsafe { out.write_unchecked(archived) }
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for ExternalExecutor {
+    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(match self {
+            ExternalExecutor::Garbler => ExternalExecutorResolver::Garbler,
+            ExternalExecutor::Evaluator => ExternalExecutorResolver::Evaluator,
+        })
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ExternalExecutor, D>
+    for ArchivedExternalExecutor
+{
+    fn deserialize(&self, _: &mut D) -> Result<ExternalExecutor, D::Error> {
+        Ok(match self {
+            ArchivedExternalExecutor::Garbler => ExternalExecutor::Garbler,
+            ArchivedExternalExecutor::Evaluator => ExternalExecutor::Evaluator,
+        })
+    }
+}
+
+/// Public authorization describing which roles receive clear external inputs.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ExternalRevealPolicy {
+    ExecutorOnly,
+    BothRoles,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, rkyv::bytecheck::CheckBytes)]
+#[bytecheck(crate = rkyv::bytecheck)]
+#[repr(u8)]
+pub enum ArchivedExternalRevealPolicy {
+    ExecutorOnly,
+    BothRoles,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(Clone, Copy, Debug)]
+pub enum ExternalRevealPolicyResolver {
+    ExecutorOnly,
+    BothRoles,
+}
+
+#[cfg(feature = "rkyv")]
+unsafe impl rkyv::Portable for ArchivedExternalRevealPolicy {}
+
+#[cfg(feature = "rkyv")]
+impl rkyv::Archive for ExternalRevealPolicy {
+    type Archived = ArchivedExternalRevealPolicy;
+    type Resolver = ExternalRevealPolicyResolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let archived = match resolver {
+            ExternalRevealPolicyResolver::ExecutorOnly => {
+                ArchivedExternalRevealPolicy::ExecutorOnly
+            }
+            ExternalRevealPolicyResolver::BothRoles => ArchivedExternalRevealPolicy::BothRoles,
+        };
+        // SAFETY: `archived` is a fully initialized repr(u8) discriminant.
+        unsafe { out.write_unchecked(archived) }
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for ExternalRevealPolicy {
+    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(match self {
+            ExternalRevealPolicy::ExecutorOnly => ExternalRevealPolicyResolver::ExecutorOnly,
+            ExternalRevealPolicy::BothRoles => ExternalRevealPolicyResolver::BothRoles,
+        })
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ExternalRevealPolicy, D>
+    for ArchivedExternalRevealPolicy
+{
+    fn deserialize(&self, _: &mut D) -> Result<ExternalRevealPolicy, D::Error> {
+        Ok(match self {
+            ArchivedExternalRevealPolicy::ExecutorOnly => ExternalRevealPolicy::ExecutorOnly,
+            ArchivedExternalRevealPolicy::BothRoles => ExternalRevealPolicy::BothRoles,
+        })
+    }
+}
+
+/// Whether a pure oracle is assigned to one executor or replicated.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum OracleExecutionKind {
+    Assigned,
+    Replicated,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, rkyv::bytecheck::CheckBytes)]
+#[bytecheck(crate = rkyv::bytecheck)]
+#[repr(u8)]
+pub enum ArchivedOracleExecutionKind {
+    Assigned,
+    Replicated,
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(Clone, Copy, Debug)]
+pub enum OracleExecutionKindResolver {
+    Assigned,
+    Replicated,
+}
+
+#[cfg(feature = "rkyv")]
+unsafe impl rkyv::Portable for ArchivedOracleExecutionKind {}
+
+#[cfg(feature = "rkyv")]
+impl rkyv::Archive for OracleExecutionKind {
+    type Archived = ArchivedOracleExecutionKind;
+    type Resolver = OracleExecutionKindResolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let archived = match resolver {
+            OracleExecutionKindResolver::Assigned => ArchivedOracleExecutionKind::Assigned,
+            OracleExecutionKindResolver::Replicated => ArchivedOracleExecutionKind::Replicated,
+        };
+        // SAFETY: `archived` is a fully initialized repr(u8) discriminant.
+        unsafe { out.write_unchecked(archived) }
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for OracleExecutionKind {
+    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(match self {
+            OracleExecutionKind::Assigned => OracleExecutionKindResolver::Assigned,
+            OracleExecutionKind::Replicated => OracleExecutionKindResolver::Replicated,
+        })
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<OracleExecutionKind, D>
+    for ArchivedOracleExecutionKind
+{
+    fn deserialize(&self, _: &mut D) -> Result<OracleExecutionKind, D::Error> {
+        Ok(match self {
+            ArchivedOracleExecutionKind::Assigned => OracleExecutionKind::Assigned,
+            ArchivedOracleExecutionKind::Replicated => OracleExecutionKind::Replicated,
+        })
+    }
+}
+
+/// Public action executor, reveal policy, and declaration fingerprint.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ActionExecutionPolicy {
+    pub executor: ExternalExecutor,
+    pub reveal: ExternalRevealPolicy,
+    pub fingerprint: [u8; 32],
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(rkyv::bytecheck::CheckBytes)]
+#[bytecheck(crate = rkyv::bytecheck)]
+#[repr(C)]
+pub struct ArchivedActionExecutionPolicy {
+    pub executor: <ExternalExecutor as rkyv::Archive>::Archived,
+    pub reveal: <ExternalRevealPolicy as rkyv::Archive>::Archived,
+    pub fingerprint: <[u8; 32] as rkyv::Archive>::Archived,
+}
+
+#[cfg(feature = "rkyv")]
+#[allow(dead_code)]
+pub struct ActionExecutionPolicyResolver {
+    executor: <ExternalExecutor as rkyv::Archive>::Resolver,
+    reveal: <ExternalRevealPolicy as rkyv::Archive>::Resolver,
+    fingerprint: <[u8; 32] as rkyv::Archive>::Resolver,
+}
+
+#[cfg(feature = "rkyv")]
+unsafe impl rkyv::Portable for ArchivedActionExecutionPolicy
+where
+    <ExternalExecutor as rkyv::Archive>::Archived: rkyv::Portable,
+    <ExternalRevealPolicy as rkyv::Archive>::Archived: rkyv::Portable,
+    <[u8; 32] as rkyv::Archive>::Archived: rkyv::Portable,
+{
+}
+
+#[cfg(feature = "rkyv")]
+impl rkyv::Archive for ActionExecutionPolicy {
+    type Archived = ArchivedActionExecutionPolicy;
+    type Resolver = ActionExecutionPolicyResolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).executor) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.executor, resolver.executor, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).reveal) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.reveal, resolver.reveal, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).fingerprint) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.fingerprint, resolver.fingerprint, field_out);
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for ActionExecutionPolicy
+where
+    ExternalExecutor: rkyv::Serialize<S>,
+    ExternalRevealPolicy: rkyv::Serialize<S>,
+    [u8; 32]: rkyv::Serialize<S>,
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(ActionExecutionPolicyResolver {
+            executor: rkyv::Serialize::serialize(&self.executor, serializer)?,
+            reveal: rkyv::Serialize::serialize(&self.reveal, serializer)?,
+            fingerprint: rkyv::Serialize::serialize(&self.fingerprint, serializer)?,
+        })
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ActionExecutionPolicy, D>
+    for ArchivedActionExecutionPolicy
+where
+    <ExternalExecutor as rkyv::Archive>::Archived: rkyv::Deserialize<ExternalExecutor, D>,
+    <ExternalRevealPolicy as rkyv::Archive>::Archived: rkyv::Deserialize<ExternalRevealPolicy, D>,
+    <[u8; 32] as rkyv::Archive>::Archived: rkyv::Deserialize<[u8; 32], D>,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<ActionExecutionPolicy, D::Error> {
+        Ok(ActionExecutionPolicy {
+            executor: rkyv::Deserialize::deserialize(&self.executor, deserializer)?,
+            reveal: rkyv::Deserialize::deserialize(&self.reveal, deserializer)?,
+            fingerprint: rkyv::Deserialize::deserialize(&self.fingerprint, deserializer)?,
+        })
+    }
+}
+
+/// Public oracle execution, reveal policy, and declaration fingerprint.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct OracleExecutionPolicy {
+    pub execution: OracleExecutionKind,
+    pub executor: ExternalExecutor,
+    pub reveal: ExternalRevealPolicy,
+    pub fingerprint: [u8; 32],
+}
+
+#[cfg(feature = "rkyv")]
+#[derive(rkyv::bytecheck::CheckBytes)]
+#[bytecheck(crate = rkyv::bytecheck)]
+#[repr(C)]
+pub struct ArchivedOracleExecutionPolicy {
+    pub execution: <OracleExecutionKind as rkyv::Archive>::Archived,
+    pub executor: <ExternalExecutor as rkyv::Archive>::Archived,
+    pub reveal: <ExternalRevealPolicy as rkyv::Archive>::Archived,
+    pub fingerprint: <[u8; 32] as rkyv::Archive>::Archived,
+}
+
+#[cfg(feature = "rkyv")]
+#[allow(dead_code)]
+pub struct OracleExecutionPolicyResolver {
+    execution: <OracleExecutionKind as rkyv::Archive>::Resolver,
+    executor: <ExternalExecutor as rkyv::Archive>::Resolver,
+    reveal: <ExternalRevealPolicy as rkyv::Archive>::Resolver,
+    fingerprint: <[u8; 32] as rkyv::Archive>::Resolver,
+}
+
+#[cfg(feature = "rkyv")]
+unsafe impl rkyv::Portable for ArchivedOracleExecutionPolicy
+where
+    <OracleExecutionKind as rkyv::Archive>::Archived: rkyv::Portable,
+    <ExternalExecutor as rkyv::Archive>::Archived: rkyv::Portable,
+    <ExternalRevealPolicy as rkyv::Archive>::Archived: rkyv::Portable,
+    <[u8; 32] as rkyv::Archive>::Archived: rkyv::Portable,
+{
+}
+
+#[cfg(feature = "rkyv")]
+impl rkyv::Archive for OracleExecutionPolicy {
+    type Archived = ArchivedOracleExecutionPolicy;
+    type Resolver = OracleExecutionPolicyResolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).execution) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.execution, resolver.execution, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).executor) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.executor, resolver.executor, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).reveal) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.reveal, resolver.reveal, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).fingerprint) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.fingerprint, resolver.fingerprint, field_out);
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for OracleExecutionPolicy
+where
+    OracleExecutionKind: rkyv::Serialize<S>,
+    ExternalExecutor: rkyv::Serialize<S>,
+    ExternalRevealPolicy: rkyv::Serialize<S>,
+    [u8; 32]: rkyv::Serialize<S>,
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(OracleExecutionPolicyResolver {
+            execution: rkyv::Serialize::serialize(&self.execution, serializer)?,
+            executor: rkyv::Serialize::serialize(&self.executor, serializer)?,
+            reveal: rkyv::Serialize::serialize(&self.reveal, serializer)?,
+            fingerprint: rkyv::Serialize::serialize(&self.fingerprint, serializer)?,
+        })
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<OracleExecutionPolicy, D>
+    for ArchivedOracleExecutionPolicy
+where
+    <OracleExecutionKind as rkyv::Archive>::Archived: rkyv::Deserialize<OracleExecutionKind, D>,
+    <ExternalExecutor as rkyv::Archive>::Archived: rkyv::Deserialize<ExternalExecutor, D>,
+    <ExternalRevealPolicy as rkyv::Archive>::Archived: rkyv::Deserialize<ExternalRevealPolicy, D>,
+    <[u8; 32] as rkyv::Archive>::Archived: rkyv::Deserialize<[u8; 32], D>,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<OracleExecutionPolicy, D::Error> {
+        Ok(OracleExecutionPolicy {
+            execution: rkyv::Deserialize::deserialize(&self.execution, deserializer)?,
+            executor: rkyv::Deserialize::deserialize(&self.executor, deserializer)?,
+            reveal: rkyv::Deserialize::deserialize(&self.reveal, deserializer)?,
+            fingerprint: rkyv::Deserialize::deserialize(&self.fingerprint, deserializer)?,
+        })
+    }
+}
+
 /// Declaration of a named pure oracle.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct OracleDecl {
     pub name: alloc::string::String,
     pub params: alloc::vec::Vec<TypeId>,
     pub results: alloc::vec::Vec<TypeId>,
+    pub execution: OracleExecutionPolicy,
 }
 
 #[cfg(feature = "rkyv")]
@@ -208,6 +580,7 @@ pub struct ArchivedOracleDecl {
     pub name: <alloc::string::String as rkyv::Archive>::Archived,
     pub params: <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived,
     pub results: <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived,
+    pub execution: <OracleExecutionPolicy as rkyv::Archive>::Archived,
 }
 
 #[cfg(feature = "rkyv")]
@@ -216,6 +589,7 @@ pub struct OracleDeclResolver {
     name: <alloc::string::String as rkyv::Archive>::Resolver,
     params: <alloc::vec::Vec<TypeId> as rkyv::Archive>::Resolver,
     results: <alloc::vec::Vec<TypeId> as rkyv::Archive>::Resolver,
+    execution: <OracleExecutionPolicy as rkyv::Archive>::Resolver,
 }
 
 #[cfg(feature = "rkyv")]
@@ -224,7 +598,9 @@ where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+    <OracleExecutionPolicy as rkyv::Archive>::Archived: rkyv::Portable,
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for OracleDecl {
@@ -241,6 +617,9 @@ impl rkyv::Archive for OracleDecl {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).results) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.results, resolver.results, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).execution) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.execution, resolver.execution, field_out);
     }
 }
 
@@ -250,29 +629,34 @@ where
     alloc::string::String: rkyv::Serialize<S>,
     alloc::vec::Vec<TypeId>: rkyv::Serialize<S>,
     alloc::vec::Vec<TypeId>: rkyv::Serialize<S>,
+    OracleExecutionPolicy: rkyv::Serialize<S>,
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(OracleDeclResolver {
             name: rkyv::Serialize::serialize(&self.name, serializer)?,
             params: rkyv::Serialize::serialize(&self.params, serializer)?,
             results: rkyv::Serialize::serialize(&self.results, serializer)?,
+            execution: rkyv::Serialize::serialize(&self.execution, serializer)?,
         })
     }
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<OracleDecl, D>
-    for ArchivedOracleDecl
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<OracleDecl, D> for ArchivedOracleDecl
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::string::String, D>,
-    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
-    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
+    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
+    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
+    <OracleExecutionPolicy as rkyv::Archive>::Archived: rkyv::Deserialize<OracleExecutionPolicy, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<OracleDecl, D::Error> {
         Ok(OracleDecl {
             name: rkyv::Deserialize::deserialize(&self.name, deserializer)?,
             params: rkyv::Deserialize::deserialize(&self.params, deserializer)?,
             results: rkyv::Deserialize::deserialize(&self.results, deserializer)?,
+            execution: rkyv::Deserialize::deserialize(&self.execution, deserializer)?,
         })
     }
 }
@@ -283,6 +667,7 @@ pub struct ActionDecl {
     pub name: alloc::string::String,
     pub params: alloc::vec::Vec<TypeId>,
     pub results: alloc::vec::Vec<TypeId>,
+    pub execution: ActionExecutionPolicy,
 }
 
 #[cfg(feature = "rkyv")]
@@ -293,6 +678,7 @@ pub struct ArchivedActionDecl {
     pub name: <alloc::string::String as rkyv::Archive>::Archived,
     pub params: <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived,
     pub results: <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived,
+    pub execution: <ActionExecutionPolicy as rkyv::Archive>::Archived,
 }
 
 #[cfg(feature = "rkyv")]
@@ -301,6 +687,7 @@ pub struct ActionDeclResolver {
     name: <alloc::string::String as rkyv::Archive>::Resolver,
     params: <alloc::vec::Vec<TypeId> as rkyv::Archive>::Resolver,
     results: <alloc::vec::Vec<TypeId> as rkyv::Archive>::Resolver,
+    execution: <ActionExecutionPolicy as rkyv::Archive>::Resolver,
 }
 
 #[cfg(feature = "rkyv")]
@@ -309,7 +696,9 @@ where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+    <ActionExecutionPolicy as rkyv::Archive>::Archived: rkyv::Portable,
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for ActionDecl {
@@ -326,6 +715,9 @@ impl rkyv::Archive for ActionDecl {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).results) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.results, resolver.results, field_out);
+        let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).execution) };
+        let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
+        rkyv::Archive::resolve(&self.execution, resolver.execution, field_out);
     }
 }
 
@@ -335,29 +727,34 @@ where
     alloc::string::String: rkyv::Serialize<S>,
     alloc::vec::Vec<TypeId>: rkyv::Serialize<S>,
     alloc::vec::Vec<TypeId>: rkyv::Serialize<S>,
+    ActionExecutionPolicy: rkyv::Serialize<S>,
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(ActionDeclResolver {
             name: rkyv::Serialize::serialize(&self.name, serializer)?,
             params: rkyv::Serialize::serialize(&self.params, serializer)?,
             results: rkyv::Serialize::serialize(&self.results, serializer)?,
+            execution: rkyv::Serialize::serialize(&self.execution, serializer)?,
         })
     }
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ActionDecl, D>
-    for ArchivedActionDecl
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ActionDecl, D> for ArchivedActionDecl
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::string::String, D>,
-    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
-    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
+    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
+    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
+    <ActionExecutionPolicy as rkyv::Archive>::Archived: rkyv::Deserialize<ActionExecutionPolicy, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<ActionDecl, D::Error> {
         Ok(ActionDecl {
             name: rkyv::Deserialize::deserialize(&self.name, deserializer)?,
             params: rkyv::Deserialize::deserialize(&self.params, deserializer)?,
             results: rkyv::Deserialize::deserialize(&self.results, deserializer)?,
+            execution: rkyv::Deserialize::deserialize(&self.execution, deserializer)?,
         })
     }
 }
@@ -390,7 +787,8 @@ unsafe impl rkyv::Portable for ArchivedRngDecl
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Portable,
     <TypeId as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for RngDecl {
@@ -422,8 +820,7 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<RngDecl, D>
-    for ArchivedRngDecl
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<RngDecl, D> for ArchivedRngDecl
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::string::String, D>,
     <TypeId as rkyv::Archive>::Archived: rkyv::Deserialize<TypeId, D>,
@@ -472,7 +869,8 @@ where
     <TypeId as rkyv::Archive>::Archived: rkyv::Portable,
     <usize as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<Constant> as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for PreInitSegment {
@@ -520,7 +918,8 @@ where
     <StorageId as rkyv::Archive>::Archived: rkyv::Deserialize<StorageId, D>,
     <TypeId as rkyv::Archive>::Archived: rkyv::Deserialize<TypeId, D>,
     <usize as rkyv::Archive>::Archived: rkyv::Deserialize<usize, D>,
-    <alloc::vec::Vec<Constant> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<Constant>, D>,
+    <alloc::vec::Vec<Constant> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<Constant>, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<PreInitSegment, D::Error> {
         Ok(PreInitSegment {
@@ -554,7 +953,9 @@ impl rkyv::Archive for TypeId {
         // SAFETY: the generated archived newtype is repr(C), contains exactly
         // one initialized portable scalar, and has no padding.
         unsafe {
-            out.write_unchecked(ArchivedTypeId(rkyv::primitive::ArchivedU32::from_native(self.0)))
+            out.write_unchecked(ArchivedTypeId(rkyv::primitive::ArchivedU32::from_native(
+                self.0,
+            )))
         }
     }
 }
@@ -567,9 +968,7 @@ impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for TypeId {
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<TypeId, D>
-    for ArchivedTypeId
-{
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<TypeId, D> for ArchivedTypeId {
     fn deserialize(&self, _: &mut D) -> Result<TypeId, D::Error> {
         Ok(TypeId(self.0.to_native()))
     }
@@ -597,7 +996,9 @@ impl rkyv::Archive for StorageId {
         // SAFETY: the generated archived newtype is repr(C), contains exactly
         // one initialized portable scalar, and has no padding.
         unsafe {
-            out.write_unchecked(ArchivedStorageId(rkyv::primitive::ArchivedU32::from_native(self.0)))
+            out.write_unchecked(ArchivedStorageId(
+                rkyv::primitive::ArchivedU32::from_native(self.0),
+            ))
         }
     }
 }
@@ -610,9 +1011,7 @@ impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for StorageId {
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<StorageId, D>
-    for ArchivedStorageId
-{
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<StorageId, D> for ArchivedStorageId {
     fn deserialize(&self, _: &mut D) -> Result<StorageId, D::Error> {
         Ok(StorageId(self.0.to_native()))
     }
@@ -650,7 +1049,8 @@ where
     <T as rkyv::Archive>::Archived: rkyv::Portable,
     <P as rkyv::Archive>::Archived: rkyv::Portable,
     <core::option::Option<volar_side::SideId> as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl<T: rkyv::Archive, P: Clone + rkyv::Archive> rkyv::Archive for Node<T, P> {
@@ -671,7 +1071,8 @@ impl<T: rkyv::Archive, P: Clone + rkyv::Archive> rkyv::Archive for Node<T, P> {
 }
 
 #[cfg(feature = "rkyv")]
-impl<T: rkyv::Archive, P: Clone + rkyv::Archive, S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for Node<T, P>
+impl<T: rkyv::Archive, P: Clone + rkyv::Archive, S: rkyv::rancor::Fallible + ?Sized>
+    rkyv::Serialize<S> for Node<T, P>
 where
     T: rkyv::Serialize<S>,
     P: rkyv::Serialize<S>,
@@ -687,12 +1088,13 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<T: rkyv::Archive, P: Clone + rkyv::Archive, D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Node<T, P>, D>
-    for ArchivedNode<T, P>
+impl<T: rkyv::Archive, P: Clone + rkyv::Archive, D: rkyv::rancor::Fallible + ?Sized>
+    rkyv::Deserialize<Node<T, P>, D> for ArchivedNode<T, P>
 where
     <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, D>,
     <P as rkyv::Archive>::Archived: rkyv::Deserialize<P, D>,
-    <core::option::Option<volar_side::SideId> as rkyv::Archive>::Archived: rkyv::Deserialize<core::option::Option<volar_side::SideId>, D>,
+    <core::option::Option<volar_side::SideId> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<core::option::Option<volar_side::SideId>, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<Node<T, P>, D::Error> {
         Ok(Node {
@@ -702,4 +1104,3 @@ where
         })
     }
 }
-

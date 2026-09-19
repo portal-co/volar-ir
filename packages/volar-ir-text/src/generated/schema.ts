@@ -47,15 +47,40 @@ export interface Constant {
   readonly hi: bigint;
   readonly lo: bigint;
 }
+export type ExternalExecutor =
+  | "Garbler"
+  | "Evaluator"
+;
+export type ExternalRevealPolicy =
+  | "ExecutorOnly"
+  | "BothRoles"
+;
+export type OracleExecutionKind =
+  | "Assigned"
+  | "Replicated"
+;
+export interface ActionExecutionPolicy {
+  readonly executor: ExternalExecutor;
+  readonly reveal: ExternalRevealPolicy;
+  readonly fingerprint: unknown;
+}
+export interface OracleExecutionPolicy {
+  readonly execution: OracleExecutionKind;
+  readonly executor: ExternalExecutor;
+  readonly reveal: ExternalRevealPolicy;
+  readonly fingerprint: unknown;
+}
 export interface OracleDecl {
   readonly name: string;
   readonly params: ReadonlyArray<TypeId>;
   readonly results: ReadonlyArray<TypeId>;
+  readonly execution: OracleExecutionPolicy;
 }
 export interface ActionDecl {
   readonly name: string;
   readonly params: ReadonlyArray<TypeId>;
   readonly results: ReadonlyArray<TypeId>;
+  readonly execution: ActionExecutionPolicy;
 }
 export interface RngDecl {
   readonly name: string;

@@ -694,6 +694,8 @@ mod tests {
             name: "hash".to_string(),
             params: vec![],
             results: vec![u64_ty],
+
+            execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
         });
 
         // sig: () -> u64

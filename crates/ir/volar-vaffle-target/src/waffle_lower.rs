@@ -166,24 +166,13 @@ pub fn lower_waffle_module_with_vc(
     }
     target.vc = Some(VcLoweringState::new(ids, calls));
 
-    let errors = lower_waffle_module_with_metadata(
-        wasm,
-        target,
-        config,
-        WasmMetadataMode::RespectUnstable,
-    );
+    let errors =
+        lower_waffle_module_with_metadata(wasm, target, config, WasmMetadataMode::RespectUnstable);
     apply_vc_public_mem_writes(target, vc);
 
     let byte_tid = target.byte_tid();
     let state = target.vc.take().expect("vc session");
-    let regions = build_vc_regions(
-        wasm,
-        &target.module,
-        vc,
-        &state.ids,
-        &state.calls,
-        byte_tid,
-    );
+    let regions = build_vc_regions(wasm, &target.module, vc, &state.ids, &state.calls, byte_tid);
     let _ = validate_vc_regions(&regions, &target.module, vc);
     let artifact = VcArtifact {
         regions,
@@ -243,9 +232,7 @@ pub fn lower_waffle_module_with_metadata(
     let import_names = waffle_import_func_names(wasm);
     for (func_ref, decl) in wasm.funcs.entries() {
         if let FuncDecl::Import(sig, decl_name) = decl {
-            let import_name = import_names
-                .get(&func_ref.index())
-                .unwrap_or(decl_name);
+            let import_name = import_names.get(&func_ref.index()).unwrap_or(decl_name);
             let Some(kind) = config.imports.get(import_name) else {
                 continue;
             };
@@ -272,6 +259,8 @@ pub fn lower_waffle_module_with_metadata(
                         name: name.clone(),
                         params,
                         results,
+
+                        execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
                     });
                 }
                 WaffleImportKind::Action { name, n_args, .. } => {
@@ -291,6 +280,8 @@ pub fn lower_waffle_module_with_metadata(
                         name: name.clone(),
                         params: action_params,
                         results,
+
+                        execution: volar_ir_common::ActionExecutionPolicy::legacy_evaluator(),
                     });
                 }
             }
@@ -689,9 +680,7 @@ fn lower_op(
 
     Ok(Some(match op {
         // ---- Constants -------------------------------------------------
-        Operator::I32Const { value } => {
-            vc_iconst(tgt, LirType::U32, *value as i32 as i64)
-        }
+        Operator::I32Const { value } => vc_iconst(tgt, LirType::U32, *value as i32 as i64),
         Operator::I64Const { value } => vc_iconst(tgt, LirType::U64, *value as i64),
 
         // ---- I32 arithmetic --------------------------------------------
@@ -1050,11 +1039,7 @@ fn lower_op(
                         // `Value::Call` to an env import), so it survives the
                         // vaffle→IR lowering as a real `IRStmt::OracleCall`
                         // validated against `module.oracles`.
-                        let r = tgt.oracle_call_multi(
-                            oracle_name,
-                            &all_arg_vals,
-                            &orig_ret_tys,
-                        );
+                        let r = tgt.oracle_call_multi(oracle_name, &all_arg_vals, &orig_ret_tys);
                         tgt.set_side(None);
                         r
                     }

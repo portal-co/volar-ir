@@ -1821,6 +1821,8 @@ impl<'ctx> Importer<'ctx> {
                 name: aes_extern::ORACLE_NAME.into(),
                 params: vec![u64_tid; 4],
                 results: vec![u64_tid; 2],
+
+                execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
             });
         }
         let output_tys = vec![u64_tid; 2];
@@ -3718,11 +3720,7 @@ impl<'a, 'ctx> BitCircuitBuilder for Ctx<'a, 'ctx> {
         )
     }
 
-    fn bc_poly(
-        &mut self,
-        coeffs: PolyCoeffs<ValueId>,
-        constant: u128,
-    ) -> ValueId {
+    fn bc_poly(&mut self, coeffs: PolyCoeffs<ValueId>, constant: u128) -> ValueId {
         let ty = self.bit_tid;
         self.fctx.emit(
             self.block,

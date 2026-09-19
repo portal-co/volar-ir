@@ -5,16 +5,45 @@
 extern crate alloc;
 
 pub mod aes_extern;
-pub mod tls13_extern;
 pub mod complexity;
+pub mod tls13_extern;
 pub use complexity::{MeasureSpec, ReentryHint, StructRef};
 
 mod generated;
 pub use generated::{
-    ActionDecl, Constant, Node, OracleDecl, PreInitSegment, RngDecl, StorageId, Type, TypeId,
+    ActionDecl, ActionExecutionPolicy, Constant, ExternalExecutor, ExternalRevealPolicy, Node,
+    OracleDecl, OracleExecutionKind, OracleExecutionPolicy, PreInitSegment, RngDecl, StorageId,
+    Type, TypeId,
 };
 
 use alloc::vec::Vec;
+
+/// Explicit compatibility policy for pre-executor action declarations.
+///
+/// New frontends must select a reviewed policy explicitly. This value exists
+/// only to migrate the repository's established evaluator-hosted action path:
+/// both roles learn the action inputs, and the evaluator owns host execution.
+impl ActionExecutionPolicy {
+    pub const fn legacy_evaluator() -> Self {
+        Self {
+            executor: ExternalExecutor::Evaluator,
+            reveal: ExternalRevealPolicy::BothRoles,
+            fingerprint: [0; 32],
+        }
+    }
+}
+
+/// Explicit compatibility policy for legacy pure-oracle declarations.
+impl OracleExecutionPolicy {
+    pub const fn legacy_evaluator() -> Self {
+        Self {
+            execution: OracleExecutionKind::Assigned,
+            executor: ExternalExecutor::Evaluator,
+            reveal: ExternalRevealPolicy::BothRoles,
+            fingerprint: [0; 32],
+        }
+    }
+}
 
 /// Canonical sparse coefficient collection for [`Stmt::Poly`].
 ///
@@ -204,10 +233,8 @@ impl<V> IntoIterator for PolyCoeffs<V> {
 
 impl<'a, V> IntoIterator for &'a PolyCoeffs<V> {
     type Item = (&'a Vec<V>, &'a u8);
-    type IntoIter = core::iter::Map<
-        core::slice::Iter<'a, (Vec<V>, u8)>,
-        fn(&(Vec<V>, u8)) -> (&Vec<V>, &u8),
-    >;
+    type IntoIter =
+        core::iter::Map<core::slice::Iter<'a, (Vec<V>, u8)>, fn(&(Vec<V>, u8)) -> (&Vec<V>, &u8)>;
 
     fn into_iter(self) -> Self::IntoIter {
         fn as_pair<V>(entry: &(Vec<V>, u8)) -> (&Vec<V>, &u8) {
@@ -245,11 +272,7 @@ mod poly_coeffs_tests {
 
     #[test]
     fn from_iter_canonicalizes_and_keeps_the_last_coefficient() {
-        let coeffs = PolyCoeffs::from_iter([
-            (vec![3], 3u8),
-            (vec![1], 1u8),
-            (vec![3], 7u8),
-        ]);
+        let coeffs = PolyCoeffs::from_iter([(vec![3], 3u8), (vec![1], 1u8), (vec![3], 7u8)]);
 
         assert_eq!(
             coeffs.into_iter().collect::<Vec<_>>(),
@@ -267,15 +290,15 @@ mod poly_coeffs_tests {
         });
         assert_eq!(outer_ptr, coeffs.0.as_ptr());
         assert_eq!(
-            coeffs.iter().map(|(key, value)| (key.clone(), *value)).collect::<Vec<_>>(),
+            coeffs
+                .iter()
+                .map(|(key, value)| (key.clone(), *value))
+                .collect::<Vec<_>>(),
             vec![(vec![2], 3), (vec![3], 7)]
         );
 
         coeffs.remap_monomials_in_place(|monomial| monomial[0] = 9);
-        assert_eq!(
-            coeffs.into_iter().collect::<Vec<_>>(),
-            vec![(vec![9], 7)]
-        );
+        assert_eq!(coeffs.into_iter().collect::<Vec<_>>(), vec![(vec![9], 7)]);
     }
 
     #[test]

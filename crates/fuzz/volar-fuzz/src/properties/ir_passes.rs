@@ -892,11 +892,15 @@ fn test_movfuscate_propagates_multiple_oracle_declarations() {
         name: "o0".to_string(),
         params: vec![t128.clone()],
         results: vec![t8.clone()],
+
+        execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
     };
     let o1 = OracleDecl {
         name: "o1".to_string(),
         params: vec![t128.clone()],
         results: vec![t8.clone()],
+
+        execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
     };
 
     let blocks: IRBlocks<()> = {

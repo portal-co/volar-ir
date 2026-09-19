@@ -63,8 +63,8 @@ use volar_ir::ir::{
 };
 use volar_ir_common::{Constant, IrType, PolyCoeffs, Stmt, StorageId, Type, TypeId};
 use volar_lir::circuits::{
-    bc_add, frame_read_cont, frame_reload, frame_spill, frame_write_cont, frame_write_ret, n_packs,
-    pack_bits, unpack_words, BitCircuitBuilder, FrameLayout, StackPtr, StorageEmitter, PACK_W,
+    BitCircuitBuilder, FrameLayout, PACK_W, StackPtr, StorageEmitter, bc_add, frame_read_cont,
+    frame_reload, frame_spill, frame_write_cont, frame_write_ret, n_packs, pack_bits, unpack_words,
 };
 
 /// Number of bits packed into a single `Vec(PACK_W, Bit)` word at block
@@ -1046,13 +1046,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             addr,
                         }) => {
                             let local_addr = val_map.get(addr.0).unwrap_or(IRVarId(0));
-                            let real_addr =
-                                rebase_stack_addr(
-                                    &mut current_em,
-                                    &current_sp_bits,
-                                    local_addr,
-                                    self.pointer_bits,
-                                );
+                            let real_addr = rebase_stack_addr(
+                                &mut current_em,
+                                &current_sp_bits,
+                                local_addr,
+                                self.pointer_bits,
+                            );
                             let id = current_em.emit(IRStmt::StorageRead {
                                 storage: StorageId::STACK,
                                 ty: self.type_map[ty.0 as usize],
@@ -1067,13 +1066,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             addr,
                         }) => {
                             let local_addr = val_map.get(addr.0).unwrap_or(IRVarId(0));
-                            let real_addr =
-                                rebase_stack_addr(
-                                    &mut current_em,
-                                    &current_sp_bits,
-                                    local_addr,
-                                    self.pointer_bits,
-                                );
+                            let real_addr = rebase_stack_addr(
+                                &mut current_em,
+                                &current_sp_bits,
+                                local_addr,
+                                self.pointer_bits,
+                            );
                             let ir_src = val_map.get(src.0).unwrap_or(IRVarId(0));
                             let id = current_em.emit(IRStmt::StorageWrite {
                                 storage: StorageId::STACK,
@@ -1108,13 +1106,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                 },
                                 base_tid,
                             ));
-                            let addr =
-                                rebase_stack_addr(
-                                    &mut current_em,
-                                    &current_sp_bits,
-                                    base_const,
-                                    self.pointer_bits,
-                                );
+                            let addr = rebase_stack_addr(
+                                &mut current_em,
+                                &current_sp_bits,
+                                base_const,
+                                self.pointer_bits,
+                            );
                             val_map.insert(svid.0, addr);
                         }
                         Value::PtrLoad { ptr, .. } => {
@@ -1336,13 +1333,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             // Unpack SP.
                             let cont_sp_word_ids: Vec<IRVarId> =
                                 (0..sp_packs as u32).map(IRVarId).collect();
-                            let cont_sp_bits =
-                                unpack_words(
-                                    &mut cont_em,
-                                    &cont_sp_word_ids,
-                                    self.pointer_bits,
-                                    PACK_W,
-                                );
+                            let cont_sp_bits = unpack_words(
+                                &mut cont_em,
+                                &cont_sp_word_ids,
+                                self.pointer_bits,
+                                PACK_W,
+                            );
 
                             // Unpack return value.
                             if n_ret_bits_orig > 0 {
@@ -1684,6 +1680,8 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 name: o.name.clone(),
                 params: remap(&o.params),
                 results: remap(&o.results),
+
+                execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
             })
             .collect();
         let actions = self
@@ -1693,6 +1691,8 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 name: a.name.clone(),
                 params: remap(&a.params),
                 results: remap(&a.results),
+
+                execution: volar_ir_common::ActionExecutionPolicy::legacy_evaluator(),
             })
             .collect();
         (
@@ -1798,9 +1798,8 @@ impl ValueMap {
     }
 
     fn required(&self, value: usize) -> IRVarId {
-        self.get(value).unwrap_or_else(|| {
-            panic!("lower_function: VAFFLE ValueId {value} has no IR mapping")
-        })
+        self.get(value)
+            .unwrap_or_else(|| panic!("lower_function: VAFFLE ValueId {value} has no IR mapping"))
     }
 
     fn contains_key(&self, value: usize) -> bool {
@@ -2230,16 +2229,20 @@ pub(crate) fn compute_owner(blocks: &[Block], n_values: usize) -> Vec<usize> {
     let mut owner = vec![usize::MAX; n_values];
     for (bi, block) in blocks.iter().enumerate() {
         for &(vid, _ty) in &block.params {
-            *owner
-                .get_mut(vid.0)
-                .unwrap_or_else(|| panic!("VAFFLE parameter ValueId {} is outside its value arena", vid.0)) =
-                bi;
+            *owner.get_mut(vid.0).unwrap_or_else(|| {
+                panic!(
+                    "VAFFLE parameter ValueId {} is outside its value arena",
+                    vid.0
+                )
+            }) = bi;
         }
         for &vid in &block.stmts {
-            *owner
-                .get_mut(vid.0)
-                .unwrap_or_else(|| panic!("VAFFLE statement ValueId {} is outside its value arena", vid.0)) =
-                bi;
+            *owner.get_mut(vid.0).unwrap_or_else(|| {
+                panic!(
+                    "VAFFLE statement ValueId {} is outside its value arena",
+                    vid.0
+                )
+            }) = bi;
         }
     }
     owner
@@ -2369,7 +2372,11 @@ fn explode_to_bits<P: Clone>(
 /// block-values). A caller advancing SP to make a nested call must skip
 /// past *both* -- this is `plan_functions`'s `FuncInfo::alloca_budget`,
 /// consulted at every call site (see `lower_function`).
-fn compute_alloca_budget<P: Clone>(body: &FuncBody<P>, types: &IRTypes, type_map: &[TypeId]) -> u64 {
+fn compute_alloca_budget<P: Clone>(
+    body: &FuncBody<P>,
+    types: &IRTypes,
+    type_map: &[TypeId],
+) -> u64 {
     let mut budget = 0u64;
     for node in &body.values {
         if let Value::StackAlloc {
@@ -2762,10 +2769,7 @@ mod tests {
             count: 1,
             base_slot: 0,
         }); // 1
-        vals0.push(Value::Op(Stmt::Const(
-            Constant { hi: 0, lo: 0 },
-            addr_tid,
-        ))); // 2: store address
+        vals0.push(Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, addr_tid))); // 2: store address
         vals0.push(Value::Op(Stmt::StorageWrite {
             storage: StorageId::ALLOCA,
             src: ValueId(0),
@@ -2776,10 +2780,7 @@ mod tests {
             func: FuncId(1),
             args: std::vec![ValueId(0)],
         }); // 4
-        vals0.push(Value::Op(Stmt::Const(
-            Constant { hi: 0, lo: 0 },
-            addr_tid,
-        ))); // 5: reload address
+        vals0.push(Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, addr_tid))); // 5: reload address
         vals0.push(Value::Op(Stmt::StorageRead {
             storage: StorageId::ALLOCA,
             ty: bit_tid,

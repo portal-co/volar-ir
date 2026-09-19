@@ -2068,6 +2068,8 @@ mod tests {
             name: "write_byte".into(),
             params: std::vec![bit],
             results: std::vec![byte],
+
+            execution: volar_ir_common::ActionExecutionPolicy::legacy_evaluator(),
         });
 
         let lowered = try_lower_ir_to_boolar(&blocks, &types).unwrap();

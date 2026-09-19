@@ -102,6 +102,72 @@
       "typescript": "Constant"
     },
     {
+      "id": "external-executor",
+      "doc": "Public MPC party assigned to execute an external primitive.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "ExternalExecutor",
+        "kind": "unit-enum",
+        "variants": ["Garbler", "Evaluator"]
+      },
+      "typescript": "ExternalExecutor"
+    },
+    {
+      "id": "external-reveal-policy",
+      "doc": "Public authorization describing which roles receive clear external inputs.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "ExternalRevealPolicy",
+        "kind": "unit-enum",
+        "variants": ["ExecutorOnly", "BothRoles"]
+      },
+      "typescript": "ExternalRevealPolicy"
+    },
+    {
+      "id": "oracle-execution-kind",
+      "doc": "Whether a pure oracle is assigned to one executor or replicated.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "OracleExecutionKind",
+        "kind": "unit-enum",
+        "variants": ["Assigned", "Replicated"]
+      },
+      "typescript": "OracleExecutionKind"
+    },
+    {
+      "id": "action-execution-policy",
+      "doc": "Public action executor, reveal policy, and declaration fingerprint.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "ActionExecutionPolicy",
+        "kind": "record",
+        "copy": true,
+        "fields": [
+          { "name": "executor", "ty": "ExternalExecutor" },
+          { "name": "reveal", "ty": "ExternalRevealPolicy" },
+          { "name": "fingerprint", "ty": "[u8; 32]" }
+        ]
+      },
+      "typescript": "ActionExecutionPolicy"
+    },
+    {
+      "id": "oracle-execution-policy",
+      "doc": "Public oracle execution, reveal policy, and declaration fingerprint.",
+      "rust": {
+        "output": "crates/ir/volar-ir-common/src/generated.rs",
+        "name": "OracleExecutionPolicy",
+        "kind": "record",
+        "copy": true,
+        "fields": [
+          { "name": "execution", "ty": "OracleExecutionKind" },
+          { "name": "executor", "ty": "ExternalExecutor" },
+          { "name": "reveal", "ty": "ExternalRevealPolicy" },
+          { "name": "fingerprint", "ty": "[u8; 32]" }
+        ]
+      },
+      "typescript": "OracleExecutionPolicy"
+    },
+    {
       "id": "oracle-declaration",
       "doc": "Declaration of a named pure oracle.",
       "rust": {
@@ -112,7 +178,8 @@
         "fields": [
           { "name": "name", "ty": "alloc::string::String" },
           { "name": "params", "ty": "alloc::vec::Vec<TypeId>" },
-          { "name": "results", "ty": "alloc::vec::Vec<TypeId>" }
+          { "name": "results", "ty": "alloc::vec::Vec<TypeId>" },
+          { "name": "execution", "ty": "OracleExecutionPolicy" }
         ]
       },
       "typescript": "OracleDecl"
@@ -128,7 +195,8 @@
         "fields": [
           { "name": "name", "ty": "alloc::string::String" },
           { "name": "params", "ty": "alloc::vec::Vec<TypeId>" },
-          { "name": "results", "ty": "alloc::vec::Vec<TypeId>" }
+          { "name": "results", "ty": "alloc::vec::Vec<TypeId>" },
+          { "name": "execution", "ty": "ActionExecutionPolicy" }
         ]
       },
       "typescript": "ActionDecl"

@@ -157,11 +157,15 @@ fn ir_decls() {
                 name: "my_oracle".into(),
                 params: vec![ty(0)],
                 results: vec![ty(1)],
+
+                execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
             }],
             actions: vec![ActionDecl {
                 name: "my_action".into(),
                 params: vec![ty(1)],
                 results: vec![ty(0)],
+
+                execution: volar_ir_common::ActionExecutionPolicy::legacy_evaluator(),
             }],
             rngs: vec![RngDecl {
                 name: "my_rng".into(),
@@ -744,19 +748,15 @@ fn comments_and_blank_lines_ir() {
 
 #[cfg(test)]
 mod regions_gadgets {
-    use crate::regions::{
-        parse_impl::parse_with_regions, write_gadget_bindings,
-    };
+    use crate::regions::{parse_impl::parse_with_regions, write_gadget_bindings};
+    use crate::tests::v;
     use crate::{ParseText, SavedBIrBlocks, WriteText};
     use alloc::string::ToString;
     use alloc::vec;
-    use volar_ir::boolar::{LaneId, BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
-    use volar_ir::gadget::{AuxSource, GadgetBinding, Port, PortKind, GadgetSpec};
+    use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId};
+    use volar_ir::gadget::{AuxSource, GadgetBinding, GadgetSpec, Port, PortKind};
     use volar_ir::ir::{IRBlockId, IRBlockTargetId, IRVarId};
-    use crate::tests::v;
-    use volar_ir::region::{
-        RegionEntry, RegionId, RegionSelector, RegionTable, WireAnchor,
-    };
+    use volar_ir::region::{RegionEntry, RegionId, RegionSelector, RegionTable, WireAnchor};
     use volar_ir_common::{Node, StorageId};
 
     fn bir_fixture() -> volar_ir::boolar::BIrBlocks<()> {
@@ -813,22 +813,26 @@ mod regions_gadgets {
 
     #[test]
     fn full_document_roundtrip() {
-        let circuit = SavedBIrBlocks { blocks: bir_fixture() };
+        let circuit = SavedBIrBlocks {
+            blocks: bir_fixture(),
+        };
         let mut doc = circuit.to_text_string();
-        doc.push_str(&RegionTable {
-            entries: vec![
-                RegionEntry {
-                    anchor: WireAnchor::Input { start: 0, len: 4 },
-                    regions: [RegionId(0)].into_iter().collect(),
-                },
-                RegionEntry {
-                    anchor: WireAnchor::Output { start: 0, len: 1 },
-                    regions: [RegionId(0)].into_iter().collect(),
-                },
-            ],
-            names: Default::default(),
-        }
-        .to_text_string());
+        doc.push_str(
+            &RegionTable {
+                entries: vec![
+                    RegionEntry {
+                        anchor: WireAnchor::Input { start: 0, len: 4 },
+                        regions: [RegionId(0)].into_iter().collect(),
+                    },
+                    RegionEntry {
+                        anchor: WireAnchor::Output { start: 0, len: 1 },
+                        regions: [RegionId(0)].into_iter().collect(),
+                    },
+                ],
+                names: Default::default(),
+            }
+            .to_text_string(),
+        );
         let bindings = vec![GadgetBinding {
             gadget: "pad".to_string(),
             selector: RegionSelector {
@@ -852,7 +856,13 @@ mod regions_gadgets {
             parsed.bindings[0].aux_sources[0],
             AuxSource::Const(vec![true, false])
         );
-        assert_eq!(parsed.bindings[0].selector.all_of, [RegionId(0)].into_iter().collect());
-        assert_eq!(parsed.bindings[0].selector.none_of, [RegionId(1)].into_iter().collect());
+        assert_eq!(
+            parsed.bindings[0].selector.all_of,
+            [RegionId(0)].into_iter().collect()
+        );
+        assert_eq!(
+            parsed.bindings[0].selector.none_of,
+            [RegionId(1)].into_iter().collect()
+        );
     }
 }
