@@ -128,9 +128,13 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+    use crate::{VirtualizeConfig, virtualize_ir};
     use volar_ir::{
         boolar::{BIrBlock, BIrTarget, BIrTerminator, LaneId},
-        ir::{IRBlock, IRBlockTargetId, IRBranchTarget, IRTerminator, IRTypeId, IRVarId},
+        ir::{
+            IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRType, IRTypeId,
+            IRTypes, IRVarId,
+        },
     };
 
     #[test]
@@ -160,6 +164,28 @@ mod tests {
                 storage,
                 operation: "StorageWrite",
             })
+        );
+    }
+
+    #[test]
+    fn virtualized_register_storage_is_not_readonly() {
+        let bit = IRTypeId(0);
+        let mut types = IRTypes(vec![IRType::Primitive(volar_ir_common::Type::Bit)]);
+        let source: IRBlocks<()> = IRBlocks::new(vec![IRBlock {
+            params: vec![bit],
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+            },
+        }]);
+        let output = virtualize_ir(&source, &mut types, &VirtualizeConfig::default());
+        assert!(validate_ir_storage_access(&output.blocks, &output.storage_access).is_ok());
+        assert!(
+            output
+                .storage_access
+                .entries
+                .iter()
+                .any(|entry| entry.access == StorageAccess::ReadWrite)
         );
     }
 

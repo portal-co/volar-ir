@@ -131,7 +131,12 @@ pub fn virtualize_bir<P: Clone + Default>(
         }
     };
 
-    let storage_access = storage_access_for_bir(&storage_init.pre_init, cfg.bytecode_storage);
+    let storage_access = storage_access_for_bir(
+        &storage_init.pre_init,
+        cfg.bytecode_storage,
+        &layout,
+        handler_bits,
+    );
     assert!(
         validate_bir_storage_access(&final_blocks, &storage_access).is_ok(),
         "virtualize_bir emitted a write to its read-only storage sidecar"
@@ -151,12 +156,28 @@ pub fn virtualize_bir<P: Clone + Default>(
 fn storage_access_for_bir(
     pre_init: &[volar_ir::boolar::BIrPreInitSegment],
     bytecode_storage: StorageId,
+    layout: &BirSlotLayout,
+    handler_bits: usize,
 ) -> StorageTable {
     let mut table = StorageTable::default();
+    // Preserve the configured base even if this degenerate program has no
+    // actual handler-index bits or target slots, matching IR's explicit
+    // bytecode-table declaration.
     table.set(bytecode_storage, StorageAccess::ReadOnly);
-    for segment in pre_init {
-        table.set(segment.storage, StorageAccess::ReadOnly);
+    // A BIR bytecode word is bit-stuffed across StorageIds, so preserve every
+    // allocated handler-index bit even when its zero-only image has no lane.
+    for bit in 0..handler_bits {
+        table.set(
+            StorageId(bytecode_storage.0 + bit as u32),
+            StorageAccess::ReadOnly,
+        );
     }
+    for storage in layout.slot_storage_ids() {
+        table.set(storage, StorageAccess::ReadOnly);
+    }
+    // Pre-init may include unrelated caller storage. It cannot establish an
+    // immutability fact and is deliberately not used to widen this sidecar.
+    let _ = pre_init;
     table
 }
 
@@ -212,6 +233,7 @@ struct BirSlotLayout {
     /// `per_handler[h]` = list of target-slot base storage ids (each is
     /// a `pc_bits`-wide stored value).
     pub(crate) per_handler: Vec<Vec<StorageId>>,
+    pc_bits: u32,
 }
 
 impl BirSlotLayout {
@@ -235,7 +257,18 @@ impl BirSlotLayout {
             }
             per_handler.push(slots);
         }
-        Self { per_handler }
+        Self {
+            per_handler,
+            pc_bits: pc_bits as u32,
+        }
+    }
+
+    fn slot_storage_ids(&self) -> impl Iterator<Item = StorageId> + '_ {
+        self.per_handler.iter().flat_map(move |slots| {
+            slots
+                .iter()
+                .flat_map(move |base| (0..self.pc_bits).map(move |bit| StorageId(base.0 + bit)))
+        })
     }
 }
 

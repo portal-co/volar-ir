@@ -104,6 +104,15 @@ fn check_fixture(name: &str) {
         "virt must declare its bytecode read-only"
     );
     assert!(readonly.is_disjoint(&written_storage_ids(&virtualized.blocks)));
+    // Source fixture RAM/port storage has no declaration, so it stays
+    // conservatively mutable even when it also appears in the merged image.
+    for storage in &storages {
+        assert_eq!(
+            virtualized.storage_access.access_of(*storage),
+            StorageAccess::ReadWrite,
+            "guest storage {storage:?} must not inherit bytecode immutability"
+        );
+    }
 
     let inputs = vec![false; params];
     let expected = eval_biir(&circuit, &inputs).expect("original fixture evaluates");

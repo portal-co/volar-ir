@@ -149,12 +149,12 @@ pub fn virtualize_ir<P: Clone + Default>(
 
 /// Virtualise an [`IRBlocks`] module with per-PC bytecode commitment.
 ///
-/// In addition to the standard virtualisation, the setup block writes
-/// `commitment[pc] = H(handler_idx, slot_0, …, slot_n)` as a constant for
-/// every program counter into `commitment_cfg.commitment_storage`.  Every
-/// handler then re-reads its slots, recomputes the hash via
-/// `H::emit_ir`, and XOR-injects the diff into `next_pc` — making the
-/// commitment structurally binding without a separate assertion oracle.
+/// In addition to the standard virtualisation, pre-initialization seeds
+/// `commitment[pc] = H(handler_idx, slot_0, …, slot_n)` at
+/// `commitment_cfg.commitment_storage`. Every handler then re-reads its
+/// slots, recomputes the hash via `H::emit_ir`, and XOR-injects the diff into
+/// `next_pc` — making the commitment structurally binding without a separate
+/// assertion oracle.
 ///
 /// All preconditions of [`virtualize_ir`] apply.  Additionally,
 /// `commitment_cfg.commitment_storage` must not overlap with
@@ -346,7 +346,13 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
         }
     };
 
-    let storage_access = storage_access_for_ir(&storage_init.pre_init, cfg.bytecode_storage);
+    let storage_access = storage_access_for_ir(
+        &storage_init.pre_init,
+        cfg.bytecode_storage,
+        &layout,
+        &reg_alloc,
+        commitment,
+    );
     assert!(
         validate_ir_storage_access(&final_blocks, &storage_access).is_ok(),
         "virtualize_ir emitted a write to its read-only storage sidecar"
@@ -363,14 +369,33 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
     }
 }
 
-pub(crate) fn storage_access_for_ir(
+pub(crate) fn storage_access_for_ir<H: IrHashAlgorithm>(
     pre_init: &[volar_ir_common::PreInitSegment],
     bytecode_storage: StorageId,
+    layout: &GlobalLayout,
+    reg_alloc: &RegAlloc,
+    commitment: Option<&CommitmentConfig<H>>,
 ) -> StorageTable {
     let mut table = StorageTable::default();
+    // The bytecode table has one handler-index lane plus one lane for every
+    // global immediate slot. Mark the complete allocated layout, including
+    // all-zero lanes which have no pre-init segment.
     table.set(bytecode_storage, StorageAccess::ReadOnly);
+    for storage in layout.slot_storage_ids() {
+        table.set(storage, StorageAccess::ReadOnly);
+    }
     for segment in pre_init {
-        table.set(segment.storage, StorageAccess::ReadOnly);
+        if segment.storage == bytecode_storage
+            || commitment.is_some_and(|cfg| segment.storage == cfg.commitment_storage)
+        {
+            table.set(segment.storage, StorageAccess::ReadOnly);
+        }
+    }
+    for storage in reg_alloc.storage_ids() {
+        table.set(storage, StorageAccess::ReadWrite);
+    }
+    if let Some(storage) = commitment.and_then(|cfg| cfg.key_storage) {
+        table.set(storage, StorageAccess::ReadWrite);
     }
     table
 }
@@ -572,6 +597,10 @@ impl RegAlloc {
             .storage_per_type
             .get(&ty)
             .expect("RegAlloc: no storage for type (missing from allocation)")
+    }
+
+    pub(crate) fn storage_ids(&self) -> impl Iterator<Item = StorageId> + '_ {
+        self.storage_per_type.values().copied()
     }
 }
 
@@ -826,6 +855,10 @@ impl GlobalLayout {
 
     /// Return the first `StorageId` strictly above the bytecode range.
     /// The register file is placed here so the two never collide.
+    pub(crate) fn slot_storage_ids(&self) -> impl Iterator<Item = StorageId> + '_ {
+        self.per_handler_slot.iter().flatten().copied()
+    }
+
     pub(crate) fn next_free_storage_after_bytecode(&self, base: StorageId) -> u32 {
         let total_slots: u32 = self
             .per_handler_slot
