@@ -64,7 +64,7 @@ use inkwell::llvm_sys::core::{
 };
 use inkwell::llvm_sys::{LLVMOpcode, LLVMTypeKind};
 use inkwell::module::Module as LlvmModule;
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{
     AnyValue, AnyValueEnum, AsValueRef, BasicValueEnum, CallSiteValue, FunctionValue,
     InstructionOpcode, InstructionValue, IntValue, PhiValue, PointerValue,
@@ -196,6 +196,28 @@ impl LlvmImportConfig {
         );
         self
     }
+
+    /// Reject contradictory duplicate registrations at the public import
+    /// boundary. The builder methods retain replacement semantics for
+    /// ergonomic construction, while this validator makes import admission
+    /// explicit and fail-closed.
+    fn validate(&self) -> IResult<()> {
+        for (symbol, external) in &self.externals {
+            if symbol.is_empty() {
+                return Err(ImportError::Unsupported(
+                    "configured external symbol must not be empty".into(),
+                ));
+            }
+            if let LlvmExternalImportKind::Action { n_args, .. } = external
+                && n_args.checked_add(2).is_none()
+            {
+                return Err(ImportError::Unsupported(format!(
+                    "configured action `{symbol}` argument count overflows its ABI"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn pointer_width_from_layout<'ctx>(
@@ -251,6 +273,7 @@ pub fn import_module_with_config<'ctx>(
     entries: &[&str],
     config: LlvmImportConfig,
 ) -> IResult<Module> {
+    config.validate()?;
     let pointer_width = pointer_width_from_layout(llvm_module, config.clone())?;
     let mut importer = Importer::new(pointer_width, config.externals);
     // Eagerly assign every module global its `StorageId` before walking any
@@ -1689,7 +1712,13 @@ impl<'ctx> Importer<'ctx> {
                     // only generic LLVM calls admitted as external MPC work.
                     // Every other direct call retains ordinary VAFFLE call
                     // semantics below; there is no name-based inference.
-                    self.translate_configured_external(fctx, instr, &callee_name, external)?
+                    self.translate_configured_external(
+                        fctx,
+                        instr,
+                        callee_fn,
+                        &callee_name,
+                        external,
+                    )?
                 } else {
                     // Validate arguments before asking `func_id` to inspect
                     // the callee signature. `FunctionValue::get_params`
@@ -1829,6 +1858,70 @@ impl<'ctx> Importer<'ctx> {
         Ok(called)
     }
 
+    fn validate_configured_external_declaration(
+        &self,
+        callee: FunctionValue<'ctx>,
+        symbol: &str,
+        external: &LlvmExternalImportKind,
+    ) -> IResult<()> {
+        let signature = callee.get_type();
+        if signature.is_var_arg() {
+            return Err(ImportError::Unsupported(format!(
+                "configured external `{symbol}` must not be variadic"
+            )));
+        }
+        let expected_params = match external {
+            LlvmExternalImportKind::Oracle { .. } => signature.count_param_types() as usize,
+            LlvmExternalImportKind::Action { n_args, .. } => {
+                n_args.checked_add(2).ok_or_else(|| {
+                    ImportError::Unsupported(format!(
+                        "configured action `{symbol}` argument count overflows its ABI"
+                    ))
+                })?
+            }
+        };
+        if signature.count_param_types() as usize != expected_params {
+            return Err(ImportError::Unsupported(format!(
+                "configured external `{symbol}` declaration has an incompatible parameter count"
+            )));
+        }
+        for ty in signature.get_param_types() {
+            if !matches!(ty, BasicMetadataTypeEnum::IntType(_)) {
+                return Err(ImportError::Unsupported(format!(
+                    "configured external `{symbol}` declaration requires scalar integer parameters"
+                )));
+            }
+        }
+        let Some(BasicTypeEnum::IntType(_)) = signature.get_return_type() else {
+            return Err(ImportError::Unsupported(format!(
+                "configured external `{symbol}` declaration must return one scalar integer"
+            )));
+        };
+        if matches!(external, LlvmExternalImportKind::Action { .. }) {
+            let types = signature.get_param_types();
+            let BasicMetadataTypeEnum::IntType(guard) = types[0] else {
+                unreachable!("integer parameters checked above");
+            };
+            if guard.get_bit_width() != 1 {
+                return Err(ImportError::Unsupported(format!(
+                    "configured action `{symbol}` declaration guard must be i1"
+                )));
+            }
+            let BasicMetadataTypeEnum::IntType(fallback) = types[types.len() - 1] else {
+                unreachable!("integer parameters checked above");
+            };
+            let Some(BasicTypeEnum::IntType(result)) = signature.get_return_type() else {
+                unreachable!("integer result checked above");
+            };
+            if fallback.get_bit_width() != result.get_bit_width() {
+                return Err(ImportError::Unsupported(format!(
+                    "configured action `{symbol}` declaration fallback type must match its result type"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn register_configured_oracle(
         &mut self,
         symbol: &str,
@@ -1892,9 +1985,11 @@ impl<'ctx> Importer<'ctx> {
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
         instr: InstructionValue<'ctx>,
+        callee: FunctionValue<'ctx>,
         symbol: &str,
         external: LlvmExternalImportKind,
     ) -> IResult<Option<Bits>> {
+        self.validate_configured_external_declaration(callee, symbol, &external)?;
         let n_args = instr.get_num_operands().saturating_sub(1) as usize;
         let mut args = Vec::with_capacity(n_args);
         let mut params = Vec::with_capacity(n_args);
