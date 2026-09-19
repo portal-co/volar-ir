@@ -209,6 +209,133 @@ fn apply_vc_public_mem_writes(target: &mut VaffleTarget, vc: &VcConfig) {
     }
 }
 
+fn configured_external_type(
+    target: &mut VaffleTarget,
+    import_name: &str,
+    ty: WType,
+) -> Result<volar_ir_common::TypeId, UnsupportedOp> {
+    match ty {
+        WType::I32 | WType::I64 => {
+            Ok(target
+                .lir_type_to_tid(&waffle_ty(ty).expect("scalar integer WAFFLE type maps to LIR")))
+        }
+        _ => Err(UnsupportedOp(alloc::format!(
+            "configured external `{import_name}` requires scalar integer parameters and results"
+        ))),
+    }
+}
+
+/// Validate and register one explicitly configured imported external.
+///
+/// This happens before lowering any body so malformed registry entries cannot
+/// become partial declarations or trigger slice indexing during call lowering.
+fn register_configured_external(
+    target: &mut VaffleTarget,
+    wasm: &WModule,
+    sig: portal_pc_waffle_ir::Signature,
+    import_name: &str,
+    kind: &WaffleImportKind,
+) -> Result<(), UnsupportedOp> {
+    let sig_data = &wasm.signatures[sig];
+    let (wasm_params, wasm_results) = match sig_data {
+        portal_pc_waffle_ir::SignatureData::Func {
+            params, returns, ..
+        } => (params.as_slice(), returns.as_slice()),
+        _ => {
+            return Err(UnsupportedOp(alloc::format!(
+                "configured external `{import_name}` must have a function signature"
+            )));
+        }
+    };
+    let results: Vec<_> = wasm_results
+        .iter()
+        .copied()
+        .map(|ty| configured_external_type(target, import_name, ty))
+        .collect::<Result<_, _>>()?;
+    if results.is_empty() {
+        return Err(UnsupportedOp(alloc::format!(
+            "configured external `{import_name}` must return at least one scalar integer"
+        )));
+    }
+    match kind {
+        WaffleImportKind::Oracle {
+            name, execution, ..
+        } => {
+            let params = wasm_params
+                .iter()
+                .copied()
+                .map(|ty| configured_external_type(target, import_name, ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            if target.module.oracles.iter().any(|decl| decl.name == *name) {
+                return Err(UnsupportedOp(alloc::format!(
+                    "configured oracle `{name}` has a duplicate declaration"
+                )));
+            }
+            target.register_oracle(volar_ir_common::OracleDecl {
+                name: name.clone(),
+                params,
+                results,
+                execution: *execution,
+            });
+        }
+        WaffleImportKind::Action {
+            name,
+            execution,
+            n_args,
+            ..
+        } => {
+            let expected = n_args
+                .checked_add(1)
+                .and_then(|count| count.checked_add(wasm_results.len()))
+                .ok_or_else(|| {
+                    UnsupportedOp(alloc::format!(
+                        "configured action `{import_name}` argument count overflows its ABI"
+                    ))
+                })?;
+            if wasm_params.len() != expected {
+                return Err(UnsupportedOp(alloc::format!(
+                    "configured action `{import_name}` has an incompatible parameter count"
+                )));
+            }
+            if wasm_params[0] != WType::I32 {
+                return Err(UnsupportedOp(alloc::format!(
+                    "configured action `{import_name}` guard must be i32"
+                )));
+            }
+            let fallback_count = wasm_params.len() - 1 - n_args;
+            if fallback_count != wasm_results.len() {
+                return Err(UnsupportedOp(alloc::format!(
+                    "configured action `{import_name}` must have one fallback per result"
+                )));
+            }
+            for (fallback, result) in wasm_params[1 + n_args..].iter().zip(wasm_results) {
+                if fallback != result {
+                    return Err(UnsupportedOp(alloc::format!(
+                        "configured action `{import_name}` fallback types must match result types"
+                    )));
+                }
+            }
+            let params = wasm_params[1..1 + n_args]
+                .iter()
+                .copied()
+                .map(|ty| configured_external_type(target, import_name, ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            if target.module.actions.iter().any(|decl| decl.name == *name) {
+                return Err(UnsupportedOp(alloc::format!(
+                    "configured action `{name}` has a duplicate declaration"
+                )));
+            }
+            target.register_action(volar_ir_common::ActionDecl {
+                name: name.clone(),
+                params,
+                results,
+                execution: *execution,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// As [`lower_waffle_module`], with an explicit source-neutral metadata mode.
 pub fn lower_waffle_module_with_metadata(
     wasm: &WModule,
@@ -230,72 +357,36 @@ pub fn lower_waffle_module_with_metadata(
     // ("<module>.<field>"), not in `FuncDecl::Import`'s (empty) name field —
     // resolve through `waffle_import_func_names`.
     let import_names = waffle_import_func_names(wasm);
+    let mut errors = Vec::new();
+    for import_name in config.imports.keys() {
+        if !import_names.values().any(|name| name == import_name) {
+            errors.push((
+                import_name.clone(),
+                UnsupportedOp(alloc::format!(
+                    "configured external `{import_name}` is not imported by the WASM module"
+                )),
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return errors;
+    }
     for (func_ref, decl) in wasm.funcs.entries() {
         if let FuncDecl::Import(sig, decl_name) = decl {
             let import_name = import_names.get(&func_ref.index()).unwrap_or(decl_name);
             let Some(kind) = config.imports.get(import_name) else {
                 continue;
             };
-            let sig_data = &wasm.signatures[*sig];
-            let (wasm_params, wasm_results) = match sig_data {
-                portal_pc_waffle_ir::SignatureData::Func {
-                    params, returns, ..
-                } => (params.as_slice(), returns.as_slice()),
-                _ => continue,
-            };
-            match kind {
-                WaffleImportKind::Oracle {
-                    name, execution, ..
-                } => {
-                    let params: alloc::vec::Vec<_> = wasm_params
-                        .iter()
-                        .filter_map(|&t| waffle_ty(t).ok())
-                        .map(|lt| target.lir_type_to_tid(&lt))
-                        .collect();
-                    let results: alloc::vec::Vec<_> = wasm_results
-                        .iter()
-                        .filter_map(|&t| waffle_ty(t).ok())
-                        .map(|lt| target.lir_type_to_tid(&lt))
-                        .collect();
-                    target.register_oracle(volar_ir_common::OracleDecl {
-                        name: name.clone(),
-                        params,
-                        results,
-
-                        execution: *execution,
-                    });
-                }
-                WaffleImportKind::Action {
-                    name,
-                    execution,
-                    n_args,
-                    ..
-                } => {
-                    let action_params: alloc::vec::Vec<_> = wasm_params
-                        .iter()
-                        .skip(1) // skip guard
-                        .take(*n_args)
-                        .filter_map(|&t| waffle_ty(t).ok())
-                        .map(|lt| target.lir_type_to_tid(&lt))
-                        .collect();
-                    let results: alloc::vec::Vec<_> = wasm_results
-                        .iter()
-                        .filter_map(|&t| waffle_ty(t).ok())
-                        .map(|lt| target.lir_type_to_tid(&lt))
-                        .collect();
-                    target.register_action(volar_ir_common::ActionDecl {
-                        name: name.clone(),
-                        params: action_params,
-                        results,
-
-                        execution: *execution,
-                    });
-                }
+            if let Err(error) = register_configured_external(target, wasm, *sig, import_name, kind)
+            {
+                errors.push((import_name.clone(), error));
             }
         }
     }
+    if !errors.is_empty() {
+        return errors;
+    }
 
-    let mut errors = Vec::new();
     // The compatibility materializer deliberately resolves every non-import
     // function through the same single-function lazy boundary.
     for (func_ref, decl) in wasm.funcs.entries() {
@@ -1057,10 +1148,37 @@ fn lower_op(
                         side,
                         ..
                     } => {
+                        let expected = n_args
+                            .checked_add(1)
+                            .and_then(|count| count.checked_add(orig_ret_tys.len()))
+                            .ok_or_else(|| {
+                                UnsupportedOp(alloc::format!(
+                                    "configured action `{action_name}` argument count overflows its ABI"
+                                ))
+                            })?;
+                        if all_arg_vals.len() != expected {
+                            return Err(UnsupportedOp(alloc::format!(
+                                "configured action `{action_name}` call has an incompatible ABI"
+                            )));
+                        }
                         let guard_vv = all_arg_vals[0].clone();
+                        if guard_vv.bits.len() != 32 {
+                            return Err(UnsupportedOp(alloc::format!(
+                                "configured action `{action_name}` guard must be i32"
+                            )));
+                        }
                         let guard_bit = or_bits(tgt, &guard_vv.bits);
                         let real_args = &all_arg_vals[1..=*n_args];
                         let fallbacks = &all_arg_vals[*n_args + 1..];
+                        if fallbacks
+                            .iter()
+                            .zip(&orig_ret_tys)
+                            .any(|(fallback, result)| fallback.ty != *result)
+                        {
+                            return Err(UnsupportedOp(alloc::format!(
+                                "configured action `{action_name}` fallback types must match result types"
+                            )));
+                        }
                         tgt.set_side(*side);
                         // Emit a real `Stmt::ActionCall` (not a call to an
                         // env import): the evaluator-hosted action extern
