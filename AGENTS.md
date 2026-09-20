@@ -24,10 +24,10 @@ It's generic compiler engineering — SSA IRs, CFG transforms, peephole
 optimizations — that happens to be designed to eventually feed a
 cryptographic proving/garbling backend, but has no cryptography of its own.
 
+Pinnedness and stability tags are tracked here as downstream-facing evidence metadata. This repository is not required to mark every file, but dependents may use `docs/reliability.md` when assessing correctness and change risk.
+
 Treat this as an ordinary compiler-IR codebase: no ZK/non-ZK discipline
-boundary, no `.insecure` quarantine convention, no pinnedness/stability
-tagging — those are `volar`'s conventions for its cryptographic spec layer,
-not this repo's.
+boundary and no cryptographic protocol claims. The pinnedness/stability policy is nevertheless available in `docs/reliability.md` for downstream correctness tracking; tags are optional here. Any protocol-specific quarantine or security policy remains outside this repository.
 
 ## Crate Constraints
 

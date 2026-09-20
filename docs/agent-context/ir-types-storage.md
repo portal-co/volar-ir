@@ -1,4 +1,4 @@
-# IR Types, Storage & Poly Semantics
+# Typed IR, storage, and polynomial semantics
 
 > Load when working on IR, lowering, evaluators, store-forward, or fuzzer generators.
 
@@ -53,27 +53,26 @@ This design enables:
 
 ### Storage-access sidecars
 
-A `StorageId` has no mutability bit in the persisted IR, text format, or rkyv
-layout. Compatibility-sensitive producers instead carry a `StorageTable`
+A `StorageId` has no access declaration in the persisted IR, text format, or
+rkyv layout. Compatibility-sensitive producers instead carry a `StorageTable`
 sidecar. An absent entry is conservatively `ReadWrite`; only an explicit
 `ReadOnly` entry proves that the producing program has no IR-visible write to
-that entire storage ID (across every `TypeId`/`LaneId`). `pre_init` supplies an
-initial image, not an access guarantee.
+that entire storage namespace (across every `TypeId`/`LaneId`). Pre-initialization
+supplies an initial storage image, not an access guarantee.
 
-`virtualize_ir` and `virtualize_bir` expose their generated table through
+`virtualize_ir` and `virtualize_bir` expose generated facts through
 `VirtOutput::storage_access`. `VirtualizeConfig::storage_access` carries caller
-facts into virtualization. Caller and generated tables merge conservatively:
+facts into IR virtualization. Caller and generated tables merge conservatively:
 conflicting declarations become `ReadWrite`, while absent declarations remain
 read-write. Bytecode and handler-slot storage is read-only; register/key
-storage remains read-write. Consumers must carry the sidecar explicitly if
-they need the fact after their own transform. `StorageTable::route_for`
-selects immutable versus mutable consumers but says nothing about visibility,
-authentication, bounds, or cost. Validate it with
-`validate_ir_storage_access` / `validate_bir_storage_access` before relying on
-it. `fold_readonly_storage_ir_blocks` and
-`fold_readonly_storage_biir_blocks` fold only a read-only storage access whose
-address resolves to a static `pre_init` cell (or the normal zero default);
-symbolic addresses and undeclared storage stay unchanged.
+storage remains read-write. Consumers carry the sidecar explicitly after their
+own transform. `StorageTable::route_for` selects a read-only or read-write
+consumer route but says nothing about visibility, authentication, bounds, or
+cost. Validate facts with `validate_ir_storage_access` or
+`validate_bir_storage_access` before relying on them. The read-only folding
+passes replace only reads whose address resolves to a static storage image (or
+the normal zero default); symbolic addresses and undeclared storage stay
+unchanged.
 
 ### Invalidation policy
 

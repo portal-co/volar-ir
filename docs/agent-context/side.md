@@ -11,13 +11,13 @@ trip-wires.
 
 ## What Side is and isn't
 
-Side answers "which actor/party does this value belong to" (ZK witness vs.
-statement, FHE plaintext vs. ciphertext). It is **not** the
+Side answers "which actor/party does this value belong to" (for example,
+ZK witness-side vs. public-side, or FHE plaintext vs. ciphertext). It is **not** the
 `volar-discipline` typestate (`Tagged<Zk/Transparent, T>`,
 [discipline.md](discipline.md)) — that's a whole-module compile-time
 boundary; side is a within-IR, per-value annotation. Don't conflate them:
 a single `Tagged<Zk, IrModule<...>>` prover module can (and does) contain
-both witness-side and statement-side values inside it.
+both witness-side and public-side values inside it. Public-side is the generic term because this IR also supports MPC and protocols where ZK-specific terminology does not apply.
 
 Side is provenance's sibling, not its replacement. Both live on the same
 `Node<T, P> { kind, prov, side: Option<SideId> }` wrapper used by every

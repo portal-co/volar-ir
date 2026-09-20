@@ -426,7 +426,9 @@ output — it serialises the IR nodes directly so that round-tripping is lossles
 
 ## 7. Pinnedness, stability, and legacy markers
 
-This format family currently carries legacy source markers such as:
+This format family may carry optional downstream-facing pinnedness and stability
+metadata. The complete policy is in [`docs/reliability.md`](reliability.md).
+It currently carries legacy source markers such as:
 
 ```rust
 // @reliability: experimental
@@ -435,6 +437,7 @@ This format family currently carries legacy source markers such as:
 
 Under the migration policy these markers are not independent evidence. Treat
 legacy `experimental` code as Unpinned and Very unstable until a source-level
-classification names its evidence and dependent contract. New cryptographic
-infrastructure depending on these crates requires separate review before any
-deployment claim.
+classification names its evidence and dependent contract. This compiler-IR
+repository does not require every source file to carry the tags; downstream
+cryptographic infrastructure may still use them when tracking correctness and
+change risk.

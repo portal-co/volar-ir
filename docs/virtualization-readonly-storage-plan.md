@@ -1,4 +1,4 @@
-# Plan: virtualization fixtures and immutable storage
+# Plan: virtualization fixtures and read-only storage
 
 **Status:** in progress. The compatibility sidecar, virtualization producer,
 structural validation, static IR/Boolar read folding, storage-to-MUX routing,
@@ -6,8 +6,8 @@ and the opt-in M6502/Z80 fixture harness are landed. Caller-sidecar
 propagation through virtualization is landed. Broader transform propagation,
 protocol selection, and the resource-gated movfuscation fixture chain remain.
 
-**Goal:** make storage mutability explicit enough that a producer can prove a
-storage namespace is immutable, then use virtualized bytecode as the first
+**Goal:** make storage access explicit enough that a producer can prove a
+storage namespace is read-only, then use virtualized bytecode as the first
 such producer. Establish the retro-CPU Boolar fixtures as an opt-in,
 large-program regression/measurement harness for virtualization. This is a
 compiler-IR optimization and representation plan; it does not prescribe a
@@ -20,7 +20,7 @@ repository; generated circuit blobs are not copied into this repository.
 
 ## Why this is needed
 
-Today a `StorageId` is only a flat namespace. `PreInitSegment` establishes
+Today a `StorageId` is only a flat storage namespace. `PreInitSegment` establishes
 initial values, but says nothing about whether a program can later write that
 namespace. A storage read is therefore state-dependent to every generic pass
 and every consumer, even when the storage is actually a static table. There is
@@ -32,8 +32,8 @@ That loses several sound optimizations and target choices:
 - storage reads cannot generally be commoned or folded beyond local
   store-to-load forwarding;
 - an initialized static table cannot be recognized as a ROM/constant source;
-- consumers cannot choose a cheaper immutable-storage protocol, rather than a
-  mutable read/write protocol, from an IR guarantee; and
+- consumers cannot choose a cheaper read-only-storage protocol, rather than a
+  read-write protocol, from an IR guarantee; and
 - virtualization emits bytecode entirely through `pre_init`, yet its bytecode
   and handler-slot storages look indistinguishable from mutable guest memory.
 
@@ -110,7 +110,7 @@ own APIs must carry that same sidecar explicitly. This keeps existing
 rkyv/text formats and old blobs compatible. Do not put it on individual
 storage statements, `TypeId`s, or `LaneId`s.
 
-### Meaning of immutable
+### Meaning of read-only storage
 
 `ReadOnly(S)` means this IR program and all declared action targets will never
 perform an IR-visible write to *any* cell whose storage ID is `S`. It does not
@@ -129,9 +129,9 @@ available:
 
 | Fact | Enables |
 |---|---|
-| `ReadOnly` | reads may be treated as non-mutating state dependencies; immutable-storage protocol selection |
+| `ReadOnly` | reads may be treated as non-mutating state dependencies; read-only-storage protocol selection |
 | `ReadOnly` + a resolved address + `pre_init`/zero image | replacement of that read with a constant |
-| `ReadOnly` + a consumer-proved finite address domain | ROM/mux/table lowering, CSE, or a specialized immutable protocol |
+| `ReadOnly` + a consumer-proved finite address domain | ROM/mux/table lowering, CSE, or a specialized read-only protocol |
 
 ### Validation is semantic, metadata is not decorative
 
@@ -259,7 +259,7 @@ fact implicitly.
 3. Mark typed register files `ReadWrite`: setup and handler arms write them.
    Mark keyed-commitment `key_storage` `ReadWrite`, because setup writes the
    key parameters. Mark `commitment_storage` `ReadOnly`, because the current
-   implementation seeds its per-PC values in `pre_init` and handlers only
+   implementation seeds its per-handler values in `pre_init` and handlers only
    read them.
 4. Correct `docs/virt.md` and the `virtualize_ir_committed` API documentation
    while landing this: they currently say setup writes every commitment hash,
@@ -293,7 +293,7 @@ APIs through more callers and add the resource-gated virtual-bytecode chain.
    use-count rules rather than substituting a read's full producer at every
    use.
 3. Give consumers a small `StorageAccessView`/table query API so they can
-   deliberately select a ROM/immutable-storage implementation or a different
+   deliberately select a ROM/read-only-storage implementation or a different
    protocol for `ReadOnly`. The API exposes a proof of immutability only; the
    consumer remains responsible for visibility, address-domain bounds,
    authentication, and cost/security analysis.
@@ -308,7 +308,7 @@ APIs through more callers and add the resource-gated virtual-bytecode chain.
 
 Success criterion: the optimization removes only reads justified by both a
 validated `ReadOnly` declaration and a resolvable static image, and consumer
-selection tests demonstrate that mutable and immutable routes remain
+selection tests demonstrate that read-write and read-only routes remain
 observably distinct.
 
 ### Phase 5 — scale and regression-test
@@ -353,7 +353,7 @@ observably distinct.
   module. Producers must declare the fact; inference can be a separate,
   conservative diagnostic later.
 - Changing typed-slot aliasing or store-forwarding invalidation semantics.
-- Treating immutable as public, trusted, authenticated, bounded, or cheap.
+- Treating read-only as public, trusted, authenticated, bounded, or cheap.
 - Making the one-block retro fixtures a handler-dedup benchmark. They are
   realistic scale tests and native-code-avoidance fixtures; a small dedicated
   multi-block program establishes dedup behavior.

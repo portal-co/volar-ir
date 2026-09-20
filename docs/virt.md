@@ -3,7 +3,8 @@
 `crates/ir/volar-ir-virt` retains legacy `@reliability: experimental`; it is treated as Unpinned and Very unstable until reclassified.
 
 The pass converts a multi-block `IRBlocks` (or `BIrBlocks`) into a
-**handler-per-unique-skeleton** module plus a bytecode table.  The key
+**virtualized program** with one virtualization handler per unique skeleton
+plus a bytecode table.  The key
 compile-time win is that the backend prints one body per unique handler
 rather than one body per original block; with typical patterns this
 reduces code volume by an order of magnitude.
@@ -31,7 +32,7 @@ DedupTable<IrHandlerKey>          ──────────────► 
         │  emit_output_ir
         ▼
 VirtOutput {
-    IRBlocks (handler module + pre_init),
+    IR program (virtualization handlers + pre_init),
     VirtBytecode (structured side view),
 }
 ```
@@ -89,7 +90,7 @@ DISPATCH structure is kept for BIR.
 
 Each original block `B` occupies one **row** of the bytecode storage
 (`StorageId::VIRT_BYTECODE` by default).  The row is indexed by `B`'s
-original block index (= its program counter value).
+original block index (the virtualized program's program-counter value).
 
 ### Row structure
 
@@ -246,7 +247,7 @@ The setup block performs only **dynamic** work:
 - Entry-block param → register-file routing.
 - Jump to the dispatcher.
 
-Per-PC commitment hash values (when commitment is enabled) also live in
+Per-handler commitment values (when commitment is enabled) also live in
 `pre_init`, not in setup-block `StorageWrite`s.
 
 A structured [`VirtBytecode`](crates/ir/volar-ir-virt/src/bytecode.rs) artifact
@@ -271,7 +272,7 @@ storage lanes.
 |---|---|---|
 | `VirtualizeConfig` | `lib.rs` | Knobs: dispatch mode, dedup policy, direct dispatch |
 | `DedupTable<K>` | `ctx.rs` | Maps original blocks to handler indices + immediates |
-| `VirtOutput<M>` | `ctx.rs` | Output module (`pre_init` + blocks) + `VirtBytecode` |
+| `VirtOutput<M>` | `ctx.rs` | Virtualized program (`pre_init` + blocks) + `VirtBytecode` |
 | `IrHandlerKey` | `canon.rs` | Canonical (structural) block key for IR |
 | `BirHandlerKey` | `canon.rs` | Canonical block key for BIR |
 | `BlockImmediates` | `canon.rs` | Lifted constants and jump targets for one block |

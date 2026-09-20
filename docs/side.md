@@ -2,7 +2,8 @@
 
 Side is a per-value annotation system that tracks **which actor, party, or
 role a value belongs to** — and therefore what cryptographic protection it
-needs (ZK witness vs. statement, FHE plaintext vs. ciphertext, garbler vs.
+needs (for example, ZK witness-side vs. public-side, FHE plaintext vs.
+ciphertext, or garbler vs.
 evaluator). It is the sibling of [provenance](provenance.md): both are
 generic per-node metadata carried by the same `Node<T, P>` wrapper, but they
 answer different questions. Provenance answers "where did this value come
