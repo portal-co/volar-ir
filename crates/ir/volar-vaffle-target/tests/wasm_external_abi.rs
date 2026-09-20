@@ -19,6 +19,69 @@ fn lower(source: &str, config: WaffleImportConfig) -> Vec<(String, String)> {
 }
 
 #[test]
+fn configured_wasm_external_reuses_matching_declaration() {
+    let source = r#"(module
+      (import "portal" "left" (func $left (param i32) (result i32)))
+      (import "portal" "right" (func $right (param i32) (result i32)))
+      (func (export "entry") (param i32) (result i32)
+        (call $right (call $left (local.get 0)))))"#;
+    let bytes = wat::parse_str(source).expect("WAT assembles");
+    let mut wasm = portal_pc_waffle_frontend::from_wasm_bytes(
+        &bytes,
+        &portal_pc_waffle_frontend::FrontendOptions::default(),
+    )
+    .expect("WASM parses");
+    portal_pc_waffle_frontend::expand_all_funcs(&mut wasm).expect("WASM functions expand");
+    let mut target = VaffleTarget::new();
+    let policy = OracleExecutionPolicy::legacy_evaluator();
+    let errors = lower_waffle_module(
+        &wasm,
+        &mut target,
+        &WaffleImportConfig::new()
+            .with_oracle_execution("portal.left", "shared", policy)
+            .with_oracle_execution("portal.right", "shared", policy),
+    );
+    assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    assert_eq!(
+        target
+            .module
+            .oracles
+            .iter()
+            .filter(|decl| decl.name == "shared")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn configured_wasm_external_rejects_inconsistent_duplicate_declaration() {
+    let source = r#"(module
+      (import "portal" "left" (func $left (param i32) (result i32)))
+      (import "portal" "right" (func $right (param i64) (result i32)))
+      (func (export "entry") (param i32) (result i32)
+        (call $left (local.get 0))))"#;
+    let bytes = wat::parse_str(source).expect("WAT assembles");
+    let mut wasm = portal_pc_waffle_frontend::from_wasm_bytes(
+        &bytes,
+        &portal_pc_waffle_frontend::FrontendOptions::default(),
+    )
+    .expect("WASM parses");
+    portal_pc_waffle_frontend::expand_all_funcs(&mut wasm).expect("WASM functions expand");
+    let mut target = VaffleTarget::new();
+    let policy = OracleExecutionPolicy::legacy_evaluator();
+    let errors = lower_waffle_module(
+        &wasm,
+        &mut target,
+        &WaffleImportConfig::new()
+            .with_oracle_execution("portal.left", "shared", policy)
+            .with_oracle_execution("portal.right", "shared", policy),
+    );
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].1.0.contains("inconsistent declarations"));
+    assert!(target.module.oracles.is_empty());
+}
+
+#[test]
 fn configured_wasm_external_rejection_leaves_no_partial_declarations() {
     let source = r#"(module
       (import "portal" "pure" (func $pure (param i32) (result i32)))

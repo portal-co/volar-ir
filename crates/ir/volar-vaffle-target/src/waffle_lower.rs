@@ -266,17 +266,23 @@ fn register_configured_external(
                 .copied()
                 .map(|ty| configured_external_type(target, import_name, ty))
                 .collect::<Result<Vec<_>, _>>()?;
-            if target.module.oracles.iter().any(|decl| decl.name == *name) {
-                return Err(UnsupportedOp(alloc::format!(
-                    "configured oracle `{name}` has a duplicate declaration"
-                )));
+            if let Some(existing) = target.module.oracles.iter().find(|decl| decl.name == *name) {
+                if existing.params != params
+                    || existing.results != results
+                    || existing.execution != *execution
+                {
+                    return Err(UnsupportedOp(alloc::format!(
+                        "configured oracle `{name}` has inconsistent declarations"
+                    )));
+                }
+            } else {
+                target.register_oracle(volar_ir_common::OracleDecl {
+                    name: name.clone(),
+                    params,
+                    results,
+                    execution: *execution,
+                });
             }
-            target.register_oracle(volar_ir_common::OracleDecl {
-                name: name.clone(),
-                params,
-                results,
-                execution: *execution,
-            });
         }
         WaffleImportKind::Action {
             name,
@@ -320,17 +326,23 @@ fn register_configured_external(
                 .copied()
                 .map(|ty| configured_external_type(target, import_name, ty))
                 .collect::<Result<Vec<_>, _>>()?;
-            if target.module.actions.iter().any(|decl| decl.name == *name) {
-                return Err(UnsupportedOp(alloc::format!(
-                    "configured action `{name}` has a duplicate declaration"
-                )));
+            if let Some(existing) = target.module.actions.iter().find(|decl| decl.name == *name) {
+                if existing.params != params
+                    || existing.results != results
+                    || existing.execution != *execution
+                {
+                    return Err(UnsupportedOp(alloc::format!(
+                        "configured action `{name}` has inconsistent declarations"
+                    )));
+                }
+            } else {
+                target.register_action(volar_ir_common::ActionDecl {
+                    name: name.clone(),
+                    params,
+                    results,
+                    execution: *execution,
+                });
             }
-            target.register_action(volar_ir_common::ActionDecl {
-                name: name.clone(),
-                params,
-                results,
-                execution: *execution,
-            });
         }
     }
     Ok(())
