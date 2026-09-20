@@ -1,9 +1,10 @@
 # Plan: virtualization fixtures and immutable storage
 
 **Status:** in progress. The compatibility sidecar, virtualization producer,
-structural validation, static IR/Boolar read folding, and opt-in M6502 fixture
-harness are landed. Protocol selection, wider sidecar propagation, and the
-Z80/movfuscation fixture chain remain.
+structural validation, static IR/Boolar read folding, storage-to-MUX routing,
+and the opt-in M6502/Z80 fixture harness are landed. Caller-sidecar
+propagation through virtualization is landed. Broader transform propagation,
+protocol selection, and the resource-gated movfuscation fixture chain remain.
 
 **Goal:** make storage mutability explicit enough that a producer can prove a
 storage namespace is immutable, then use virtualized bytecode as the first
@@ -238,6 +239,12 @@ module that declares `ReadOnly(S)` yet contains an IR-visible write to `S`.
 
 ### Phase 3 — make virtualization the first producer
 
+**Status: landed.** Virtualization now returns a validated sidecar covering
+its complete generated table layout. Caller declarations are carried into the
+result and merged conservatively: any conflicting read-write fact weakens the
+result to read-write, while undeclared caller storage remains read-write by
+default.
+
 Virtualization already creates its bytecode and handler-slot contents with
 `pre_init`; classify those storage IDs explicitly instead of relying on that
 fact implicitly.
@@ -269,6 +276,11 @@ APIs that return modules with nonempty, validated `ReadOnly` storage facts;
 all virtual bytecode reads retain those facts through the next lowering.
 
 ### Phase 4 — exploit the fact conservatively
+
+**Status: substantially landed.** Typed IR and Boolar constant folding,
+consumer route queries, and sidecar-aware bounded storage-to-MUX entry points
+are implemented and tested. The remaining end-to-end work is to thread these
+APIs through more callers and add the resource-gated virtual-bytecode chain.
 
 1. Add a read-only storage folding pass (or a clearly named extension of the
    existing folding pass), initially limited to a read whose address resolves

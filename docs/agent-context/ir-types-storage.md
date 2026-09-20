@@ -61,9 +61,14 @@ that entire storage ID (across every `TypeId`/`LaneId`). `pre_init` supplies an
 initial image, not an access guarantee.
 
 `virtualize_ir` and `virtualize_bir` expose their generated table through
-`VirtOutput::storage_access`. Bytecode and handler-slot storage is read-only;
-register/key storage remains read-write. Consumers must carry the sidecar
-explicitly if they need the fact after their own transform. Validate it with
+`VirtOutput::storage_access`. `VirtualizeConfig::storage_access` carries caller
+facts into virtualization. Caller and generated tables merge conservatively:
+conflicting declarations become `ReadWrite`, while absent declarations remain
+read-write. Bytecode and handler-slot storage is read-only; register/key
+storage remains read-write. Consumers must carry the sidecar explicitly if
+they need the fact after their own transform. `StorageTable::route_for`
+selects immutable versus mutable consumers but says nothing about visibility,
+authentication, bounds, or cost. Validate it with
 `validate_ir_storage_access` / `validate_bir_storage_access` before relying on
 it. `fold_readonly_storage_ir_blocks` and
 `fold_readonly_storage_biir_blocks` fold only a read-only storage access whose
