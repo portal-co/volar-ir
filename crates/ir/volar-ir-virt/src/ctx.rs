@@ -129,6 +129,7 @@ mod tests {
 
     use super::*;
     use crate::{VirtualizeConfig, virtualize_ir};
+    use volar_fuzz::interpreter::ir::eval_ir;
     use volar_ir::{
         boolar::{BIrBlock, BIrTarget, BIrTerminator, LaneId},
         ir::{
@@ -136,6 +137,7 @@ mod tests {
             IRTypes, IRVarId,
         },
     };
+    use volar_ir_opt::ir::fold_readonly_storage_ir_blocks;
 
     #[test]
     fn rejects_ir_storage_write_to_readonly_sidecar() {
@@ -195,6 +197,41 @@ mod tests {
             StorageAccess::ReadWrite,
             "a conflicting caller claim must conservatively weaken the generated fact"
         );
+    }
+
+    #[test]
+    fn virtual_bytecode_constant_reads_fold_without_changing_results() {
+        let bit = IRTypeId(0);
+        let mut types = IRTypes(vec![IRType::Primitive(volar_ir_common::Type::Bit)]);
+        let source: IRBlocks<()> = IRBlocks::new(vec![
+            IRBlock {
+                params: vec![bit],
+                stmts: vec![],
+                terminator: IRTerminator::JumpCond {
+                    condition: IRVarId(0),
+                    then_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(volar_ir::ir::IRBlockId(1)),
+                        vec![IRVarId(0)],
+                    ),
+                    else_target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+                },
+            },
+            IRBlock {
+                params: vec![bit],
+                stmts: vec![],
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+                },
+            },
+        ]);
+        let output = virtualize_ir(&source, &mut types, &VirtualizeConfig::default());
+        let before =
+            eval_ir(&output.blocks, &types, &[vec![true]]).expect("virtualized module evaluates");
+        let mut folded = output.blocks.clone();
+        let _changed = fold_readonly_storage_ir_blocks(&mut folded, &output.storage_access);
+        let after =
+            eval_ir(&folded, &types, &[vec![true]]).expect("folded virtualized module evaluates");
+        assert_eq!(after, before);
     }
 
     #[test]

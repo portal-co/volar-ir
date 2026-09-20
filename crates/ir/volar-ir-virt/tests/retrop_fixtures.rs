@@ -12,6 +12,7 @@ use volar_fuzz::interpreter::biir::eval_biir;
 use volar_ir::boolar::{BIrBlocks, BIrStmt};
 use volar_ir::ir::StorageId;
 use volar_ir_common::StorageAccess;
+use volar_ir_opt::biir::fold_readonly_storage_biir_blocks;
 use volar_ir_virt::{DispatchMode, VirtualizeConfig, virtualize_bir};
 
 fn fixture_dir() -> std::path::PathBuf {
@@ -104,6 +105,14 @@ fn check_fixture(name: &str) {
         "virt must declare its bytecode read-only"
     );
     assert!(readonly.is_disjoint(&written_storage_ids(&virtualized.blocks)));
+
+    // Exercise the Phase 4 consumer path. The pass must accept the
+    // virtualization sidecar and leave the large fixture semantically intact;
+    // this fixture's addresses are witness-dependent, so no broad folding is
+    // expected here.
+    let mut folded = virtualized.blocks.clone();
+    let _changed = fold_readonly_storage_biir_blocks(&mut folded, &virtualized.storage_access);
+
     // Source fixture RAM/port storage has no declaration, so it stays
     // conservatively mutable even when it also appears in the merged image.
     for storage in &storages {

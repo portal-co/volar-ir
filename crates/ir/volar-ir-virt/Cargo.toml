@@ -15,4 +15,5 @@ volar-lir.workspace = true
 
 [dev-dependencies]
 volar-fuzz.workspace = true
+volar-ir-opt.workspace = true
 rkyv.workspace = true
