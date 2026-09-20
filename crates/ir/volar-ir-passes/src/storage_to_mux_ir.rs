@@ -38,7 +38,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypeId,
     IRTypes, IRVarId, PrimType as Type,
 };
-use volar_ir_common::{Constant, PolyCoeffs, StorageId};
+use volar_ir_common::{Constant, PolyCoeffs, StorageAccess, StorageId, StorageTable};
 
 /// Which storage id to eliminate, the value type of each cell, and the
 /// declared cell count.
@@ -56,6 +56,9 @@ pub struct StorageToMuxConfig {
 /// Why a Volar IR storage-to-MUX promotion failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageToMuxError {
+    /// The sidecar proves this storage immutable, but the input contains a
+    /// write; do not lower an invalid immutable claim.
+    ReadOnlyWrite { storage: StorageId },
     /// The input isn't a single `Jmp(Return)`-terminated block; run
     /// `movfuscate_ir` / `unroll_ir_everything` first.
     NotSingleBlockCircuit,
@@ -72,6 +75,10 @@ pub enum StorageToMuxError {
 impl core::fmt::Display for StorageToMuxError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            StorageToMuxError::ReadOnlyWrite { storage } => write!(
+                f,
+                "storage_to_mux_ir: read-only storage {storage:?} has a write"
+            ),
             StorageToMuxError::NotSingleBlockCircuit => write!(
                 f,
                 "storage_to_mux_ir requires single-block circuit-shaped Volar IR; run movfuscate_ir or unroll_ir_everything first"
@@ -105,6 +112,25 @@ pub fn storage_to_mux_ir<P: Clone + Default>(
     types: &mut IRTypes,
     cfg: &StorageToMuxConfig,
 ) -> Result<IRBlocks<P>, StorageToMuxError> {
+    storage_to_mux_ir_with_access(blocks, types, cfg, None)
+}
+
+/// As [`storage_to_mux_ir`], with an optional mutability sidecar. A read-only
+/// target may be promoted from its static `pre_init` image, but any write is
+/// rejected rather than silently weakening the proof.
+pub fn storage_to_mux_ir_with_access<P: Clone + Default>(
+    blocks: &IRBlocks<P>,
+    types: &mut IRTypes,
+    cfg: &StorageToMuxConfig,
+    storage_access: Option<&StorageTable>,
+) -> Result<IRBlocks<P>, StorageToMuxError> {
+    if storage_access.is_some_and(|table| table.access_of(cfg.storage) == StorageAccess::ReadOnly)
+        && blocks.blocks.iter().flat_map(|block| block.stmts.iter()).any(|node| {
+            matches!(node.kind, IRStmt::StorageWrite { storage, .. } if storage == cfg.storage)
+        })
+    {
+        return Err(StorageToMuxError::ReadOnlyWrite { storage: cfg.storage });
+    }
     if !blocks.is_circuit() {
         return Err(StorageToMuxError::NotSingleBlockCircuit);
     }
@@ -290,7 +316,17 @@ fn emit_poly<P: Clone>(
     ty: IRTypeId,
     prov: P,
 ) -> u32 {
-    push_typed(block, var_types, IRStmt::Poly { ty, coeffs, constant }, ty, prov)
+    push_typed(
+        block,
+        var_types,
+        IRStmt::Poly {
+            ty,
+            coeffs,
+            constant,
+        },
+        ty,
+        prov,
+    )
 }
 
 /// `a AND b` (both Bit-typed).
@@ -306,7 +342,14 @@ fn emit_and_bit<P: Clone>(
     key.sort();
     let mut coeffs = PolyCoeffs::new();
     coeffs.insert(key, 1u8);
-    emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 0 }, bit_ty, prov)
+    emit_poly(
+        block,
+        var_types,
+        coeffs,
+        Constant { hi: 0, lo: 0 },
+        bit_ty,
+        prov,
+    )
 }
 
 /// `NOT a` (Bit-typed) = `1 + a` in GF(2).
@@ -319,7 +362,14 @@ fn emit_not_bit<P: Clone>(
 ) -> u32 {
     let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![IRVarId(a)], 1);
-    emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 1 }, bit_ty, prov)
+    emit_poly(
+        block,
+        var_types,
+        coeffs,
+        Constant { hi: 0, lo: 1 },
+        bit_ty,
+        prov,
+    )
 }
 
 /// `val XOR const_k` (field addition in GF(2^n)), result typed `ty`.
@@ -370,7 +420,14 @@ fn emit_gate<P: Clone>(
     key.sort();
     let mut coeffs = PolyCoeffs::new();
     coeffs.insert(key, 1u8);
-    emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 0 }, ty, prov)
+    emit_poly(
+        block,
+        var_types,
+        coeffs,
+        Constant { hi: 0, lo: 0 },
+        ty,
+        prov,
+    )
 }
 
 /// `a + b` — field addition, both operands typed `ty`.
@@ -385,7 +442,14 @@ fn emit_field_add<P: Clone>(
     let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![IRVarId(a)], 1);
     coeffs.insert(vec![IRVarId(b)], 1);
-    emit_poly(block, var_types, coeffs, Constant { hi: 0, lo: 0 }, ty, prov)
+    emit_poly(
+        block,
+        var_types,
+        coeffs,
+        Constant { hi: 0, lo: 0 },
+        ty,
+        prov,
+    )
 }
 
 /// `1` iff `val == const_k`.
@@ -466,9 +530,25 @@ fn mux_read<P: Clone>(
             lo: i as u128,
         };
         let eq_i = emit_eq_const(
-            block, var_types, types, bit_ty, addr, const_i, addr_ty, prov.clone(),
+            block,
+            var_types,
+            types,
+            bit_ty,
+            addr,
+            const_i,
+            addr_ty,
+            prov.clone(),
         )?;
-        acc = mux(block, var_types, bit_ty, eq_i, cell, acc, val_ty, prov.clone());
+        acc = mux(
+            block,
+            var_types,
+            bit_ty,
+            eq_i,
+            cell,
+            acc,
+            val_ty,
+            prov.clone(),
+        );
     }
     Ok(acc)
 }
@@ -495,9 +575,25 @@ fn mux_write<P: Clone>(
                 lo: i as u128,
             };
             let eq_i = emit_eq_const(
-                block, var_types, types, bit_ty, addr, const_i, addr_ty, prov.clone(),
+                block,
+                var_types,
+                types,
+                bit_ty,
+                addr,
+                const_i,
+                addr_ty,
+                prov.clone(),
             )?;
-            Ok(mux(block, var_types, bit_ty, eq_i, src, cell, val_ty, prov.clone()))
+            Ok(mux(
+                block,
+                var_types,
+                bit_ty,
+                eq_i,
+                src,
+                cell,
+                val_ty,
+                prov.clone(),
+            ))
         })
         .collect()
 }
@@ -525,7 +621,15 @@ where
     }
     values
         .into_iter()
-        .map(|c| push_typed(block, var_types, IRStmt::Const(c, cfg.ty), cfg.ty, P::default()))
+        .map(|c| {
+            push_typed(
+                block,
+                var_types,
+                IRStmt::Const(c, cfg.ty),
+                cfg.ty,
+                P::default(),
+            )
+        })
         .collect()
 }
 
@@ -557,10 +661,7 @@ fn remap_terminator(term: &IRTerminator, remap: &[u32]) -> IRTerminator {
         },
         IRTerminator::JumpTable { index, cases } => IRTerminator::JumpTable {
             index: IRVarId(remap[index.0 as usize]),
-            cases: cases
-                .iter()
-                .map(|(c, t)| (*c, remap_target(t)))
-                .collect(),
+            cases: cases.iter().map(|(c, t)| (*c, remap_target(t))).collect(),
         },
         _ => panic!("storage_to_mux_ir: unsupported IRTerminator variant"),
     }
@@ -700,8 +801,7 @@ mod tests {
             ty: bit_ty,
             num_cells: 2,
         };
-        let rewritten =
-            storage_to_mux_ir(&blocks, &mut types, &cfg).expect("pass should succeed");
+        let rewritten = storage_to_mux_ir(&blocks, &mut types, &cfg).expect("pass should succeed");
         assert!(rewritten.is_circuit());
         for node in &rewritten.blocks[0].stmts {
             assert!(
@@ -720,6 +820,71 @@ mod tests {
             &eval(&rewritten.blocks[0].stmts, &[], &mut no_storage),
         );
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn readonly_sidecar_rejects_writes() {
+        let storage = StorageId(0);
+        let mut types = bit_types();
+        let blocks = build_fixture(IRTypeId(0));
+        let mut sidecar = StorageTable::new();
+        sidecar.set(storage, StorageAccess::ReadOnly);
+        assert_eq!(
+            storage_to_mux_ir_with_access(
+                &blocks,
+                &mut types,
+                &StorageToMuxConfig {
+                    storage,
+                    ty: IRTypeId(0),
+                    num_cells: 2,
+                },
+                Some(&sidecar),
+            ),
+            Err(StorageToMuxError::ReadOnlyWrite { storage })
+        );
+    }
+
+    #[test]
+    fn readonly_sidecar_allows_read_only_promotion() {
+        let storage = StorageId(0);
+        let mut types = bit_types();
+        let mut block: IRBlock<()> = IRBlock {
+            params: vec![],
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
+            },
+        };
+        let address = block.push_stmt(IRStmt::Const(Constant { hi: 0, lo: 1 }, IRTypeId(0)), ());
+        let value = block.push_stmt(
+            IRStmt::StorageRead {
+                storage,
+                ty: IRTypeId(0),
+                addr: address,
+            },
+            (),
+        );
+        block.terminator = IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Return, vec![value]),
+        };
+        let blocks = IRBlocks::new(vec![block]);
+        let mut sidecar = StorageTable::new();
+        sidecar.set(storage, StorageAccess::ReadOnly);
+        let rewritten = storage_to_mux_ir_with_access(
+            &blocks,
+            &mut types,
+            &StorageToMuxConfig {
+                storage,
+                ty: IRTypeId(0),
+                num_cells: 2,
+            },
+            Some(&sidecar),
+        )
+        .expect("read-only storage can be promoted");
+        assert!(rewritten.is_circuit());
+        assert!(!rewritten.blocks[0].stmts.iter().any(
+            |node| matches!(node.kind, IRStmt::StorageRead { storage: s, .. } if s == storage)
+        ));
     }
 
     #[test]

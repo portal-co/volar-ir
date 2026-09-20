@@ -40,6 +40,12 @@ pub struct StorageTable {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StorageRoute {
+    Immutable,
+    Mutable,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StorageTableError {
     NotStrictlyOrdered {
         previous: StorageId,
@@ -113,6 +119,23 @@ impl StorageTable {
             .binary_search_by_key(&storage, |entry| entry.storage)
             .map(|index| self.entries[index].access)
             .unwrap_or(StorageAccess::ReadWrite)
+    }
+
+    /// Whether this table explicitly proves that `storage` is immutable.
+    /// Missing declarations are deliberately false.
+    pub fn is_read_only(&self, storage: StorageId) -> bool {
+        self.access_of(storage) == StorageAccess::ReadOnly
+    }
+
+    /// Select the conservative protocol/representation route for a storage.
+    /// This exposes only the mutability proof; callers remain responsible for
+    /// visibility, bounds, authentication, and cost decisions.
+    pub fn route_for(&self, storage: StorageId) -> StorageRoute {
+        if self.is_read_only(storage) {
+            StorageRoute::Immutable
+        } else {
+            StorageRoute::Mutable
+        }
     }
 
     /// Insert or replace a declaration while preserving canonical order.

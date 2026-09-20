@@ -36,7 +36,7 @@ use alloc::vec::Vec;
 
 use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTerminator, LaneId};
 use volar_ir::ir::IRVarId;
-use volar_ir_common::StorageId;
+use volar_ir_common::{StorageAccess, StorageId, StorageTable};
 
 /// Which `(StorageId, LaneId)` to eliminate, and its declared cell count.
 ///
@@ -54,6 +54,9 @@ pub struct StorageToMuxBoolarConfig {
 /// Why a Boolar storage-to-MUX promotion failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageToMuxBoolarError {
+    /// The sidecar proves this storage/lane is immutable, but the input has a
+    /// write to that storage namespace.
+    ReadOnlyWrite { storage: StorageId },
     /// The input isn't a single `Jmp(Return)`-terminated block; run
     /// `movfuscate_biir` / `lower_to_circuit` first.
     NotSingleBlockCircuit,
@@ -70,6 +73,10 @@ pub enum StorageToMuxBoolarError {
 impl core::fmt::Display for StorageToMuxBoolarError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            StorageToMuxBoolarError::ReadOnlyWrite { storage } => write!(
+                f,
+                "storage_to_mux_boolar: read-only storage {storage:?} has a write"
+            ),
             StorageToMuxBoolarError::NotSingleBlockCircuit => write!(
                 f,
                 "storage_to_mux_boolar requires single-block circuit-shaped Boolar IR; run movfuscate_biir or lower_to_circuit first"
@@ -101,6 +108,23 @@ pub fn storage_to_mux_boolar<P: Clone + Default>(
     blocks: &BIrBlocks<P>,
     cfg: &StorageToMuxBoolarConfig,
 ) -> Result<BIrBlocks<P>, StorageToMuxBoolarError> {
+    storage_to_mux_boolar_with_access(blocks, cfg, None)
+}
+
+/// As [`storage_to_mux_boolar`], validating an optional immutable-storage
+/// sidecar before lowering the selected storage namespace.
+pub fn storage_to_mux_boolar_with_access<P: Clone + Default>(
+    blocks: &BIrBlocks<P>,
+    cfg: &StorageToMuxBoolarConfig,
+    storage_access: Option<&StorageTable>,
+) -> Result<BIrBlocks<P>, StorageToMuxBoolarError> {
+    if storage_access.is_some_and(|table| table.access_of(cfg.storage) == StorageAccess::ReadOnly)
+        && blocks.blocks.iter().flat_map(|block| block.stmts.iter()).any(|node| {
+            matches!(node.kind, BIrStmt::StorageWrite { storage, .. } if storage == cfg.storage)
+        })
+    {
+        return Err(StorageToMuxBoolarError::ReadOnlyWrite { storage: cfg.storage });
+    }
     if !blocks.is_circuit() {
         return Err(StorageToMuxBoolarError::NotSingleBlockCircuit);
     }
@@ -509,6 +533,27 @@ mod tests {
             &eval(&rewritten.blocks[0].stmts, &[], &mut no_storage),
         );
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn readonly_sidecar_rejects_writes() {
+        let blocks = build_fixture();
+        let mut sidecar = StorageTable::new();
+        sidecar.set(StorageId(0), StorageAccess::ReadOnly);
+        assert_eq!(
+            storage_to_mux_boolar_with_access(
+                &blocks,
+                &StorageToMuxBoolarConfig {
+                    storage: StorageId(0),
+                    lane: LaneId(0),
+                    num_cells: 2,
+                },
+                Some(&sidecar),
+            ),
+            Err(StorageToMuxBoolarError::ReadOnlyWrite {
+                storage: StorageId(0)
+            })
+        );
     }
 
     #[test]
