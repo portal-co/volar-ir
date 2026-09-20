@@ -346,13 +346,15 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
         }
     };
 
-    let storage_access = storage_access_for_ir(
+    let generated_storage_access = storage_access_for_ir(
         &storage_init.pre_init,
         cfg.bytecode_storage,
         &layout,
         &reg_alloc,
         commitment,
     );
+    let mut storage_access = cfg.storage_access.clone();
+    storage_access.merge_conservative(&generated_storage_access);
     assert!(
         validate_ir_storage_access(&final_blocks, &storage_access).is_ok(),
         "virtualize_ir emitted a write to its read-only storage sidecar"

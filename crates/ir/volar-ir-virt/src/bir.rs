@@ -131,12 +131,14 @@ pub fn virtualize_bir<P: Clone + Default>(
         }
     };
 
-    let storage_access = storage_access_for_bir(
+    let generated_storage_access = storage_access_for_bir(
         &storage_init.pre_init,
         cfg.bytecode_storage,
         &layout,
         handler_bits,
     );
+    let mut storage_access = cfg.storage_access.clone();
+    storage_access.merge_conservative(&generated_storage_access);
     assert!(
         validate_bir_storage_access(&final_blocks, &storage_access).is_ok(),
         "virtualize_bir emitted a write to its read-only storage sidecar"

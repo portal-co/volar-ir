@@ -64,7 +64,7 @@ pub use hash::{CommitmentConfig, IrEmitter, IrHashAlgorithm, SipHash48, XorFoldH
 pub use ir::{virtualize_ir, virtualize_ir_committed};
 pub use split::plan_adaptive_split;
 
-use volar_ir_common::StorageId;
+use volar_ir_common::{StorageId, StorageTable};
 
 /// How the dispatcher routes control to the active handler every step.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -111,6 +111,10 @@ pub struct VirtualizeConfig {
     /// Adaptive split: SharedCore cross-block dedup and RerollLoop intra-block
     /// rerolling. See [`AdaptiveSplitConfig`] and `docs/agent-context/virt-adaptive-split-adr.md`.
     pub adaptive_split: AdaptiveSplitConfig,
+    /// Compatibility sidecar for caller-owned storage facts. Virtualization
+    /// conservatively merges these declarations with its generated layout;
+    /// absent declarations remain read-write.
+    pub storage_access: StorageTable,
 }
 
 impl Default for VirtualizeConfig {
@@ -121,6 +125,7 @@ impl Default for VirtualizeConfig {
             bytecode_storage: StorageId::VIRT_BYTECODE,
             direct_dispatch: false,
             adaptive_split: AdaptiveSplitConfig::default(),
+            storage_access: StorageTable::new(),
         }
     }
 }

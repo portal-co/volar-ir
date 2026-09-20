@@ -168,6 +168,36 @@ mod tests {
     }
 
     #[test]
+    fn caller_storage_access_is_preserved_conservatively() {
+        let bit = IRTypeId(0);
+        let mut types = IRTypes(vec![IRType::Primitive(volar_ir_common::Type::Bit)]);
+        let source: IRBlocks<()> = IRBlocks::new(vec![IRBlock {
+            params: vec![bit],
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(0)]),
+            },
+        }]);
+        let mut config = VirtualizeConfig::default();
+        config
+            .storage_access
+            .set(StorageId(77), StorageAccess::ReadOnly);
+        config
+            .storage_access
+            .set(config.bytecode_storage, StorageAccess::ReadWrite);
+        let output = virtualize_ir(&source, &mut types, &config);
+        assert_eq!(
+            output.storage_access.access_of(StorageId(77)),
+            StorageAccess::ReadOnly
+        );
+        assert_eq!(
+            output.storage_access.access_of(config.bytecode_storage),
+            StorageAccess::ReadWrite,
+            "a conflicting caller claim must conservatively weaken the generated fact"
+        );
+    }
+
+    #[test]
     fn virtualized_register_storage_is_not_readonly() {
         let bit = IRTypeId(0);
         let mut types = IRTypes(vec![IRType::Primitive(volar_ir_common::Type::Bit)]);

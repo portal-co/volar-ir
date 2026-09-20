@@ -97,13 +97,15 @@ pub(super) fn virtualize_ir_adaptive<P: Clone + Default, H: IrHashAlgorithm>(
         pre_init: merged_pre_init,
         ..out_blocks
     };
-    let storage_access = storage_access_for_ir(
+    let generated_storage_access = storage_access_for_ir(
         &storage_init.pre_init,
         cfg.bytecode_storage,
         &merged_layout,
         &reg_alloc,
         None::<&CommitmentConfig<H>>,
     );
+    let mut storage_access = cfg.storage_access.clone();
+    storage_access.merge_conservative(&generated_storage_access);
     assert!(
         validate_ir_storage_access(&blocks, &storage_access).is_ok(),
         "adaptive virtualization emitted a write to its read-only storage sidecar"
