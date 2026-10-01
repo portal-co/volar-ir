@@ -42,12 +42,13 @@
 //! For an eligible call site `Value::Call { func: callee, args }` in
 //! block `B` of the caller:
 //!
-//! 1. The callee's body is cloned and every `ValueId`/`BlockId`/
-//!    `StackAlloc::base_slot` inside it is shifted into fresh caller-local
-//!    ranges (VAFFLE's ids are flat, function-global arenas — not
-//!    block-local — so splicing into another function's arena requires
-//!    shifting every reference, including the function-local stack-slot
-//!    bump-allocator range a `StackAlloc` claims).
+//! 1. The callee's body is cloned and every `ValueId`/`BlockId` inside it
+//!    is shifted into fresh caller-local ranges (VAFFLE's ids are flat,
+//!    function-global arenas — not block-local — so splicing into another
+//!    function's arena requires shifting every reference). `StackAlloc`'s
+//!    data storage and virtual stack pointer are module-global and are
+//!    not shifted; the entry-save and exit-restore stores travel with the
+//!    body.
 //! 2. `B` is split at the call site: everything before it stays in `B`;
 //!    a fresh continuation block gets `B`'s old terminator plus everything
 //!    after the call (minus the call's own `Value::Output` uses, which
@@ -502,15 +503,15 @@ fn splice_call<P: Clone>(
     callee_body: &FuncBody<P>,
     callee_results: &[TypeId],
 ) -> usize {
-    let (value_base, block_base, slot_base) = match &module.funcs[func_idx] {
-        FuncDecl::Body(b) => (b.values.len(), b.blocks.len(), stack_slot_high_water(b)),
+    let (value_base, block_base) = match &module.funcs[func_idx] {
+        FuncDecl::Body(b) => (b.values.len(), b.blocks.len()),
         _ => unreachable!(),
     };
 
     let remapped_values: Vec<Node<Value, P>> = callee_body
         .values
         .iter()
-        .map(|n| remap_callee_node(n, value_base, block_base, slot_base))
+        .map(|n| remap_callee_node(n, value_base, block_base))
         .collect();
     let remapped_blocks: Vec<Block> = callee_body
         .blocks
@@ -668,15 +669,15 @@ fn splice_return_call<P: Clone>(
     block_id: BlockId,
     callee_body: &FuncBody<P>,
 ) -> usize {
-    let (value_base, block_base, slot_base) = match &module.funcs[func_idx] {
-        FuncDecl::Body(b) => (b.values.len(), b.blocks.len(), stack_slot_high_water(b)),
+    let (value_base, block_base) = match &module.funcs[func_idx] {
+        FuncDecl::Body(b) => (b.values.len(), b.blocks.len()),
         _ => unreachable!(),
     };
 
     let remapped_values: Vec<Node<Value, P>> = callee_body
         .values
         .iter()
-        .map(|n| remap_callee_node(n, value_base, block_base, slot_base))
+        .map(|n| remap_callee_node(n, value_base, block_base))
         .collect();
     let remapped_blocks: Vec<Block> = callee_body
         .blocks
@@ -722,24 +723,14 @@ fn find_call_site<P: Clone>(body: &FuncBody<P>, call_vid: ValueId) -> Option<(Bl
     None
 }
 
-fn stack_slot_high_water<P: Clone>(body: &FuncBody<P>) -> u64 {
-    body.values.iter().fold(0u64, |acc, n| match &n.kind {
-        Value::StackAlloc {
-            count, base_slot, ..
-        } => acc.max(base_slot + *count as u64),
-        _ => acc,
-    })
-}
-
 // ============================================================================
-// Callee remapping (ValueId / BlockId / stack-slot shift)
+// Callee remapping (ValueId / BlockId shift)
 // ============================================================================
 
 fn remap_callee_node<P: Clone>(
     node: &Node<Value, P>,
     value_base: usize,
     block_base: usize,
-    slot_base: u64,
 ) -> Node<Value, P> {
     let shifted = node
         .kind
@@ -756,15 +747,6 @@ fn remap_callee_node<P: Clone>(
         },
         Value::BlockAddr { block } => Value::BlockAddr {
             block: BlockId(block.0 + block_base),
-        },
-        Value::StackAlloc {
-            elem_ty,
-            count,
-            base_slot,
-        } => Value::StackAlloc {
-            elem_ty,
-            count,
-            base_slot: base_slot + slot_base,
         },
         other => other,
     };

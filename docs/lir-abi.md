@@ -301,9 +301,11 @@ separately in the `lower_to_ir.rs` module header but summarised here:
 5. Callee returns via `Dyn(continuation)` with retreated `SP` + return values
 6. Continuation reloads spilled values and continues
 
-**Stack allocation** (`StackAllocExt`): `VaffleTarget` supports `alloca` via
-  `StorageId::STACK` with a per-function bump allocator.  Each `alloca` reserves
-  a range of bit-slots in the frame and returns a constant 32-bit address.
+**Stack allocation** (`StackAllocExt`): `VaffleTarget` gives each `alloca` its
+  own bit-addressed data storage and a pointer-width stack-pointer global.
+  The returned bits are the `Value::StackAlloc` result (the stack pointer
+  before the bump). Function exit writes the entry stack-pointer value back.
+  This storage is not the calling-convention `StorageId::STACK` frame.
 
 ---
 
@@ -383,10 +385,10 @@ when the `StackAllocExt` methods are called:
 pub enum Value {
     // … other variants …
 
-    /// Allocate `count` elements of `elem_ty` on the function's stack frame.
-    /// `base_slot` is the compile-time stack-storage slot assigned by the target.
-    /// Returns a 32-bit address (PTR_BITS = 32 bit-typed SSA values).
-    StackAlloc { elem_ty: TypeId, count: usize, base_slot: u64 },
+    /// Allocate `count` elements of `elem_ty` on this site's data stack.
+    /// `storage` is the bit-addressed data stack. `sp` is the pointer-width
+    /// cell at address 0. The result is the stack pointer before the bump.
+    StackAlloc { elem_ty: TypeId, count: usize, storage: StorageId, sp: StorageId },
 
     /// Load a value through a stack pointer.
     /// `ptr` is an address produced by `StackAlloc` or `PtrOffset`.
@@ -401,8 +403,10 @@ pub enum Value {
 }
 ```
 
-All four variants are lowered to `StorageId::STACK` reads/writes during the
-`VaffleTarget → Volar IR` lowering pass (`lower_to_ir.rs`).
+`StackAlloc` lowers to a read, an add of the allocation size, and a write of
+its own stack-pointer global. `PtrLoad` and `PtrStore` are markers; the real
+accesses are `StorageRead` / `StorageWrite` of `storage` at the pointer bits.
+`lower_to_ir.rs` does not rebase those addresses onto `StorageId::STACK`.
 
 ---
 

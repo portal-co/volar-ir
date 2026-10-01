@@ -666,12 +666,11 @@ entry:
     let _ = fs::remove_file(&path);
 }
 
-/// A caller's `alloca` must survive a nested call uncorrupted: the callee's
-/// own frame (params/ret/spill/cont) must not be placed on top of the
-/// caller's still-live alloca storage. Regression test for
-/// `lower_to_ir.rs`'s `FuncInfo::alloca_budget` -- call-site SP advancement
-/// must skip past the caller's own alloca budget, not just the callee's
-/// own `own_layout.size` (see docs/llvm-array-alloca.md's rebasing note).
+/// A caller's `alloca` must survive a nested call uncorrupted. Each `alloca`
+/// has its own data storage and stack-pointer global; the pointer is the
+/// stack-pointer value captured before the bump, and function exit writes
+/// the entry value back. The calling-convention frame stays on
+/// `StorageId::STACK` and is not added into that pointer.
 ///
 /// Also exercises (now fixed, see `llvm_register_xor_call_computes_correct_value`
 /// for the isolated regression test) the calling convention's own numeric
@@ -718,6 +717,47 @@ entry:
         x + x,
         "caller(11) must compute buf(11) + helper(11) = 22"
     );
+    let _ = fs::remove_file(&path);
+}
+
+/// Two calls of one alloca site must both observe the low stack pointer.
+/// Exit restores the entry value, so the second activation's store and load
+/// name the same cell the first activation used.
+#[test]
+fn llvm_alloca_second_call_reuses_stack() {
+    let src = r#"
+define i32 @once(i32 %x) {
+entry:
+  %buf = alloca i32, align 4
+  store i32 %x, ptr %buf
+  %v = load i32, ptr %buf
+  ret i32 %v
+}
+
+define i32 @caller(i32 %x) {
+entry:
+  %a = call i32 @once(i32 %x)
+  %b = call i32 @once(i32 %a)
+  ret i32 %b
+}
+"#;
+    let path = write_temp_ll("alloca_second_call", src);
+    let (blocks, types) = Pipeline::from_llvm(&path, &["caller"])
+        .and_then(|p| p.lower_to_volar_ir())
+        .and_then(|p| p.unroll_ir())
+        .expect("two calls of one alloca site")
+        .to_volar_ir();
+    assert!(blocks.is_circuit());
+
+    let x: u64 = 11;
+    let input_word: Vec<bool> = (0..64).map(|i| (x >> i) & 1 != 0).collect();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[input_word])
+        .expect("eval terminates");
+    let r = out
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, bit)| acc | ((bit[0] as u64) << i));
+    assert_eq!(r, x, "caller(11) must return once(once(11)) = 11");
     let _ = fs::remove_file(&path);
 }
 

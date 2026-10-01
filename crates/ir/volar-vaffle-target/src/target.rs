@@ -15,8 +15,8 @@ use alloc::{
 };
 
 use volar_ir_common::{
-    ActionDecl, Constant, IrType, Node, OracleDecl, PolyCoeffs, Stmt, StorageId, Type, TypeId,
-    TypeTable,
+    ActionDecl, Constant, IrType, Node, OracleDecl, PolyCoeffs, PreInitSegment, Stmt, StorageAllocator,
+    StorageId, Type, TypeId, TypeTable,
 };
 use volar_lir::{
     BitCircuitBuilder, BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt,
@@ -33,6 +33,9 @@ use vaffle::{
     Terminator, Value, ValueId,
 };
 
+use crate::circuit_helpers::{
+    helper_result_width, intern_circuit_helper, width_type, CircuitHelperMode, HelperKey, HelperOp,
+};
 use crate::vc::VcLoweringState;
 
 // ============================================================================
@@ -82,8 +85,12 @@ pub(crate) struct FuncBuilder {
     current: usize,
     all_values: Vec<Node<Value>>,
     bit_tid: TypeId,
-    /// Next free stack-storage slot for `StackAlloc` within this function.
+    /// Next free `StorageId::STACK` slot for the optimized-ABI argument spill.
     next_stack_slot: u64,
+    /// Virtual stack-pointer globals bumped by this function's `alloca`s.
+    sp_globals: Vec<StorageId>,
+    /// Entry-block reads of `sp_globals`, filled the first time an exit restores them.
+    sp_saved: Vec<(StorageId, ValueId)>,
     /// Side to attach to the next emitted value.
     current_side: Option<volar_side::SideId>,
 }
@@ -102,6 +109,8 @@ impl FuncBuilder {
             all_values: vec![],
             bit_tid,
             next_stack_slot: 0,
+            sp_globals: Vec::new(),
+            sp_saved: Vec::new(),
             current_side: None,
         }
     }
@@ -165,6 +174,12 @@ pub struct VaffleTarget {
     pending_funcs: BTreeMap<String, FuncId>,
     /// Opt-in vc-spec session. `None` keeps default lowering untagged.
     pub(crate) vc: Option<VcLoweringState>,
+    storage_alloc: StorageAllocator,
+    addr_tid: TypeId,
+    /// `alloca` result bit 0 → that site's data storage.
+    ptr_storage: BTreeMap<ValueId, StorageId>,
+    helper_mode: CircuitHelperMode,
+    helper_cache: BTreeMap<HelperKey, FuncId>,
 }
 
 impl VaffleTarget {
@@ -176,6 +191,10 @@ impl VaffleTarget {
     pub fn with_pointer_width(pointer_width: PointerWidth) -> Self {
         let mut types = TypeTable::new();
         types.intern(IrType::Primitive(Type::Bit)); // bit_tid always at index 0
+        let addr_tid = types.primitive(match pointer_width {
+            PointerWidth::Bits32 => Type::_32,
+            PointerWidth::Bits64 => Type::_64,
+        });
         VaffleTarget {
             module: Module {
                 pointer_width,
@@ -192,7 +211,174 @@ impl VaffleTarget {
             optimized_abi: false,
             pending_funcs: BTreeMap::new(),
             vc: None,
+            storage_alloc: StorageAllocator::new(64),
+            addr_tid,
+            ptr_storage: BTreeMap::new(),
+            helper_mode: CircuitHelperMode::Inline,
+            helper_cache: BTreeMap::new(),
         }
+    }
+
+    /// Inline circuit helpers into each parent, or extract them as typed functions.
+    pub fn with_circuit_helpers(mut self, mode: CircuitHelperMode) -> Self {
+        self.helper_mode = mode;
+        self
+    }
+
+    /// `None` in inline mode. Otherwise intern the helper and return its result bits.
+    fn extract_bits(&mut self, op: HelperOp, operands: &[Vec<ValueId>]) -> Option<Vec<ValueId>> {
+        if self.helper_mode != CircuitHelperMode::Extract {
+            return None;
+        }
+        let widths: Vec<usize> = operands.iter().map(|bits| bits.len()).collect();
+        let func = intern_circuit_helper(
+            &mut self.module.types,
+            &mut self.module.sigs,
+            &mut self.module.funcs,
+            &mut self.helper_cache,
+            op,
+            &widths,
+        );
+        let result_width = helper_result_width(op, &widths);
+        let args: Vec<ValueId> = operands.iter().map(|bits| self.merge_operand(bits)).collect();
+        let call = self.fb().emit_value(Value::Call { func, args });
+        Some(
+            (0..result_width)
+                .map(|i| {
+                    self.fb().emit_value(Value::Output {
+                        value: call,
+                        idx: i,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn merge_operand(&mut self, bits: &[ValueId]) -> ValueId {
+        if bits.len() <= 1 {
+            return bits[0];
+        }
+        let ty = width_type(&mut self.module.types, bits.len());
+        self.fb().emit_value(Value::Op(Stmt::Merge {
+            parts: bits.to_vec(),
+            ty,
+        }))
+    }
+
+    fn ensure_sp_saves(&mut self) {
+        let empty = self
+            .func
+            .as_ref()
+            .map(|fb| fb.sp_globals.is_empty() || !fb.sp_saved.is_empty())
+            .unwrap_or(true);
+        if empty {
+            return;
+        }
+        let sps = self.fb().sp_globals.clone();
+        let saved_current = self.fb().current;
+        self.fb().current = 0;
+        let addr_tid = self.addr_tid;
+        let mut saved = Vec::with_capacity(sps.len());
+        for sp in sps {
+            let addr = self.fb().emit_value(Value::Op(Stmt::Const(
+                Constant { hi: 0, lo: 0 },
+                addr_tid,
+            )));
+            let val = self.fb().emit_value(Value::Op(Stmt::StorageRead {
+                storage: sp,
+                ty: addr_tid,
+                addr,
+            }));
+            saved.push((sp, val));
+        }
+        let n = saved.len() * 2;
+        {
+            let stmts = &mut self.fb().blocks[0].stmts;
+            let mut prefixed = stmts.split_off(stmts.len() - n);
+            prefixed.append(stmts);
+            *stmts = prefixed;
+        }
+        self.fb().sp_saved = saved;
+        self.fb().current = saved_current;
+    }
+
+    fn emit_sp_restores(&mut self) {
+        self.ensure_sp_saves();
+        let saved = self.fb().sp_saved.clone();
+        if saved.is_empty() {
+            return;
+        }
+        let addr_tid = self.addr_tid;
+        for (sp, val) in saved {
+            let addr = self.fb().emit_value(Value::Op(Stmt::Const(
+                Constant { hi: 0, lo: 0 },
+                addr_tid,
+            )));
+            self.fb().emit_value(Value::Op(Stmt::StorageWrite {
+                storage: sp,
+                src: val,
+                ty: addr_tid,
+                addr,
+            }));
+        }
+    }
+
+    fn restore_sps_on_unterminated_blocks(&mut self) {
+        let missing: Vec<usize> = self
+            .func
+            .as_ref()
+            .map(|fb| {
+                fb.blocks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, block)| block.terminator.is_none())
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for i in missing {
+            self.fb().current = i;
+            self.emit_sp_restores();
+        }
+    }
+
+    fn alloc_stack_site(&mut self) -> (StorageId, StorageId) {
+        let storage = self.storage_alloc.alloc();
+        let sp = self.storage_alloc.alloc();
+        self.module.pre_init.push(PreInitSegment {
+            storage: sp,
+            ty: self.addr_tid,
+            offset: 0,
+            data: vec![Constant { hi: 0, lo: 0 }],
+        });
+        self.fb().sp_globals.push(sp);
+        (storage, sp)
+    }
+
+    fn explode_pointer(&mut self, alloc_vid: ValueId) -> Vec<ValueId> {
+        let bit_tid = self.bit_tid();
+        let n = self.module.pointer_width.bits();
+        (0..n)
+            .map(|i| {
+                self.fb().emit_value(Value::Op(Stmt::Shuffle {
+                    result_bits: vec![(i as u8, alloc_vid)],
+                    ty: bit_tid,
+                }))
+            })
+            .collect()
+    }
+
+    fn remember_ptr(&mut self, bits: &[ValueId], storage: StorageId) {
+        if let Some(&bit0) = bits.first() {
+            self.ptr_storage.insert(bit0, storage);
+        }
+    }
+
+    fn ptr_data_storage(&self, ptr: &VaffleValue) -> StorageId {
+        self.ptr_storage
+            .get(&ptr.bits[0])
+            .copied()
+            .expect("pointer was not produced by alloca or ptr_offset")
     }
 
     /// The pointer ABI used by the module being assembled.
@@ -701,6 +887,7 @@ impl LirTarget for VaffleTarget {
         params: &[LirType],
         ret: Option<LirType>,
     ) -> (VaffleBlock, Vec<Vec<VaffleValue>>) {
+        self.ptr_storage.clear();
         let bit_tid = self.bit_tid();
         let threshold = self.abi().aggregate_byval_limit;
 
@@ -786,10 +973,23 @@ impl LirTarget for VaffleTarget {
             }
             groups[pi] = vec![VaffleValue { bits: loaded, ty }];
         }
+        // Occupy a function slot before any extracted helper is interned, so
+        // a helper cannot become `funcs[0]` (the module entry, which does
+        // not receive a spill pointer).
+        if !self.pending_funcs.contains_key(name) {
+            let fid = FuncId(self.module.funcs.len());
+            self.module.funcs.push(FuncDecl::Import {
+                module: "self".to_string(),
+                name: name.to_string(),
+                sig: sig_id,
+            });
+            self.pending_funcs.insert(name.to_string(), fid);
+        }
         (VaffleBlock(0), groups)
     }
 
     fn end_function(&mut self) {
+        self.restore_sps_on_unterminated_blocks();
         let fb = self
             .func
             .take()
@@ -887,41 +1087,44 @@ impl LirTarget for VaffleTarget {
     // ---- Arithmetic --------------------------------------------------------
     fn add(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        VaffleValue {
-            bits: bc_add(self, &lhs.bits, &rhs.bits, false),
-            ty,
-        }
+        let bits = self
+            .extract_bits(HelperOp::Add, &[lhs.bits.clone(), rhs.bits.clone()])
+            .unwrap_or_else(|| bc_add(self, &lhs.bits, &rhs.bits, false));
+        VaffleValue { bits, ty }
     }
     fn sub(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        VaffleValue {
-            bits: bc_sub(self, &lhs.bits, &rhs.bits),
-            ty,
-        }
+        let bits = self
+            .extract_bits(HelperOp::Sub, &[lhs.bits.clone(), rhs.bits.clone()])
+            .unwrap_or_else(|| bc_sub(self, &lhs.bits, &rhs.bits));
+        VaffleValue { bits, ty }
     }
     fn mul(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        VaffleValue {
-            bits: bc_mul(self, &lhs.bits, &rhs.bits),
-            ty,
-        }
+        let bits = self
+            .extract_bits(HelperOp::Mul, &[lhs.bits.clone(), rhs.bits.clone()])
+            .unwrap_or_else(|| bc_mul(self, &lhs.bits, &rhs.bits));
+        VaffleValue { bits, ty }
     }
     fn udiv(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        VaffleValue {
-            bits: bc_udiv(self, &lhs.bits, &rhs.bits),
-            ty,
-        }
+        let bits = self
+            .extract_bits(HelperOp::UDiv, &[lhs.bits.clone(), rhs.bits.clone()])
+            .unwrap_or_else(|| bc_udiv(self, &lhs.bits, &rhs.bits));
+        VaffleValue { bits, ty }
     }
     fn sdiv(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        VaffleValue {
-            bits: bc_sdiv(self, &lhs.bits, &rhs.bits),
-            ty,
-        }
+        let bits = self
+            .extract_bits(HelperOp::SDiv, &[lhs.bits.clone(), rhs.bits.clone()])
+            .unwrap_or_else(|| bc_sdiv(self, &lhs.bits, &rhs.bits));
+        VaffleValue { bits, ty }
     }
     fn and(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
+        if let Some(bits) = self.extract_bits(HelperOp::And, &[lhs.bits.clone(), rhs.bits.clone()]) {
+            return VaffleValue { bits, ty };
+        }
         let width = lhs.bits.len();
         if let Some(bits) = self.emit_wide_binop_poly(&lhs.bits, &rhs.bits, WideBinOp::And, width) {
             return VaffleValue { bits, ty };
@@ -933,6 +1136,9 @@ impl LirTarget for VaffleTarget {
     }
     fn or(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
+        if let Some(bits) = self.extract_bits(HelperOp::Or, &[lhs.bits.clone(), rhs.bits.clone()]) {
+            return VaffleValue { bits, ty };
+        }
         let width = lhs.bits.len();
         if let Some(bits) = self.emit_wide_binop_poly(&lhs.bits, &rhs.bits, WideBinOp::Or, width) {
             return VaffleValue { bits, ty };
@@ -944,6 +1150,9 @@ impl LirTarget for VaffleTarget {
     }
     fn xor(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
+        if let Some(bits) = self.extract_bits(HelperOp::Xor, &[lhs.bits.clone(), rhs.bits.clone()]) {
+            return VaffleValue { bits, ty };
+        }
         let width = lhs.bits.len();
         if let Some(bits) = self.emit_wide_binop_poly(&lhs.bits, &rhs.bits, WideBinOp::Xor, width) {
             return VaffleValue { bits, ty };
@@ -955,6 +1164,9 @@ impl LirTarget for VaffleTarget {
     }
     fn not(&mut self, val: VaffleValue) -> VaffleValue {
         let ty = val.ty.clone();
+        if let Some(bits) = self.extract_bits(HelperOp::Not, &[val.bits.clone()]) {
+            return VaffleValue { bits, ty };
+        }
         let width = val.bits.len();
         if let Some(bits) = self.emit_wide_not_poly(&val.bits, width) {
             return VaffleValue { bits, ty };
@@ -966,28 +1178,47 @@ impl LirTarget for VaffleTarget {
     }
     fn shl(&mut self, val: VaffleValue, shift: VaffleValue) -> VaffleValue {
         let ty = val.ty.clone();
-        VaffleValue {
-            bits: bc_shl(self, &val.bits, &shift.bits),
-            ty,
-        }
+        let bits = self
+            .extract_bits(HelperOp::Shl, &[val.bits.clone(), shift.bits.clone()])
+            .unwrap_or_else(|| bc_shl(self, &val.bits, &shift.bits));
+        VaffleValue { bits, ty }
     }
     fn lshr(&mut self, val: VaffleValue, shift: VaffleValue) -> VaffleValue {
         let ty = val.ty.clone();
-        VaffleValue {
-            bits: bc_lshr(self, &val.bits, &shift.bits),
-            ty,
-        }
+        let bits = self
+            .extract_bits(HelperOp::LShr, &[val.bits.clone(), shift.bits.clone()])
+            .unwrap_or_else(|| bc_lshr(self, &val.bits, &shift.bits));
+        VaffleValue { bits, ty }
     }
     fn ashr(&mut self, val: VaffleValue, shift: VaffleValue) -> VaffleValue {
         let ty = val.ty.clone();
-        VaffleValue {
-            bits: bc_ashr(self, &val.bits, &shift.bits),
-            ty,
-        }
+        let bits = self
+            .extract_bits(HelperOp::AShr, &[val.bits.clone(), shift.bits.clone()])
+            .unwrap_or_else(|| bc_ashr(self, &val.bits, &shift.bits));
+        VaffleValue { bits, ty }
     }
 
     // ---- Comparisons -------------------------------------------------------
     fn icmp(&mut self, pred: IcmpPred, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
+        let (op, swap) = match pred {
+            IcmpPred::Eq => (HelperOp::Eq, false),
+            IcmpPred::Ne => (HelperOp::Ne, false),
+            IcmpPred::Ult => (HelperOp::Ult, false),
+            IcmpPred::Ule => (HelperOp::Ule, false),
+            IcmpPred::Ugt => (HelperOp::Ult, true),
+            IcmpPred::Uge => (HelperOp::Ule, true),
+            IcmpPred::Slt => (HelperOp::Slt, false),
+            IcmpPred::Sle => (HelperOp::Sle, false),
+            IcmpPred::Sgt => (HelperOp::Slt, true),
+            IcmpPred::Sge => (HelperOp::Sle, true),
+        };
+        let (a, b) = if swap { (&rhs, &lhs) } else { (&lhs, &rhs) };
+        if let Some(bits) = self.extract_bits(op, &[a.bits.clone(), b.bits.clone()]) {
+            return VaffleValue {
+                bits,
+                ty: LirType::Bool,
+            };
+        }
         let bit = match pred {
             IcmpPred::Eq => bc_eq(self, &lhs.bits, &rhs.bits),
             IcmpPred::Ne => bc_ne(self, &lhs.bits, &rhs.bits),
@@ -1199,6 +1430,7 @@ impl LirTarget for VaffleTarget {
     }
 
     fn ret(&mut self, vals: &[VaffleValue]) {
+        self.emit_sp_restores();
         let flat: Vec<ValueId> = vals.iter().flat_map(|v| v.bits.iter().copied()).collect();
         let fb = self.fb();
         let cur = fb.current;
@@ -1336,6 +1568,7 @@ impl VaffleTarget {
             });
             fid
         };
+        self.emit_sp_restores();
         let flat: Vec<ValueId> = args.iter().flat_map(|v| v.bits.iter().copied()).collect();
         let fb = self.fb();
         let cur = fb.current;
@@ -1405,33 +1638,23 @@ impl VaffleTarget {
 }
 
 // ============================================================================
-// StackAllocExt — stack allocation via StorageId::STACK
+// StackAllocExt — one data stack and one virtual SP global per alloca
 // ============================================================================
 
 impl StackAllocExt for VaffleTarget {
     type Value = VaffleValue;
 
     fn alloca(&mut self, elem_ty: LirType, count: usize) -> VaffleValue {
-        let elem_bits = self.bits_for(&elem_ty);
-        let total_slots = (elem_bits * count) as u64;
-        let base_slot = self.fb().next_stack_slot;
-        self.fb().next_stack_slot += total_slots;
-
-        // Intern the pointee type so we can record it in the VAFFLE value.
+        let (storage, sp) = self.alloc_stack_site();
         let elem_tid = self.lir_type_to_tid(&elem_ty);
-
-        // Emit the StackAlloc value node.
-        let alloc_val = Value::StackAlloc {
+        let alloc_vid = self.fb().emit_value(Value::StackAlloc {
             elem_ty: elem_tid,
             count,
-            base_slot,
-        };
-        let _alloc_vid = self.fb().emit_value(alloc_val);
-
-        // The pointer is the constant address `base_slot`, bit-decomposed.
-        let addr_bits: Vec<ValueId> = (0..self.module.pointer_width.bits())
-            .map(|i| self.bc_const((base_slot >> i) & 1 != 0))
-            .collect();
+            storage,
+            sp,
+        });
+        let addr_bits = self.explode_pointer(alloc_vid);
+        self.remember_ptr(&addr_bits, storage);
         VaffleValue {
             bits: addr_bits,
             ty: LirType::Ptr(alloc::boxed::Box::new(elem_ty)),
@@ -1441,14 +1664,12 @@ impl StackAllocExt for VaffleTarget {
     fn ptr_load(&mut self, ptr: VaffleValue, ty: LirType) -> VaffleValue {
         let n = self.bits_for(&ty);
         let bit_tid = self.bit_tid();
-        let storage = StorageId::STACK;
+        let storage = self.ptr_data_storage(&ptr);
 
-        // Read `n` individual bit-slots from STACK storage.
         let mut bits = Vec::with_capacity(n);
         for i in 0..n {
             let mut addr_bits = ptr.bits.clone();
             if i > 0 {
-                // offset = ptr + i
                 let off = self.iconst(LirType::U32, i as i64);
                 let padded = self.pad_to_ptr_bits(off);
                 addr_bits = bc_add(self, &addr_bits, &padded, false);
@@ -1457,13 +1678,11 @@ impl StackAllocExt for VaffleTarget {
             bits.push(v);
         }
 
-        // Record the PtrLoad in the VAFFLE value stream for the lowering pass.
         let pointee_tid = self.lir_type_to_tid(&ty);
-        let load_val = Value::PtrLoad {
-            ptr: ptr.bits[0], // representative (the actual addr is in the storage reads above)
+        let _load_vid = self.fb().emit_value(Value::PtrLoad {
+            ptr: ptr.bits[0],
             pointee_ty: pointee_tid,
-        };
-        let _load_vid = self.fb().emit_value(load_val);
+        });
 
         VaffleValue { bits, ty }
     }
@@ -1471,7 +1690,7 @@ impl StackAllocExt for VaffleTarget {
     fn ptr_store(&mut self, ptr: VaffleValue, val: VaffleValue) {
         let n = val.bits.len();
         let bit_tid = self.bit_tid();
-        let storage = StorageId::STACK;
+        let storage = self.ptr_data_storage(&ptr);
 
         for i in 0..n {
             let mut addr_bits = ptr.bits.clone();
@@ -1483,36 +1702,34 @@ impl StackAllocExt for VaffleTarget {
             self.emit_write(storage, val.bits[i], bit_tid, &addr_bits);
         }
 
-        // Record the PtrStore for the VAFFLE lowering.
-        let store_val = Value::PtrStore {
+        let _store_vid = self.fb().emit_value(Value::PtrStore {
             ptr: ptr.bits[0],
             val: val.bits[0],
-        };
-        let _store_vid = self.fb().emit_value(store_val);
+        });
     }
 
     fn ptr_offset(&mut self, ptr: VaffleValue, idx: VaffleValue) -> VaffleValue {
+        let storage = self.ptr_data_storage(&ptr);
         let pointee_ty = match &ptr.ty {
             LirType::Ptr(inner) => inner.as_ref().clone(),
             other => other.clone(),
         };
         let elem_bits = self.bits_for(&pointee_ty);
 
-        // offset_slots = idx * elem_bits
+        // Address scale stays inline in both helper modes.
         let scale = self.iconst(LirType::U32, elem_bits as i64);
-        let scaled_idx = self.mul(idx, scale);
-
-        // Pad to pointer width and add.
-        let padded = self.pad_to_ptr_bits(scaled_idx);
+        let padded_idx = self.pad_to_ptr_bits(idx);
+        let padded_scale = self.pad_to_ptr_bits(scale);
+        let scaled = bc_mul(self, &padded_idx, &padded_scale);
+        let padded = scaled;
         let new_bits = bc_add(self, &ptr.bits, &padded, false);
 
-        // Record the PtrOffset for the VAFFLE lowering.
-        let offset_val = Value::PtrOffset {
+        let _offset_vid = self.fb().emit_value(Value::PtrOffset {
             ptr: ptr.bits[0],
-            idx: new_bits[0], // representative
+            idx: new_bits[0],
             elem_bits,
-        };
-        let _offset_vid = self.fb().emit_value(offset_val);
+        });
+        self.remember_ptr(&new_bits, storage);
 
         VaffleValue {
             bits: new_bits,
@@ -1624,25 +1841,23 @@ mod tests {
         t.ret(&[loaded]);
         t.end_function();
 
-        // Should have StorageRead and StorageWrite with STACK storage.
         let body = match &t.module.funcs[0] {
             vaffle::FuncDecl::Body(b) => b,
             _ => panic!("expected function body"),
         };
-        let has_stack_write = body.values.iter().any(|v| matches!(
-            &v.kind, Value::Op(Stmt::StorageWrite { storage, .. }) if *storage == StorageId::STACK
-        ));
-        let has_stack_read = body.values.iter().any(|v| matches!(
-            &v.kind, Value::Op(Stmt::StorageRead { storage, .. }) if *storage == StorageId::STACK
-        ));
-        assert!(
-            has_stack_write,
-            "ptr_store should emit StorageWrite to STACK"
-        );
-        assert!(
-            has_stack_read,
-            "ptr_load should emit StorageRead from STACK"
-        );
+        let data = body.values.iter().find_map(|v| match &v.kind {
+            Value::StackAlloc { storage, .. } => Some(*storage),
+            _ => None,
+        });
+        let data = data.expect("alloca records its data storage");
+        let has_stack_write = body.values.iter().any(|v| {
+            matches!(&v.kind, Value::Op(Stmt::StorageWrite { storage, .. }) if *storage == data)
+        });
+        let has_stack_read = body.values.iter().any(|v| {
+            matches!(&v.kind, Value::Op(Stmt::StorageRead { storage, .. }) if *storage == data)
+        });
+        assert!(has_stack_write, "ptr_store should write the alloca's storage");
+        assert!(has_stack_read, "ptr_load should read the alloca's storage");
     }
 
     #[test]
@@ -1690,7 +1905,6 @@ mod tests {
         t.ret(&[]);
         t.end_function();
 
-        // Extract the base_slot from the StackAlloc values.
         let body = match &t.module.funcs[0] {
             vaffle::FuncDecl::Body(b) => b,
             _ => panic!("expected function body"),
@@ -1700,16 +1914,16 @@ mod tests {
             .iter()
             .filter_map(|v| match &v.kind {
                 Value::StackAlloc {
-                    base_slot, count, ..
-                } => Some((*base_slot, *count)),
+                    storage, sp, count, ..
+                } => Some((*storage, *sp, *count)),
                 _ => None,
             })
             .collect();
         assert_eq!(allocs.len(), 2);
-        // First alloc at slot 0, size = 32*2 = 64 slots.
-        assert_eq!(allocs[0].0, 0);
-        // Second alloc at slot 64.
-        assert_eq!(allocs[1].0, 64);
+        assert_ne!(allocs[0].0, allocs[1].0, "each alloca has its own data storage");
+        assert_ne!(allocs[0].1, allocs[1].1, "each alloca has its own stack pointer");
+        assert_eq!(allocs[0].2, 2);
+        assert_eq!(allocs[1].2, 4);
     }
 
     #[test]
@@ -2299,5 +2513,73 @@ mod tests {
             }
             other => panic!("expected Terminator::Table, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn extracted_add_is_a_typed_function_and_inline_is_not() {
+        let mut extracted = VaffleTarget::new().with_circuit_helpers(CircuitHelperMode::Extract);
+        let (entry, params) =
+            extracted.begin_function("add32", &[LirType::U32, LirType::U32], Some(LirType::U32));
+        extracted.switch_to_block(entry);
+        let sum = extracted.add(params[0][0].clone(), params[1][0].clone());
+        extracted.ret(&[sum]);
+        extracted.end_function();
+
+        assert!(
+            extracted.module.funcs.len() >= 2,
+            "extract mode interns a helper beside the parent"
+        );
+        let parent = match &extracted.module.funcs[0] {
+            vaffle::FuncDecl::Body(body) => body,
+            _ => panic!("parent is funcs[0]"),
+        };
+        assert!(
+            parent
+                .values
+                .iter()
+                .any(|v| matches!(v.kind, Value::Call { .. })),
+            "the parent calls the helper"
+        );
+        let helper = match &extracted.module.funcs[1] {
+            vaffle::FuncDecl::Body(body) => body,
+            other => panic!("helper is an ordinary body, got {other:?}"),
+        };
+        let sig = &extracted.module.sigs[helper.sig.0];
+        assert_eq!(sig.params.len(), 2);
+        assert_eq!(sig.results.len(), 1);
+        for ty in sig.params.iter().chain(sig.results.iter()) {
+            assert!(
+                matches!(
+                    extracted.module.types.0[ty.0 as usize],
+                    volar_ir_common::IrType::Primitive(volar_ir_common::Type::_32)
+                ),
+                "each operand and the result is a primitive 32-bit value"
+            );
+        }
+        assert_eq!(helper.blocks[0].params.len(), 2, "one entry param per operand");
+        match &helper.blocks[0].terminator {
+            Terminator::Return { values } => assert_eq!(values.len(), 1),
+            other => panic!("helper returns one value, got {other:?}"),
+        }
+
+        let mut inlined = VaffleTarget::new();
+        let (entry, params) =
+            inlined.begin_function("add32", &[LirType::U32, LirType::U32], Some(LirType::U32));
+        inlined.switch_to_block(entry);
+        let sum = inlined.add(params[0][0].clone(), params[1][0].clone());
+        inlined.ret(&[sum]);
+        inlined.end_function();
+        assert_eq!(inlined.module.funcs.len(), 1);
+        let body = match &inlined.module.funcs[0] {
+            vaffle::FuncDecl::Body(body) => body,
+            _ => panic!("expected a body"),
+        };
+        assert!(
+            !body
+                .values
+                .iter()
+                .any(|v| matches!(v.kind, Value::Call { .. })),
+            "inline mode does not add a helper call"
+        );
     }
 }

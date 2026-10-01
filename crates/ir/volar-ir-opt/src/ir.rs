@@ -1514,6 +1514,29 @@ fn compute_action(
             IrAction::NoChange
         }
 
+        Stmt::Shuffle { result_bits, ty } => {
+            if result_bits.iter().all(|(_, src)| const_map.contains_key(src)) {
+                let mut result = Constant { hi: 0, lo: 0 };
+                for (lane, &(bit, src)) in result_bits.iter().enumerate() {
+                    let source = const_map.get(&src).copied().unwrap();
+                    let extracted = if bit < 128 {
+                        (source.lo >> bit) & 1
+                    } else {
+                        (source.hi >> (bit - 128)) & 1
+                    };
+                    if extracted != 0 {
+                        if lane < 128 {
+                            result.lo |= 1u128 << lane;
+                        } else {
+                            result.hi |= 1u128 << (lane - 128);
+                        }
+                    }
+                }
+                return IrAction::FoldToConst(result, *ty);
+            }
+            IrAction::NoChange
+        }
+
         // Everything else is not foldable by this pass.
         _ => IrAction::NoChange,
     }

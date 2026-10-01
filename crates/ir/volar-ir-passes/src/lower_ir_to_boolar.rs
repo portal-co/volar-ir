@@ -1429,7 +1429,7 @@ mod tests {
         };
         let read = block.push_stmt(
             volar_ir::ir::IRStmt::StorageRead {
-                storage: StorageId::ALLOCA,
+                storage: StorageId(64),
                 ty: word,
                 addr: IRVarId(0),
             },

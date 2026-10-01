@@ -33,12 +33,13 @@
 //!   "the entire operation must be a constant load": the *storage identity*
 //!   must resolve to a literal global at import time, even though the value
 //!   read/written through it may be symbolic);
-//! - a constant-size `alloca` (scalar integer element type only) — or a
-//!   single constant-index `getelementptr` off one — tracked as a
-//!   compile-time-constant `StorageId::ALLOCA` address (`Value::StackAlloc`
-//!   / `PtrLoad` / `PtrStore` / `PtrOffset`, one bit-level `StorageRead`/
-//!   `StorageWrite` per bit, mirroring `VaffleTarget`'s own convention; see
-//!   `docs/llvm-alloca.md`).
+//! - a constant-size `alloca` (integer, pointer, or array of those) — or a
+//!   `getelementptr` off one — tracked as its own bit-addressed data
+//!   `StorageId` plus a pointer-width stack-pointer global. `Value::StackAlloc`
+//!   yields the pointer (the stack pointer before the bump); loads and stores
+//!   are ordinary `StorageRead`/`StorageWrite` of that storage at those bits.
+//!   Function exit writes the entry stack-pointer value back. See
+//!   `docs/llvm-alloca.md`.
 //!
 //! Not yet supported (hard error): floats, vectors, aggregates, atomics,
 //! `indirectbr`/`blockaddress` (VAFFLE's `Value::BlockAddr` already models
@@ -52,7 +53,7 @@
 //! a dense positional `Terminator::Table` via the same `bc_eq` /
 //! `bc_select_vec` selector cascade `VaffleTarget::switch` uses.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
@@ -75,10 +76,13 @@ use vaffle::{
     Terminator, Value, ValueId,
 };
 use volar_ir_common::{
-    Constant, IrType, Node, PolyCoeffs, Stmt, StorageAllocator, StorageId, Type, TypeId,
-    TypeTable,
+    Constant, IrType, Node, PolyCoeffs, PreInitSegment, Stmt, StorageAllocator, StorageId, Type,
+    TypeId, TypeTable,
 };
 use volar_lir::circuits::{self, BitCircuitBuilder};
+use volar_vaffle_target::circuit_helpers::{
+    helper_result_width, intern_circuit_helper, width_type, CircuitHelperMode, HelperKey, HelperOp,
+};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
 
 /// A structural-import failure.
@@ -117,9 +121,9 @@ type IResult<T> = Result<T, ImportError>;
 const GLOBAL_ID_BITS: usize = 12;
 /// Bits reserved for a global's byte offset within the same encoding.
 
-/// First `StorageId` this importer's own `storage_alloc` hands out to a
-/// global -- below any reserved range (`StorageId::ALLOCA`/`STACK`/
-/// `VIRT_*`/`memory(_)`).
+/// First `StorageId` this importer's allocator hands out. Globals, per-alloca
+/// data stacks, and per-alloca stack-pointer cells all come from this
+/// allocator, above `StorageId::STACK`.
 const GLOBAL_STORAGE_BASE: u32 = 64;
 
 /// Cap on the number of distinct globals a single runtime pointer-dispatch
@@ -150,6 +154,10 @@ fn bits_for_max_value(v: usize) -> usize {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LlvmImportConfig {
     pub pointer_width: Option<PointerWidth>,
+    /// Inline `bc_*` into the parent block, or intern one typed function per
+    /// `(op, operand widths)` and call it. Address math and stack-pointer
+    /// bumps stay inline in both modes.
+    pub circuit_helpers: CircuitHelperMode,
 }
 
 fn pointer_width_from_layout<'ctx>(
@@ -205,7 +213,10 @@ pub fn import_module_with_config<'ctx>(
     entries: &[&str],
     config: LlvmImportConfig,
 ) -> IResult<Module> {
-    let mut importer = Importer::new(pointer_width_from_layout(llvm_module, config)?);
+    let mut importer = Importer::new(
+        pointer_width_from_layout(llvm_module, config)?,
+        config.circuit_helpers,
+    );
     // Eagerly assign every module global its `StorageId` before walking any
     // function body, so `dispatch_read`/`dispatch_write` (runtime
     // storage-identity dispatch for a pointer whose provenance isn't
@@ -273,62 +284,43 @@ pub fn import_module_inlined_with_config<'ctx>(
 /// `VaffleTarget::VaffleValue.bits`.
 type Bits = Vec<ValueId>;
 
-#[derive(Clone, Copy, Debug)]
-struct StackPointer {
-    /// Identity and bounds of the originating alloca, in bit-addressed
-    /// `StorageId::ALLOCA` slots. Used by `StackPtr::Const`'s import-time
-    /// memory-intrinsic range check; symbolic stack addresses retain their
-    /// normal runtime defined-execution requirement instead.
-    allocation_base: u64,
+/// One alloca site's data stack. The address is the `Value::StackAlloc`
+/// result (the site's stack pointer before the bump), plus any later GEP.
+/// `const_offset` is the bit offset from that allocation's base when it is
+/// still a constant; a symbolic GEP clears it. Range checks use the offset,
+/// and the address bits stay the full pointer width so a known-provenance
+/// load does not go through the tagged encoding.
+#[derive(Clone, Debug)]
+struct StackPtr {
+    storage: StorageId,
     allocation_bits: u64,
-    /// Current pointer position within (or potentially beyond) that alloca.
-    /// Ordinary loads/stores retain their pre-existing behavior; memory
-    /// intrinsics validate this range before emitting accesses.
-    addr: u64,
+    const_offset: Option<u64>,
+    addr_bits: Bits,
 }
 
-impl StackPointer {
-    fn intrinsic_range(self, n_bytes: usize) -> IResult<(u64, u64)> {
+impl StackPtr {
+    fn intrinsic_range(&self, n_bytes: usize) -> IResult<(u64, u64)> {
+        let start = self.const_offset.ok_or_else(|| {
+            ImportError::Unsupported(
+                "memory intrinsic range is not a constant offset of its alloca".into(),
+            )
+        })?;
         let n_bits = u64::try_from(n_bytes)
             .ok()
             .and_then(|n| n.checked_mul(8))
             .ok_or_else(|| {
                 ImportError::Unsupported("memory intrinsic length is too large".into())
             })?;
-        let allocation_end = self
-            .allocation_base
-            .checked_add(self.allocation_bits)
-            .ok_or_else(|| ImportError::Unsupported("alloca range overflow".into()))?;
-        let end = self
-            .addr
+        let end = start
             .checked_add(n_bits)
             .ok_or_else(|| ImportError::Unsupported("memory intrinsic range overflow".into()))?;
-        if self.addr < self.allocation_base || self.addr > allocation_end || end > allocation_end {
+        if start > self.allocation_bits || end > self.allocation_bits {
             return Err(ImportError::Unsupported(
                 "memory intrinsic range escapes its alloca provenance".into(),
             ));
         }
-        Ok((self.addr, end))
+        Ok((start, end))
     }
-}
-
-/// Tracking for a pointer-typed LLVM value known (at import time) to be
-/// stack-provenance. `Const` is the pre-existing, common case: a
-/// compile-time-constant `StorageId::ALLOCA` address. `Symbolic` is produced
-/// by a `getelementptr` whose index isn't a compile-time constant (or whose
-/// base is itself already `Symbolic`): a genuinely runtime-computed address,
-/// `PTR_BITS` wide, LSB first -- proven safe by `rebase_stack_addr`
-/// (`volar-vaffle-target/src/lower_to_ir.rs`), which already treats every
-/// ALLOCA address as an opaque runtime value with no dependency on it being
-/// a compile-time constant.
-#[derive(Clone, Debug)]
-enum StackPtr {
-    Const(StackPointer),
-    Symbolic {
-        allocation_base: u64,
-        allocation_bits: u64,
-        addr_bits: Bits,
-    },
 }
 
 /// Identity and constant byte offset of a global-provenance pointer tracked
@@ -477,27 +469,24 @@ struct Importer<'ctx> {
     func_ids: HashMap<PointerValue<'ctx>, FuncId>,
     storage_for_global: HashMap<PointerValue<'ctx>, StorageId>,
     storage_alloc: StorageAllocator,
+    /// Data stacks created for `alloca`, in allocation order. Dispatch
+    /// muxes these separately from byte-addressed globals.
+    alloca_data: Vec<StorageId>,
+    /// Stack-pointer globals paired with `alloca_data`. Excluded from
+    /// global dispatch; each holds one pointer-width cell at address 0.
+    sp_globals: Vec<StorageId>,
+    pre_init: Vec<PreInitSegment>,
     bit_tid: TypeId,
     byte_tid: TypeId,
-    /// Type stamped on `StorageId::ALLOCA` address `Stmt::Const`s
-    /// (`stack_load`/`stack_store`). Must be wide enough to hold the
-    /// *numeric value* of a stack bit-address (this function's own
-    /// allocated bits, zero-based -- see `FuncCtx::next_stack_slot`;
-    /// `volar-vaffle-target/src/lower_to_ir.rs` rebases this local offset
-    /// onto the real runtime frame at lowering time, so nothing here needs
-    /// to reserve headroom against a collision) -- `self.bit_tid` (1 bit)
-    /// is NOT wide enough: an interpreter evaluating `Stmt::Const` masks
-    /// the literal down to its *declared* type's width, so a 1-bit-typed
-    /// address constant silently collapses every address to just its own
-    /// low bit, aliasing almost everything onto addresses 0/1 (confirmed
-    /// root cause of `spill(5)` computing `0` instead of `5` -- every one
-    /// of `spill`'s 32 distinct bit addresses collapsed to 0 or 1 this
-    /// way). Its integer width matches the LLVM module's pointer ABI.
+    /// Pointer-width type for stack-pointer cells and merged addresses.
+    /// A 1-bit address constant would collapse every address to its low bit.
     addr_tid: TypeId,
+    helper_mode: CircuitHelperMode,
+    helper_cache: BTreeMap<HelperKey, FuncId>,
 }
 
 impl<'ctx> Importer<'ctx> {
-    fn new(pointer_width: PointerWidth) -> Self {
+    fn new(pointer_width: PointerWidth, helper_mode: CircuitHelperMode) -> Self {
         let pointer_bits = pointer_width.bits();
         let mut types = TypeTable::new();
         let bit_tid = types.bit();
@@ -515,14 +504,15 @@ impl<'ctx> Importer<'ctx> {
             exports: Default::default(),
             func_ids: HashMap::new(),
             storage_for_global: HashMap::new(),
-            // Start well above any reserved range; this importer's own
-            // *global* StorageIds never touch StorageId::ALLOCA/STACK/
-            // VIRT_*/memory(_) (stack-alloca'd data uses StorageId::ALLOCA
-            // directly, via `stack_load`/`stack_store`, not this allocator).
             storage_alloc: StorageAllocator::new(GLOBAL_STORAGE_BASE),
+            alloca_data: Vec::new(),
+            sp_globals: Vec::new(),
+            pre_init: Vec::new(),
             bit_tid,
             byte_tid,
             addr_tid,
+            helper_mode,
+            helper_cache: BTreeMap::new(),
         }
     }
 
@@ -535,7 +525,7 @@ impl<'ctx> Importer<'ctx> {
             funcs: self.funcs,
             sigs: self.sigs,
             exports: self.exports,
-            pre_init: Vec::new(),
+            pre_init: self.pre_init,
         }
     }
 
@@ -957,6 +947,7 @@ impl<'ctx> Importer<'ctx> {
         // blocks. Keep the fallback vector aligned with every block so
         // `finish_blocks` does not truncate them when zipping its vectors.
         fallback_return_values.resize_with(fctx.stmts.len(), Vec::new);
+        self.install_sp_reverts(&mut fctx);
         let values = core::mem::take(&mut fctx.values);
         let body = FuncBody {
             sig,
@@ -1059,160 +1050,67 @@ impl<'ctx> Importer<'ctx> {
         let result_bits: Option<Bits> = match opcode {
             InstructionOpcode::Add => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_add(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                    false,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::Add, &[a, b]))
             }
             InstructionOpcode::Sub => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_sub(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::Sub, &[a, b]))
             }
             InstructionOpcode::Mul => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_mul(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::Mul, &[a, b]))
             }
             InstructionOpcode::UDiv => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_udiv(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::UDiv, &[a, b]))
             }
             InstructionOpcode::SDiv => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_sdiv(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::SDiv, &[a, b]))
             }
             InstructionOpcode::And => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_and_vec(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::And, &[a, b]))
             }
             InstructionOpcode::Or => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_or_vec(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::Or, &[a, b]))
             }
             InstructionOpcode::Xor => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_xor_vec(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::Xor, &[a, b]))
             }
             InstructionOpcode::Shl => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_shl(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::Shl, &[a, b]))
             }
             InstructionOpcode::LShr => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_lshr(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::LShr, &[a, b]))
             }
             InstructionOpcode::AShr => {
                 let (a, b) = (op!(0), op!(1));
-                Some(circuits::bc_ashr(
-                    &mut Ctx {
-                        fctx,
-                        bit_tid: self.bit_tid,
-                        block: cur,
-                    },
-                    &a,
-                    &b,
-                ))
+                Some(self.alu(fctx, cur, HelperOp::AShr, &[a, b]))
             }
             InstructionOpcode::ICmp => {
                 let pred = instr
                     .get_icmp_predicate()
                     .ok_or_else(|| ImportError::Unsupported("icmp without predicate".into()))?;
                 let (a, b) = (op!(0), op!(1));
-                let mut c = Ctx {
-                    fctx,
-                    bit_tid: self.bit_tid,
-                    block: cur,
+                let (op, swap) = match pred {
+                    IntPredicate::EQ => (HelperOp::Eq, false),
+                    IntPredicate::NE => (HelperOp::Ne, false),
+                    IntPredicate::ULT => (HelperOp::Ult, false),
+                    IntPredicate::ULE => (HelperOp::Ule, false),
+                    IntPredicate::UGT => (HelperOp::Ult, true),
+                    IntPredicate::UGE => (HelperOp::Ule, true),
+                    IntPredicate::SLT => (HelperOp::Slt, false),
+                    IntPredicate::SLE => (HelperOp::Sle, false),
+                    IntPredicate::SGT => (HelperOp::Slt, true),
+                    IntPredicate::SGE => (HelperOp::Sle, true),
                 };
-                let bit = match pred {
-                    IntPredicate::EQ => circuits::bc_eq(&mut c, &a, &b),
-                    IntPredicate::NE => circuits::bc_ne(&mut c, &a, &b),
-                    IntPredicate::ULT => circuits::bc_ult(&mut c, &a, &b),
-                    IntPredicate::ULE => circuits::bc_ule(&mut c, &a, &b),
-                    IntPredicate::UGT => circuits::bc_ult(&mut c, &b, &a),
-                    IntPredicate::UGE => circuits::bc_ule(&mut c, &b, &a),
-                    IntPredicate::SLT => circuits::bc_slt(&mut c, &a, &b),
-                    IntPredicate::SLE => circuits::bc_sle(&mut c, &a, &b),
-                    IntPredicate::SGT => circuits::bc_slt(&mut c, &b, &a),
-                    IntPredicate::SGE => circuits::bc_sle(&mut c, &b, &a),
-                };
-                Some(vec![bit])
+                let (x, y) = if swap { (b, a) } else { (a, b) };
+                Some(self.alu(fctx, cur, op, &[x, y]))
             }
             InstructionOpcode::Select => {
                 let cond = op!(0)[0];
@@ -1267,18 +1165,14 @@ impl<'ctx> Importer<'ctx> {
                             ImportError::Unsupported("stack pointer bits missing (internal)".into())
                         })?;
                     let pointee_tid = self.llvm_type_id(instr.get_type())?;
-                    Some(match stack_ptr {
-                        StackPtr::Const(sp) => {
-                            self.stack_load(fctx, ptr_bits0, sp.addr, pointee_tid, n_bits)
-                        }
-                        StackPtr::Symbolic { addr_bits, .. } => self.stack_load_dynamic(
-                            fctx,
-                            ptr_bits0,
-                            &addr_bits,
-                            pointee_tid,
-                            n_bits,
-                        ),
-                    })
+                    Some(self.stack_load_dynamic(
+                        fctx,
+                        stack_ptr.storage,
+                        ptr_bits0,
+                        &stack_ptr.addr_bits,
+                        pointee_tid,
+                        n_bits,
+                    ))
                 } else {
                     match self.resolve_global_ptr(fctx, ptr) {
                         Ok(GlobalPtr::Const(g)) => {
@@ -1316,12 +1210,13 @@ impl<'ctx> Importer<'ctx> {
                         .ok_or_else(|| {
                             ImportError::Unsupported("stack pointer bits missing (internal)".into())
                         })?;
-                    match stack_ptr {
-                        StackPtr::Const(sp) => self.stack_store(fctx, ptr_bits0, sp.addr, &val),
-                        StackPtr::Symbolic { addr_bits, .. } => {
-                            self.stack_store_dynamic(fctx, ptr_bits0, &addr_bits, &val)
-                        }
-                    }
+                    self.stack_store_dynamic(
+                        fctx,
+                        stack_ptr.storage,
+                        ptr_bits0,
+                        &stack_ptr.addr_bits,
+                        &val,
+                    );
                 } else {
                     let n_bytes = val.len().div_ceil(8);
                     match self.resolve_global_ptr(fctx, ptr) {
@@ -1346,13 +1241,10 @@ impl<'ctx> Importer<'ctx> {
                 self.ensure_default_address_space(base)?;
                 if let Some(base_ptr) = fctx.stack_slot_of.get(&base.as_any_value_enum()).cloned() {
                     // Offset GEP off a tracked stack pointer. A constant
-                    // index against a `Const` base takes the original
-                    // compile-time-constant fast path; anything else (a
-                    // symbolic index, or a base that's already
-                    // `Symbolic` from an earlier dynamic GEP) computes a
-                    // genuinely runtime address via real bit-circuit
-                    // multiply-and-add -- `rebase_stack_addr` already
-                    // proves ALLOCA addressing tolerates this.
+                    // index against a constant offset keeps `const_offset`
+                    // for range checks and adds that delta to the
+                    // StackAlloc-derived address. A symbolic index clears
+                    // the constant offset and multiplies at runtime.
                     if instr.get_num_operands() != 2 {
                         return Err(ImportError::Unsupported(
                             "multi-index GEP into stack pointer not supported".into(),
@@ -1380,26 +1272,25 @@ impl<'ctx> Importer<'ctx> {
                         ));
                     };
 
-                    let new_stack_ptr = match (&base_ptr, idx_int.get_sign_extended_constant()) {
-                        (StackPtr::Const(sp), Some(idx)) => {
+                    let new_stack_ptr = match (base_ptr.const_offset, idx_int.get_sign_extended_constant())
+                    {
+                        (Some(base_off), Some(idx)) => {
                             let offset = idx.checked_mul(elem_bits).ok_or_else(|| {
                                 ImportError::Unsupported("gep offset overflow".into())
                             })?;
-                            let addr = sp.addr.checked_add_signed(offset).ok_or_else(|| {
+                            let addr = base_off.checked_add_signed(offset).ok_or_else(|| {
                                 ImportError::Unsupported("gep offset out of range".into())
                             })?;
-                            StackPtr::Const(StackPointer { addr, ..*sp })
+                            let addr_bits =
+                                self.add_signed_delta(fctx, cur, &base_ptr.addr_bits, offset);
+                            StackPtr {
+                                storage: base_ptr.storage,
+                                allocation_bits: base_ptr.allocation_bits,
+                                const_offset: Some(addr as u64),
+                                addr_bits,
+                            }
                         }
                         (_, _) => {
-                            let (allocation_base, allocation_bits) = match &base_ptr {
-                                StackPtr::Const(sp) => (sp.allocation_base, sp.allocation_bits),
-                                StackPtr::Symbolic {
-                                    allocation_base,
-                                    allocation_bits,
-                                    ..
-                                } => (*allocation_base, *allocation_bits),
-                            };
-                            let base_bits = self.stack_ptr_addr_bits(fctx, cur, &base_ptr);
                             let idx_bits = self.value_bits(fctx, idx_val)?;
                             let idx_bits = resize_bits_signed(&idx_bits, self.pointer_bits);
                             let new_addr_bits = {
@@ -1412,33 +1303,39 @@ impl<'ctx> Importer<'ctx> {
                                     .map(|b| c.bc_const((elem_bits as u64 >> b) & 1 != 0))
                                     .collect();
                                 let scaled = circuits::bc_mul(&mut c, &idx_bits, &elem_bits_const);
-                                circuits::bc_add(&mut c, &base_bits, &scaled, false)
+                                circuits::bc_add(&mut c, &base_ptr.addr_bits, &scaled, false)
                             };
-                            StackPtr::Symbolic {
-                                allocation_base,
-                                allocation_bits,
+                            StackPtr {
+                                storage: base_ptr.storage,
+                                allocation_bits: base_ptr.allocation_bits,
+                                const_offset: None,
                                 addr_bits: new_addr_bits,
                             }
                         }
                     };
 
-                    let addr_bits = self.stack_ptr_addr_bits(fctx, cur, &new_stack_ptr);
                     let base_bits = fctx
                         .cache
                         .get(&base.as_any_value_enum())
                         .cloned()
-                        .unwrap_or_else(|| addr_bits.clone());
+                        .unwrap_or_else(|| new_stack_ptr.addr_bits.clone());
                     fctx.emit(
                         cur,
                         Value::PtrOffset {
                             ptr: base_bits[0],
-                            idx: addr_bits[0], // representative, matching `VaffleTarget::ptr_offset`
+                            idx: new_stack_ptr.addr_bits[0],
                             elem_bits: elem_bits as usize,
                         },
                     );
+                    let tagged = self.encode_stack_ptr(
+                        fctx,
+                        cur,
+                        new_stack_ptr.storage,
+                        &new_stack_ptr.addr_bits,
+                    )?;
                     fctx.stack_slot_of
                         .insert(instr.as_any_value_enum(), new_stack_ptr);
-                    Some(addr_bits)
+                    Some(tagged)
                 } else if let Ok(base_gp) = self.resolve_global_ptr(fctx, base) {
                     // Base is a global (directly, a constant-index GEP
                     // constant expression, or a previously-tracked
@@ -1703,46 +1600,48 @@ impl<'ctx> Importer<'ctx> {
                 let total_slots = elem_bits
                     .checked_mul(count)
                     .ok_or_else(|| ImportError::Unsupported("alloca size overflow".into()))?;
-                let base_slot = fctx.next_stack_slot;
-                fctx.next_stack_slot = fctx
-                    .next_stack_slot
-                    .checked_add(total_slots)
-                    .ok_or_else(|| ImportError::Unsupported("alloca stack overflow".into()))?;
-                // `ptr_value_bits` reserves bit 31 of a pointer *value*'s
-                // encoding as the stack-vs-global tag (0 = stack); a local
-                // ALLOCA offset that set it would be indistinguishable from
-                // a global-provenance value.
-                if fctx.next_stack_slot >= (1u64 << (self.pointer_bits - 1)) {
+                // The tagged pointer encoding keeps the bit offset in the
+                // low `global_addr_bits` field. One site's allocation has to
+                // fit there; the calling-convention frame is a different storage.
+                if total_slots >= (1u64 << self.global_addr_bits()) {
                     return Err(ImportError::Unsupported(
                         "alloca stack region too large for the pointer-value encoding".into(),
                     ));
                 }
 
-                // Bookkeeping marker (unused as an operand, matching
-                // `VaffleTarget::alloca`'s own `_alloc_vid` convention) —
-                // required so passes that pattern-match `Value::StackAlloc`
-                // (e.g. `inline_vaffle`'s stack-slot rebase, `lower_to_ir`'s
-                // spill-avoidance) see this allocation.
+                let storage = self.storage_alloc.alloc();
+                let sp = self.storage_alloc.alloc();
+                self.alloca_data.push(storage);
+                self.sp_globals.push(sp);
+                self.pre_init.push(PreInitSegment {
+                    storage: sp,
+                    ty: self.addr_tid,
+                    offset: 0,
+                    data: vec![Constant { hi: 0, lo: 0 }],
+                });
+                fctx.sp_globals.push(sp);
+
                 let elem_tid = self.llvm_type_id(scalar_ty)?;
-                fctx.emit(
+                let alloc_vid = fctx.emit(
                     cur,
                     Value::StackAlloc {
                         elem_ty: elem_tid,
                         count: count as usize,
-                        base_slot,
+                        storage,
+                        sp,
                     },
                 );
-
-                let addr_bits = self.stack_addr_bits(fctx, cur, base_slot);
+                let addr_bits = self.explode_pointer(fctx, cur, alloc_vid);
                 fctx.stack_slot_of.insert(
                     instr.as_any_value_enum(),
-                    StackPtr::Const(StackPointer {
-                        allocation_base: base_slot,
+                    StackPtr {
+                        storage,
                         allocation_bits: total_slots,
-                        addr: base_slot,
-                    }),
+                        const_offset: Some(0),
+                        addr_bits: addr_bits.clone(),
+                    },
                 );
-                Some(addr_bits)
+                Some(self.encode_stack_ptr(fctx, cur, storage, &addr_bits)?)
             }
             other => {
                 return Err(ImportError::Unsupported(format!("{other:?}")));
@@ -2227,12 +2126,10 @@ impl<'ctx> Importer<'ctx> {
     }
 
     fn validate_intrinsic_pointer(&self, ptr: &IntrinsicPointer, n_bytes: usize) -> IResult<()> {
-        if let IntrinsicPointer::Stack {
-            ptr: StackPtr::Const(ptr),
-            ..
-        } = ptr
-        {
-            (*ptr).intrinsic_range(n_bytes)?;
+        if let IntrinsicPointer::Stack { ptr, .. } = ptr {
+            if ptr.const_offset.is_some() {
+                ptr.intrinsic_range(n_bytes)?;
+            }
         }
         Ok(())
     }
@@ -2244,23 +2141,18 @@ impl<'ctx> Importer<'ctx> {
         n_bytes: usize,
     ) -> IResult<Bits> {
         match ptr {
-            IntrinsicPointer::Stack {
-                ptr: StackPtr::Const(ptr),
-                ptr_bits0,
-            } => {
+            IntrinsicPointer::Stack { ptr, ptr_bits0 } => {
                 let n_bits = n_bytes.checked_mul(8).ok_or_else(|| {
                     ImportError::Unsupported("memory intrinsic length is too large".into())
                 })?;
-                Ok(self.stack_load(fctx, *ptr_bits0, ptr.addr, self.byte_tid, n_bits))
-            }
-            IntrinsicPointer::Stack {
-                ptr: StackPtr::Symbolic { addr_bits, .. },
-                ptr_bits0,
-            } => {
-                let n_bits = n_bytes.checked_mul(8).ok_or_else(|| {
-                    ImportError::Unsupported("memory intrinsic length is too large".into())
-                })?;
-                Ok(self.stack_load_dynamic(fctx, *ptr_bits0, addr_bits, self.byte_tid, n_bits))
+                Ok(self.stack_load_dynamic(
+                    fctx,
+                    ptr.storage,
+                    *ptr_bits0,
+                    &ptr.addr_bits,
+                    self.byte_tid,
+                    n_bits,
+                ))
             }
             IntrinsicPointer::Global {
                 storage,
@@ -2279,16 +2171,9 @@ impl<'ctx> Importer<'ctx> {
         bytes: &Bits,
     ) -> IResult<()> {
         match ptr {
-            IntrinsicPointer::Stack {
-                ptr: StackPtr::Const(ptr),
-                ptr_bits0,
-            } => {
-                self.stack_store(fctx, *ptr_bits0, ptr.addr, bytes);
+            IntrinsicPointer::Stack { ptr, ptr_bits0 } => {
+                self.stack_store_dynamic(fctx, ptr.storage, *ptr_bits0, &ptr.addr_bits, bytes);
             }
-            IntrinsicPointer::Stack {
-                ptr: StackPtr::Symbolic { addr_bits, .. },
-                ptr_bits0,
-            } => self.stack_store_dynamic(fctx, *ptr_bits0, addr_bits, bytes),
             IntrinsicPointer::Global {
                 storage,
                 byte_offset,
@@ -2302,11 +2187,8 @@ impl<'ctx> Importer<'ctx> {
         Ok(())
     }
 
-    /// Bit-decompose a compile-time-constant `u64` (a `StorageId::ALLOCA`
-    /// address, *or* a global's constant byte offset — the encoding is
-    /// identical, just a plain unsigned integer), `PTR_BITS` wide, LSB
-    /// first. Mirrors `VaffleTarget::alloca`'s `addr_bits` construction
-    /// exactly.
+    /// Bit-decompose a compile-time-constant `u64` (a global's constant byte
+    /// offset), `PTR_BITS` wide, LSB first.
     fn stack_addr_bits(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
@@ -2318,110 +2200,217 @@ impl<'ctx> Importer<'ctx> {
             .collect()
     }
 
-    /// Read `n_bits` individual bits from `StorageId::ALLOCA` starting at
-    /// `base_slot`, one `StorageRead` per bit (matches `VaffleTarget::
-    /// ptr_load`'s per-bit granularity, but with a compile-time-constant
-    /// address per bit instead of a runtime-composed one, since this
-    /// importer only tracks compile-time-constant stack pointers).
-    /// `StorageId::ALLOCA`, not `StorageId::STACK` -- see that constant's
-    /// own doc comment for why sharing `STACK` is unsafe.
-    fn stack_load(
-        &mut self,
-        fctx: &mut FuncCtx<'ctx>,
-        ptr_bits0: ValueId,
-        base_slot: u64,
-        pointee_ty: TypeId,
-        n_bits: usize,
-    ) -> Bits {
-        let cur = fctx.current;
-        let mut bits = Vec::with_capacity(n_bits);
-        for i in 0..n_bits as u64 {
-            let addr = fctx.emit(
-                cur,
-                Value::Op(Stmt::Const(
-                    Constant {
-                        hi: 0,
-                        lo: (base_slot + i) as u128,
-                    },
-                    self.addr_tid,
-                )),
-            );
-            let bit = fctx.emit(
-                cur,
-                Value::Op(Stmt::StorageRead {
-                    storage: StorageId::ALLOCA,
-                    ty: self.bit_tid,
-                    addr,
-                }),
-            );
-            bits.push(bit);
-        }
-        // Bookkeeping marker (unused as an operand); the real read already
-        // happened above, matching `VaffleTarget::ptr_load`'s `_load_vid`.
-        fctx.emit(
-            cur,
-            Value::PtrLoad {
-                ptr: ptr_bits0,
-                pointee_ty,
-            },
-        );
-        bits
-    }
-
-    /// Write `val` to `StorageId::ALLOCA` starting at `base_slot`, one
-    /// `StorageWrite` per bit. See [`Self::stack_load`].
-    fn stack_store(
-        &mut self,
-        fctx: &mut FuncCtx<'ctx>,
-        ptr_bits0: ValueId,
-        base_slot: u64,
-        val: &Bits,
-    ) {
-        let cur = fctx.current;
-        for (i, &bit) in val.iter().enumerate() {
-            let addr = fctx.emit(
-                cur,
-                Value::Op(Stmt::Const(
-                    Constant {
-                        hi: 0,
-                        lo: (base_slot + i as u64) as u128,
-                    },
-                    self.addr_tid,
-                )),
-            );
-            fctx.emit(
-                cur,
-                Value::Op(Stmt::StorageWrite {
-                    storage: StorageId::ALLOCA,
-                    src: bit,
-                    ty: self.bit_tid,
-                    addr,
-                }),
-            );
-        }
-        let val_bits0 = val.first().copied().unwrap_or(ptr_bits0);
-        fctx.emit(
-            cur,
-            Value::PtrStore {
-                ptr: ptr_bits0,
-                val: val_bits0,
-            },
-        );
-    }
-
-    /// Bit-decompose a `StackPtr`'s current address into a `PTR_BITS`-wide
-    /// `Bits`, LSB first, regardless of whether it's a compile-time constant
-    /// (`StackPtr::Const`, via `stack_addr_bits`) or already
-    /// runtime-computed (`StackPtr::Symbolic`, returned as-is).
-    fn stack_ptr_addr_bits(
+    /// Project `src` into `n` bit values. `src` is the `StackAlloc` result.
+    fn explode_pointer(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
         block: BlockId,
-        ptr: &StackPtr,
+        src: ValueId,
     ) -> Bits {
-        match ptr {
-            StackPtr::Const(sp) => self.stack_addr_bits(fctx, block, sp.addr),
-            StackPtr::Symbolic { addr_bits, .. } => addr_bits.clone(),
+        (0..self.pointer_bits)
+            .map(|i| {
+                fctx.emit(
+                    block,
+                    Value::Op(Stmt::Shuffle {
+                        result_bits: vec![(i as u8, src)],
+                        ty: self.bit_tid,
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    /// `base + delta`, with `delta` a signed bit count in two's complement.
+    fn add_signed_delta(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        base: &Bits,
+        delta: i64,
+    ) -> Bits {
+        let mut c = Ctx {
+            fctx,
+            bit_tid: self.bit_tid,
+            block,
+        };
+        let delta_bits: Vec<ValueId> = (0..self.pointer_bits)
+            .map(|b| c.bc_const(((delta as u64) >> b) & 1 != 0))
+            .collect();
+        circuits::bc_add(&mut c, base, &delta_bits, false)
+    }
+
+    /// Tagged pointer value for one alloca site: low `global_addr_bits` of
+    /// the absolute bit address, then `GLOBAL_ID_BITS` of `storage`, tag 0.
+    fn encode_stack_ptr(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        storage: StorageId,
+        addr_bits: &Bits,
+    ) -> IResult<Bits> {
+        if storage.0 >= (1u32 << GLOBAL_ID_BITS) {
+            return Err(ImportError::Unsupported(
+                "too many storages for the pointer-value encoding".into(),
+            ));
+        }
+        let global_addr_bits = self.global_addr_bits();
+        let mut bits = Vec::with_capacity(self.pointer_bits);
+        bits.extend_from_slice(&addr_bits[..global_addr_bits]);
+        for b in 0..GLOBAL_ID_BITS {
+            bits.push(self.bc_const_at(fctx, block, (storage.0 >> b) & 1 != 0));
+        }
+        bits.push(self.bc_const_at(fctx, block, false));
+        Ok(bits)
+    }
+
+    /// Read each stack-pointer global this function bumps, at the start of
+    /// the entry block, and write those values back before every return and
+    /// tail call. Unreachable fallback returns do not restore.
+    fn install_sp_reverts(&mut self, fctx: &mut FuncCtx<'ctx>) {
+        if fctx.sp_globals.is_empty() {
+            return;
+        }
+        let sps = fctx.sp_globals.clone();
+        let entry = BlockId(0);
+        let before = fctx.stmts[entry.0].len();
+        let mut saved = Vec::with_capacity(sps.len());
+        for sp in sps {
+            let addr = fctx.emit(
+                entry,
+                Value::Op(Stmt::Const(
+                    Constant { hi: 0, lo: 0 },
+                    self.addr_tid,
+                )),
+            );
+            let val = fctx.emit(
+                entry,
+                Value::Op(Stmt::StorageRead {
+                    storage: sp,
+                    ty: self.addr_tid,
+                    addr,
+                }),
+            );
+            saved.push((sp, val));
+        }
+        let stmts = &mut fctx.stmts[entry.0];
+        let mut reads = stmts.split_off(before);
+        reads.append(stmts);
+        *stmts = reads;
+
+        let exits: Vec<usize> = fctx
+            .terminators
+            .iter()
+            .enumerate()
+            .filter_map(|(i, term)| match term {
+                Some(Terminator::Return { .. }) | Some(Terminator::ReturnCall { .. }) => Some(i),
+                _ => None,
+            })
+            .collect();
+        for i in exits {
+            for &(sp, val) in &saved {
+                let addr = fctx.emit(
+                    BlockId(i),
+                    Value::Op(Stmt::Const(
+                        Constant { hi: 0, lo: 0 },
+                        self.addr_tid,
+                    )),
+                );
+                fctx.emit(
+                    BlockId(i),
+                    Value::Op(Stmt::StorageWrite {
+                        storage: sp,
+                        src: val,
+                        ty: self.addr_tid,
+                        addr,
+                    }),
+                );
+            }
+        }
+    }
+
+    /// Inline `bc_*`, or intern one typed helper and call it.
+    fn alu(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        op: HelperOp,
+        operands: &[Bits],
+    ) -> Bits {
+        if self.helper_mode != CircuitHelperMode::Extract {
+            return self.alu_inline(fctx, block, op, operands);
+        }
+        let widths: Vec<usize> = operands.iter().map(|bits| bits.len()).collect();
+        let func = intern_circuit_helper(
+            &mut self.types,
+            &mut self.sigs,
+            &mut self.funcs,
+            &mut self.helper_cache,
+            op,
+            &widths,
+        );
+        let result_width = helper_result_width(op, &widths);
+        let args: Vec<ValueId> = operands
+            .iter()
+            .map(|bits| self.merge_operand(fctx, block, bits))
+            .collect();
+        let call = fctx.emit(block, Value::Call { func, args });
+        (0..result_width)
+            .map(|i| fctx.emit(block, Value::Output { value: call, idx: i }))
+            .collect()
+    }
+
+    fn merge_operand(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        bits: &Bits,
+    ) -> ValueId {
+        if bits.len() <= 1 {
+            return bits[0];
+        }
+        let ty = width_type(&mut self.types, bits.len());
+        fctx.emit(
+            block,
+            Value::Op(Stmt::Merge {
+                parts: bits.to_vec(),
+                ty,
+            }),
+        )
+    }
+
+    fn alu_inline(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        op: HelperOp,
+        operands: &[Bits],
+    ) -> Bits {
+        let mut c = Ctx {
+            fctx,
+            bit_tid: self.bit_tid,
+            block,
+        };
+        match op {
+            HelperOp::Add => circuits::bc_add(&mut c, &operands[0], &operands[1], false),
+            HelperOp::Sub => circuits::bc_sub(&mut c, &operands[0], &operands[1]),
+            HelperOp::Mul => circuits::bc_mul(&mut c, &operands[0], &operands[1]),
+            HelperOp::UDiv => circuits::bc_udiv(&mut c, &operands[0], &operands[1]),
+            HelperOp::SDiv => circuits::bc_sdiv(&mut c, &operands[0], &operands[1]),
+            HelperOp::URem => circuits::bc_urem(&mut c, &operands[0], &operands[1]),
+            HelperOp::SRem => circuits::bc_srem(&mut c, &operands[0], &operands[1]),
+            HelperOp::Shl => circuits::bc_shl(&mut c, &operands[0], &operands[1]),
+            HelperOp::LShr => circuits::bc_lshr(&mut c, &operands[0], &operands[1]),
+            HelperOp::AShr => circuits::bc_ashr(&mut c, &operands[0], &operands[1]),
+            HelperOp::And => circuits::bc_and_vec(&mut c, &operands[0], &operands[1]),
+            HelperOp::Or => circuits::bc_or_vec(&mut c, &operands[0], &operands[1]),
+            HelperOp::Xor => circuits::bc_xor_vec(&mut c, &operands[0], &operands[1]),
+            HelperOp::Not => circuits::bc_not_vec(&mut c, &operands[0]),
+            HelperOp::Eq => vec![circuits::bc_eq(&mut c, &operands[0], &operands[1])],
+            HelperOp::Ne => vec![circuits::bc_ne(&mut c, &operands[0], &operands[1])],
+            HelperOp::Ult => vec![circuits::bc_ult(&mut c, &operands[0], &operands[1])],
+            HelperOp::Ule => vec![circuits::bc_ule(&mut c, &operands[0], &operands[1])],
+            HelperOp::Slt => vec![circuits::bc_slt(&mut c, &operands[0], &operands[1])],
+            HelperOp::Sle => vec![circuits::bc_sle(&mut c, &operands[0], &operands[1])],
         }
     }
 
@@ -2446,13 +2435,10 @@ impl<'ctx> Importer<'ctx> {
     /// constant-index GEP constant expression, or via a previously-tracked
     /// `GlobalPtr`, constant or already-dynamic offset alike).
     ///
-    /// Bit 31 (MSB) is the provenance tag: `0` = stack (bits `[30:0]` are
-    /// the ALLOCA-local address, matching `stack_ptr_addr_bits` exactly --
-    /// `Alloca`'s own bump allocator refuses to ever set this bit, see its
-    /// `next_stack_slot` check); `1` = global (bits `[GLOBAL_ADDR_BITS+
-    /// GLOBAL_ID_BITS-1 : GLOBAL_ADDR_BITS]` are this global's own
-    /// `StorageId` value, bits `[GLOBAL_ADDR_BITS-1:0]` are the byte offset
-    /// within it).
+    /// The MSB is the provenance tag: `0` = stack (low `global_addr_bits`
+    /// are the absolute bit offset, and the next `GLOBAL_ID_BITS` are that
+    /// alloca's data `StorageId`); `1` = global (the same split, with the
+    /// global's `StorageId` and a byte offset).
     ///
     /// This is purely a *value* representation: it doesn't change how
     /// `Load`/`Store` resolve a pointer (still `stack_slot_of`/
@@ -2484,7 +2470,7 @@ impl<'ctx> Importer<'ctx> {
             return Ok(self.null_ptr_bits(fctx, block));
         }
         if let Some(sp) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
-            return Ok(self.stack_ptr_addr_bits(fctx, block, &sp));
+            return self.encode_stack_ptr(fctx, block, sp.storage, &sp.addr_bits);
         }
         let gp = self.resolve_global_ptr(fctx, ptr)?;
         let storage = match &gp {
@@ -2559,13 +2545,11 @@ impl<'ctx> Importer<'ctx> {
         )
     }
 
-    /// Like `stack_load`, but the base address is a runtime-computed `Bits`
-    /// (`StackPtr::Symbolic`) rather than a compile-time-constant slot: each
-    /// of the `n_bits` individual bit reads needs its own `addr = base + i`,
-    /// via [`Self::dynamic_addr`].
+    /// Read `n_bits` from `storage` at `base_addr_bits`, one bit per address.
     fn stack_load_dynamic(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
+        storage: StorageId,
         ptr_bits0: ValueId,
         base_addr_bits: &Bits,
         pointee_ty: TypeId,
@@ -2578,7 +2562,7 @@ impl<'ctx> Importer<'ctx> {
             let bit = fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageRead {
-                    storage: StorageId::ALLOCA,
+                    storage,
                     ty: self.bit_tid,
                     addr,
                 }),
@@ -2595,11 +2579,11 @@ impl<'ctx> Importer<'ctx> {
         bits
     }
 
-    /// Write `val` to `StorageId::ALLOCA` at a runtime-computed base
-    /// address. See [`Self::stack_load_dynamic`].
+    /// Write `val` to `storage` at `base_addr_bits`, one bit per address.
     fn stack_store_dynamic(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
+        storage: StorageId,
         ptr_bits0: ValueId,
         base_addr_bits: &Bits,
         val: &Bits,
@@ -2610,7 +2594,7 @@ impl<'ctx> Importer<'ctx> {
             fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageWrite {
-                    storage: StorageId::ALLOCA,
+                    storage,
                     src: bit,
                     ty: self.bit_tid,
                     addr,
@@ -2797,14 +2781,18 @@ impl<'ctx> Importer<'ctx> {
         }
     }
 
-    /// The closed candidate set every runtime pointer dispatch considers:
-    /// every `StorageId` `register_all_globals` (or any later lazy
-    /// `storage_for` call) has handed out to a global so far. Always
-    /// complete by the time any function body is walked, since
-    /// `import_module` registers every module global up front.
+    /// Byte-addressed globals. Per-alloca data stacks and their stack-pointer
+    /// cells are allocated from the same counter and are not globals.
     fn dispatch_candidates(&self) -> IResult<Vec<StorageId>> {
+        let skip: HashSet<StorageId> = self
+            .alloca_data
+            .iter()
+            .copied()
+            .chain(self.sp_globals.iter().copied())
+            .collect();
         let candidates: Vec<StorageId> = (GLOBAL_STORAGE_BASE..self.storage_alloc.next)
             .map(StorageId)
+            .filter(|id| !skip.contains(id))
             .collect();
         if candidates.len() > MAX_DISPATCH_CANDIDATES {
             return Err(ImportError::Unsupported(format!(
@@ -2816,20 +2804,16 @@ impl<'ctx> Importer<'ctx> {
         Ok(candidates)
     }
 
-    /// Per-candidate `matched` flags for `ptr_bits` against `candidates`:
-    /// `tag_bit AND (id_bits == candidate's StorageId)` — `false` whenever
-    /// `tag_bit` is 0 (a stack pointer), which is exactly what lets
-    /// `dispatch_read` use the stack read as a bare default with no
-    /// separate `NOT tag_bit` case of its own.
-    fn dispatch_matches(
+    /// Per-candidate `gate AND (id_bits == candidate's StorageId)`.
+    fn dispatch_id_matches(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
         block: BlockId,
         ptr_bits: &Bits,
         candidates: &[StorageId],
+        gate: ValueId,
     ) -> Vec<ValueId> {
         let global_addr_bits = self.global_addr_bits();
-        let tag_bit = ptr_bits[self.pointer_bits - 1];
         let id_bits = &ptr_bits[global_addr_bits..global_addr_bits + GLOBAL_ID_BITS];
         let mut c = Ctx {
             fctx,
@@ -2843,9 +2827,21 @@ impl<'ctx> Importer<'ctx> {
                     .map(|b| c.bc_const((sid.0 >> b) & 1 != 0))
                     .collect();
                 let id_eq = circuits::bc_eq(&mut c, id_bits, &id_const);
-                c.bc_and(tag_bit, id_eq)
+                c.bc_and(gate, id_eq)
             })
             .collect()
+    }
+
+    /// Global candidates: tag bit AND storage-id equality.
+    fn dispatch_matches(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        ptr_bits: &Bits,
+        candidates: &[StorageId],
+    ) -> Vec<ValueId> {
+        let tag_bit = ptr_bits[self.pointer_bits - 1];
+        self.dispatch_id_matches(fctx, block, ptr_bits, candidates, tag_bit)
     }
 
     /// Zero-extend `ptr_bits`'s low `GLOBAL_ADDR_BITS` (the ADDR sub-field
@@ -2868,8 +2864,8 @@ impl<'ctx> Importer<'ctx> {
     /// `stack_slot_of` nor `global_ptr_of`/`storage_for_with_offset` could
     /// pin it down -- e.g. a pointer function parameter, or a
     /// `phi`/`select`-merged value whose tag isn't a compile-time
-    /// constant). Reads *every* candidate in the closed set (the stack,
-    /// `StorageId::ALLOCA`, plus every module global) and muxes the one
+    /// constant). Reads every per-alloca data stack (tag 0, bit address) and
+    /// every module global (tag 1, byte address) and muxes the one
     /// `ptr_bits` actually names, decoding `ptr_bits` per
     /// `ptr_value_bits`'s own tag+ID+ADDR encoding -- the uniform encoding
     /// every pointer *value* this importer produces already uses (see
@@ -2887,16 +2883,10 @@ impl<'ctx> Importer<'ctx> {
         let n_bits = n_bytes
             .checked_mul(8)
             .ok_or_else(|| ImportError::Unsupported("dispatch read length too large".into()))?;
+        let allocas = self.alloca_data.clone();
         let candidates = self.dispatch_candidates()?;
         let cur = fctx.current;
-        let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
-        let global_addr_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
-
-        // The stack candidate is selected only for tag = 0. An unmatched
-        // tagged-global pattern (LLVM `null` uses ID 0, while real globals
-        // begin at `GLOBAL_STORAGE_BASE`) must read as zero rather than
-        // accidentally falling through to stack address zero.
-        let stack = self.stack_load_dynamic(fctx, ptr_bits[0], ptr_bits, pointee_ty, n_bits);
+        let offset_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
         let tag_bit = ptr_bits[self.pointer_bits - 1];
         let not_tag = {
             let mut c = Ctx {
@@ -2906,34 +2896,33 @@ impl<'ctx> Importer<'ctx> {
             };
             c.bc_not(tag_bit)
         };
+        let stack_matches =
+            self.dispatch_id_matches(fctx, cur, ptr_bits, &allocas, not_tag);
         let zero = self.bc_const_at(fctx, cur, false);
-        let mut result: Bits = {
-            let mut c = Ctx {
+        let mut result = vec![zero; n_bits];
+        for (candidate_idx, &sid) in allocas.iter().enumerate() {
+            let loaded = self.stack_load_dynamic(
                 fctx,
-                bit_tid: self.bit_tid,
-                block: cur,
-            };
-            stack
-                .iter()
-                .map(|bit| c.bc_select(not_tag, *bit, zero))
-                .collect()
-        };
+                sid,
+                ptr_bits[0],
+                &offset_bits,
+                pointee_ty,
+                n_bits,
+            );
+            result = mux_bits(self, fctx, cur, stack_matches[candidate_idx], &loaded, &result);
+        }
 
+        let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
         for (candidate_idx, &sid) in candidates.iter().enumerate() {
-            let global_bits = self.mem_load_dynamic(fctx, sid, &global_addr_bits, n_bytes);
-            let matched = matches[candidate_idx];
-            let mut new_result = Vec::with_capacity(n_bits);
-            {
-                let mut c = Ctx {
-                    fctx,
-                    bit_tid: self.bit_tid,
-                    block: cur,
-                };
-                for i in 0..n_bits {
-                    new_result.push(c.bc_select(matched, global_bits[i], result[i]));
-                }
-            }
-            result = new_result;
+            let global_bits = self.mem_load_dynamic(fctx, sid, &offset_bits, n_bytes);
+            result = mux_bits(
+                self,
+                fctx,
+                cur,
+                matches[candidate_idx],
+                &global_bits,
+                &result,
+            );
         }
         Ok(result)
     }
@@ -2955,10 +2944,10 @@ impl<'ctx> Importer<'ctx> {
     ) -> IResult<()> {
         let n_bits = val.len();
         let n_bytes = n_bits.div_ceil(8);
+        let allocas = self.alloca_data.clone();
         let candidates = self.dispatch_candidates()?;
         let cur = fctx.current;
-        let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
-        let global_addr_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
+        let offset_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
         let tag_bit = ptr_bits[self.pointer_bits - 1];
         let not_tag = {
             let mut c = Ctx {
@@ -2968,39 +2957,21 @@ impl<'ctx> Importer<'ctx> {
             };
             c.bc_not(tag_bit)
         };
-
-        // Stack candidate.
+        let stack_matches =
+            self.dispatch_id_matches(fctx, cur, ptr_bits, &allocas, not_tag);
         let bit_tid = self.bit_tid;
-        let stack_old = self.stack_load_dynamic(fctx, ptr_bits[0], ptr_bits, bit_tid, n_bits);
-        let mut stack_new = Vec::with_capacity(n_bits);
-        {
-            let mut c = Ctx {
-                fctx,
-                bit_tid: self.bit_tid,
-                block: cur,
-            };
-            for i in 0..n_bits {
-                stack_new.push(c.bc_select(not_tag, val[i], stack_old[i]));
-            }
+        for (candidate_idx, &sid) in allocas.iter().enumerate() {
+            let old =
+                self.stack_load_dynamic(fctx, sid, ptr_bits[0], &offset_bits, bit_tid, n_bits);
+            let new_val = mux_bits(self, fctx, cur, stack_matches[candidate_idx], val, &old);
+            self.stack_store_dynamic(fctx, sid, ptr_bits[0], &offset_bits, &new_val);
         }
-        self.stack_store_dynamic(fctx, ptr_bits[0], ptr_bits, &stack_new);
 
-        // Every global candidate.
+        let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
         for (candidate_idx, &sid) in candidates.iter().enumerate() {
-            let old = self.mem_load_dynamic(fctx, sid, &global_addr_bits, n_bytes);
-            let matched = matches[candidate_idx];
-            let mut new_val = Vec::with_capacity(n_bits);
-            {
-                let mut c = Ctx {
-                    fctx,
-                    bit_tid: self.bit_tid,
-                    block: cur,
-                };
-                for i in 0..n_bits {
-                    new_val.push(c.bc_select(matched, val[i], old[i]));
-                }
-            }
-            self.mem_store_dynamic(fctx, sid, &global_addr_bits, &new_val, n_bytes);
+            let old = self.mem_load_dynamic(fctx, sid, &offset_bits, n_bytes);
+            let new_val = mux_bits(self, fctx, cur, matches[candidate_idx], val, &old);
+            self.mem_store_dynamic(fctx, sid, &offset_bits, &new_val, n_bytes);
         }
         Ok(())
     }
@@ -3407,6 +3378,26 @@ fn overflow_integer_operand<'ctx>(
     }
 }
 
+fn mux_bits<'ctx>(
+    importer: &mut Importer<'ctx>,
+    fctx: &mut FuncCtx<'ctx>,
+    block: BlockId,
+    cond: ValueId,
+    taken: &[ValueId],
+    fallback: &[ValueId],
+) -> Bits {
+    let mut c = Ctx {
+        fctx,
+        bit_tid: importer.bit_tid,
+        block,
+    };
+    taken
+        .iter()
+        .zip(fallback.iter())
+        .map(|(&bit, &keep)| c.bc_select(cond, bit, keep))
+        .collect()
+}
+
 fn intrinsic_ranges_overlap(
     dest: &IntrinsicPointer,
     src: &IntrinsicPointer,
@@ -3414,19 +3405,14 @@ fn intrinsic_ranges_overlap(
 ) -> IResult<bool> {
     match (dest, src) {
         (
-            IntrinsicPointer::Stack {
-                ptr: StackPtr::Const(dest),
-                ..
-            },
-            IntrinsicPointer::Stack {
-                ptr: StackPtr::Const(src),
-                ..
-            },
-        ) if dest.allocation_base == src.allocation_base
-            && dest.allocation_bits == src.allocation_bits =>
+            IntrinsicPointer::Stack { ptr: dest, .. },
+            IntrinsicPointer::Stack { ptr: src, .. },
+        ) if dest.storage == src.storage
+            && dest.const_offset.is_some()
+            && src.const_offset.is_some() =>
         {
-            let (dest_start, dest_end) = (*dest).intrinsic_range(n_bytes)?;
-            let (src_start, src_end) = (*src).intrinsic_range(n_bytes)?;
+            let (dest_start, dest_end) = dest.intrinsic_range(n_bytes)?;
+            let (src_start, src_end) = src.intrinsic_range(n_bytes)?;
             Ok(dest_start < src_end && src_start < dest_end)
         }
         (
@@ -3489,22 +3475,13 @@ struct FuncCtx<'ctx> {
     /// cache and arbitrary aggregate handling remains unsupported.
     aggregate_fields: HashMap<AnyValueEnum<'ctx>, Vec<Bits>>,
     current: BlockId,
-    /// Per-function bump allocator for `StorageId::ALLOCA`, in *bits*, zero-
-    /// based (matches `VaffleTarget`'s own `next_stack_slot`/`PTR_BITS`
-    /// convention) — not bytes like the global `storage_for`/`mem_load`/
-    /// `mem_store` path, which is a distinct storage identity and
-    /// addressing convention. These are *local* offsets within this
-    /// function's own alloca region: `volar-vaffle-target/src/
-    /// lower_to_ir.rs` rebases each one onto the real runtime frame
-    /// (`sp_bits + local_offset`) at lowering time, so this bump allocator
-    /// never needs to know — or reserve headroom against — the calling
-    /// convention's own frame layout.
-    next_stack_slot: u64,
-    /// Pointer-typed LLVM values (alloca results, or a constant-index GEP
-    /// off one) that are tracked as `StorageId::ALLOCA` addresses. This is
-    /// the sole source of truth for "is this a stack pointer" — `cache`
-    /// alone is not enough, since pointer-typed function *parameters* are
-    /// also cached there as plain (meaningless-as-an-address) bits.
+    /// Stack-pointer globals this function's `alloca` sites bump. Exit
+    /// restores the values read from these cells at entry.
+    sp_globals: Vec<StorageId>,
+    /// Pointer-typed LLVM values (alloca results, or a GEP off one) whose
+    /// data stack and absolute bit address are known. `cache` holds the
+    /// tagged encoding used when the pointer escapes; this map holds the
+    /// full address used by a known-provenance load or store.
     stack_slot_of: HashMap<AnyValueEnum<'ctx>, StackPtr>,
     /// Pointer-typed LLVM values that are the result of a constant-index
     /// `getelementptr` *instruction* off a global (directly, or chained off
@@ -3524,7 +3501,7 @@ impl<'ctx> FuncCtx<'ctx> {
             cache: HashMap::new(),
             aggregate_fields: HashMap::new(),
             current: BlockId(0),
-            next_stack_slot: 0,
+            sp_globals: Vec::new(),
             stack_slot_of: HashMap::new(),
             global_ptr_of: HashMap::new(),
         }

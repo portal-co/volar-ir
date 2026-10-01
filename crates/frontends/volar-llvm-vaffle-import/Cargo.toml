@@ -11,6 +11,7 @@ vaffle = { workspace = true }
 volar-ir-common = { workspace = true }
 volar-ir-opt = { workspace = true }
 volar-lir = { workspace = true }
+volar-vaffle-target = { workspace = true }
 inkwell = { workspace = true }
 volar-llvm-constchain = { git = "https://github.com/portal-co/llvm-bridge.git" }
 

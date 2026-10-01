@@ -1,7 +1,9 @@
 #![no_std]
 
 use alloc::{string::String, vec::Vec};
-use volar_ir_common::{ActionDecl, Node, OracleDecl, PreInitSegment, Stmt, TypeId, TypeTable};
+use volar_ir_common::{
+    ActionDecl, Node, OracleDecl, PreInitSegment, Stmt, StorageId, TypeId, TypeTable,
+};
 
 extern crate alloc;
 
@@ -246,17 +248,22 @@ pub enum Value<V = ValueId> {
     /// Type annotations in the inner [`Stmt`] reference the same
     /// [`Module::types`] table as the rest of the module.
     Op(Stmt<V>),
-    /// Allocate `count` elements of `elem_ty` on the function's stack frame.
+    /// Allocate `count` elements of `elem_ty` on this site's own data stack.
     ///
-    /// Returns a pointer (address bits) into `StorageId::STACK`.  The
-    /// allocated region is valid for the lifetime of the enclosing function
-    /// call.  `base_slot` is the compile-time slot offset assigned by the
-    /// target when the allocation was emitted.
+    /// The result is the pointer: the virtual stack pointer in `sp` before
+    /// this allocation grows it. `storage` is bit-addressed data. `sp` is a
+    /// separate global holding one pointer-width cell at address 0. Lowering
+    /// reads that cell, adds `count * bit_width(elem_ty)`, and writes the
+    /// sum back. The producer saves `sp` on function entry and stores that
+    /// saved value back on every function exit, so a call cannot change a
+    /// pointer that was already returned.
     StackAlloc {
         elem_ty: TypeId,
         count: usize,
-        /// The first stack-storage slot assigned to this allocation.
-        base_slot: u64,
+        /// Bit-addressed data stack for this allocation site.
+        storage: StorageId,
+        /// Virtual stack-pointer global (pointer-width cell at address 0).
+        sp: StorageId,
     },
     /// Load a value through a stack pointer.
     ///
@@ -330,11 +337,13 @@ impl<V> Value<V> {
             Value::StackAlloc {
                 elem_ty,
                 count,
-                base_slot,
+                storage,
+                sp,
             } => Value::StackAlloc {
                 elem_ty,
                 count,
-                base_slot,
+                storage,
+                sp,
             },
             Value::PtrLoad { ptr, pointee_ty } => Value::PtrLoad {
                 ptr: go(ctx, ptr)?,
