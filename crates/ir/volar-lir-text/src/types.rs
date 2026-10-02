@@ -55,8 +55,6 @@ fn write_native_type(nt: &NativeType, w: &mut dyn fmt::Write) -> fmt::Result {
         NativeType::_64 => w.write_str("u64"),
         NativeType::_128 => w.write_str("u128"),
         NativeType::_256 => w.write_str("u256"),
-        NativeType::AES8 => w.write_str("aes8"),
-        NativeType::Galois64 => w.write_str("galois64"),
         // Catch-all for any future variants added under #[non_exhaustive]
         _ => w.write_str("native:unknown"),
     }

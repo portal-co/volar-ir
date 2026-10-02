@@ -9,8 +9,8 @@
 //! - `Dyn` jump targets are resolved by treating the variable as a 32-bit
 //!   block index (LSB-first bit vector → u64 → block index).
 //! - `Block` types are treated as 32-bit integers (block IDs).
-//! - `_256`, `AES8`, and `Galois64` types are supported by width only (no
-//!   field-specific semantics); the generator avoids them.
+//! - `_256` is supported by width. Extension fields use the type-directed
+//!   `Poly` product.
 
 use std::collections::BTreeMap;
 
@@ -267,6 +267,10 @@ fn eval_ir_block(
     );
 
     let mut vars: BTreeMap<u32, IrValue> = BTreeMap::new();
+    let mut var_tys: BTreeMap<u32, TypeId> = BTreeMap::new();
+    for (i, &ty) in block.params.iter().enumerate() {
+        var_tys.insert(i as u32, ty);
+    }
     // Side-table for OracleCall aggregates: stmt_var_id → Vec<IrValue> (one per output).
     let mut oracle_agg: BTreeMap<u32, Vec<IrValue>> = BTreeMap::new();
 
@@ -283,10 +287,14 @@ fn eval_ir_block(
             types,
             oracles,
             &vars,
+            &var_tys,
             &mut oracle_agg,
             storage,
         );
         vars.insert(id, val);
+        if let Some(ty) = volar_ir_opt::common::stmt_output_type(&node.kind) {
+            var_tys.insert(id, ty);
+        }
     }
 
     let result = match &block.terminator {
@@ -378,6 +386,7 @@ fn eval_ir_stmt(
     types: &IRTypes,
     oracles: &[OracleDecl],
     vars: &BTreeMap<u32, IrValue>,
+    var_tys: &BTreeMap<u32, TypeId>,
     oracle_agg: &mut BTreeMap<u32, Vec<IrValue>>,
     storage: &mut StorageMap,
 ) -> IrValue {
@@ -406,8 +415,17 @@ fn eval_ir_stmt(
             // if that var happens to be the scalar selector, this silently
             // produced a width-1 result even when `ty` (and every real
             // consumer of this statement, e.g. the weaver) says otherwise.
-            let width = bit_width(*ty, types);
-            eval_poly(coeffs, constant, width, vars)
+            if volar_ir_common::mul_is_idempotent(*ty, types) {
+                let width = bit_width(*ty, types);
+                eval_poly(coeffs, constant, width, vars)
+            } else {
+                eval_typed_poly(*ty, coeffs, constant, types, |var| {
+                    let factor_ty = var_tys.get(&var.0).copied().unwrap_or_else(|| {
+                        panic!("eval_ir: factor v{} has no type", var.0)
+                    });
+                    (factor_ty, get_ir(vars, var))
+                })
+            }
         }
         Stmt::Rol { src, ty, n } => {
             let val = get_ir(vars, src);
@@ -541,6 +559,9 @@ pub fn bit_width(ty_id: TypeId, types: &IRTypes) -> usize {
         IrType::Tuple(elems) => elems.iter().map(|&e| bit_width(e, types)).sum(),
         IrType::Block { .. } => 32,
         IrType::Func { .. } => 32,
+        IrType::ExtField { wrapped, degree, .. } => {
+            *degree as usize * bit_width(*wrapped, types)
+        }
         _ => panic!(
             "bit_width: unhandled IrType variant — add bit-width calculation for this variant"
         ),
@@ -551,10 +572,10 @@ pub fn bit_width(ty_id: TypeId, types: &IRTypes) -> usize {
 pub fn primitive_width(ty: Type) -> usize {
     match ty {
         Type::Bit => 1,
-        Type::_8 | Type::AES8 => 8,
+        Type::_8 => 8,
         Type::_16 => 16,
         Type::_32 => 32,
-        Type::_64 | Type::Galois64 => 64,
+        Type::_64 => 64,
         Type::_128 => 128,
         Type::_256 => 256,
         _ => panic!("primitive_width: unknown Type variant"),
@@ -659,6 +680,39 @@ pub fn eval_poly(
         result[k] = acc;
     }
     result
+}
+
+/// Evaluate one monomial product in `ty` and XOR it into the constant bits.
+///
+/// Used for extension fields and vectors that contain one, where the product
+/// is not a per-bit AND.
+pub fn eval_typed_poly<V>(
+    ty: TypeId,
+    coeffs: &PolyCoeffs<V>,
+    constant: &Constant,
+    types: &volar_ir_common::TypeTable,
+    mut factor: impl FnMut(&V) -> (TypeId, IrValue),
+) -> IrValue {
+    let width = bit_width(ty, types);
+    let mut acc = const_to_bits(constant, width);
+    let mut ring = volar_ir_common::BoolRing;
+    for (monomial, coeff) in coeffs {
+        if coeff & 1 == 0 {
+            continue;
+        }
+        let owned: Vec<(TypeId, IrValue)> = monomial.iter().map(&mut factor).collect();
+        let refs: Vec<(TypeId, &[bool])> = owned
+            .iter()
+            .map(|(factor_ty, bits)| (*factor_ty, bits.as_slice()))
+            .collect();
+        let product = volar_ir_common::monomial_product(ty, &refs, types, &mut ring);
+        for (bit, value) in product.into_iter().enumerate() {
+            if bit < acc.len() {
+                acc[bit] ^= value;
+            }
+        }
+    }
+    acc
 }
 
 /// Look up a variable by ID, panicking with a clear message if missing.
@@ -930,6 +984,174 @@ mod tests {
         let c = Constant { hi: 0, lo: 0b1010 };
         let bits = const_to_bits(&c, 4);
         assert_eq!(bits, vec![false, true, false, true]); // LSB first: bit0=0, bit1=1, bit2=0, bit3=1
+    }
+
+    fn field_product_matches_boolar(blocks: &IRBlocks<()>, types: &IRTypes, inputs: &[IrValue]) {
+        let ir = eval_ir(blocks, types, inputs).expect("ir eval");
+        let lowered = volar_ir_passes::lower_ir_to_boolar(blocks, types);
+        let flat: Vec<bool> = inputs.iter().flat_map(|value| value.iter().copied()).collect();
+        let boolar = crate::interpreter::biir::eval_biir(&lowered, &flat).expect("boolar eval");
+        let ir_flat: Vec<bool> = ir.into_iter().flatten().collect();
+        assert_eq!(ir_flat, boolar);
+    }
+
+    fn u8_bits(value: u8) -> IrValue {
+        (0..8).map(|bit| (value >> bit) & 1 == 1).collect()
+    }
+
+    fn gf8_mul(mut left: u8, right: u8) -> u8 {
+        let mut acc = 0u8;
+        for bit in 0..8 {
+            if (right >> bit) & 1 == 1 {
+                acc ^= left;
+            }
+            let overflow = left >> 7;
+            left <<= 1;
+            if overflow == 1 {
+                left ^= 0x1b;
+            }
+        }
+        acc
+    }
+
+    fn gf64_mul(mut left: u64, right: u64) -> u64 {
+        let mut acc = 0u64;
+        for bit in 0..64 {
+            if (right >> bit) & 1 == 1 {
+                acc ^= left;
+            }
+            let overflow = left >> 63;
+            left <<= 1;
+            if overflow == 1 {
+                left ^= 0x1b;
+            }
+        }
+        acc
+    }
+
+    #[test]
+    fn aes_poly_matches_fips_197_and_boolar() {
+        let mut types = TypeTable::new();
+        let field = types.aes8();
+        let mut coeffs = PolyCoeffs::new();
+        coeffs.insert(vec![IRVarId(0), IRVarId(1)], 1);
+        let blocks = single_block_return(
+            vec![field, field],
+            vec![Stmt::Poly {
+                ty: field,
+                coeffs,
+                constant: zero_const(),
+            }],
+            vec![IRVarId(2)],
+        );
+        let inputs = [u8_bits(0x57), u8_bits(0x13)];
+        let result = eval_ir(&blocks, &types, &inputs).unwrap();
+        assert_eq!(bits_to_u64(&result[0]) as u8, gf8_mul(0x57, 0x13));
+        assert_eq!(gf8_mul(0x57, 0x13), 0xfe);
+        field_product_matches_boolar(&blocks, &types, &inputs);
+    }
+
+    #[test]
+    fn extfield_square_stays_and_matches_boolar() {
+        let mut types = TypeTable::new();
+        let field = types.aes8();
+        let mut coeffs = PolyCoeffs::new();
+        coeffs.insert(vec![IRVarId(0), IRVarId(0)], 1);
+        let blocks = single_block_return(
+            vec![field],
+            vec![Stmt::Poly {
+                ty: field,
+                coeffs,
+                constant: zero_const(),
+            }],
+            vec![IRVarId(1)],
+        );
+        let inputs = [u8_bits(0x57)];
+        let result = eval_ir(&blocks, &types, &inputs).unwrap();
+        assert_ne!(bits_to_u64(&result[0]) as u8, 0x57);
+        assert_eq!(bits_to_u64(&result[0]) as u8, gf8_mul(0x57, 0x57));
+        field_product_matches_boolar(&blocks, &types, &inputs);
+    }
+
+    #[test]
+    fn galois64_poly_matches_schoolbook_and_boolar() {
+        let mut types = TypeTable::new();
+        let field = types.galois64();
+        let mut coeffs = PolyCoeffs::new();
+        coeffs.insert(vec![IRVarId(0), IRVarId(1)], 1);
+        let blocks = single_block_return(
+            vec![field, field],
+            vec![Stmt::Poly {
+                ty: field,
+                coeffs,
+                constant: zero_const(),
+            }],
+            vec![IRVarId(2)],
+        );
+        let left = 0x0123_4567_89ab_cdefu64;
+        let right = 0xfedc_ba98_7654_3210u64;
+        let inputs = [
+            (0..64).map(|bit| (left >> bit) & 1 == 1).collect(),
+            (0..64).map(|bit| (right >> bit) & 1 == 1).collect(),
+        ];
+        let result = eval_ir(&blocks, &types, &inputs).unwrap();
+        assert_eq!(bits_to_u64(&result[0]), gf64_mul(left, right));
+        field_product_matches_boolar(&blocks, &types, &inputs);
+    }
+
+    #[test]
+    fn pack_then_unpack_recovers_aes_coefficients() {
+        let mut types = TypeTable::new();
+        let bit = types.bit();
+        let field = types.aes8();
+        let parts: Vec<IRVarId> = (0..8).map(IRVarId).collect();
+        let mut stmts = vec![Stmt::Merge {
+            parts: parts.clone(),
+            ty: field,
+        }];
+        let mut returns = Vec::new();
+        for index in 0..8u8 {
+            stmts.push(Stmt::Shuffle {
+                result_bits: vec![(index, IRVarId(8))],
+                ty: bit,
+            });
+            returns.push(IRVarId(9 + index as u32));
+        }
+        let blocks = single_block_return(vec![bit; 8], stmts, returns);
+        let inputs: Vec<IrValue> = u8_bits(0x57).into_iter().map(|bit| vec![bit]).collect();
+        let result = eval_ir(&blocks, &types, &inputs).unwrap();
+        let packed = result
+            .iter()
+            .enumerate()
+            .fold(0u8, |acc, (bit, value)| acc | ((value[0] as u8) << bit));
+        assert_eq!(packed, 0x57);
+        field_product_matches_boolar(&blocks, &types, &inputs);
+    }
+
+    #[test]
+    fn vec_of_aes8_maps_lanes_and_spreads_a_scalar() {
+        let mut types = TypeTable::new();
+        let field = types.aes8();
+        let lanes = types.intern(IrType::Vec(2, field));
+        let mut coeffs = PolyCoeffs::new();
+        coeffs.insert(vec![IRVarId(0), IRVarId(1)], 1);
+        let blocks = single_block_return(
+            vec![lanes, field],
+            vec![Stmt::Poly {
+                ty: lanes,
+                coeffs,
+                constant: zero_const(),
+            }],
+            vec![IRVarId(2)],
+        );
+        let mut vec_bits = u8_bits(0x57);
+        vec_bits.extend(u8_bits(0x13));
+        let inputs = [vec_bits, u8_bits(0x13)];
+        let result = eval_ir(&blocks, &types, &inputs).unwrap();
+        let word = bits_to_u64(&result[0]);
+        assert_eq!(word as u8, gf8_mul(0x57, 0x13));
+        assert_eq!((word >> 8) as u8, gf8_mul(0x13, 0x13));
+        field_product_matches_boolar(&blocks, &types, &inputs);
     }
 
     #[test]

@@ -1063,6 +1063,22 @@ fn lower_op(
                 .iter()
                 .map(|&t| waffle_ty(t))
                 .collect::<Result<_, _>>()?;
+            // The name section stores the local `$mul` name on `FuncDecl`.
+            // The import string (`volar.field.…`) lives on `module.imports`.
+            let field_name = external_import_name(wasm, fid).unwrap_or_else(|| name.clone());
+            if let Some(symbol) = volar_ir_common::parse_field_symbol(&field_name) {
+                if orig_ret_tys.len() != 1 {
+                    return Err(UnsupportedOp(alloc::format!(
+                        "volar.field `{field_name}` must return one value"
+                    )));
+                }
+                let result = tgt
+                    .lower_field_import(&symbol, &arg_vals, &orig_ret_tys[0])
+                    .map_err(|err| {
+                        UnsupportedOp(alloc::format!("volar.field `{field_name}`: {err:?}"))
+                    })?;
+                return Ok(Some(result));
+            }
             // Append current globals to args and return types for threading.
             let mut all_args = arg_vals;
             all_args.extend_from_slice(current_globals);
@@ -1477,11 +1493,29 @@ fn or_bits(tgt: &mut VaffleTarget, bits: &[ValueId]) -> ValueId {
     acc
 }
 
+/// The WASM import string for `fid`, when the function is an import.
+fn external_import_name(wasm: &WModule, fid: portal_pc_waffle_ir::Func) -> Option<String> {
+    wasm.imports.iter().find_map(|import| match import.kind {
+        portal_pc_waffle_ir::ImportKind::Func(func) if func == fid => Some(import.name.clone()),
+        _ => None,
+    })
+}
+
 /// Derive a callee name from the WAFFLE module's function declaration.
 fn callee_name(wasm: &WModule, fid: portal_pc_waffle_ir::Func) -> String {
     match &wasm.funcs[fid] {
         FuncDecl::Body(_, name, _) => name.clone(),
-        FuncDecl::Import(_, name) => name.clone(),
+        FuncDecl::Import(_, name) if !name.is_empty() => name.clone(),
+        FuncDecl::Import(..) => wasm
+            .imports
+            .iter()
+            .find_map(|import| match import.kind {
+                portal_pc_waffle_ir::ImportKind::Func(func) if func == fid => {
+                    Some(import.name.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| alloc::format!("func_{}", fid.index())),
         _ => alloc::format!("func_{}", fid.index()),
     }
 }

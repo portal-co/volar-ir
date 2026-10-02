@@ -582,10 +582,9 @@ impl WasmBackend {
             LirType::Native(t) => match t {
                 NativeType::Bit
                 | NativeType::_8
-                | NativeType::AES8
                 | NativeType::_16
                 | NativeType::_32 => ValType::I32,
-                NativeType::_64 | NativeType::Galois64 => ValType::I64,
+                NativeType::_64 => ValType::I64,
                 NativeType::_128 | NativeType::_256 => {
                     panic!(
                         "WasmBackend: multi-word native type passed where one Wasm value was required"

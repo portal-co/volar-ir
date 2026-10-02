@@ -77,8 +77,6 @@ fn lir_type_native() {
         NativeType::_64,
         NativeType::_128,
         NativeType::_256,
-        NativeType::AES8,
-        NativeType::Galois64,
     ] {
         rt_lir_type(LirType::Native(nt));
     }
@@ -366,7 +364,7 @@ fn call_rng() {
         out: 0,
     });
     rt_call(LirCall::Rng {
-        ty: LirType::Native(NativeType::Galois64),
+        ty: LirType::U64,
         out: 1,
     });
 }

@@ -7,7 +7,14 @@ extern crate alloc;
 pub mod complexity;
 pub use complexity::{MeasureSpec, ReentryHint, StructRef};
 
+mod field;
 mod generated;
+pub use field::{
+    contains_ext_field, ext_field_type, format_field_symbol, lower_field_call, monomial_product,
+    mul_identity, mul_is_idempotent, parse_field_symbol, primitive_bit_width, BitRing, BoolRing,
+    ExtFieldError, FieldArg, FieldCallError, FieldOp, FieldSpec, FieldSymbol, WrappedSpec,
+    aes8_irreducible, galois64_irreducible,
+};
 pub use generated::{
     ActionDecl, Constant, Node, OracleDecl, PreInitSegment, RngDecl, StorageId, Type, TypeId,
 };
@@ -337,7 +344,8 @@ impl<V: Ord> PolyCoeffs<V> {
             let mut write = 0;
             for read in 0..self.0.len() {
                 if write > 0 && self.0[write - 1].0 == self.0[read].0 {
-                    self.0[write - 1].1 = self.0[read].1;
+                    // Characteristic 2: two copies of one monomial cancel.
+                    self.0[write - 1].1 ^= self.0[read].1;
                 } else {
                     if write != read {
                         self.0.swap(write, read);
@@ -346,6 +354,7 @@ impl<V: Ord> PolyCoeffs<V> {
                 }
             }
             self.0.truncate(write);
+            self.0.retain(|(_, coeff)| coeff & 1 != 0);
         }
     }
 
@@ -529,6 +538,16 @@ pub enum IrType {
     Func {
         params: alloc::vec::Vec<TypeId>,
         results: alloc::vec::Vec<TypeId>,
+    },
+    /// A degree-`degree` extension of `wrapped` by `irreducible`.
+    ///
+    /// `irreducible` lists coefficients of degrees `0..=degree`, low first,
+    /// and is monic. An element is `degree` coefficients of `wrapped`,
+    /// concatenated LSB-first the same way as `Vec(degree, wrapped)`.
+    ExtField {
+        wrapped: TypeId,
+        degree: u32,
+        irreducible: alloc::vec::Vec<u64>,
     },
 }
 
@@ -736,13 +755,13 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     /// sorted.
     ///
     /// # Type semantics
-    /// * If `ty` resolves to `Bit`: all variables must be `Bit`; arithmetic
-    ///   is GF(2) (mod 2 on every coefficient bit).
-    /// * If `ty` resolves to a bitvector or field element `T`: at most one
-    ///   variable across all monomials may have type `T` (the "non-Bit slot");
-    ///   all other variables in that monomial must be `Bit` and act as GF(2)
-    ///   selectors.  The constant term occupies the lowest `bits(T)` bits of
-    ///   `constant`.  Mixing two distinct non-GF(2) field types is prohibited.
+    /// The `u8` coefficient is a characteristic-2 repetition count. The sum
+    /// of monomials is XOR. The product inside one monomial follows `ty`:
+    /// bits and integer primitives multiply per bit (a bit factor spreads),
+    /// `Vec` maps that product across lanes, and `ExtField` is schoolbook
+    /// multiplication modulo its polynomial. An extension monomial may
+    /// contain several field factors. `Tuple`, `Block`, `Func`, and `Z3`
+    /// fail closed.
     Poly {
         /// Output (and dominant operand) type.
         ty: Ty,
@@ -1426,6 +1445,18 @@ impl TypeRemapper {
                     results: results_host,
                 }
             }
+            IrType::ExtField {
+                wrapped,
+                degree,
+                irreducible,
+            } => {
+                let wrapped_host = Self::remap_one(wrapped.0 as usize, guest, host, map, done);
+                IrType::ExtField {
+                    wrapped: wrapped_host,
+                    degree: *degree,
+                    irreducible: irreducible.clone(),
+                }
+            }
         };
         let host_id = host.intern(remapped);
         map[idx] = host_id;
@@ -1608,10 +1639,10 @@ mod generated_binary_compat_tests {
             &[0xd0, 0xc0, 0xb0, 0xa0]
         );
         assert_eq!(
-            rkyv::to_bytes::<rkyv::rancor::Error>(&Type::Galois64)
+            rkyv::to_bytes::<rkyv::rancor::Error>(&Type::Z3)
                 .unwrap()
                 .as_slice(),
-            &[8]
+            &[7]
         );
         assert_eq!(
             rkyv::to_bytes::<rkyv::rancor::Error>(&Constant {

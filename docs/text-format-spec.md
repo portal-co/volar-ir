@@ -66,7 +66,7 @@ lir_type ::=
   | "native:" native_prim
   | "ptr[" lir_type "]"
 
-native_prim ::= "bit" | "u8" | "u16" | "u32" | "u64" | "u128" | "u256" | "aes8" | "galois64"
+native_prim ::= "bit" | "u8" | "u16" | "u32" | "u64" | "u128" | "u256"
 nat         ::= [0-9]+
 ```
 
@@ -78,7 +78,7 @@ arr[u8, 32]
 arr[arr[u32, 4], 8]
 struct:0
 native:bit
-native:galois64
+native:u64
 ptr[u8]
 ptr[arr[u32, 4]]
 ```
@@ -258,11 +258,14 @@ File extension: `.vir` ("Volar IR").
 ```ebnf
 vir_type ::=
     "bit" | "u8" | "u16" | "u32" | "u64" | "u128" | "u256" | "aes8" | "galois64"
+  | "extfield" type_id nat nat+
   | "vec[" "#" nat ", " nat "]"
   | "tuple[" ("#" nat ",")* "]"
   | "block[" ("#" nat ",")* "]"
   | "func[(" ("#" nat ",")* ") -> (" ("#" nat ",")* ")]"
 ```
+
+`aes8` and `galois64` are writer sugar for the canonical extension fields, accepted by the parser only after `prim bit` is already in the table. The general form is `extfield <wrapped_id> <degree> <c0> … <c_degree>`.
 
 `Constant` (256-bit): `0x` followed by 64 hex digits, zero-padded on the left.
 

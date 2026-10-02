@@ -1508,6 +1508,11 @@ impl<'ctx> Importer<'ctx> {
                 } else if let Some(intrinsic) = MemoryIntrinsic::from_name(&callee_name) {
                     self.translate_memory_intrinsic(fctx, instr, intrinsic)?;
                     None
+                } else if callee_fn.get_first_basic_block().is_none()
+                    && volar_ir_common::parse_field_symbol(&callee_name).is_some()
+                {
+                    let symbol = volar_ir_common::parse_field_symbol(&callee_name).expect("parsed");
+                    Some(self.lower_field_call(fctx, cur, instr, &symbol)?)
                 } else if let Some(intrinsic) = OverflowIntrinsic::from_name(&callee_name) {
                     let fields = self.translate_overflow_intrinsic(fctx, instr, intrinsic)?;
                     fctx.aggregate_fields
@@ -1924,6 +1929,39 @@ impl<'ctx> Importer<'ctx> {
         }
         let bits = self.value_bits(fctx, BasicValueEnum::IntValue(length))?;
         Ok(MemoryIntrinsicLength::Symbolic { bits })
+    }
+
+    fn lower_field_call(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        cur: BlockId,
+        instr: InstructionValue<'ctx>,
+        symbol: &volar_ir_common::FieldSymbol,
+    ) -> IResult<Bits> {
+        let n_args = instr.get_num_operands().saturating_sub(1);
+        let mut field_args = Vec::with_capacity(n_args as usize);
+        for i in 0..n_args {
+            let value = call_value_operand(instr, i, "field argument")?;
+            let constant = match value {
+                inkwell::values::BasicValueEnum::IntValue(int) => {
+                    int.get_zero_extended_constant().map(|bits| bits as u128)
+                }
+                _ => None,
+            };
+            field_args.push(volar_ir_common::FieldArg {
+                bits: self.value_bits(fctx, value)?,
+                constant,
+            });
+        }
+        let ret_bits = self.llvm_bit_width(instr.get_type())?;
+        volar_ir_common::lower_field_call(
+            symbol,
+            &field_args,
+            ret_bits,
+            &mut self.types,
+            |stmt| fctx.emit(cur, Value::Op(stmt)),
+        )
+        .map_err(|err| ImportError::Unsupported(format!("volar.field: {err:?}")))
     }
 
     fn call_arg_bits(

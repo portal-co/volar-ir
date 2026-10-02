@@ -2,6 +2,7 @@
 //! Lowering passes from the circuit IRs (`BIrBlocks`, `IRBlocks`) to `LirTarget`.
 
 use alloc::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
+use core::marker::PhantomData;
 use volar_ir_config::IrLoweringConfig;
 use volar_lir::{ActionStoreTarget, BranchTarget, LirTarget, LirType};
 use volar_provenance::ProvenanceHandler;
@@ -10,7 +11,7 @@ use volar_ir::{
     boolar::{BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
     ir::{IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypes},
 };
-use volar_ir_common::Type;
+use volar_ir_common::{BitRing, Constant, PolyCoeffs, Type, TypeId};
 
 // ============================================================================
 // BIrBlocks → LirTarget
@@ -541,7 +542,13 @@ pub fn lower_ir_with_handler<P, T, H>(
                 }
                 // ---- All other stmts: existing lowering --------------------
                 other => {
-                    let v = lower_ir_stmt(other, &vals_per_block[bi], types, target);
+                    let v = lower_ir_stmt(
+                        other,
+                        &vals_per_block[bi],
+                        &block_var_tys[bi],
+                        types,
+                        target,
+                    );
                     vals_per_block[bi].push(v);
                 }
             }
@@ -565,16 +572,32 @@ pub fn lower_ir_with_handler<P, T, H>(
 fn ir_type_bits(ty: &IRType, types: &IRTypes) -> u32 {
     match ty {
         IRType::Primitive(Type::Bit) => 1,
-        IRType::Primitive(Type::_8) | IRType::Primitive(Type::AES8) => 8,
+        IRType::Primitive(Type::_8) => 8,
         IRType::Primitive(Type::_16) => 16,
         IRType::Primitive(Type::_32) => 32,
-        IRType::Primitive(Type::_64) | IRType::Primitive(Type::Galois64) => 64,
+        IRType::Primitive(Type::_64) => 64,
         IRType::Primitive(Type::_128) => 128,
         IRType::Primitive(Type::_256) => 256,
         IRType::Vec(n, elem_tid) => {
             (*n as u32) * ir_type_bits(&types.0[elem_tid.0 as usize], types)
         }
+        IRType::ExtField { wrapped, degree, .. } => {
+            *degree * ir_type_bits(&types.0[wrapped.0 as usize], types)
+        }
         other => unimplemented!("ir_type_bits: unsupported type {:?}", other),
+    }
+}
+
+fn lir_uint(bits: u32) -> LirType {
+    match bits {
+        1 => LirType::Bool,
+        2..=8 => LirType::U8,
+        9..=16 => LirType::U16,
+        17..=32 => LirType::U32,
+        33..=64 => LirType::U64,
+        65..=128 => LirType::U128,
+        129..=256 => LirType::U256,
+        _ => panic!("lir_uint: {bits} bits do not fit an unsigned LIR integer"),
     }
 }
 
@@ -587,8 +610,7 @@ fn ir_type_to_lir(ty: &IRType, types: &IRTypes) -> LirType {
         IRType::Primitive(Type::_64) => LirType::U64,
         IRType::Primitive(Type::_128) => LirType::U128,
         IRType::Primitive(Type::_256) => LirType::U256,
-        IRType::Primitive(Type::AES8) => LirType::Native(Type::AES8),
-        IRType::Primitive(Type::Galois64) => LirType::Native(Type::Galois64),
+        IRType::ExtField { .. } => lir_uint(ir_type_bits(ty, types)),
         IRType::Primitive(Type::Z3) => {
             panic!("ir_type_to_lir: Z3 values cannot lower through the GF(2) native targets")
         }
@@ -724,9 +746,151 @@ fn requires_native_return_abi(ty: &LirType) -> bool {
     )
 }
 
+fn constant_bit(c: &Constant, bit: usize) -> bool {
+    if bit < 128 {
+        (c.lo >> bit) & 1 == 1
+    } else if bit < 256 {
+        (c.hi >> (bit - 128)) & 1 == 1
+    } else {
+        false
+    }
+}
+
+fn extract_lir_bits<Q: Clone, T: LirTarget<Q>>(
+    target: &mut T,
+    val: T::Value,
+    val_ty: LirType,
+    logical_bits: usize,
+) -> Vec<T::Value> {
+    let mut bits = Vec::with_capacity(logical_bits);
+    for bit in 0..logical_bits {
+        let shifted = if bit == 0 {
+            val.clone()
+        } else {
+            let shift = target.iconst(val_ty.clone(), bit as i64);
+            target.lshr(val.clone(), shift)
+        };
+        bits.push(target.trunc(shifted, LirType::Bool));
+    }
+    bits
+}
+
+fn pack_lir_bits<Q: Clone, T: LirTarget<Q>>(
+    target: &mut T,
+    bits: &[Option<T::Value>],
+    container: LirType,
+) -> T::Value {
+    let mut acc = target.iconst(container.clone(), 0);
+    for (bit, wire) in bits.iter().enumerate() {
+        let Some(wire) = wire else {
+            continue;
+        };
+        let extended = target.zext(wire.clone(), container.clone());
+        let placed = if bit == 0 {
+            extended
+        } else {
+            let shift = target.iconst(container.clone(), bit as i64);
+            target.shl(extended, shift)
+        };
+        acc = target.or(acc, placed);
+    }
+    acc
+}
+
+struct LirBitRing<'a, Q, T> {
+    target: &'a mut T,
+    _prov: PhantomData<Q>,
+}
+
+impl<Q: Clone, T: LirTarget<Q>> BitRing for LirBitRing<'_, Q, T> {
+    type Bit = T::Value;
+
+    fn bit_and(&mut self, lhs: Self::Bit, rhs: Self::Bit) -> Self::Bit {
+        self.target.and(lhs, rhs)
+    }
+
+    fn bit_xor(&mut self, lhs: Self::Bit, rhs: Self::Bit) -> Self::Bit {
+        self.target.xor(lhs, rhs)
+    }
+
+    fn bit_zero(&mut self) -> Self::Bit {
+        self.target.iconst(LirType::Bool, 0)
+    }
+
+    fn bit_one(&mut self) -> Self::Bit {
+        self.target.iconst(LirType::Bool, 1)
+    }
+}
+
+fn lower_field_poly<Q: Clone, T: LirTarget<Q>>(
+    ty: TypeId,
+    coeffs: &PolyCoeffs<volar_ir::ir::IRVarId>,
+    constant: &Constant,
+    vals: &[T::Value],
+    var_tys: &[Option<TypeId>],
+    types: &IRTypes,
+    target: &mut T,
+) -> T::Value {
+    let width = types
+        .value_bit_width(ty)
+        .unwrap_or_else(|| panic!("lower_field_poly: output type has no bit width"));
+    let mut acc: Vec<Option<T::Value>> = vec![None; width];
+    for bit in 0..width {
+        if constant_bit(constant, bit) {
+            acc[bit] = Some(target.iconst(LirType::Bool, 1));
+        }
+    }
+    for (vars, coeff) in coeffs.iter() {
+        if coeff & 1 == 0 {
+            continue;
+        }
+        let mut owned = Vec::with_capacity(vars.len());
+        for var in vars {
+            let factor_ty = var_tys
+                .get(var.0 as usize)
+                .copied()
+                .flatten()
+                .unwrap_or_else(|| panic!("lower_field_poly: factor v{} has no type", var.0));
+            let factor_bits = types.value_bit_width(factor_ty).unwrap_or_else(|| {
+                panic!("lower_field_poly: factor type has no bit width")
+            });
+            let factor_lir = ir_type_to_lir(&types.0[factor_ty.0 as usize], types);
+            owned.push((
+                factor_ty,
+                extract_lir_bits(
+                    target,
+                    vals[var.0 as usize].clone(),
+                    factor_lir,
+                    factor_bits,
+                ),
+            ));
+        }
+        let refs: Vec<(TypeId, &[T::Value])> = owned.iter().map(|(ty, bits)| (*ty, bits.as_slice())).collect();
+        let product = {
+            let mut ring = LirBitRing {
+                target,
+                _prov: PhantomData,
+            };
+            volar_ir_common::monomial_product(ty, &refs, types, &mut ring)
+        };
+        for (bit, wire) in product.into_iter().enumerate() {
+            if bit >= acc.len() {
+                break;
+            }
+            acc[bit] = Some(match acc[bit].take() {
+                Some(prev) => target.xor(prev, wire),
+                None => wire,
+            });
+        }
+    }
+    let container = ir_type_to_lir(&types.0[ty.0 as usize], types);
+    pack_lir_bits(target, &acc, container)
+}
+
 fn lower_ir_stmt<Q: Clone, T: LirTarget<Q>>(
     stmt: &IRStmt,
     vals: &[T::Value],
+    var_tys: &[Option<volar_ir::ir::IRTypeId>],
     types: &IRTypes,
     target: &mut T,
 ) -> T::Value {
@@ -756,21 +920,24 @@ fn lower_ir_stmt<Q: Clone, T: LirTarget<Q>>(
             coeffs,
             constant,
         } => {
-            // Use the declared output type to determine LIR type.
             let lir_ty = ir_type_to_lir(&types.0[ty.0 as usize], types);
-            let mut acc = target.iconst(lir_ty, (constant.lo & 1) as i64);
-            for (vars, &coeff) in coeffs {
-                if coeff == 0 {
-                    continue;
+            if volar_ir_common::mul_is_idempotent(*ty, types) {
+                let mut acc = target.iconst(lir_ty, (constant.lo & 1) as i64);
+                for (vars, &coeff) in coeffs {
+                    if coeff == 0 {
+                        continue;
+                    }
+                    let product = vars
+                        .iter()
+                        .map(|id| vals[id.0 as usize].clone())
+                        .reduce(|a, b| target.and(a, b))
+                        .unwrap_or_else(|| target.iconst(LirType::Bool, 1));
+                    acc = target.xor(acc, product);
                 }
-                let product = vars
-                    .iter()
-                    .map(|id| vals[id.0 as usize].clone())
-                    .reduce(|a, b| target.and(a, b))
-                    .unwrap_or_else(|| target.iconst(LirType::Bool, 1));
-                acc = target.xor(acc, product);
+                acc
+            } else {
+                lower_field_poly(*ty, coeffs, constant, vals, var_tys, types, target)
             }
-            acc
         }
         IRStmt::Rol { src, ty, n } => {
             let sv = vals[src.0 as usize].clone();

@@ -1586,6 +1586,59 @@ impl VaffleTarget {
     /// assigning each its own slice of `Value::Output { idx }` nodes.
     /// This is used by the WAFFLE lowering for multi-result calls and for
     /// globals-tunnelling (where globals are appended to both args and rets).
+    /// Lower a `volar.field.*` import to `Merge` / `Poly` / `Shuffle`.
+    pub fn lower_field_import(
+        &mut self,
+        symbol: &volar_ir_common::FieldSymbol,
+        args: &[VaffleValue],
+        ret_ty: &LirType,
+    ) -> Result<VaffleValue, volar_ir_common::FieldCallError> {
+        let ret_bits = self.bits_for(ret_ty);
+        let field_args: Vec<volar_ir_common::FieldArg<ValueId>> = args
+            .iter()
+            .map(|arg| volar_ir_common::FieldArg {
+                bits: arg.bits.clone(),
+                constant: self.constant_bits(&arg.bits),
+            })
+            .collect();
+        let func = self
+            .func
+            .as_mut()
+            .expect("VaffleTarget: no function in progress");
+        let bits = volar_ir_common::lower_field_call(
+            symbol,
+            &field_args,
+            ret_bits,
+            &mut self.module.types,
+            |stmt| func.emit_value(Value::Op(stmt)),
+        )?;
+        Ok(VaffleValue {
+            bits,
+            ty: ret_ty.clone(),
+        })
+    }
+
+    fn constant_bits(&self, bits: &[ValueId]) -> Option<u128> {
+        if bits.len() > 128 {
+            return None;
+        }
+        let values = &self.func.as_ref()?.all_values;
+        let mut value = 0u128;
+        for (index, bit) in bits.iter().enumerate() {
+            let kind = &values.get(bit.0)?.kind;
+            let Value::Op(volar_ir_common::Stmt::Const(constant, _)) = kind else {
+                return None;
+            };
+            if constant.hi != 0 || constant.lo > 1 {
+                return None;
+            }
+            if constant.lo == 1 {
+                value |= 1u128 << index;
+            }
+        }
+        Some(value)
+    }
+
     pub fn call_extern_multi(
         &mut self,
         name: &str,

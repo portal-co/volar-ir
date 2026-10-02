@@ -1009,9 +1009,25 @@ impl<'a> Compiler<'a> {
             }
             Operator::Call { function_index } => {
                 if matches!(&self.wasm.funcs[*function_index], FuncDecl::Import(..)) {
-                    return Err(ImportError::ImportedFunction(
-                        self.wasm.funcs[*function_index].name().to_string(),
-                    ));
+                    let name = self
+                        .wasm
+                        .imports
+                        .iter()
+                        .find_map(|import| match import.kind {
+                            portal_pc_waffle_ir::ImportKind::Func(func)
+                                if func == *function_index =>
+                            {
+                                Some(import.name.clone())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| self.wasm.funcs[*function_index].name().to_string());
+                    if volar_ir_common::parse_field_symbol(&name).is_some() {
+                        return Err(ImportError::Unsupported(alloc::format!(
+                            "volar.field symbol `{name}` is not lowered in VCircuit import"
+                        )));
+                    }
+                    return Err(ImportError::ImportedFunction(name));
                 }
                 let result = self.compile_function(
                     *function_index,

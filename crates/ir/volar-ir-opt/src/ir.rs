@@ -1217,7 +1217,11 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
         let rv = IRVarId(base + i as u32);
 
         // Step 1: apply alias substitutions to this stmt's operands.
-        if apply_aliases_to_stmt(&mut block.stmts[i].kind, &alias_map) {
+        if apply_aliases_to_stmt(&mut block.stmts[i].kind, &alias_map, |var| {
+            type_map
+                .get(var)
+                .map_or(false, |&tid| volar_ir_common::mul_is_idempotent(tid, types))
+        }) {
             changed = true;
         }
 

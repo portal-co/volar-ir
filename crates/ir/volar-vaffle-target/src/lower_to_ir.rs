@@ -349,6 +349,18 @@ fn remap_type_id(
                 results: results_ir,
             }
         }
+        IrType::ExtField {
+            wrapped,
+            degree,
+            irreducible,
+        } => {
+            let wrapped_ir = remap_type_id(wrapped, vaffle_types, ir_types, map, done);
+            IrType::ExtField {
+                wrapped: wrapped_ir,
+                degree,
+                irreducible,
+            }
+        }
         _ => panic!("remap_type_id: unhandled IrType variant — add type mapping for this variant"),
     };
     let ir_tid = ir_types.intern(ity);
@@ -2052,10 +2064,10 @@ fn ir_type_bit_width(types: &IRTypes, tid: TypeId) -> usize {
     match &types.0[tid.0 as usize] {
         IrType::Primitive(p) => match p {
             volar_ir_common::Type::Bit => 1,
-            volar_ir_common::Type::_8 | volar_ir_common::Type::AES8 => 8,
+            volar_ir_common::Type::_8 => 8,
             volar_ir_common::Type::_16 => 16,
             volar_ir_common::Type::_32 => 32,
-            volar_ir_common::Type::_64 | volar_ir_common::Type::Galois64 => 64,
+            volar_ir_common::Type::_64 => 64,
             volar_ir_common::Type::_128 => 128,
             volar_ir_common::Type::_256 => 256,
             volar_ir_common::Type::Z3 => 2,
@@ -2064,6 +2076,9 @@ fn ir_type_bit_width(types: &IRTypes, tid: TypeId) -> usize {
         IrType::Vec(n, inner) => *n * ir_type_bit_width(types, *inner),
         IrType::Tuple(parts) => parts.iter().map(|&p| ir_type_bit_width(types, p)).sum(),
         IrType::Block { .. } | IrType::Func { .. } => 32,
+        IrType::ExtField { wrapped, degree, .. } => {
+            *degree as usize * ir_type_bit_width(types, *wrapped)
+        }
         _ => panic!("ir_type_bit_width: unhandled IrType variant — add bit-width calculation"),
     }
 }

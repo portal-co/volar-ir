@@ -12,19 +12,24 @@ When working with `IRType` (in `volar-ir`), use this taxonomy:
 | `Vec(N, Bit)` | packed bitvector | N | Full (`[wire; N]`) |
 | `Primitive(_8/_16/_32/_64)` | packed bitvector | 8/16/32/64 | Full (`[wire; W]`) |
 | `Primitive(_128/_256)` | packed bitvector | 128/256 | LIR: `unimplemented!`; FHE: `[wire; W]` |
-| `Primitive(AES8)` | GF(256) field element | 8 | Deferred |
-| `Primitive(Galois64)` | GF(2^64) field element | 64 | Deferred |
+| `ExtField { wrapped, degree, irreducible }` | extension of `wrapped` | `degree * width(wrapped)` | Boolar: schoolbook product |
+
+`aes8()` is `ExtField(Bit, 8, x^8 + x^4 + x^3 + x + 1)`. `galois64()` is `ExtField(Bit, 64, x^64 + x^4 + x^3 + x + 1)`. An element is the LSB-first concatenation of `degree` coefficients of `wrapped`, the same layout as `Vec(degree, wrapped)`. `TypeTable::ext_field` accepts the polynomial only when it is a monic irreducible over `Bit` or another `ExtField`.
 
 - `ir_type_bit_width(ty_id, types)` computes the wire count for any supported type.
 - `FheScheme::wire_type_for_ir` / `public_type_for_ir` convert an `IRTypeId` to the appropriate compiler `IrType` for generated code.
-- Unsupported types (AES8, Galois64 in FHE CFG path; _128/_256 in LIR) panic with an explicit message — do not silently emit wrong code.
+- Unsupported types (`Z3`; `_128`/`_256` in LIR) panic with an explicit message — do not silently emit wrong code.
 
 ## `Poly` Statement Semantics
 
-`IRStmt::Poly { ty, coeffs, constant }` represents a multilinear polynomial over GF(2) with a typed output:
+`IRStmt::Poly { ty, coeffs, constant }` is a sum of monomials. The `u8` coefficient is a characteristic-2 repetition count (`coeff & 1`); a non-trivial field scalar is a `Const` factor inside the monomial. The sum across monomials is XOR. The product inside one monomial is type-directed and recurses:
 
-- **`ty = Bit`**: standard GF(2) gate — all coefficient variables are `Bit`-typed. This is the original and most common case.
-- **`ty = T` (bitvector or field element)**: at most one `T`-typed variable per monomial; all other variables in that monomial are `Bit`-typed selectors. The polynomial result has type `T`.
+- **`Bit`**: AND. Repeated factors collapse (`a * a = a`). The empty product is 1.
+- **Integer primitive**: the same product mapped across lanes. A 1-bit factor spreads to every lane.
+- **`Vec(n, E)`**: for each lane, recurse at `E`. A `Vec(n, E)` factor contributes that lane; an `E` or `Bit` factor spreads. A length mismatch fails closed.
+- **`ExtField`**: schoolbook polynomial multiplication modulo `irreducible`. Coefficient products recurse at `wrapped`. A `Bit` factor is a 0/1 selector. A `wrapped` factor embeds as the degree-0 coefficient. Repeated field factors stay, so `a * a` is the square. The empty product is the field one (only bit 0 set).
+
+`Tuple`, `Block`, `Func`, and `Z3` as a `Poly` output fail closed. Folds that assume `a * a = a` or that all-ones is the multiplicative identity run only when `mul_is_idempotent` is true. Pack and unpack stay `Merge` and `Shuffle`.
 
 When constructing `Poly` nodes, always supply the `ty` field explicitly. Do not use `ir_stmt_output_ty`'s old fallback (it now returns `Some(*ty)` for `Poly`).
 

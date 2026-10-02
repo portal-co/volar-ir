@@ -94,11 +94,12 @@ fn bit_width_for_eq(ir_types: &[IRType], ty: IRTypeId) -> usize {
             Type::_64 => 64,
             Type::_128 => 128,
             Type::_256 => 256,
-            Type::AES8 => 8,
-            Type::Galois64 => 64,
             _ => panic!("bit_width_for_eq: unsupported primitive type {:?}", p),
         },
         IRType::Vec(n, inner) => *n * bit_width_for_eq(ir_types, *inner),
+        IRType::ExtField { wrapped, degree, .. } => {
+            *degree as usize * bit_width_for_eq(ir_types, *wrapped)
+        }
         IRType::Tuple(parts) => parts
             .iter()
             .map(|&p| bit_width_for_eq(ir_types, p))
@@ -3111,7 +3112,26 @@ mod tests {
         IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator,
         IRType, IRTypeId, IRTypes, IRVarId,
     };
-    use volar_ir_common::{Constant, Node};
+    use volar_ir_common::{ext_field_type, Constant, Node};
+
+    fn aes8_ty() -> IRType {
+        ext_field_type(IRTypeId(0), 8, volar_ir_common::aes8_irreducible())
+    }
+
+    fn galois64_ty() -> IRType {
+        ext_field_type(IRTypeId(0), 64, volar_ir_common::galois64_irreducible())
+    }
+
+    fn is_aes8_type(ty: &IRType) -> bool {
+        match ty {
+            IRType::ExtField {
+                degree: 8,
+                irreducible,
+                ..
+            } => irreducible == &volar_ir_common::aes8_irreducible(),
+            _ => false,
+        }
+    }
 
     // =========================================================================
     // pc_bits_needed
@@ -3570,7 +3590,7 @@ mod tests {
     fn declared_poly_type_is_authoritative_during_type_collection() {
         let types = IRTypes(std::vec![
             IRType::Primitive(Type::Bit),
-            IRType::Primitive(Type::Galois64),
+            galois64_ty(),
         ]);
         let block = IRBlock {
             params: std::vec![IRTypeId(0)],
@@ -3605,7 +3625,7 @@ mod tests {
         // types[0] = Bit, types[1] = Galois8AES
         let types = IRTypes(std::vec![
             IRType::Primitive(Type::Bit),
-            IRType::Primitive(Type::AES8)
+            aes8_ty()
         ]);
         let g8 = IRTypeId(1);
         let bit = IRTypeId(0);
@@ -3657,11 +3677,8 @@ mod tests {
         );
         // Second param (state slot 0) must be Galois8AES
         assert!(
-            matches!(
-                types.0[result.blocks[0].params[1].0 as usize],
-                IRType::Primitive(Type::AES8)
-            ),
-            "state slot 0 must be Galois8AES"
+            is_aes8_type(&types.0[result.blocks[0].params[1].0 as usize]),
+            "state slot 0 must be aes8"
         );
     }
 
@@ -3728,7 +3745,7 @@ mod tests {
     fn test_ir_mixed_types_two_block() {
         let mut types = IRTypes(std::vec![
             IRType::Primitive(Type::Bit),
-            IRType::Primitive(Type::AES8)
+            aes8_ty()
         ]);
         let bit = IRTypeId(0);
         let g8 = IRTypeId(1);
@@ -3773,7 +3790,7 @@ mod tests {
             "PC slot"
         );
         assert!(
-            matches!(types.0[p[1].0 as usize], IRType::Primitive(Type::AES8)),
+            is_aes8_type(&types.0[p[1].0 as usize]),
             "state slot 0"
         );
         assert!(
@@ -3922,7 +3939,7 @@ mod tests {
     fn test_ir_position_type_collision_splits_into_separate_slots() {
         let mut types = IRTypes(std::vec![
             IRType::Primitive(Type::Bit),
-            IRType::Primitive(Type::AES8)
+            aes8_ty()
         ]);
         let bit = IRTypeId(0);
         let g8 = IRTypeId(1);
@@ -3978,7 +3995,7 @@ mod tests {
         let is_bit =
             |tid: &IRTypeId| matches!(types.0[tid.0 as usize], IRType::Primitive(Type::Bit));
         let is_g8 =
-            |tid: &IRTypeId| matches!(types.0[tid.0 as usize], IRType::Primitive(Type::AES8));
+            |tid: &IRTypeId| is_aes8_type(&types.0[tid.0 as usize]);
         assert!(is_bit(&p[0]), "PC slot must be Bit");
         assert!(
             is_bit(&p[1]) && is_g8(&p[2]),
@@ -4073,7 +4090,7 @@ mod tests {
         // Block 1 (x: G8): Jmp(Return,[x])
         let mut types = IRTypes(std::vec![
             IRType::Primitive(Type::Bit),
-            IRType::Primitive(Type::AES8)
+            aes8_ty()
         ]);
         let g8 = IRTypeId(1);
         let mut coeffs = PolyCoeffs::new();

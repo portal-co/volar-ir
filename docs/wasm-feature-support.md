@@ -99,6 +99,7 @@ panic.
 | Conversions | `I32WrapI64`, `I64ExtendI32S`, `I64ExtendI32U` |
 | Select | `Select`, `TypedSelect` (I32 non-zero condition via OR-reduce) |
 | Direct call | `Call { function_index }` — single return value only |
+| Field import | `volar.field.<op>.d<degree>.<wrapped>.p<hex>` (`add`, `mul`, `pack`, `unpack`) lowers to `Poly` / `Merge` / `Shuffle` instead of an extern call. AES multiply is `volar.field.mul.d8.bit.p1b`. Carriers are `i32` up to 32 bits and `i64` up to 64. `volar-wasm-circuit-import` rejects these names. |
 | Nop | `Nop` |
 | Memory loads | `I32Load`, `I64Load`, `I32Load8U/S`, `I32Load16U/S`, `I64Load8U/S`, `I64Load16U/S`, `I64Load32U/S` |
 | Memory stores | `I32Store`, `I64Store`, `I32Store8`, `I32Store16`, `I64Store8`, `I64Store16`, `I64Store32` |

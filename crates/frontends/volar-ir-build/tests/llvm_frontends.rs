@@ -17,6 +17,30 @@ fn write_temp_ll(name: &str, src: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn llvm_field_mul_matches_fips_197() {
+    let src = r#"
+declare i8 @volar.field.mul.d8.bit.p1b(i8, i8)
+
+define i8 @mul() {
+entry:
+  %r = call i8 @volar.field.mul.d8.bit.p1b(i8 87, i8 19)
+  ret i8 %r
+}
+"#;
+    let path = write_temp_ll("field-mul", src);
+    let (blocks, types) = Pipeline::from_llvm_direct(&path, "mul")
+        .expect("llvm field import")
+        .to_volar_ir();
+    let out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &[])
+        .expect("field mul evaluates");
+    let byte = out.iter().enumerate().fold(0u8, |acc, (bit, value)| {
+        acc | ((value[0] as u8) << bit)
+    });
+    assert_eq!(byte, 0xfe);
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn llvm_direct_is_circuit() {
     let src = r#"
 define i32 @add(i32 %a, i32 %b) {

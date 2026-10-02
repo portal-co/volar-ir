@@ -15,7 +15,8 @@
 //! - Entry function parameters must be integer-typed; each becomes a fully
 //!   symbolic value (its bits become free `IRBlock` parameters).
 //! - Only a scalar integer (or void) return is supported.
-//! - No pointer arguments, no globals, no host calls.
+//! - No pointer arguments and no globals. The only host calls are
+//!   `volar.field.*` imports, which lower to extension-field `Poly`s.
 //! - Control flow (branch conditions, memory addresses) must be concrete,
 //!   per `volar-llvm-import-core`'s own execution model — loops must have a
 //!   compile-time-known trip count; genuinely data-dependent branches are a
@@ -36,11 +37,12 @@ use volar_ir::ir::{
     Constant, IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRTypeId,
     IRTypes, IRVarId, StorageId,
 };
-use volar_ir_common::{Node, PolyCoeffs};
+use volar_ir_common::{FieldArg, FieldSymbol, Node, PolyCoeffs};
 use volar_lir::circuits::BitCircuitBuilder;
 
 use volar_llvm_import_core::{
-    ArgumentBinding, ExecutionBackend, ExecutionResult, Export, FrontendError, HostCallRegistry,
+    ArgumentBinding, ExecutionBackend, ExecutionResult, Export, FrontendError, HostCall,
+    HostCallContext, HostCallRegistry, HostCallSignature, HostInteger, HostType, HostValue,
     LowerRequest, ScalarBinding, execute_module,
 };
 pub use volar_llvm_import_core::{LoweringLimits, ModuleInput};
@@ -129,7 +131,8 @@ pub fn import_module<'ctx>(
         }
     };
 
-    let host_calls: HostCallRegistry<VolarIrBitSink> = HostCallRegistry::new();
+    let mut host_calls: HostCallRegistry<VolarIrBitSink> = HostCallRegistry::new();
+    register_field_imports(module, &mut host_calls);
     let request = LowerRequest {
         entry,
         arguments: &arguments,
@@ -139,12 +142,111 @@ pub fn import_module<'ctx>(
         host_calls: &host_calls,
     };
 
-    let mut types = IRTypes::new();
-    let bit_tid = types.bit();
-    let mut sink = VolarIrBitSink::new(bit_tid);
+    let mut sink = VolarIrBitSink::new();
     let result = execute_module(module, &request, &mut sink)?;
-    let block = sink.into_block(result);
+    let (block, types) = sink.into_block(result);
     Ok((IRBlocks::new(vec![block]), types))
+}
+
+fn register_field_imports<'ctx>(
+    module: &LlvmModule<'ctx>,
+    host_calls: &mut HostCallRegistry<VolarIrBitSink>,
+) {
+    for function in module.get_functions() {
+        if function.get_first_basic_block().is_some() {
+            continue;
+        }
+        let name = function.get_name().to_string_lossy();
+        let Some(symbol) = volar_ir_common::parse_field_symbol(&name) else {
+            continue;
+        };
+        let Some(signature) = host_signature(function) else {
+            continue;
+        };
+        let ret_bits = match &signature.result {
+            Some(HostType::Integer(width)) => *width,
+            _ => continue,
+        };
+        host_calls.register(
+            name.as_ref(),
+            signature,
+            FieldHost { symbol, ret_bits },
+        );
+    }
+}
+
+fn host_signature(function: inkwell::values::FunctionValue<'_>) -> Option<HostCallSignature> {
+    let mut parameters = Vec::new();
+    for param in function.get_params() {
+        parameters.push(HostType::Integer(int_width(param.get_type())?));
+    }
+    let result = match function.get_type().get_return_type() {
+        Some(ty) => Some(HostType::Integer(int_width(ty)?)),
+        None => None,
+    };
+    Some(HostCallSignature::new(parameters, result))
+}
+
+struct FieldHost {
+    symbol: FieldSymbol,
+    ret_bits: u32,
+}
+
+impl HostCall<VolarIrBitSink> for FieldHost {
+    fn lower(
+        &self,
+        backend: &mut VolarIrBitSink,
+        _context: &HostCallContext<IRVarId>,
+        arguments: &[HostValue<IRVarId>],
+    ) -> Result<Option<HostValue<IRVarId>>, FrontendError> {
+        let mut field_args = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            field_args.push(host_field_arg(backend, argument)?);
+        }
+        let VolarIrBitSink { emitter, types } = backend;
+        let bits = volar_ir_common::lower_field_call(
+            &self.symbol,
+            &field_args,
+            self.ret_bits as usize,
+            types,
+            |stmt| emitter.emit(stmt),
+        )
+        .map_err(|err| FrontendError::request(format!("volar.field: {err:?}")))?;
+        Ok(Some(HostValue::Integer(HostInteger::Symbolic {
+            width: self.ret_bits,
+            bits,
+        })))
+    }
+}
+
+fn host_field_arg(
+    backend: &mut VolarIrBitSink,
+    argument: &HostValue<IRVarId>,
+) -> Result<FieldArg<IRVarId>, FrontendError> {
+    match argument {
+        HostValue::Integer(HostInteger::Symbolic { bits, .. }) => Ok(FieldArg {
+            bits: bits.clone(),
+            constant: None,
+        }),
+        HostValue::Integer(HostInteger::Concrete { width, value }) => {
+            if *width > 128 {
+                return Err(FrontendError::request(
+                    "volar.field constant wider than 128 bits",
+                ));
+            }
+            let mut bits = Vec::with_capacity(*width as usize);
+            for index in 0..*width {
+                bits.push(backend.create(((*value >> index) & 1) != 0).unwrap());
+            }
+            Ok(FieldArg {
+                bits,
+                constant: Some(*value as u128),
+            })
+        }
+        HostValue::Pointer { .. } => Err(FrontendError::request(
+            "volar.field does not accept pointer arguments",
+        )),
+    }
 }
 
 fn int_width(ty: BasicTypeEnum<'_>) -> Option<u32> {
@@ -214,12 +316,16 @@ impl BitCircuitBuilder for BlockEmitter {
 /// for maps directly onto [`BitCircuitBuilder`]'s derived gate ops.
 struct VolarIrBitSink {
     emitter: BlockEmitter,
+    types: IRTypes,
 }
 
 impl VolarIrBitSink {
-    fn new(bit_tid: IRTypeId) -> Self {
+    fn new() -> Self {
+        let mut types = IRTypes::new();
+        let bit_tid = types.bit();
         VolarIrBitSink {
             emitter: BlockEmitter::new(bit_tid),
+            types,
         }
     }
 
@@ -233,7 +339,8 @@ impl VolarIrBitSink {
     /// method. This rewrites exactly those designated statements into real
     /// block parameters, drops them from the statement list, and renumbers
     /// every remaining statement and reference around the gap.
-    fn into_block(self, result: ExecutionResult<IRVarId>) -> IRBlock {
+    fn into_block(self, result: ExecutionResult<IRVarId>) -> (IRBlock, IRTypes) {
+        let types = self.types;
         let bit_tid = self.emitter.bit_tid;
         let old_stmts = self.emitter.stmts;
         let n_inputs = result.inputs.len();
@@ -276,11 +383,14 @@ impl VolarIrBitSink {
         let terminator = IRTerminator::Jmp {
             target: IRBranchTarget::new(IRBlockTargetId::Return, output_vars),
         };
-        IRBlock {
-            params,
-            stmts: new_stmts,
-            terminator,
-        }
+        (
+            IRBlock {
+                params,
+                stmts: new_stmts,
+                terminator,
+            },
+            types,
+        )
     }
 }
 

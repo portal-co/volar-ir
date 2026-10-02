@@ -343,9 +343,6 @@ pub struct CBackend {
     /// Expected signature: `void rng_fn(void *out, size_t len);`
     /// Default: `"volar_rng"`.
     pub rng_fn: String,
-    /// Set to `true` when any `LirType::Native(AES8)` value is encountered,
-    /// causing `finish()` to emit a `volar_gf8_mul` helper function.
-    needs_gf8_helpers: bool,
     /// When `false`, the folding pass is disabled and every recorded
     /// definition materializes eagerly (A/B debugging escape hatch; also
     /// settable via `VOLAR_C_NOFOLD=1` in [`CBackend::new`]).
@@ -367,7 +364,6 @@ impl CBackend {
             next_struct_id: 0,
             name_config: NameConfig::default(),
             rng_fn: "volar_rng".to_string(),
-            needs_gf8_helpers: false,
             fold_expressions: std::env::var("VOLAR_C_NOFOLD").is_err(),
         }
     }
@@ -402,27 +398,6 @@ impl CBackend {
         out.push_str("#include <stdint.h>\n");
         out.push_str("#include <stdbool.h>\n");
         out.push_str("#include <stdlib.h>\n\n");
-
-        // GF(2^8) carry-less multiply helper, emitted only when Galois field types are used.
-        // Uses AES polynomial 0x1b (x^8 + x^4 + x^3 + x + 1).
-        if self.needs_gf8_helpers {
-            out.push_str(concat!(
-                "/* GF(2^8) carry-less multiply, AES polynomial 0x1b */\n",
-                "static uint8_t volar_gf8_mul(uint8_t a, uint8_t b) {\n",
-                "  uint8_t p = 0;\n",
-                "  uint8_t hi;\n",
-                "  int i;\n",
-                "  for (i = 0; i < 8; i++) {\n",
-                "    if (b & 1) p ^= a;\n",
-                "    hi = a & 0x80;\n",
-                "    a = (uint8_t)(a << 1);\n",
-                "    if (hi) a ^= 0x1b;\n",
-                "    b >>= 1;\n",
-                "  }\n",
-                "  return p;\n",
-                "}\n\n",
-            ));
-        }
 
         // All type definitions in dependency order.
         for td in &self.all_typedefs {
@@ -1542,33 +1517,12 @@ impl LirTarget for CBackend {
     // ---- Arithmetic ---------------------------------------------------------
 
     fn add(&mut self, lhs: CValue, rhs: CValue) -> CValue {
-        // GF(2^8): addition is XOR.
-        if self.state().type_of(lhs) == &LirType::Native(NativeType::AES8) {
-            self.needs_gf8_helpers = true;
-            return self.binop(lhs, "^", rhs);
-        }
         self.binop(lhs, "+", rhs)
     }
     fn sub(&mut self, lhs: CValue, rhs: CValue) -> CValue {
-        // GF(2^8): subtraction is XOR (same as addition in char 2).
-        if self.state().type_of(lhs) == &LirType::Native(NativeType::AES8) {
-            self.needs_gf8_helpers = true;
-            return self.binop(lhs, "^", rhs);
-        }
         self.binop(lhs, "-", rhs)
     }
     fn mul(&mut self, lhs: CValue, rhs: CValue) -> CValue {
-        // GF(2^8): carry-less multiply via volar_gf8_mul helper (pure).
-        if self.state().type_of(lhs) == &LirType::Native(NativeType::AES8) {
-            self.needs_gf8_helpers = true;
-            let ty = self.state().type_of(lhs).clone();
-            let c_type = self.type_to_c(&ty);
-            let expr = Expr::FnPure(
-                "volar_gf8_mul".to_string(),
-                vec![Expr::Name(lhs.0), Expr::Name(rhs.0)],
-            );
-            return self.state().record_def(ty, c_type, expr, ValKind::Pure);
-        }
         self.binop(lhs, "*", rhs)
     }
     fn udiv(&mut self, lhs: CValue, rhs: CValue) -> CValue {
@@ -2224,10 +2178,10 @@ fn native_type_to_c(t: volar_ir_common::Type) -> &'static str {
     use volar_ir_common::Type;
     match t {
         Type::Bit => "bool",
-        Type::_8 | Type::AES8 => "uint8_t",
+        Type::_8 => "uint8_t",
         Type::_16 => "uint16_t",
         Type::_32 => "uint32_t",
-        Type::_64 | Type::Galois64 => "uint64_t",
+        Type::_64 => "uint64_t",
         Type::_128 => "__uint128_t",
         Type::_256 => "uint64_t", // no native 256-bit C integer; use u64 placeholder
         _ => "uint64_t",          // future primitive types: conservative fallback
@@ -2239,10 +2193,10 @@ fn native_type_signed(t: volar_ir_common::Type) -> &'static str {
     use volar_ir_common::Type;
     match t {
         Type::Bit => "int8_t",
-        Type::_8 | Type::AES8 => "int8_t",
+        Type::_8 => "int8_t",
         Type::_16 => "int16_t",
         Type::_32 => "int32_t",
-        Type::_64 | Type::Galois64 => "int64_t",
+        Type::_64 => "int64_t",
         Type::_128 => "__int128_t",
         Type::_256 => "int64_t",
         _ => "int64_t",

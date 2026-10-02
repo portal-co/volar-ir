@@ -258,6 +258,7 @@ fn apply_one(
             spill_storage,
             addr_ty,
             &output_tys,
+            types,
         );
 
         // Build the fallback block (Action only).
@@ -388,6 +389,7 @@ fn build_continuation_block(
     spill: StorageId,
     addr_ty: TypeId,
     output_tys: &[TypeId],
+    types: &IRTypes,
 ) -> IRBlock {
     let n_live = live_vars.len();
     let result_prefix = 2 * n_results;
@@ -453,7 +455,10 @@ fn build_continuation_block(
             continue;
         }
         let mut s = stmt.kind.clone();
-        apply_aliases_to_stmt(&mut s, alias);
+        apply_aliases_to_stmt(&mut s, alias, |var| {
+            let factor_ty = var_type_in_block(orig_block, *var, types);
+            volar_ir_common::mul_is_idempotent(factor_ty, types)
+        });
         push(&mut stmts, s);
     }
 

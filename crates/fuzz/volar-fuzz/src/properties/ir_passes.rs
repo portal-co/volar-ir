@@ -621,8 +621,11 @@ fn build_xor_chain(
     n: usize,
     consts: &[u8],
 ) -> (IRBlocks<()>, volar_ir_common::TypeTable, IRTypeId) {
-    use volar_ir_common::TypeTable;
-    let types = TypeTable(vec![IrType::Primitive(Type::AES8)]);
+    use volar_ir_common::{ext_field_type, TypeId, TypeTable};
+    let types = TypeTable(vec![
+        ext_field_type(TypeId(1), 8, volar_ir_common::aes8_irreducible()),
+        IrType::Primitive(Type::Bit),
+    ]);
     let g8 = IRTypeId(0);
 
     let wrap = |stmts: Vec<IRStmt>| -> Vec<Node<IRStmt, ()>> {
@@ -724,9 +727,12 @@ proptest! {
 /// regardless of `a`.
 #[test]
 fn test_movfuscate_sequential_unrelated_same_slot_no_aliasing() {
-    use volar_ir_common::TypeTable;
+    use volar_ir_common::{ext_field_type, TypeId, TypeTable};
 
-    let types = TypeTable(vec![IrType::Primitive(Type::AES8)]);
+    let types = TypeTable(vec![
+        ext_field_type(TypeId(1), 8, volar_ir_common::aes8_irreducible()),
+        IrType::Primitive(Type::Bit),
+    ]);
     let g8 = IRTypeId(0);
 
     let wrap = |stmts: Vec<IRStmt>| -> Vec<Node<IRStmt, ()>> {
