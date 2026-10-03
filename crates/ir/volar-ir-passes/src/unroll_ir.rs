@@ -31,7 +31,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypeId, IRTypes,
     IRVarId,
 };
-use volar_ir_common::{Constant, PolyCoeffs, Stmt, StorageId};
+use volar_ir_common::{Constant, PolyCoeffs, PreInitSegment, Stmt, StorageId, TypeId};
 use volar_ir_opt::common::{
     constant_or, constant_rol, constant_ror, constant_shl, mask_constant, stmt_output_type,
     type_bit_width,
@@ -661,6 +661,15 @@ fn walk<P: Clone>(
     }
 
     fold_dest_mut(dest, types);
+    // Alloca pointers are reads of a stack-pointer cell. Along a concrete
+    // path that cell's value is fixed by `pre_init` and earlier constant
+    // writes, so fold can turn the derived data addresses into constants.
+    for _ in 0..dest.stmts.len().saturating_add(1) {
+        if !forward_known_storage(dest, &blocks.pre_init) {
+            break;
+        }
+        fold_dest_mut(dest, types);
+    }
     let consts = concrete_consts(dest, types);
     for i in 0..dest.stmts.len() {
         let addr = match &dest.stmts[i].kind {
@@ -676,6 +685,80 @@ fn walk<P: Clone>(
 
     let term = remap_terminator(&block.terminator, &remap);
     dispatch_terminator(blocks, types, dest, block_id, &term, visited, steps, limits)
+}
+
+/// Replace a `StorageRead` whose address is constant with the constant
+/// currently in that cell: `pre_init`, then constant writes earlier in
+/// `dest`. A write whose address is not constant drops the image for that
+/// storage, so a later read stays a read.
+fn forward_known_storage<P: Clone>(dest: &mut IRBlock<P>, pre_init: &[PreInitSegment]) -> bool {
+    let mut image: BTreeMap<(StorageId, TypeId, u64), Constant> = BTreeMap::new();
+    for segment in pre_init {
+        for (index, value) in segment.data.iter().enumerate() {
+            let Some(addr) = segment.offset.checked_add(index) else {
+                continue;
+            };
+            let Ok(addr) = u64::try_from(addr) else {
+                continue;
+            };
+            image.insert((segment.storage, segment.ty, addr), *value);
+        }
+    }
+    let mut consts: BTreeMap<u32, Constant> = BTreeMap::new();
+    let base = dest.params.len() as u32;
+    let mut changed = false;
+    for (index, node) in dest.stmts.iter_mut().enumerate() {
+        let vid = base + index as u32;
+        let read = match &node.kind {
+            Stmt::StorageRead { storage, ty, addr } => Some((*storage, *ty, *addr)),
+            _ => None,
+        };
+        if let Some((storage, ty, addr)) = read {
+            let replacement = consts.get(&addr.0).copied().and_then(|address| {
+                if address.hi != 0 {
+                    return None;
+                }
+                let addr_u = u64::try_from(address.lo).ok()?;
+                image.get(&(storage, ty, addr_u)).copied()
+            });
+            if let Some(value) = replacement {
+                node.kind = Stmt::Const(value, ty);
+                consts.insert(vid, value);
+                changed = true;
+                continue;
+            }
+        }
+        match &node.kind {
+            Stmt::Const(value, _) => {
+                consts.insert(vid, *value);
+            }
+            Stmt::StorageWrite {
+                storage,
+                src,
+                ty,
+                addr,
+            } => {
+                let addr_c = consts.get(&addr.0).copied();
+                let src_c = consts.get(&src.0).copied();
+                match addr_c {
+                    Some(address) if address.hi == 0 => {
+                        if let Ok(addr_u) = u64::try_from(address.lo) {
+                            if let Some(value) = src_c {
+                                image.insert((*storage, *ty, addr_u), value);
+                            } else {
+                                image.remove(&(*storage, *ty, addr_u));
+                            }
+                        }
+                    }
+                    _ => {
+                        image.retain(|(stored, _, _), _| stored != storage);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
 }
 
 fn fold_dest_mut<P: Clone>(dest: &mut IRBlock<P>, types: &IRTypes) {

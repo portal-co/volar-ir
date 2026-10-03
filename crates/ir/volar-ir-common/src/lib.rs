@@ -9,12 +9,175 @@ pub mod complexity;
 pub mod tls13_extern;
 pub use complexity::{MeasureSpec, ReentryHint, StructRef};
 
+mod field;
 mod generated;
+mod prime;
+pub use field::{
+    BitRing, BoolRing, ExtFieldError, FieldArg, FieldCallError, FieldOp, FieldSpec, FieldSymbol,
+    WrappedSpec, aes8_irreducible, contains_ext_field, ext_field_type, format_field_symbol,
+    galois64_irreducible, lower_field_call, monomial_product, mul_identity, mul_is_idempotent,
+    parse_field_symbol, primitive_bit_width,
+};
 pub use generated::{
     ActionDecl, ActionExecutionPolicy, Constant, ExternalExecutor, ExternalRevealPolicy, Node,
     OracleDecl, OracleExecutionKind, OracleExecutionPolicy, PreInitSegment, RngDecl, StorageId,
     Type, TypeId,
 };
+pub use prime::{
+    FieldSink, PrimeFieldError, PrimeSpec, contains_prime_field, embed_and, embed_xor,
+    eval_prime_poly, is_native_field, prime_spec, repetition_residue, solinas_add, solinas_mul,
+    solinas_repeat,
+};
+
+/// Whether a storage namespace may be mutated by a producer.
+///
+/// This metadata is intentionally carried as a sidecar by compatibility-
+/// sensitive IR containers. An absent declaration is conservatively read-write.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub enum StorageAccess {
+    /// The producer guarantees there are no storage writes to this namespace.
+    ReadOnly,
+    /// Reads and writes may occur; this is the conservative default.
+    #[default]
+    ReadWrite,
+}
+
+/// One storage namespace declaration.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct StorageDecl {
+    pub storage: StorageId,
+    pub access: StorageAccess,
+}
+
+/// Sidecar storage mutability facts. This is not part of the serialized IR
+/// carrier layout, so existing rkyv/text consumers remain compatible.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub struct StorageTable {
+    pub entries: Vec<StorageDecl>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StorageRoute {
+    Immutable,
+    Mutable,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StorageTableError {
+    NotStrictlyOrdered {
+        previous: StorageId,
+        current: StorageId,
+    },
+}
+
+impl core::fmt::Display for StorageTableError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotStrictlyOrdered { previous, current } => write!(
+                f,
+                "storage declarations must be strictly ordered: {current:?} follows {previous:?}"
+            ),
+        }
+    }
+}
+
+impl StorageTable {
+    /// Merge `other` conservatively: an ID stays read-only only when both
+    /// sides prove it read-only; any read-write fact wins.
+    pub fn merge_conservative(&mut self, other: &StorageTable) {
+        for declaration in &other.entries {
+            let existing = self
+                .entries
+                .binary_search_by_key(&declaration.storage, |entry| entry.storage)
+                .ok()
+                .map(|index| self.entries[index].access);
+            let access = match (existing, declaration.access) {
+                (None, access) => access,
+                (Some(StorageAccess::ReadOnly), StorageAccess::ReadOnly) => StorageAccess::ReadOnly,
+                _ => StorageAccess::ReadWrite,
+            };
+            self.set(declaration.storage, access);
+        }
+    }
+
+    /// Return a copy whose storage IDs are transformed by `map`.
+    ///
+    /// Colliding source IDs are merged conservatively: read-only survives only
+    /// when every source ID mapped to the result is read-only.
+    pub fn remap(&self, mut map: impl FnMut(StorageId) -> StorageId) -> Self {
+        let mut result = StorageTable::new();
+        for declaration in &self.entries {
+            let storage = map(declaration.storage);
+            let existing = result
+                .entries
+                .binary_search_by_key(&storage, |entry| entry.storage)
+                .ok()
+                .map(|index| result.entries[index].access);
+            let access = match (existing, declaration.access) {
+                (None, access) => access,
+                (Some(StorageAccess::ReadOnly), StorageAccess::ReadOnly) => StorageAccess::ReadOnly,
+                _ => StorageAccess::ReadWrite,
+            };
+            result.set(storage, access);
+        }
+        result
+    }
+
+    /// An empty sidecar carries no stronger fact than legacy IR: all
+    /// storages remain conservatively read-write.
+    pub const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn access_of(&self, storage: StorageId) -> StorageAccess {
+        self.entries
+            .binary_search_by_key(&storage, |entry| entry.storage)
+            .map(|index| self.entries[index].access)
+            .unwrap_or(StorageAccess::ReadWrite)
+    }
+
+    /// Whether this table explicitly proves that `storage` is immutable.
+    /// Missing declarations are deliberately false.
+    pub fn is_read_only(&self, storage: StorageId) -> bool {
+        self.access_of(storage) == StorageAccess::ReadOnly
+    }
+
+    /// Select the conservative protocol/representation route for a storage.
+    /// This exposes only the mutability proof; callers remain responsible for
+    /// visibility, bounds, authentication, and cost decisions.
+    pub fn route_for(&self, storage: StorageId) -> StorageRoute {
+        if self.is_read_only(storage) {
+            StorageRoute::Immutable
+        } else {
+            StorageRoute::Mutable
+        }
+    }
+
+    /// Insert or replace a declaration while preserving canonical order.
+    pub fn set(&mut self, storage: StorageId, access: StorageAccess) {
+        match self
+            .entries
+            .binary_search_by_key(&storage, |entry| entry.storage)
+        {
+            Ok(index) => self.entries[index].access = access,
+            Err(index) => self.entries.insert(index, StorageDecl { storage, access }),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), StorageTableError> {
+        for pair in self.entries.windows(2) {
+            if pair[0].storage >= pair[1].storage {
+                return Err(StorageTableError::NotStrictlyOrdered {
+                    previous: pair[0].storage,
+                    current: pair[1].storage,
+                });
+            }
+        }
+        Ok(())
+    }
+}
 
 use alloc::vec::Vec;
 
@@ -42,6 +205,61 @@ impl OracleExecutionPolicy {
             reveal: ExternalRevealPolicy::BothRoles,
             fingerprint: [0; 32],
         }
+    }
+}
+
+#[cfg(test)]
+mod storage_access_tests {
+    use alloc::vec;
+
+    use super::*;
+
+    #[test]
+    fn absent_storage_is_read_write_and_set_is_canonical() {
+        let mut table = StorageTable::new();
+        assert_eq!(table.access_of(StorageId(4)), StorageAccess::ReadWrite);
+        table.set(StorageId(8), StorageAccess::ReadOnly);
+        table.set(StorageId(2), StorageAccess::ReadOnly);
+        table.set(StorageId(8), StorageAccess::ReadWrite);
+        assert_eq!(table.entries[0].storage, StorageId(2));
+        assert_eq!(table.entries[1].storage, StorageId(8));
+        assert!(table.validate().is_ok());
+    }
+
+    #[test]
+    fn remapping_or_merging_facts_is_conservative() {
+        let mut table = StorageTable::new();
+        table.set(StorageId(1), StorageAccess::ReadOnly);
+        table.set(StorageId(2), StorageAccess::ReadOnly);
+        assert_eq!(
+            table.remap(|_| StorageId(7)).access_of(StorageId(7)),
+            StorageAccess::ReadOnly
+        );
+        table.set(StorageId(2), StorageAccess::ReadWrite);
+        assert_eq!(
+            table.remap(|_| StorageId(7)).access_of(StorageId(7)),
+            StorageAccess::ReadWrite
+        );
+    }
+
+    #[test]
+    fn validator_rejects_duplicate_entries() {
+        let table = StorageTable {
+            entries: vec![
+                StorageDecl {
+                    storage: StorageId(3),
+                    access: StorageAccess::ReadOnly,
+                },
+                StorageDecl {
+                    storage: StorageId(3),
+                    access: StorageAccess::ReadWrite,
+                },
+            ],
+        };
+        assert!(matches!(
+            table.validate(),
+            Err(StorageTableError::NotStrictlyOrdered { .. })
+        ));
     }
 }
 
@@ -163,7 +381,8 @@ impl<V: Ord> PolyCoeffs<V> {
             let mut write = 0;
             for read in 0..self.0.len() {
                 if write > 0 && self.0[write - 1].0 == self.0[read].0 {
-                    self.0[write - 1].1 = self.0[read].1;
+                    // Characteristic 2: two copies of one monomial cancel.
+                    self.0[write - 1].1 ^= self.0[read].1;
                 } else {
                     if write != read {
                         self.0.swap(write, read);
@@ -172,6 +391,7 @@ impl<V: Ord> PolyCoeffs<V> {
                 }
             }
             self.0.truncate(write);
+            self.0.retain(|(_, coeff)| coeff & 1 != 0);
         }
     }
 
@@ -356,6 +576,21 @@ pub enum IrType {
         params: alloc::vec::Vec<TypeId>,
         results: alloc::vec::Vec<TypeId>,
     },
+    /// A degree-`degree` extension of `wrapped` by `irreducible`.
+    ///
+    /// `irreducible` lists coefficients of degrees `0..=degree`, low first,
+    /// and is monic. An element is `degree` coefficients of `wrapped`,
+    /// concatenated LSB-first the same way as `Vec(degree, wrapped)`.
+    ExtField {
+        wrapped: TypeId,
+        degree: u32,
+        irreducible: alloc::vec::Vec<u64>,
+    },
+    /// The prime field of `p = 2^k - n`.
+    ///
+    /// `k` is in `2..=256` and `n < 2^(k-1)`, so `k` is the bit length of `p`.
+    /// An element is an integer in `0..p`, stored in `k` bits, LSB first.
+    PrimeField { k: u32, n: alloc::vec::Vec<u64> },
 }
 
 /// An interning table for [`IrType`] values.
@@ -482,24 +717,6 @@ impl StorageId {
     /// with any realistic number of declared memories can't collide with
     /// it.
     pub const VAFFLE_SSA_SPILL: StorageId = StorageId(1_000_000);
-    /// Dedicated marker space for a frontend's `alloca` (e.g.
-    /// `volar-llvm-vaffle-import`'s `Value::StackAlloc`/`PtrLoad`/
-    /// `PtrStore`/`PtrOffset`).
-    ///
-    /// Deliberately *not* [`STACK`]: `volar-vaffle-target/src/lower_to_ir.rs`
-    /// rebases every `StorageRead`/`StorageWrite` tagged `ALLOCA` onto the
-    /// enclosing function's real runtime frame (`sp_bits + local_offset`,
-    /// re-tagged `STACK` in the lowered output — that's genuinely where the
-    /// data ends up living) before emitting it. [`STACK`] itself carries no
-    /// such contract — it is (and must stay) a plain, unrebased storage
-    /// space free for the calling convention's own internal frame *and* for
-    /// arbitrary hand-built or fuzzer-generated VAFFLE code that has no
-    /// notion of "this address is relative to some frame" (confirmed by
-    /// `volar-fuzz`'s own extended-block generator, which picks a random
-    /// `StorageId` including `STACK`'s numeric value as just another id).
-    /// Rebasing based on the numeric value of [`STACK`] instead of this
-    /// dedicated id would silently corrupt any such unrelated access.
-    pub const ALLOCA: StorageId = StorageId(1_000_001);
 }
 
 impl PreInitSegment {
@@ -580,13 +797,15 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     /// sorted.
     ///
     /// # Type semantics
-    /// * If `ty` resolves to `Bit`: all variables must be `Bit`; arithmetic
-    ///   is GF(2) (mod 2 on every coefficient bit).
-    /// * If `ty` resolves to a bitvector or field element `T`: at most one
-    ///   variable across all monomials may have type `T` (the "non-Bit slot");
-    ///   all other variables in that monomial must be `Bit` and act as GF(2)
-    ///   selectors.  The constant term occupies the lowest `bits(T)` bits of
-    ///   `constant`.  Mixing two distinct non-GF(2) field types is prohibited.
+    /// The `u8` coefficient is a characteristic-2 repetition count. The sum
+    /// of monomials is XOR. The product inside one monomial follows `ty`:
+    /// bits and integer primitives multiply per bit (a bit factor spreads),
+    /// `Vec` maps that product across lanes, and `ExtField` is schoolbook
+    /// multiplication modulo its polynomial. An extension monomial may
+    /// contain several field factors. A `PrimeField` sum is addition modulo
+    /// `p` and its product is multiplication modulo `p`; the `u8` coefficient
+    /// is still a repetition count. A tuple of prime fields is the
+    /// concatenation of its parts. `Block` and `Func` fail closed.
     Poly {
         /// Output (and dominant operand) type.
         ty: Ty,
@@ -1270,6 +1489,22 @@ impl TypeRemapper {
                     results: results_host,
                 }
             }
+            IrType::ExtField {
+                wrapped,
+                degree,
+                irreducible,
+            } => {
+                let wrapped_host = Self::remap_one(wrapped.0 as usize, guest, host, map, done);
+                IrType::ExtField {
+                    wrapped: wrapped_host,
+                    degree: *degree,
+                    irreducible: irreducible.clone(),
+                }
+            }
+            IrType::PrimeField { k, n } => IrType::PrimeField {
+                k: *k,
+                n: n.clone(),
+            },
         };
         let host_id = host.intern(remapped);
         map[idx] = host_id;
@@ -1450,12 +1685,6 @@ mod generated_binary_compat_tests {
                 .unwrap()
                 .as_slice(),
             &[0xd0, 0xc0, 0xb0, 0xa0]
-        );
-        assert_eq!(
-            rkyv::to_bytes::<rkyv::rancor::Error>(&Type::Galois64)
-                .unwrap()
-                .as_slice(),
-            &[8]
         );
         assert_eq!(
             rkyv::to_bytes::<rkyv::rancor::Error>(&Constant {

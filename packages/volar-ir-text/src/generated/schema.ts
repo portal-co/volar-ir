@@ -39,9 +39,6 @@ export type PrimitiveType =
   | "_64"
   | "_128"
   | "_256"
-  | "AES8"
-  | "Galois64"
-  | "Z3"
 ;
 export interface Constant {
   readonly hi: bigint;

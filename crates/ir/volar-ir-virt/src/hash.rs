@@ -129,8 +129,8 @@ pub trait IrHashAlgorithm {
 pub struct CommitmentConfig<H: IrHashAlgorithm> {
     /// Hash algorithm to use.
     pub algorithm: H,
-    /// [`StorageId`] where per-PC commitment hashes are written at setup
-    /// and read by handlers.
+    /// [`StorageId`] holding the pre-initialized per-PC commitment hashes,
+    /// read by handlers. The setup block does not write this storage.
     pub commitment_storage: StorageId,
     /// Compile-time key values, one per word in [`IrHashAlgorithm::key_schema`].
     /// Empty for unkeyed algorithms.

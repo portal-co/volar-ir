@@ -265,10 +265,10 @@ impl<'ctx> LlvmBackend<'ctx> {
     fn native_type_to_llvm(&self, t: NativeType) -> inkwell::types::IntType<'ctx> {
         match t {
             NativeType::Bit => self.context.bool_type(),
-            NativeType::_8 | NativeType::AES8 => self.context.i8_type(),
+            NativeType::_8 => self.context.i8_type(),
             NativeType::_16 => self.context.i16_type(),
             NativeType::_32 => self.context.i32_type(),
-            NativeType::_64 | NativeType::Galois64 => self.context.i64_type(),
+            NativeType::_64 => self.context.i64_type(),
             NativeType::_128 => self.context.i128_type(),
             NativeType::_256 => self
                 .context

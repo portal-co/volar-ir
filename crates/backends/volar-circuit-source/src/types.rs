@@ -23,13 +23,12 @@ pub fn ir_type_bit_width(types: &IRTypes, id: TypeId) -> Result<usize, EmitError
         IrType::Primitive(Type::_256) => Err(EmitError::TypeUnsupported {
             ty: "u256".into(),
         }),
-        IrType::Primitive(Type::AES8) => Err(EmitError::TypeUnsupported {
-            ty: "AES8".into(),
+        IrType::PrimeField { .. } => Err(EmitError::TypeUnsupported {
+            ty: "PrimeField".into(),
         }),
-        IrType::Primitive(Type::Galois64) => Err(EmitError::TypeUnsupported {
-            ty: "Galois64".into(),
+        IrType::ExtField { .. } => Err(EmitError::TypeUnsupported {
+            ty: "ExtField".into(),
         }),
-        IrType::Primitive(Type::Z3) => Err(EmitError::TypeUnsupported { ty: "Z3".into() }),
         IrType::Vec(n, elem) => Ok(n.saturating_mul(ir_type_bit_width(types, *elem)?)),
         IrType::Tuple(fields) => {
             let mut sum = 0usize;

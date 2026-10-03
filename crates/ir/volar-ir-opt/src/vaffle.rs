@@ -9,7 +9,7 @@
 //!
 //! # Conservative rules
 //! - No alias propagation — only fold to constants.
-//! - `AES8` / `Galois64` monomials inside `Poly` are skipped (see
+//! - Extension-field monomials inside `Poly` fold under field rules (see
 //!   `common::fold_poly_in_place`).
 
 use alloc::{collections::BTreeMap, vec::Vec};

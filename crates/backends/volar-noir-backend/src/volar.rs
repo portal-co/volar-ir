@@ -149,6 +149,9 @@ pub fn noir_type(types: &IRTypes, id: TypeId) -> Result<String, EmitError> {
             ty: "Block".into(),
         }),
         IrType::Func { .. } => Err(EmitError::TypeUnsupported { ty: "Func".into() }),
+        IrType::PrimeField { .. } => Err(EmitError::TypeUnsupported {
+            ty: "PrimeField".into(),
+        }),
         _ => panic!("noir_type: unhandled IrType variant — add lowering for this variant"),
     }
 }

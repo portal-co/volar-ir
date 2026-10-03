@@ -38,8 +38,8 @@ use crate::region::{RegionId, RegionNames, RegionSelector};
 // Bit widths
 // ============================================================================
 
-/// Total GF(2) bit width of a type, or `None` if the type has no Boolean
-/// lowering (`Z3`). Unlike the pass-level `ir_type_bits`, this never panics:
+/// Total bit width of a type, or `None` if the type has no value width.
+/// Unlike the pass-level `ir_type_bits`, this never panics:
 /// callers turn `None` into a fail-closed error.
 ///
 /// `Block`/`Func` types have width 0 (control-flow labels carry no bits).
@@ -47,13 +47,12 @@ pub fn typed_bit_width(ty_id: IRTypeId, types: &IRTypes) -> Option<usize> {
     match &types.0[ty_id.0 as usize] {
         IRType::Primitive(t) => match t {
             volar_ir_common::Type::Bit => Some(1),
-            volar_ir_common::Type::_8 | volar_ir_common::Type::AES8 => Some(8),
+            volar_ir_common::Type::_8 => Some(8),
             volar_ir_common::Type::_16 => Some(16),
             volar_ir_common::Type::_32 => Some(32),
-            volar_ir_common::Type::_64 | volar_ir_common::Type::Galois64 => Some(64),
+            volar_ir_common::Type::_64 => Some(64),
             volar_ir_common::Type::_128 => Some(128),
             volar_ir_common::Type::_256 => Some(256),
-            volar_ir_common::Type::Z3 => None,
             _ => None,
         },
         IRType::Vec(n, elem) => typed_bit_width(*elem, types).map(|w| n.saturating_mul(w)),
@@ -63,6 +62,7 @@ pub fn typed_bit_width(ty_id: IRTypeId, types: &IRTypes) -> Option<usize> {
                 typed_bit_width(id, types).map(|w| acc + w)
             }),
         IRType::Block { .. } | IRType::Func { .. } => Some(0),
+        IRType::ExtField { .. } | IRType::PrimeField { .. } => types.value_bit_width(ty_id),
         _ => None,
     }
 }
@@ -793,7 +793,7 @@ pub enum TypedGadgetError {
     BodyParamMismatch { gadget: String, reason: &'static str },
     /// The body's outputs do not match the `Data` port words.
     BodyOutputMismatch { gadget: String, reason: &'static str },
-    /// A port type has no Boolean bit width (e.g. `Z3`).
+    /// A port type has no Boolean bit width (e.g. `Block` or `Func`).
     UnsupportedWidth { gadget: String, ty: IRTypeId },
 }
 

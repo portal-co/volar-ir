@@ -11,4 +11,6 @@ pub mod arbitrary;
 pub mod generators;
 pub mod interpreter;
 #[cfg(test)]
+mod prime_field;
+#[cfg(test)]
 pub mod properties;

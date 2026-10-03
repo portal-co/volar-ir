@@ -14,6 +14,7 @@
 #![no_std]
 extern crate alloc;
 
+pub mod circuit_helpers;
 pub mod import_config;
 pub mod lower_to_ir;
 #[cfg(feature = "lazy-ir-plan")]
@@ -24,6 +25,9 @@ pub mod vaffle_ssa;
 pub mod vc;
 pub mod waffle_lower;
 
+pub use circuit_helpers::{
+    intern_circuit_helper, width_type, CircuitHelperMode, HelperKey, HelperOp,
+};
 pub use import_config::{WaffleImportConfig, WaffleImportKind};
 pub use lower_to_ir::{
     entry_param_sides, lower_vaffle_to_ir, lower_vaffle_to_ir_fully_inlined,

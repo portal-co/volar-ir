@@ -17,8 +17,8 @@ use volar_ir_common::{Constant, OracleDecl, PolyCoeffs, Stmt, StorageId, TypeId,
 
 use crate::generators::oracle::hash_oracle;
 use crate::interpreter::ir::{
-    IrValue, StorageMap, bit_width, bits_to_u64, const_to_bits, rotate_left, rotate_right,
-    transmute_bits,
+    IrValue, StorageMap, bit_width, bits_to_u64, const_to_bits, eval_typed_poly, rotate_left,
+    rotate_right, transmute_bits,
 };
 
 // ============================================================================
@@ -59,6 +59,7 @@ fn eval_vaffle_depth(
     };
 
     let mut value_table: BTreeMap<usize, IrValue> = BTreeMap::new();
+    let mut value_tys: BTreeMap<usize, TypeId> = BTreeMap::new();
     // Side-table for OracleCall aggregates: vid → Vec<IrValue>.
     let mut oracle_agg: BTreeMap<usize, Vec<IrValue>> = BTreeMap::new();
     // Side-table for Value::Call aggregates: vid → Vec<IrValue>.
@@ -73,8 +74,9 @@ fn eval_vaffle_depth(
         entry_block.params.len(),
         inputs.len(),
     );
-    for ((vid, _tid), val) in entry_block.params.iter().zip(inputs.iter()) {
+    for ((vid, tid), val) in entry_block.params.iter().zip(inputs.iter()) {
         value_table.insert(vid.0, val.clone());
+        value_tys.insert(vid.0, *tid);
     }
 
     let mut current_block_id = body.entry;
@@ -97,12 +99,18 @@ fn eval_vaffle_depth(
                 &body.values,
                 module,
                 &mut value_table,
+                &mut value_tys,
                 &mut oracle_agg,
                 &mut call_agg,
                 storage,
                 depth,
             )?;
             value_table.insert(vid.0, val);
+            if let Value::Op(stmt) = &body.values[vid.0].kind {
+                if let Some(ty) = volar_ir_opt::common::stmt_output_type(stmt) {
+                    value_tys.insert(vid.0, ty);
+                }
+            }
         }
 
         // Dispatch the terminator.
@@ -122,8 +130,9 @@ fn eval_vaffle_depth(
                     .map(|vid| get_val(&value_table, *vid))
                     .collect();
                 let next_block = &body.blocks[target.block.0];
-                for ((param_vid, _), val) in next_block.params.iter().zip(args.iter()) {
+                for ((param_vid, tid), val) in next_block.params.iter().zip(args.iter()) {
                     value_table.insert(param_vid.0, val.clone());
+                    value_tys.insert(param_vid.0, *tid);
                 }
                 current_block_id = target.block;
             }
@@ -144,8 +153,9 @@ fn eval_vaffle_depth(
                     .map(|vid| get_val(&value_table, *vid))
                     .collect();
                 let next_block = &body.blocks[target.block.0];
-                for ((param_vid, _), val) in next_block.params.iter().zip(args.iter()) {
+                for ((param_vid, tid), val) in next_block.params.iter().zip(args.iter()) {
                     value_table.insert(param_vid.0, val.clone());
+                    value_tys.insert(param_vid.0, *tid);
                 }
                 current_block_id = target.block;
             }
@@ -168,8 +178,9 @@ fn eval_vaffle_depth(
                     .map(|vid| get_val(&value_table, *vid))
                     .collect();
                 let next_block = &body.blocks[target.block.0];
-                for ((param_vid, _), val) in next_block.params.iter().zip(args.iter()) {
+                for ((param_vid, tid), val) in next_block.params.iter().zip(args.iter()) {
                     value_table.insert(param_vid.0, val.clone());
+                    value_tys.insert(param_vid.0, *tid);
                 }
                 current_block_id = target.block;
             }
@@ -190,19 +201,24 @@ fn eval_vaffle_value(
     values: &[volar_ir_common::Node<Value>],
     module: &Module,
     value_table: &mut BTreeMap<usize, IrValue>,
+    value_tys: &mut BTreeMap<usize, TypeId>,
     oracle_agg: &mut BTreeMap<usize, Vec<IrValue>>,
     call_agg: &mut BTreeMap<usize, Vec<IrValue>>,
     storage: &mut StorageMap,
     depth: usize,
 ) -> Option<IrValue> {
     let val = match &values[vid.0].kind {
-        Value::Param { .. } => get_val(value_table, vid),
+        Value::Param { ty, .. } => {
+            value_tys.insert(vid.0, *ty);
+            get_val(value_table, vid)
+        }
         Value::Op(stmt) => eval_vaffle_stmt(
             stmt,
             vid.0,
             &module.types,
             &module.oracles,
             value_table,
+            value_tys,
             oracle_agg,
             storage,
         ),
@@ -234,6 +250,7 @@ fn eval_vaffle_stmt(
     types: &TypeTable,
     oracles: &[OracleDecl],
     value_table: &mut BTreeMap<usize, IrValue>,
+    value_tys: &BTreeMap<usize, TypeId>,
     oracle_agg: &mut BTreeMap<usize, Vec<IrValue>>,
     storage: &mut StorageMap,
 ) -> IrValue {
@@ -250,15 +267,21 @@ fn eval_vaffle_stmt(
             transmute_bits(&src_val, dst_w)
         }
         Stmt::Poly {
-            coeffs, constant, ..
+            ty,
+            coeffs,
+            constant,
         } => {
-            let width = coeffs
-                .iter()
-                .next()
-                .and_then(|(key, _)| key.first())
-                .map(|first_var| get(first_var).len())
-                .unwrap_or(1);
-            eval_vaffle_poly(coeffs, constant, width, value_table)
+            if volar_ir_common::mul_is_idempotent(*ty, types) {
+                let width = bit_width(*ty, types);
+                eval_vaffle_poly(coeffs, constant, width, value_table)
+            } else {
+                eval_typed_poly(*ty, coeffs, constant, types, |var| {
+                    let factor_ty = value_tys.get(&var.0).copied().unwrap_or_else(|| {
+                        panic!("eval_vaffle: factor v{} has no type", var.0)
+                    });
+                    (factor_ty, get(var))
+                })
+            }
         }
         Stmt::Rol { src, ty, n } => {
             let val = get(src);

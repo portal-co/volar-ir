@@ -88,8 +88,6 @@ fn parse_native_type(s: &str) -> Result<NativeType, ParseError> {
         "u64" => Ok(NativeType::_64),
         "u128" => Ok(NativeType::_128),
         "u256" => Ok(NativeType::_256),
-        "aes8" => Ok(NativeType::AES8),
-        "galois64" => Ok(NativeType::Galois64),
         other => Err(ParseError::UnknownNativeType(other.into())),
     }
 }

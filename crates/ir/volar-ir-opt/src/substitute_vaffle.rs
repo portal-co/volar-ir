@@ -609,11 +609,13 @@ fn remap_value<P: Clone>(
         Value::StackAlloc {
             elem_ty,
             count,
-            base_slot,
+            storage,
+            sp,
         } => Value::StackAlloc {
             elem_ty: tr.remap(*elem_ty),
             count: *count,
-            base_slot: *base_slot,
+            storage: *storage,
+            sp: *sp,
         },
         Value::PtrLoad { ptr, pointee_ty } => Value::PtrLoad {
             ptr: *ptr,

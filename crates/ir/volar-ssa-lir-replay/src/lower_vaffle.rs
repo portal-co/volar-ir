@@ -67,13 +67,16 @@ fn build_func_names<P: Clone>(module: &Module<P>) -> Vec<Option<String>> {
 fn type_bits(tid: TypeId, types: &TypeTable) -> u32 {
     match &types.0[tid.0 as usize] {
         IrType::Primitive(NativeType::Bit) => 1,
-        IrType::Primitive(NativeType::_8) | IrType::Primitive(NativeType::AES8) => 8,
+        IrType::Primitive(NativeType::_8) => 8,
         IrType::Primitive(NativeType::_16) => 16,
         IrType::Primitive(NativeType::_32) => 32,
-        IrType::Primitive(NativeType::_64) | IrType::Primitive(NativeType::Galois64) => 64,
+        IrType::Primitive(NativeType::_64) => 64,
         IrType::Primitive(NativeType::_128) => 128,
         IrType::Primitive(NativeType::_256) => 256,
         IrType::Vec(n, elem) => (*n as u32) * type_bits(*elem, types),
+        IrType::ExtField { wrapped, degree, .. } => {
+            (*degree) * type_bits(*wrapped, types)
+        }
         other => unimplemented!("type_bits: unsupported VAFFLE type {:?}", other),
     }
 }

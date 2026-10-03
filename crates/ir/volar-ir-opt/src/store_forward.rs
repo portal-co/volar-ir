@@ -445,6 +445,10 @@ fn store_forward_ir_block_with_cache<P: Clone>(
 ) -> (bool, IrStoreCache) {
     let mut cache = incoming;
     let mut alias_map: BTreeMap<IRVarId, IRVarId> = BTreeMap::new();
+    let mut type_map: BTreeMap<IRVarId, volar_ir_common::TypeId> = BTreeMap::new();
+    for (idx, &tid) in block.params.iter().enumerate() {
+        type_map.insert(IRVarId(idx as u32), tid);
+    }
     let mut const_map: BTreeMap<IRVarId, Constant> = BTreeMap::new();
     let mut addr_poly_map: BTreeMap<IRVarId, IrPolyRepr> = BTreeMap::new();
     let mut known_bits_map: BTreeMap<IRVarId, KnownBits> = BTreeMap::new();
@@ -456,8 +460,11 @@ fn store_forward_ir_block_with_cache<P: Clone>(
     for i in 0..block.stmts.len() {
         let rv = IRVarId(base + i as u32);
 
-        if apply_aliases_to_ir_stmt(&mut block.stmts[i].kind, &alias_map) {
+        if apply_aliases_to_ir_stmt(&mut block.stmts[i].kind, &alias_map, &type_map, types) {
             changed = true;
+        }
+        if let Some(ty) = crate::common::stmt_output_type(&block.stmts[i].kind) {
+            type_map.insert(rv, ty);
         }
 
         let stmt = block.stmts[i].kind.clone();
@@ -2079,8 +2086,14 @@ fn store_forward_vaffle_block_with_cache(
 fn apply_aliases_to_ir_stmt(
     stmt: &mut volar_ir_common::Stmt<IRVarId, IRVarId>,
     alias_map: &BTreeMap<IRVarId, IRVarId>,
+    type_map: &BTreeMap<IRVarId, volar_ir_common::TypeId>,
+    types: &TypeTable,
 ) -> bool {
-    crate::common::apply_aliases_to_stmt(stmt, alias_map)
+    crate::common::apply_aliases_to_stmt(stmt, alias_map, |var| {
+        type_map
+            .get(var)
+            .map_or(false, |&tid| volar_ir_common::mul_is_idempotent(tid, types))
+    })
 }
 
 // ============================================================================

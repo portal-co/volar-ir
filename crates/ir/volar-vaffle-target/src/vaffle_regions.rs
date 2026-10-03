@@ -42,7 +42,7 @@ pub enum VaffleRegionError {
     UnsupportedAnchor { anchor: TypedAnchor },
     /// The function is imported — there is no body to wrap.
     ImportedFunction { anchor: TypedAnchor, func: u32 },
-    /// The anchor's type has no Boolean width (e.g. `Z3`).
+    /// The anchor's type has no Boolean width (e.g. `Block` or `Func`).
     UnsupportedWidth { anchor: TypedAnchor, ty: IRTypeId },
     /// A storage anchor's `(StorageId, TypeId)` space has no traffic in the
     /// module (statements or typed `pre_init`).

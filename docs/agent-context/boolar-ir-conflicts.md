@@ -4,23 +4,16 @@
 `volar-weaver/src/vole.rs`, or any other shared pass/weaver code that has to
 serve both `BIrBlocks` (Boolar IR) and `IRBlocks` (Volar IR).
 
-## Status: Boolar IR support is **backlogged**
+## Status: Boolar IR support is active
 
-As of this log, Boolar IR (`BIrBlocks`) is **not actively extended**. Its
-existing call sites keep working (via shims, see below), but new work
-targets Volar IR (`IRBlocks`) directly, and Boolar IR does not get parallel
-new features unless something specifically needs it.
+Boolar IR (`BIrBlocks`) is an actively supported Bit-only representation in the
+Volar IR family. Every wire and storage cell is exactly one bit. It is not a
+width-generic replacement for Volar IR, so shared passes must preserve the
+representation boundary and account explicitly for its lane and address rules.
 
-**Why:** Boolar IR is Bit-only by construction (every wire is exactly 1
-bit). Repeatedly, shared code written to serve both IRs has had to choose
-between (a) staying Bit-only and blocking Volar IR improvements that need
-real width (`_32`, `_64`, `Vec(k, _)`, ...), or (b) becoming width-aware and
-risking Boolar IR's Bit-only assumptions being silently violated. This has
-happened enough times in this project's history — sometimes caught by
-review, sometimes not — that treating Boolar IR as a co-equal, actively
-maintained general-purpose target IR is no longer the effective default.
-Volar IR is the general-purpose target going forward; Boolar IR is kept
-working for existing callers via thin shims, not extended.
+The historical backlog described below is closed. The conflict entries remain
+useful compatibility notes: they record places where width-generic Volar IR
+logic and Bit-only Boolar logic must not be conflated.
 
 **What this means in practice:**
 - New passes/weaver features: write them for `IRBlocks` (Volar IR) directly.

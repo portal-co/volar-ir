@@ -13,7 +13,8 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId,
 };
 use volar_ir_common::{
-    ActionDecl, Constant, IrType, OracleDecl, RngDecl, Stmt, StorageId, Type, TypeId, TypeTable,
+    ActionDecl, Constant, IrType, OracleDecl, PolyCoeffs, RngDecl, Stmt, StorageId, Type, TypeId,
+    TypeTable,
 };
 
 use crate::{ParseText, SavedBIrBlocks, SavedIrBlocks, WriteText};
@@ -108,8 +109,10 @@ fn ir_type_table() {
         IrType::Primitive(Type::_64),
         IrType::Primitive(Type::_128),
         IrType::Primitive(Type::_256),
-        IrType::Primitive(Type::AES8),
-        IrType::Primitive(Type::Galois64),
+        IrType::PrimeField { k: 2, n: vec![1] },
+        IrType::PrimeField { k: 3, n: vec![3] },
+        volar_ir_common::ext_field_type(ty(0), 8, volar_ir_common::aes8_irreducible()),
+        volar_ir_common::ext_field_type(ty(0), 64, volar_ir_common::galois64_irreducible()),
         IrType::Vec(8, ty(0)),
         IrType::Tuple(vec![ty(0), ty(1)]),
         IrType::Block {
@@ -252,7 +255,7 @@ fn ir_stmt_transmute() {
 #[test]
 fn ir_stmt_poly() {
     let types = TypeTable(vec![IrType::Primitive(Type::Bit)]);
-    let mut coeffs = BTreeMap::new();
+    let mut coeffs = PolyCoeffs::new();
     coeffs.insert(vec![v(0), v(1)], 1u8);
     coeffs.insert(vec![v(0)], 1u8);
     let block = IRBlock {

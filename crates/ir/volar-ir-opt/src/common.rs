@@ -2,8 +2,12 @@
 // @ai: assisted
 //! Shared helpers for constant-folding all three IR layers.
 
-use alloc::{collections::BTreeMap, vec::Vec};
-use volar_ir_common::{Constant, IrType, PolyCoeffs, Stmt, Type, TypeId, TypeTable};
+use alloc::{collections::BTreeMap, vec, vec::Vec};
+use volar_ir_common::{
+    BoolRing, Constant, IrType, PolyCoeffs, PrimeSpec, Stmt, Type, TypeId, TypeTable,
+    contains_prime_field, eval_prime_poly, monomial_product, mul_identity, mul_is_idempotent,
+    prime_spec, repetition_residue,
+};
 
 // ============================================================================
 // Alias canonicalization
@@ -163,10 +167,10 @@ pub fn constant_ror(c: Constant, width: usize, n: usize) -> Constant {
 pub fn primitive_type_width(t: Type) -> usize {
     match t {
         Type::Bit => 1,
-        Type::_8 | Type::AES8 => 8,
+        Type::_8 => 8,
         Type::_16 => 16,
         Type::_32 => 32,
-        Type::_64 | Type::Galois64 => 64,
+        Type::_64 => 64,
         Type::_128 => 128,
         Type::_256 => 256,
         _ => panic!("primitive_type_width: unknown Type variant"),
@@ -174,30 +178,14 @@ pub fn primitive_type_width(t: Type) -> usize {
 }
 
 /// Recursively compute the bit-width of `ty_id`.
-/// Returns `None` for `AES8`, `Galois64`, `Block`, and `Func` types.
+/// Returns `None` for `Block` and `Func`.
 pub fn type_bit_width(ty_id: TypeId, types: &TypeTable) -> Option<usize> {
-    match types.0.get(ty_id.0 as usize)? {
-        IrType::Primitive(Type::AES8) | IrType::Primitive(Type::Galois64) => None,
-        IrType::Primitive(t) => Some(primitive_type_width(*t)),
-        IrType::Vec(n, elem_ty) => Some(n * type_bit_width(*elem_ty, types)?),
-        IrType::Tuple(elems) => {
-            let mut sum = 0usize;
-            for &e in elems {
-                sum += type_bit_width(e, types)?;
-            }
-            Some(sum)
-        }
-        IrType::Block { .. } | IrType::Func { .. } => None,
-        _ => None,
-    }
+    types.value_bit_width(ty_id)
 }
 
-/// Returns `true` if `ty_id` is `AES8` or `Galois64`.
+/// Returns `true` when `ty_id` is an extension field or contains one.
 pub fn is_field_type(ty_id: TypeId, types: &TypeTable) -> bool {
-    matches!(
-        types.0.get(ty_id.0 as usize),
-        Some(IrType::Primitive(Type::AES8)) | Some(IrType::Primitive(Type::Galois64))
-    )
+    volar_ir_common::contains_ext_field(ty_id, types)
 }
 
 /// Extract the output `TypeId` from a `Stmt`, if it produces one.
@@ -228,11 +216,17 @@ pub fn stmt_output_type<V, A>(stmt: &Stmt<V, A>) -> Option<TypeId> {
 // ============================================================================
 
 /// Rewrite all var references in `stmt` through `alias_map`.
-/// For `Poly`, monomial keys are rebuilt (sorted + deduped) after substitution.
+///
+/// For `Poly`, monomial keys are rebuilt after substitution. Duplicate
+/// factors collapse only when `factor_idempotent` says that factor's
+/// product is idempotent (`v * v = v`). Extension-field factors stay, so
+/// `a * a` remains the square.
+///
 /// Returns `true` if any reference was changed.
 pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
     stmt: &mut Stmt<V, V>,
     alias_map: &BTreeMap<V, V>,
+    mut factor_idempotent: impl FnMut(&V) -> bool,
 ) -> bool {
     if alias_map.is_empty() {
         return false;
@@ -277,19 +271,25 @@ pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
                     changed = true;
                     continue;
                 }
-                let mut new_key: Vec<V> = key
+                let mut tagged: Vec<(V, bool)> = key
                     .iter()
                     .map(|&v| {
                         let w = canon_alias(alias_map, v);
                         if w != v {
                             changed = true;
                         }
-                        w
+                        (w, factor_idempotent(&v))
                     })
                     .collect();
-                new_key.sort();
-                let before_len = new_key.len();
-                new_key.dedup(); // idempotent AND: v*v = v in GF(2)
+                tagged.sort_by(|a, b| a.0.cmp(&b.0));
+                let before_len = tagged.len();
+                let mut new_key: Vec<V> = Vec::with_capacity(before_len);
+                for (var, idempotent) in tagged {
+                    if idempotent && new_key.last() == Some(&var) {
+                        continue;
+                    }
+                    new_key.push(var);
+                }
                 if new_key.len() != before_len {
                     changed = true;
                 }
@@ -468,12 +468,12 @@ pub fn merge_poly_into<V: Clone + Ord>(
 
 /// Simplify a `Poly` in-place using known constants and type information.
 ///
-/// Conservative rules applied:
-/// - Skip monomials containing `AES8`/`Galois64`-typed vars (leave unchanged).
-/// - Drop monomials where any var resolves to the zero constant.
-/// - Remove vars that resolve to all-ones from monomial keys (multiplicative identity).
-/// - Fold empty-key monomials (after identity removal) into `constant`.
-/// - Mask `constant` to the output type width.
+/// Characteristic-2 cancellation applies to bit, integer, and extension-field
+/// outputs. A prime-field sum adds repetition counts modulo `p` and does not
+/// cancel even coefficients. Folds that assume `a * a = a` apply only when
+/// the factor's type is idempotent. An all-constant monomial evaluates with
+/// the real field product, and an empty monomial contributes that type's
+/// multiplicative identity.
 ///
 /// Returns `true` if any change was made.
 pub fn fold_poly_in_place<V: Clone + Ord>(
@@ -484,9 +484,11 @@ pub fn fold_poly_in_place<V: Clone + Ord>(
     type_map: &BTreeMap<V, TypeId>,
     types: &TypeTable,
 ) -> bool {
-    // Skip field-element output types entirely.
+    if contains_prime_field(ty, types) {
+        return fold_prime_poly(ty, coeffs, constant, const_map, type_map, types);
+    }
     if is_field_type(ty, types) {
-        return false;
+        return fold_extension_poly(ty, coeffs, constant, const_map, type_map, types);
     }
 
     let mut changed = false;
@@ -501,11 +503,11 @@ pub fn fold_poly_in_place<V: Clone + Ord>(
             continue;
         }
 
-        // Skip monomials with any field-typed var.
+        // A non-idempotent factor is not an AND. Leave that monomial alone.
         let has_field = key.iter().any(|v| {
             type_map
                 .get(v)
-                .map_or(false, |&tid| is_field_type(tid, types))
+                .map_or(false, |&tid| !mul_is_idempotent(tid, types))
         });
         if has_field {
             *new_coeffs.entry(key).or_insert(0) ^= coeff;
@@ -587,4 +589,475 @@ pub fn fold_poly_in_place<V: Clone + Ord>(
     }
 
     changed
+}
+
+fn fold_extension_poly<V: Clone + Ord>(
+    ty: TypeId,
+    coeffs: &mut PolyCoeffs<V>,
+    constant: &mut Constant,
+    const_map: &BTreeMap<V, Constant>,
+    type_map: &BTreeMap<V, TypeId>,
+    types: &TypeTable,
+) -> bool {
+    let Some(width) = type_bit_width(ty, types) else {
+        return false;
+    };
+    let mut changed = false;
+    let old_coeffs = core::mem::take(coeffs);
+    let old_coeffs_for_cmp = old_coeffs.clone();
+    let mut new_coeffs = PolyCoeffs::new();
+
+    for (key, coeff) in old_coeffs {
+        if coeff & 1 == 0 {
+            changed = true;
+            continue;
+        }
+
+        let mut monomial_zero = false;
+        let mut all_constant = true;
+        let mut const_factors: Vec<(TypeId, Vec<bool>)> = Vec::new();
+        let mut new_key: Vec<V> = Vec::with_capacity(key.len());
+
+        for v in &key {
+            let Some(&factor_ty) = type_map.get(v) else {
+                all_constant = false;
+                new_key.push(v.clone());
+                continue;
+            };
+            let Some(&c) = const_map.get(v) else {
+                all_constant = false;
+                new_key.push(v.clone());
+                continue;
+            };
+            let factor_width = type_bit_width(factor_ty, types).unwrap_or(1);
+            let masked = mask_constant(c, factor_width);
+            if constant_is_zero(masked) {
+                monomial_zero = true;
+                changed = true;
+                break;
+            }
+            if constant_is_mul_identity(masked, factor_ty, types) {
+                changed = true;
+                continue;
+            }
+            const_factors.push((factor_ty, constant_to_bits(masked, factor_width)));
+            new_key.push(v.clone());
+        }
+
+        if monomial_zero {
+            continue;
+        }
+
+        if all_constant && width <= 256 {
+            let product = eval_constant_product(ty, &const_factors, types);
+            *constant = constant_xor(*constant, bits_to_constant(&product));
+            changed = true;
+            continue;
+        }
+
+        new_key.sort();
+        let before_len = new_key.len();
+        let mut deduped = Vec::with_capacity(new_key.len());
+        for v in new_key {
+            let idempotent = type_map
+                .get(&v)
+                .map_or(false, |&tid| mul_is_idempotent(tid, types));
+            if idempotent && deduped.last() == Some(&v) {
+                continue;
+            }
+            deduped.push(v);
+        }
+        if deduped.len() != before_len || deduped.len() != key.len() {
+            changed = true;
+        }
+
+        if deduped.is_empty() {
+            if let Some(identity) = mul_identity(ty, types) {
+                *constant = constant_xor(*constant, bits_to_constant(&identity));
+            }
+            changed = true;
+        } else {
+            *new_coeffs.entry(deduped).or_insert(0) ^= coeff;
+        }
+    }
+
+    new_coeffs.retain(|_, c| *c & 1 != 0);
+    if new_coeffs != old_coeffs_for_cmp {
+        changed = true;
+    }
+    *coeffs = new_coeffs;
+
+    if let Some(w) = type_bit_width(ty, types) {
+        let masked = mask_constant(*constant, w);
+        if masked != *constant {
+            *constant = masked;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn fold_prime_poly<V: Clone + Ord>(
+    ty: TypeId,
+    coeffs: &mut PolyCoeffs<V>,
+    constant: &mut Constant,
+    const_map: &BTreeMap<V, Constant>,
+    type_map: &BTreeMap<V, TypeId>,
+    types: &TypeTable,
+) -> bool {
+    let Some(width) = type_bit_width(ty, types) else {
+        return false;
+    };
+    let spec = uniform_prime_spec(ty, types);
+    let mut changed = false;
+    let mut overflow = false;
+    let old_constant = *constant;
+    let old_coeffs = core::mem::take(coeffs);
+    let old_coeffs_for_cmp = old_coeffs.clone();
+    let mut new_coeffs = PolyCoeffs::new();
+
+    for (key, coeff) in old_coeffs {
+        let stored = match &spec {
+            Some(spec) => repetition_residue(coeff, spec),
+            None => coeff,
+        };
+        if stored == 0 {
+            changed = true;
+            continue;
+        }
+
+        let mut monomial_zero = false;
+        let mut all_constant = true;
+        let mut const_factors: Vec<(TypeId, Vec<bool>)> = Vec::new();
+        let mut new_key: Vec<V> = Vec::with_capacity(key.len());
+
+        for v in &key {
+            let Some(&factor_ty) = type_map.get(v) else {
+                all_constant = false;
+                new_key.push(v.clone());
+                continue;
+            };
+            let Some(&c) = const_map.get(v) else {
+                all_constant = false;
+                new_key.push(v.clone());
+                continue;
+            };
+            let factor_width = type_bit_width(factor_ty, types).unwrap_or(1);
+            let masked = mask_constant(c, factor_width);
+            if constant_is_zero(masked) {
+                monomial_zero = true;
+                changed = true;
+                break;
+            }
+            if constant_is_mul_identity(masked, factor_ty, types) {
+                changed = true;
+                continue;
+            }
+            const_factors.push((factor_ty, constant_to_bits(masked, factor_width)));
+            new_key.push(v.clone());
+        }
+
+        if monomial_zero {
+            continue;
+        }
+
+        if all_constant && width <= 256 {
+            let acc = constant_to_bits(*constant, width);
+            let terms = vec![(const_factors, stored)];
+            let mut sink = BoolRing;
+            let reduced = eval_prime_poly(ty, &acc, &terms, types, &mut sink);
+            *constant = bits_to_constant(&reduced);
+            changed = true;
+            continue;
+        }
+
+        new_key.sort();
+        let before_len = new_key.len();
+        let mut deduped = Vec::with_capacity(new_key.len());
+        for v in new_key {
+            let idempotent = type_map
+                .get(&v)
+                .map_or(false, |&tid| mul_is_idempotent(tid, types));
+            if idempotent && deduped.last() == Some(&v) {
+                continue;
+            }
+            deduped.push(v);
+        }
+        if deduped.len() != before_len || deduped.len() != key.len() {
+            changed = true;
+        }
+
+        if deduped.is_empty() && width <= 256 {
+            let acc = constant_to_bits(*constant, width);
+            let terms = vec![(Vec::new(), stored)];
+            let mut sink = BoolRing;
+            let reduced = eval_prime_poly(ty, &acc, &terms, types, &mut sink);
+            *constant = bits_to_constant(&reduced);
+            changed = true;
+            continue;
+        }
+
+        match new_coeffs.get(&deduped).copied() {
+            Some(prev) => match merge_repetition(prev, stored, spec.as_ref()) {
+                Some(sum) => {
+                    if sum == 0 {
+                        new_coeffs.remove(&deduped);
+                    } else {
+                        new_coeffs.insert(deduped, sum);
+                    }
+                    changed = true;
+                }
+                None => overflow = true,
+            },
+            None => {
+                new_coeffs.insert(deduped, stored);
+            }
+        }
+    }
+
+    if overflow {
+        *coeffs = old_coeffs_for_cmp;
+        *constant = old_constant;
+        return false;
+    }
+
+    new_coeffs.retain(|_, c| *c != 0);
+    if new_coeffs != old_coeffs_for_cmp {
+        changed = true;
+    }
+    *coeffs = new_coeffs;
+
+    if width <= 256 {
+        let acc = constant_to_bits(*constant, width);
+        let mut sink = BoolRing;
+        let reduced = eval_prime_poly(ty, &acc, &[], types, &mut sink);
+        let masked = bits_to_constant(&reduced);
+        if masked != *constant {
+            *constant = masked;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn uniform_prime_spec(ty: TypeId, types: &TypeTable) -> Option<PrimeSpec> {
+    match types.0.get(ty.0 as usize)? {
+        IrType::PrimeField { .. } => prime_spec(ty, types),
+        IrType::Vec(_, elem) => uniform_prime_spec(*elem, types),
+        IrType::Tuple(parts) => {
+            let mut found = None;
+            for &part in parts {
+                let spec = uniform_prime_spec(part, types)?;
+                if let Some(prev) = &found {
+                    if prev != &spec {
+                        return None;
+                    }
+                } else {
+                    found = Some(spec);
+                }
+            }
+            found
+        }
+        _ => None,
+    }
+}
+
+fn merge_repetition(prev: u8, add: u8, spec: Option<&PrimeSpec>) -> Option<u8> {
+    match spec {
+        Some(spec) if spec.k <= 8 => {
+            let n = spec.n.first().copied().unwrap_or(0) as u16;
+            let prime = (1u16 << spec.k) - n;
+            Some(((prev as u16 + add as u16) % prime) as u8)
+        }
+        _ => {
+            let sum = prev as u16 + add as u16;
+            if sum > 255 {
+                None
+            } else {
+                Some(sum as u8)
+            }
+        }
+    }
+}
+
+fn constant_is_mul_identity(c: Constant, ty: TypeId, types: &TypeTable) -> bool {
+    let Some(identity) = mul_identity(ty, types) else {
+        return false;
+    };
+    constant_to_bits(c, identity.len()) == identity
+}
+
+fn constant_to_bits(c: Constant, width: usize) -> Vec<bool> {
+    let mut bits = Vec::with_capacity(width);
+    for bit in 0..width {
+        let set = if bit < 128 {
+            (c.lo >> bit) & 1 == 1
+        } else if bit < 256 {
+            (c.hi >> (bit - 128)) & 1 == 1
+        } else {
+            false
+        };
+        bits.push(set);
+    }
+    bits
+}
+
+fn bits_to_constant(bits: &[bool]) -> Constant {
+    let mut lo = 0u128;
+    let mut hi = 0u128;
+    for (bit, set) in bits.iter().enumerate() {
+        if !*set {
+            continue;
+        }
+        if bit < 128 {
+            lo |= 1u128 << bit;
+        } else if bit < 256 {
+            hi |= 1u128 << (bit - 128);
+        }
+    }
+    Constant { hi, lo }
+}
+
+fn eval_constant_product(
+    ty: TypeId,
+    factors: &[(TypeId, Vec<bool>)],
+    types: &TypeTable,
+) -> Vec<bool> {
+    let refs: Vec<(TypeId, &[bool])> = factors
+        .iter()
+        .map(|(factor_ty, bits)| (*factor_ty, bits.as_slice()))
+        .collect();
+    monomial_product(ty, &refs, types, &mut BoolRing)
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use alloc::vec;
+
+    fn zero() -> Constant {
+        Constant { hi: 0, lo: 0 }
+    }
+
+    #[test]
+    fn bit_square_collapses_and_field_square_stays() {
+        let mut types = TypeTable::new();
+        let bit = types.bit();
+        let field = types.aes8();
+        let mut bit_coeffs = PolyCoeffs::new();
+        bit_coeffs.insert(vec![0u32, 0], 1);
+        let mut constant = zero();
+        let const_map = BTreeMap::new();
+        let mut type_map = BTreeMap::new();
+        type_map.insert(0u32, bit);
+        fold_poly_in_place(
+            bit,
+            &mut bit_coeffs,
+            &mut constant,
+            &const_map,
+            &type_map,
+            &types,
+        );
+        assert_eq!(bit_coeffs.get(&[0u32]).copied(), Some(1));
+
+        let mut field_coeffs = PolyCoeffs::new();
+        field_coeffs.insert(vec![1u32, 1], 1);
+        type_map.insert(1u32, field);
+        fold_poly_in_place(
+            field,
+            &mut field_coeffs,
+            &mut constant,
+            &const_map,
+            &type_map,
+            &types,
+        );
+        assert_eq!(field_coeffs.get(&[1u32, 1]).copied(), Some(1));
+    }
+
+    #[test]
+    fn prime_repetition_adds_and_does_not_cancel_evens() {
+        let mut types = TypeTable::new();
+        let z3 = types.z3();
+        let mut type_map = BTreeMap::new();
+        type_map.insert(0u32, z3);
+        type_map.insert(1u32, z3);
+        let mut const_map = BTreeMap::new();
+        const_map.insert(0u32, Constant { hi: 0, lo: 1 });
+        let mut coeffs = PolyCoeffs::new();
+        // Dropping the constant one makes this the same monomial as `[1]`,
+        // so the repetitions add: 1 + 1 = 2 (mod 3), which stays.
+        coeffs.insert(vec![0u32, 1], 1);
+        coeffs.insert(vec![1u32], 1);
+        let mut constant = zero();
+        fold_poly_in_place(
+            z3,
+            &mut coeffs,
+            &mut constant,
+            &const_map,
+            &type_map,
+            &types,
+        );
+        assert_eq!(coeffs.get(&[1u32]).copied(), Some(2));
+
+        let mut doubled = PolyCoeffs::new();
+        doubled.insert(vec![1u32], 2);
+        fold_poly_in_place(
+            z3,
+            &mut doubled,
+            &mut constant,
+            &const_map,
+            &type_map,
+            &types,
+        );
+        assert_eq!(doubled.get(&[1u32]).copied(), Some(2));
+
+        let mut cancelled = PolyCoeffs::new();
+        cancelled.insert(vec![1u32], 3);
+        fold_poly_in_place(
+            z3,
+            &mut cancelled,
+            &mut constant,
+            &const_map,
+            &type_map,
+            &types,
+        );
+        assert!(cancelled.is_empty());
+    }
+
+    #[test]
+    fn field_one_drops_and_all_ones_stays() {
+        let mut types = TypeTable::new();
+        let field = types.aes8();
+        let mut type_map = BTreeMap::new();
+        type_map.insert(0u32, field);
+        type_map.insert(1u32, field);
+        let mut const_map = BTreeMap::new();
+        const_map.insert(0u32, Constant { hi: 0, lo: 1 });
+        let mut coeffs = PolyCoeffs::new();
+        coeffs.insert(vec![0u32, 1], 1);
+        let mut constant = zero();
+        fold_poly_in_place(
+            field,
+            &mut coeffs,
+            &mut constant,
+            &const_map,
+            &type_map,
+            &types,
+        );
+        assert_eq!(coeffs.get(&[1u32]).copied(), Some(1));
+        assert!(coeffs.get(&[0u32, 1]).is_none());
+
+        const_map.insert(0u32, Constant { hi: 0, lo: 0xff });
+        let mut coeffs = PolyCoeffs::new();
+        coeffs.insert(vec![0u32, 1], 1);
+        fold_poly_in_place(
+            field,
+            &mut coeffs,
+            &mut constant,
+            &const_map,
+            &type_map,
+            &types,
+        );
+        assert_eq!(coeffs.get(&[0u32, 1]).copied(), Some(1));
+    }
 }

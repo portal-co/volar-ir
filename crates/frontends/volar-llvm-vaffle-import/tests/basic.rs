@@ -14,6 +14,27 @@ use volar_llvm_vaffle_import::{
     LlvmImportConfig, import_module, import_module_inlined, import_module_with_config,
 };
 
+/// Data storages and stack-pointer globals recorded by `Value::StackAlloc`.
+fn stack_sites(
+    body: &vaffle::FuncBody,
+) -> (
+    std::collections::HashSet<StorageId>,
+    std::collections::HashSet<StorageId>,
+) {
+    let mut data = std::collections::HashSet::new();
+    let mut sp = std::collections::HashSet::new();
+    for value in &body.values {
+        if let Value::StackAlloc {
+            storage, sp: site, ..
+        } = &value.kind
+        {
+            data.insert(*storage);
+            sp.insert(*site);
+        }
+    }
+    (data, sp)
+}
+
 fn parse(source: &str) -> Context {
     let context = Context::create();
     context
@@ -343,18 +364,21 @@ entry:
     assert!(stack_alloc_widths.iter().all(|&ty| {
         out.types.0[ty.0 as usize] == volar_ir_common::IrType::Primitive(volar_ir_common::Type::_64)
     }));
+    let (data, _) = stack_sites(body);
     let stack_reads = body
         .values
         .iter()
         .filter(|value| {
             matches!(
                 &value.kind,
-                Value::Op(Stmt::StorageRead { storage, .. }) if *storage == StorageId::ALLOCA
+                Value::Op(Stmt::StorageRead { storage, .. }) if data.contains(storage)
             )
         })
         .count();
-    // `load ptr` + `load i64`: both are 64-bit accesses.
-    assert_eq!(stack_reads, 128);
+    // Direct `load ptr` is 64 bit reads of the slot. The reloaded pointer is
+    // no longer a tracked alloca, so `load i64` dispatches across both data
+    // stacks (64 bits each).
+    assert_eq!(stack_reads, 192);
 }
 
 #[test]
@@ -386,7 +410,7 @@ entry:
         &["pointer_array"],
         LlvmImportConfig {
             pointer_width: Some(PointerWidth::Bits32),
-            ..Default::default()
+            ..LlvmImportConfig::default()
         },
     )
     .expect("matching 32-bit layout imports");
@@ -406,7 +430,7 @@ entry:
         &["pointer_array"],
         LlvmImportConfig {
             pointer_width: Some(PointerWidth::Bits64),
-            ..Default::default()
+            ..LlvmImportConfig::default()
         },
     )
     .expect_err("an incompatible pointer ABI must not be silently overridden");
@@ -885,23 +909,20 @@ entry:
         panic!("expected a function body");
     };
 
-    // Every non-ALLOCA StorageRead/StorageWrite address must be a
-    // *computed* value (a `Stmt::Merge` of bit-circuit-adder output), not a
+    // Every global StorageRead/StorageWrite address must be a *computed*
+    // value (a `Stmt::Merge` of bit-circuit-adder output), not a
     // `Stmt::Const` -- confirming the address is genuinely runtime.
+    let (_, sp) = stack_sites(body);
     let addr_ids: Vec<usize> = body
         .values
         .iter()
         .filter_map(|v| match &v.kind {
-            Value::Op(Stmt::StorageRead {
-                storage: volar_ir_common::StorageId(id),
-                addr,
-                ..
-            })
-            | Value::Op(Stmt::StorageWrite {
-                storage: volar_ir_common::StorageId(id),
-                addr,
-                ..
-            }) if *id != volar_ir_common::StorageId::ALLOCA.0 => Some(addr.0),
+            Value::Op(Stmt::StorageRead { storage, addr, .. })
+            | Value::Op(Stmt::StorageWrite { storage, addr, .. })
+                if !sp.contains(storage) =>
+            {
+                Some(addr.0)
+            }
             _ => None,
         })
         .collect();
@@ -941,32 +962,30 @@ entry:
     let FuncDecl::Body(body) = &out.funcs[0] else {
         panic!("expected a function body");
     };
-    let has_alloc = body
-        .values
-        .iter()
-        .any(|v| matches!(&v.kind, Value::StackAlloc { .. }));
+    let (data, _) = stack_sites(body);
+    let has_alloc = !data.is_empty();
     let has_read = body.values.iter().any(|v| {
         matches!(
             &v.kind,
             Value::Op(volar_ir_common::Stmt::StorageRead { storage, .. })
-                if *storage == volar_ir_common::StorageId::ALLOCA
+                if data.contains(storage)
         )
     });
     let has_write = body.values.iter().any(|v| {
         matches!(
             &v.kind,
             Value::Op(volar_ir_common::Stmt::StorageWrite { storage, .. })
-                if *storage == volar_ir_common::StorageId::ALLOCA
+                if data.contains(storage)
         )
     });
     assert!(has_alloc, "expected a Value::StackAlloc marker");
     assert!(
         has_read,
-        "expected an ALLOCA StorageRead for the spill load"
+        "expected a data-stack StorageRead for the spill load"
     );
     assert!(
         has_write,
-        "expected an ALLOCA StorageWrite for the spill store"
+        "expected a data-stack StorageWrite for the spill store"
     );
 }
 
@@ -1002,30 +1021,28 @@ entry:
         panic!("expected a function body");
     };
 
-    // Every ALLOCA StorageRead/StorageWrite address must be a *computed*
+    // Every data-stack StorageRead/StorageWrite address must be a *computed*
     // value (a `Stmt::Merge` of bit-circuit-adder output), not a
     // `Stmt::Const` -- confirming the address is genuinely runtime, not
-    // silently folded back down to a fixed offset.
+    // silently folded back down to a fixed offset. The stack-pointer cell
+    // itself is still read and written at address 0.
+    let (data, _) = stack_sites(body);
     let addr_ids: Vec<usize> = body
         .values
         .iter()
         .filter_map(|v| match &v.kind {
-            Value::Op(Stmt::StorageRead {
-                storage: volar_ir_common::StorageId::ALLOCA,
-                addr,
-                ..
-            })
-            | Value::Op(Stmt::StorageWrite {
-                storage: volar_ir_common::StorageId::ALLOCA,
-                addr,
-                ..
-            }) => Some(addr.0),
+            Value::Op(Stmt::StorageRead { storage, addr, .. })
+            | Value::Op(Stmt::StorageWrite { storage, addr, .. })
+                if data.contains(storage) =>
+            {
+                Some(addr.0)
+            }
             _ => None,
         })
         .collect();
     assert!(
         !addr_ids.is_empty(),
-        "expected ALLOCA StorageRead/StorageWrite operations"
+        "expected data-stack StorageRead/StorageWrite operations"
     );
     for id in addr_ids {
         assert!(
@@ -1065,6 +1082,7 @@ entry:
     let FuncDecl::Body(body) = &out.funcs[0] else {
         panic!("expected a function body");
     };
+    let (data, _) = stack_sites(body);
     let stack_reads = body
         .values
         .iter()
@@ -1072,7 +1090,7 @@ entry:
             matches!(
                 &v.kind,
                 Value::Op(volar_ir_common::Stmt::StorageRead { storage, .. })
-                    if *storage == volar_ir_common::StorageId::ALLOCA
+                    if data.contains(storage)
             )
         })
         .count();
@@ -1083,7 +1101,7 @@ entry:
             matches!(
                 &v.kind,
                 Value::Op(volar_ir_common::Stmt::StorageWrite { storage, .. })
-                    if *storage == volar_ir_common::StorageId::ALLOCA
+                    if data.contains(storage)
             )
         })
         .count();
@@ -1155,6 +1173,7 @@ entry:
     let FuncDecl::Body(body) = &out.funcs[0] else {
         panic!("expected a function body");
     };
+    let (data, _) = stack_sites(body);
     let stack_reads = body
         .values
         .iter()
@@ -1162,7 +1181,7 @@ entry:
             matches!(
                 &v.kind,
                 Value::Op(volar_ir_common::Stmt::StorageRead { storage, .. })
-                    if *storage == volar_ir_common::StorageId::ALLOCA
+                    if data.contains(storage)
             )
         })
         .count();
@@ -1173,7 +1192,7 @@ entry:
             matches!(
                 &v.kind,
                 Value::Op(volar_ir_common::Stmt::StorageWrite { storage, .. })
-                    if *storage == volar_ir_common::StorageId::ALLOCA
+                    if data.contains(storage)
             )
         })
         .count();
@@ -1248,6 +1267,7 @@ fn stack_pointer_param_dispatches_at_runtime() {
     let source = r#"
 define i32 @through_param(ptr %p) {
 entry:
+  %slot = alloca i32
   %y = load i32, ptr %p
   ret i32 %y
 }
@@ -1264,15 +1284,14 @@ entry:
     let FuncDecl::Body(body) = &out.funcs[0] else {
         panic!("expected a function body");
     };
+    let (data, _) = stack_sites(body);
     let alloca_reads: Vec<usize> = body
         .values
         .iter()
         .filter_map(|v| match &v.kind {
-            Value::Op(Stmt::StorageRead {
-                storage: volar_ir_common::StorageId::ALLOCA,
-                addr,
-                ..
-            }) => Some(addr.0),
+            Value::Op(Stmt::StorageRead { storage, addr, .. }) if data.contains(storage) => {
+                Some(addr.0)
+            }
             _ => None,
         })
         .collect();
@@ -1304,6 +1323,7 @@ fn slice_get_dispatches_through_pointer_parameter() {
     let source = r#"
 define i32 @slice_get(ptr %xs, i64 %i) {
 entry:
+  %slot = alloca i32
   %p = getelementptr i32, ptr %xs, i64 %i
   %v = load i32, ptr %p
   ret i32 %v
@@ -1321,13 +1341,11 @@ entry:
     let FuncDecl::Body(body) = &out.funcs[0] else {
         panic!("expected a function body");
     };
+    let (data, _) = stack_sites(body);
     let has_alloca_read = body.values.iter().any(|v| {
         matches!(
             &v.kind,
-            Value::Op(Stmt::StorageRead {
-                storage: volar_ir_common::StorageId::ALLOCA,
-                ..
-            })
+            Value::Op(Stmt::StorageRead { storage, .. }) if data.contains(storage)
         )
     });
     assert!(
@@ -1351,6 +1369,7 @@ fn dispatch_write_through_pointer_parameter_reaches_every_candidate() {
 
 define void @store_through_param(ptr %p, i32 %x) {
 entry:
+  %slot = alloca i32
   store i32 %x, ptr %p
   ret void
 }
@@ -1367,12 +1386,13 @@ entry:
     let FuncDecl::Body(body) = &out.funcs[0] else {
         panic!("expected a function body");
     };
+    let (data, sp) = stack_sites(body);
     let (mut alloca_writes, mut global_writes) = (0usize, 0usize);
     for v in &body.values {
         if let Value::Op(Stmt::StorageWrite { storage, .. }) = &v.kind {
-            if *storage == volar_ir_common::StorageId::ALLOCA {
+            if data.contains(storage) {
                 alloca_writes += 1;
-            } else {
+            } else if !sp.contains(storage) {
                 global_writes += 1;
             }
         }
@@ -1631,7 +1651,7 @@ entry:
                 let Value::Op(Stmt::StorageWrite { storage, addr, .. }) = &value.kind else {
                     return false;
                 };
-                *storage == StorageId::ALLOCA
+                stack_sites(body).0.contains(storage)
                     && matches!(body.values[addr.0].kind, Value::Op(Stmt::Merge { .. }))
             })
             .count()
@@ -1647,10 +1667,9 @@ entry:
                 .any(|value| matches!(value.kind, Value::Call { .. })),
             "a supported intrinsic must not remain a call"
         );
-        assert_eq!(
-            dynamic_stack_writes(body),
-            32,
-            "four byte intrinsic must perform 32 dynamically addressed stack writes"
+        assert!(
+            dynamic_stack_writes(body) >= 32,
+            "a four-byte intrinsic writes 32 computed stack addresses; the base pointer is computed too"
         );
     }
 }
@@ -1810,13 +1829,12 @@ entry:
     // The two copies read `@iv` at `[0, 32)` and `[7, 15)`, respectively.
     // Inspecting the address constants makes an offset-zero regression
     // observable even though both copies' data happen to be zero here.
+    let (_, sp) = stack_sites(body);
     let global_read_offsets: Vec<u64> = body
         .values
         .iter()
         .filter_map(|node| match &node.kind {
-            Value::Op(Stmt::StorageRead { storage, addr, .. })
-                if *storage != volar_ir_common::StorageId::ALLOCA =>
-            {
+            Value::Op(Stmt::StorageRead { storage, addr, .. }) if !sp.contains(storage) => {
                 match &body.values[addr.0].kind {
                     Value::Op(Stmt::Const(constant, _)) => u64::try_from(constant.lo).ok(),
                     _ => None,
@@ -1851,6 +1869,7 @@ declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
 
 define void @copy_param(ptr %out, ptr %in) {
 entry:
+  %slot = alloca i8
   call void @llvm.memcpy.p0.p0.i64(ptr %out, ptr %in, i64 4, i1 false)
   ret void
 }
@@ -1874,13 +1893,13 @@ entry:
             .any(|value| matches!(value.kind, Value::Call { .. })),
         "dispatched memcpy must not leave a Value::Call"
     );
+    let (data, _) = stack_sites(body);
     assert!(
         body.values.iter().any(|value| matches!(
-            value.kind,
-            Value::Op(Stmt::StorageRead { storage, .. })
-                if storage == volar_ir_common::StorageId::ALLOCA
+            &value.kind,
+            Value::Op(Stmt::StorageRead { storage, .. }) if data.contains(storage)
         )),
-        "the read side must include the stack candidate in the runtime dispatch"
+        "the read side must include the alloca data stack in the runtime dispatch"
     );
 }
 
@@ -2255,5 +2274,101 @@ bb4:
         .iter()
         .any(|b| matches!(b.terminator, Terminator::Table { .. }));
     assert!(has_table, "expected a Terminator::Table for rustc match");
+    let _ = context;
+}
+
+#[test]
+fn recursive_alloca_saves_and_restores_its_stack_pointer() {
+    // One site, shared by every activation. The pointer bits are shuffles of
+    // `StackAlloc` (the stack pointer before the bump). Entry reads that
+    // cell; every return writes the same SSA value back, so a nested call
+    // does not permanently advance the caller's stack pointer.
+    let source = r#"
+define i32 @rec(i32 %n) {
+entry:
+  %slot = alloca i32, align 4
+  store i32 %n, ptr %slot
+  %zero = icmp eq i32 %n, 0
+  br i1 %zero, label %done, label %more
+more:
+  %dec = sub i32 %n, 1
+  %ignored = call i32 @rec(i32 %dec)
+  br label %done
+done:
+  %v = load i32, ptr %slot
+  ret i32 %v
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "test.ll",
+        ))
+        .expect("valid LLVM IR fixture");
+    let out = import_module(&module, &["rec"]).expect("recursive alloca must import");
+    let FuncDecl::Body(body) = &out.funcs[0] else {
+        panic!("expected a function body");
+    };
+    let sites: Vec<(StorageId, StorageId, vaffle::ValueId)> = body
+        .values
+        .iter()
+        .enumerate()
+        .filter_map(|(i, value)| match &value.kind {
+            Value::StackAlloc { storage, sp, .. } => Some((*storage, *sp, vaffle::ValueId(i))),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sites.len(), 1, "recursion shares one alloca site");
+    let (data, sp, alloc) = sites[0];
+    assert!(
+        body.values.iter().any(|value| matches!(
+            &value.kind,
+            Value::Op(Stmt::Shuffle { result_bits, .. })
+                if result_bits.iter().any(|(_, src)| *src == alloc)
+        )),
+        "the pointer bits are shuffles of StackAlloc, not a constant local offset"
+    );
+    let entry_reads: Vec<vaffle::ValueId> = body.blocks[0]
+        .stmts
+        .iter()
+        .filter_map(|id| match &body.values[id.0].kind {
+            Value::Op(Stmt::StorageRead { storage, .. }) if *storage == sp => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entry_reads.len(), 1, "entry reads the stack pointer once");
+    let saved = entry_reads[0];
+    let restores = body
+        .blocks
+        .iter()
+        .filter(|block| matches!(block.terminator, Terminator::Return { .. }))
+        .filter(|block| {
+            block.stmts.iter().any(|id| {
+                matches!(
+                    &body.values[id.0].kind,
+                    Value::Op(Stmt::StorageWrite { storage, src, .. })
+                        if *storage == sp && *src == saved
+                )
+            })
+        })
+        .count();
+    let returns = body
+        .blocks
+        .iter()
+        .filter(|block| matches!(block.terminator, Terminator::Return { .. }))
+        .count();
+    assert!(returns >= 1);
+    assert_eq!(
+        restores, returns,
+        "every return restores the entry stack pointer"
+    );
+    assert!(
+        body.values.iter().any(|value| matches!(
+            &value.kind,
+            Value::Op(Stmt::StorageWrite { storage, .. }) if *storage == data
+        )),
+        "the store addresses the site's data storage"
+    );
     let _ = context;
 }

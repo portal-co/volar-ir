@@ -66,7 +66,7 @@ lir_type ::=
   | "native:" native_prim
   | "ptr[" lir_type "]"
 
-native_prim ::= "bit" | "u8" | "u16" | "u32" | "u64" | "u128" | "u256" | "aes8" | "galois64"
+native_prim ::= "bit" | "u8" | "u16" | "u32" | "u64" | "u128" | "u256"
 nat         ::= [0-9]+
 ```
 
@@ -78,7 +78,7 @@ arr[u8, 32]
 arr[arr[u32, 4], 8]
 struct:0
 native:bit
-native:galois64
+native:u64
 ptr[u8]
 ptr[arr[u32, 4]]
 ```
@@ -257,12 +257,18 @@ File extension: `.vir` ("Volar IR").
 
 ```ebnf
 vir_type ::=
-    "bit" | "u8" | "u16" | "u32" | "u64" | "u128" | "u256" | "aes8" | "galois64"
+    "bit" | "u8" | "u16" | "u32" | "u64" | "u128" | "u256" | "aes8" | "galois64" | "z3"
+  | "extfield" type_id nat nat+
+  | "primefield" nat nat+
   | "vec[" "#" nat ", " nat "]"
   | "tuple[" ("#" nat ",")* "]"
   | "block[" ("#" nat ",")* "]"
   | "func[(" ("#" nat ",")* ") -> (" ("#" nat ",")* ")]"
 ```
+
+`aes8` and `galois64` are writer sugar for the canonical extension fields, accepted by the parser only after `prim bit` is already in the table. The general form is `extfield <wrapped_id> <degree> <c0> … <c_degree>`.
+
+`z3` is writer sugar for `PrimeField { k: 2, n: [1] }`. The general form is `primefield <k> <n0> …`, the little-endian limbs of `n` in `p = 2^k - n`. The directive writer emits `type <i> z3` or `type <i> primefield <k> <n0> …`.
 
 `Constant` (256-bit): `0x` followed by 64 hex digits, zero-padded on the left.
 
@@ -426,7 +432,9 @@ output — it serialises the IR nodes directly so that round-tripping is lossles
 
 ## 7. Pinnedness, stability, and legacy markers
 
-This format family currently carries legacy source markers such as:
+This format family may carry optional downstream-facing pinnedness and stability
+metadata. The complete policy is in [`docs/reliability.md`](reliability.md).
+It currently carries legacy source markers such as:
 
 ```rust
 // @reliability: experimental
@@ -435,6 +443,7 @@ This format family currently carries legacy source markers such as:
 
 Under the migration policy these markers are not independent evidence. Treat
 legacy `experimental` code as Unpinned and Very unstable until a source-level
-classification names its evidence and dependent contract. New cryptographic
-infrastructure depending on these crates requires separate review before any
-deployment claim.
+classification names its evidence and dependent contract. This compiler-IR
+repository does not require every source file to carry the tags; downstream
+cryptographic infrastructure may still use them when tracking correctness and
+change risk.

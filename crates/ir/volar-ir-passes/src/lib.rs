@@ -10,6 +10,7 @@ pub mod fuse_to_circuit;
 pub mod lower_ir_to_boolar;
 pub mod lower_lir;
 pub mod lower_to_circuit;
+pub mod lower_to_native;
 pub mod movfuscate;
 pub mod raise_to_z3;
 pub mod region_lowering;
@@ -33,6 +34,7 @@ pub use lower_to_circuit::{
     LoweringMode, lower_to_circuit, lower_to_circuit_ir,
     lower_to_circuit_ir_with_control_provenance, lower_to_circuit_with_control_provenance,
 };
+pub use lower_to_native::{NativeLowering, lower_to_native};
 pub use movfuscate::{
     MovfuscAccumInfo, MovfuscAccumInit, MovfuscAccumStep, MovfuscBlockBoundary, movfuscate_biir,
     movfuscate_biir_with_control_provenance, movfuscate_ir, movfuscate_ir_owned,
@@ -43,8 +45,11 @@ pub use movfuscate::{
 pub use raise_to_z3::raise_bits_to_z3;
 pub use storage_to_mux_boolar::{
     StorageToMuxBoolarConfig, StorageToMuxBoolarError, storage_to_mux_boolar,
+    storage_to_mux_boolar_with_access,
 };
-pub use storage_to_mux_ir::{StorageToMuxConfig, StorageToMuxError, storage_to_mux_ir};
+pub use storage_to_mux_ir::{
+    StorageToMuxConfig, StorageToMuxError, storage_to_mux_ir, storage_to_mux_ir_with_access,
+};
 pub use to_reversible::{
     ReversibleMode, ToReversibleError, UnknownVar, ValueWatchlist, VarWireMap, WireWatchEntry,
     WireWatchlist, to_reversible, to_reversible_with_mode, translate_watchlist,

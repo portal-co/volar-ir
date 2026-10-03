@@ -12,12 +12,14 @@
 //! | IR type            | Bit count      |
 //! |--------------------|----------------|
 //! | `Bit`              | 1              |
-//! | `_8` / `AES8`      | 8              |
+//! | `_8` / `aes8()`    | 8              |
 //! | `_16`              | 16             |
 //! | `_32`              | 32             |
-//! | `_64` / `Galois64` | 64             |
+//! | `_64` / `galois64()` | 64           |
 //! | `_128`             | 128            |
 //! | `_256`             | 256            |
+//! | `ExtField`         | degree × bits(wrapped) |
+//! | `PrimeField`       | `k`            |
 //! | `Vec(n, T)`        | n × bits(T)    |
 //! | `Tuple(Ts)`        | Σ bits(Tᵢ)    |
 //! | `Block` / `Func`   | 0              |
@@ -63,7 +65,7 @@ use volar_ir::{
         IRVarId, PrimType,
     },
 };
-use volar_ir_common::{Constant, PolyCoeffs, StorageId};
+use volar_ir_common::{BitRing, Constant, FieldSink, PolyCoeffs, StorageId, TypeId};
 
 /// A source call did not match the external declarations carried by its
 /// containing [`IRBlocks`].  Lowering is deliberately fail-closed: a backend
@@ -599,11 +601,13 @@ fn lower_block_with_var_bits<P: Clone>(
     // Each IR param of type T becomes ir_type_bits(T) consecutive Boolar params.
     // var_bits[param_idx] = slice of Boolar param IRVarIds for that param.
     let mut var_bits: BTreeMap<u32, Vec<IRVarId>> = BTreeMap::new();
+    let mut var_tys: BTreeMap<u32, IRTypeId> = BTreeMap::new();
     let mut next_param: u32 = 0;
     for (i, ty_id) in block.params.iter().enumerate() {
         let w = ir_type_bits(&types.0[ty_id.0 as usize], types);
         let bits: Vec<IRVarId> = (next_param..next_param + w as u32).map(IRVarId).collect();
         var_bits.insert(i as u32, bits);
+        var_tys.insert(i as u32, *ty_id);
         next_param += w as u32;
     }
     let total_params = next_param;
@@ -627,6 +631,7 @@ fn lower_block_with_var_bits<P: Clone>(
             prov,
             ir_var_idx,
             &mut var_bits,
+            &var_tys,
             &mut call_output_bits,
             &mut emitter,
             types,
@@ -635,6 +640,9 @@ fn lower_block_with_var_bits<P: Clone>(
             occurrence,
             stmt.side,
         );
+        if let Some(ty) = volar_ir_opt::common::stmt_output_type(&stmt.kind) {
+            var_tys.insert(ir_var_idx, ty);
+        }
     }
 
     // ---- 3. Convert terminator --------------------------------------------
@@ -660,6 +668,7 @@ fn lower_stmt<P: Clone>(
     prov: P,
     ir_var_idx: u32,
     var_bits: &mut BTreeMap<u32, Vec<IRVarId>>,
+    var_tys: &BTreeMap<u32, IRTypeId>,
     call_output_bits: &mut BTreeMap<u32, Vec<Vec<IRVarId>>>,
     emitter: &mut Emitter<P>,
     types: &IRTypes,
@@ -700,20 +709,44 @@ fn lower_stmt<P: Clone>(
             // The result type is authoritative. In particular, a pure
             // constant polynomial has no operands from which to infer a
             // width, but still needs one Boolar wire per bit of `ty`.
-            let w = ir_type_bits(&types.0[ty.0 as usize], types);
-            let bits: Vec<IRVarId> = (0..w)
-                .map(|j| {
-                    lower_poly_bit(
-                        coeffs,
-                        constant,
-                        j,
-                        var_bits,
-                        emitter,
-                        prov.clone(),
-                        stmt_side,
-                    )
-                })
-                .collect();
+            let bits = if volar_ir_common::contains_prime_field(*ty, types) {
+                lower_prime_poly(
+                    *ty,
+                    coeffs,
+                    constant,
+                    var_bits,
+                    var_tys,
+                    emitter,
+                    types,
+                    prov.clone(),
+                )
+            } else if volar_ir_common::mul_is_idempotent(*ty, types) {
+                let w = ir_type_bits(&types.0[ty.0 as usize], types);
+                (0..w)
+                    .map(|j| {
+                        lower_poly_bit(
+                            coeffs,
+                            constant,
+                            j,
+                            var_bits,
+                            emitter,
+                            prov.clone(),
+                            stmt_side,
+                        )
+                    })
+                    .collect()
+            } else {
+                lower_field_poly(
+                    *ty,
+                    coeffs,
+                    constant,
+                    var_bits,
+                    var_tys,
+                    emitter,
+                    types,
+                    prov.clone(),
+                )
+            };
             var_bits.insert(ir_var_idx, bits);
         }
 
@@ -1088,6 +1121,187 @@ fn flatten_bits(args: &[IRVarId], var_bits: &BTreeMap<u32, Vec<IRVarId>>) -> Vec
 // Polynomial lowering helpers
 // ============================================================================
 
+struct GateRing<'a, P: Clone> {
+    emitter: &'a mut Emitter<P>,
+    prov: P,
+    zero: Option<IRVarId>,
+    one: Option<IRVarId>,
+}
+
+impl<P: Clone> FieldSink for GateRing<'_, P> {
+    type Wire = IRVarId;
+
+    fn zero(&mut self) -> IRVarId {
+        BitRing::bit_zero(self)
+    }
+
+    fn one(&mut self) -> IRVarId {
+        BitRing::bit_one(self)
+    }
+
+    fn add(&mut self, lhs: IRVarId, rhs: IRVarId) -> IRVarId {
+        self.bit_xor(lhs, rhs)
+    }
+
+    fn sub(&mut self, lhs: IRVarId, rhs: IRVarId) -> IRVarId {
+        self.bit_xor(lhs, rhs)
+    }
+
+    fn mul(&mut self, lhs: IRVarId, rhs: IRVarId) -> IRVarId {
+        self.bit_and(lhs, rhs)
+    }
+
+    fn char_two(&self) -> bool {
+        true
+    }
+}
+
+impl<P: Clone> BitRing for GateRing<'_, P> {
+    type Bit = IRVarId;
+
+    fn bit_and(&mut self, lhs: IRVarId, rhs: IRVarId) -> IRVarId {
+        self.emitter.emit_poly_and(lhs, rhs, self.prov.clone())
+    }
+
+    fn bit_xor(&mut self, lhs: IRVarId, rhs: IRVarId) -> IRVarId {
+        self.emitter.emit_poly_xor(lhs, rhs, self.prov.clone())
+    }
+
+    fn bit_zero(&mut self) -> IRVarId {
+        if let Some(zero) = self.zero {
+            return zero;
+        }
+        let zero = self.emitter.emit(BIrStmt::Zero, self.prov.clone());
+        self.zero = Some(zero);
+        zero
+    }
+
+    fn bit_one(&mut self) -> IRVarId {
+        if let Some(one) = self.one {
+            return one;
+        }
+        let one = self.emitter.emit(BIrStmt::One, self.prov.clone());
+        self.one = Some(one);
+        one
+    }
+}
+
+/// Lower a prime-field `Poly` by Solinas addition and multiplication on its
+/// boolean digits. Characteristic 2 makes those digits XOR and AND.
+fn lower_prime_poly<P: Clone>(
+    ty: TypeId,
+    coeffs: &PolyCoeffs<IRVarId>,
+    constant: &Constant,
+    var_bits: &BTreeMap<u32, Vec<IRVarId>>,
+    var_tys: &BTreeMap<u32, IRTypeId>,
+    emitter: &mut Emitter<P>,
+    types: &IRTypes,
+    prov: P,
+) -> Vec<IRVarId> {
+    let width = ir_type_bits(&types.0[ty.0 as usize], types);
+    let mut ring = GateRing {
+        emitter,
+        prov: prov.clone(),
+        zero: None,
+        one: None,
+    };
+    let constant_bits: Vec<IRVarId> = (0..width)
+        .map(|bit| {
+            if constant_bit(constant, bit) {
+                ring.one()
+            } else {
+                ring.zero()
+            }
+        })
+        .collect();
+    let mut terms = Vec::new();
+    for (mono, coeff) in coeffs.iter() {
+        let mut factors = Vec::with_capacity(mono.len());
+        for var in mono {
+            let factor_ty = var_tys
+                .get(&var.0)
+                .copied()
+                .unwrap_or_else(|| panic!("lower_prime_poly: factor v{} has no type", var.0));
+            let bits = var_bits
+                .get(&var.0)
+                .cloned()
+                .unwrap_or_else(|| panic!("lower_prime_poly: factor v{} has no bits", var.0));
+            factors.push((factor_ty, bits));
+        }
+        terms.push((factors, *coeff));
+    }
+    volar_ir_common::eval_prime_poly(ty, &constant_bits, &terms, types, &mut ring)
+}
+
+/// Lower a non-idempotent `Poly` (an extension field, or a vector of one).
+///
+/// A single factor whose type is the output type is copied. The accumulator
+/// starts empty, so the first term contributes its wires directly and a
+/// later term emits `Xor`.
+fn lower_field_poly<P: Clone>(
+    ty: TypeId,
+    coeffs: &PolyCoeffs<IRVarId>,
+    constant: &Constant,
+    var_bits: &BTreeMap<u32, Vec<IRVarId>>,
+    var_tys: &BTreeMap<u32, IRTypeId>,
+    emitter: &mut Emitter<P>,
+    types: &IRTypes,
+    prov: P,
+) -> Vec<IRVarId> {
+    let width = ir_type_bits(&types.0[ty.0 as usize], types);
+    let mut acc: Vec<Option<IRVarId>> = vec![None; width];
+    for bit in 0..width {
+        if constant_bit(constant, bit) {
+            acc[bit] = Some(emitter.emit(BIrStmt::One, prov.clone()));
+        }
+    }
+    for (mono, &coeff) in coeffs {
+        if coeff % 2 == 0 {
+            continue;
+        }
+        let product =
+            if mono.len() == 1 && var_tys.get(&mono[0].0).copied() == Some(ty) {
+                var_bits.get(&mono[0].0).cloned().unwrap_or_else(|| {
+                    panic!("lower_field_poly: factor v{} has no bits", mono[0].0)
+                })
+            } else {
+                let mut owned = Vec::with_capacity(mono.len());
+                for var in mono {
+                    let factor_ty = var_tys.get(&var.0).copied().unwrap_or_else(|| {
+                        panic!("lower_field_poly: factor v{} has no type", var.0)
+                    });
+                    let bits = var_bits.get(&var.0).cloned().unwrap_or_else(|| {
+                        panic!("lower_field_poly: factor v{} has no bits", var.0)
+                    });
+                    owned.push((factor_ty, bits));
+                }
+                let refs: Vec<(TypeId, &[IRVarId])> = owned
+                    .iter()
+                    .map(|(factor_ty, bits)| (*factor_ty, bits.as_slice()))
+                    .collect();
+                let mut ring = GateRing {
+                    emitter,
+                    prov: prov.clone(),
+                    zero: None,
+                    one: None,
+                };
+                volar_ir_common::monomial_product(ty, &refs, types, &mut ring)
+            };
+        for (bit, wire) in product.into_iter().enumerate() {
+            if bit >= acc.len() {
+                break;
+            }
+            acc[bit] = Some(match acc[bit] {
+                None => wire,
+                Some(prev) => emitter.emit_poly_xor(prev, wire, prov.clone()),
+            });
+        }
+    }
+    acc.into_iter()
+        .map(|bit| bit.unwrap_or_else(|| emitter.emit(BIrStmt::Zero, prov.clone())))
+        .collect()
+}
+
 /// Lower the `j`-th output bit of a `Poly` stmt.
 ///
 /// Implements: `result[j] = constant[j] ⊕ ⊕{(mono,coeff): coeff odd} ∧(vars[j])`.
@@ -1167,24 +1381,21 @@ fn lower_poly_bit<P: Clone>(
 pub fn ir_type_bits(ty: &IRType, types: &IRTypes) -> usize {
     match ty {
         IRType::Primitive(PrimType::Bit) => 1,
-        IRType::Primitive(PrimType::_8) | IRType::Primitive(PrimType::AES8) => 8,
+        IRType::Primitive(PrimType::_8) => 8,
         IRType::Primitive(PrimType::_16) => 16,
         IRType::Primitive(PrimType::_32) => 32,
-        IRType::Primitive(PrimType::_64) | IRType::Primitive(PrimType::Galois64) => 64,
+        IRType::Primitive(PrimType::_64) => 64,
         IRType::Primitive(PrimType::_128) => 128,
         IRType::Primitive(PrimType::_256) => 256,
-        IRType::Primitive(PrimType::Z3) => {
-            panic!(
-                "ir_type_bits: Z3 (GF(3)) cannot be lowered to GF(2) bits. \
-                 Z3 values are only valid in the TFHE backend. \
-                 Use raise_to_z3 before the TFHE weaver, not before lower_ir_to_boolar."
-            );
-        }
+        IRType::PrimeField { k, .. } => *k as usize,
         IRType::Vec(n, elem_id) => n * ir_type_bits(&types.0[elem_id.0 as usize], types),
         IRType::Tuple(ids) => ids
             .iter()
             .map(|id| ir_type_bits(&types.0[id.0 as usize], types))
             .sum(),
+        IRType::ExtField {
+            wrapped, degree, ..
+        } => *degree as usize * ir_type_bits(&types.0[wrapped.0 as usize], types),
         IRType::Block { .. } | IRType::Func { .. } => 0,
         IRType::Primitive(_) => unimplemented!("ir_type_bits: unknown PrimType variant"),
         _ => panic!("ir_type_bits: unhandled IrType variant — add bit-width calculation"),
@@ -1595,7 +1806,7 @@ mod tests {
 
     #[test]
     fn type_bits_primitives() {
-        let types = TypeTable::new();
+        let mut types = TypeTable::new();
         assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_8), &types), 8);
         assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_16), &types), 16);
         assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_32), &types), 32);
@@ -1608,11 +1819,10 @@ mod tests {
             ir_type_bits(&IRType::Primitive(PrimType::_256), &types),
             256
         );
-        assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::AES8), &types), 8);
-        assert_eq!(
-            ir_type_bits(&IRType::Primitive(PrimType::Galois64), &types),
-            64
-        );
+        let aes8 = types.aes8();
+        let galois64 = types.galois64();
+        assert_eq!(ir_type_bits(&types.0[aes8.0 as usize], &types), 8);
+        assert_eq!(ir_type_bits(&types.0[galois64.0 as usize], &types), 64);
     }
 
     #[test]
@@ -1693,7 +1903,7 @@ mod tests {
         };
         let read = block.push_stmt(
             volar_ir::ir::IRStmt::StorageRead {
-                storage: StorageId::ALLOCA,
+                storage: StorageId(64),
                 ty: word,
                 addr: IRVarId(0),
             },
@@ -1840,7 +2050,7 @@ mod tests {
         // constant = 0 } — i.e. param0 XOR param1.
         // Verify: 8 output bits, each is XOR of the corresponding param bits.
         let mut types = TypeTable::new();
-        let aes8_id = types.primitive(PrimType::AES8);
+        let aes8_id = types.aes8();
 
         let mut coeffs = PolyCoeffs::new();
         coeffs.insert(std::vec![IRVarId(0)], 1);
@@ -2102,19 +2312,19 @@ mod tests {
 
     use volar_side::SideId;
 
-    /// Two AES8 params XORed bit-wise via Poly; returns the lowered block so
+    /// Two 8-bit params XORed bit-wise via Poly; returns the lowered block so
     /// tests can inspect per-wire sides.
     fn xor_two_params_block() -> (IRBlocks<()>, IRTypes) {
         let mut types = TypeTable::new();
-        let aes8_id = types.primitive(PrimType::AES8);
+        let byte_id = types.primitive(PrimType::_8);
         let mut coeffs = PolyCoeffs::new();
         coeffs.insert(std::vec![IRVarId(0)], 1);
         coeffs.insert(std::vec![IRVarId(1)], 1);
         let block = IRBlock::<()> {
-            params: std::vec![aes8_id, aes8_id],
+            params: std::vec![byte_id, byte_id],
             stmts: std::vec![Node::new(
                 volar_ir::ir::IRStmt::Poly {
-                    ty: aes8_id,
+                    ty: byte_id,
                     coeffs,
                     constant: zero_const(),
                 },

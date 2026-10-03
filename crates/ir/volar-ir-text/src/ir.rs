@@ -120,6 +120,28 @@ pub(crate) fn write_block_target(t: &IRBlockTargetId, w: &mut dyn fmt::Write) ->
 // Helper: write_prim_type
 // ============================================================================
 
+fn canonical_field_name(
+    types: &TypeTable,
+    wrapped: volar_ir_common::TypeId,
+    degree: u32,
+    irreducible: &[u64],
+) -> Option<&'static str> {
+    let wrapped_is_bit = matches!(
+        types.0.get(wrapped.0 as usize),
+        Some(IrType::Primitive(Type::Bit))
+    );
+    if !wrapped_is_bit {
+        return None;
+    }
+    if degree == 8 && irreducible == volar_ir_common::aes8_irreducible() {
+        Some("aes8")
+    } else if degree == 64 && irreducible == volar_ir_common::galois64_irreducible() {
+        Some("galois64")
+    } else {
+        None
+    }
+}
+
 fn write_prim_type(ty: Type, w: &mut dyn fmt::Write) -> fmt::Result {
     w.write_str(match ty {
         Type::Bit => "bit",
@@ -129,8 +151,6 @@ fn write_prim_type(ty: Type, w: &mut dyn fmt::Write) -> fmt::Result {
         Type::_64 => "u64",
         Type::_128 => "u128",
         Type::_256 => "u256",
-        Type::AES8 => "aes8",
-        Type::Galois64 => "galois64",
         _ => "unknown",
     })
 }
@@ -164,6 +184,35 @@ impl WriteText for TypeTable {
                     write_type_id_list(params, w)?;
                     w.write_str("->")?;
                     write_type_id_list(results, w)?;
+                }
+                IrType::ExtField {
+                    wrapped,
+                    degree,
+                    irreducible,
+                } => {
+                    let name = if wrapped.0 < i as u32 {
+                        canonical_field_name(self, *wrapped, *degree, irreducible)
+                    } else {
+                        None
+                    };
+                    if let Some(name) = name {
+                        w.write_str(name)?;
+                    } else {
+                        write!(w, "extfield {} {}", wrapped.0, degree)?;
+                        for coeff in irreducible {
+                            write!(w, " {coeff}")?;
+                        }
+                    }
+                }
+                IrType::PrimeField { k, n } => {
+                    if *k == 2 && n.as_slice() == [1] {
+                        w.write_str("z3")?;
+                    } else {
+                        write!(w, "primefield {k}")?;
+                        for limb in n {
+                            write!(w, " {limb}")?;
+                        }
+                    }
                 }
                 _ => {
                     w.write_str("unknown")?;

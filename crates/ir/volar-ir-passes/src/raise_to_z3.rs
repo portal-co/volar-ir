@@ -1,10 +1,11 @@
 // @reliability: normal
 // @ai: assisted
-//! IR pass: lift GF(2) `Bit`-typed polynomials to GF(3) `Z3` polynomials.
+//! IR pass: lift GF(2) `Bit`-typed polynomials to GF(3) polynomials.
 //!
 //! Each `Stmt::Poly { ty: Bit, ... }` in the input `IRBlocks` is replaced by
-//! an equivalent `Stmt::Poly { ty: Z3, ... }` whose coefficients are the GF(3)
-//! Möbius lifting of the original GF(2) multilinear polynomial.
+//! an equivalent `Stmt::Poly` whose type is `TypeTable::z3()` and whose
+//! coefficients are the GF(3) Möbius lifting of the original GF(2)
+//! multilinear polynomial.
 //!
 //! # Algorithm — GF(2)→GF(3) Möbius inversion
 //!
@@ -45,16 +46,16 @@ use volar_ir_common::{Constant, IrType, PolyCoeffs, Stmt, Type as PrimType};
 // ============================================================================
 
 /// Lift every `Stmt::Poly { ty: Bit, ... }` in `blocks` to an equivalent
-/// `Stmt::Poly { ty: Z3, ... }` via GF(2)→GF(3) Möbius inversion.
+/// `Stmt::Poly` of type `z3()` via GF(2)→GF(3) Möbius inversion.
 ///
-/// `types` is mutated to intern the `Z3` primitive type if it is not already
-/// present.  All other type entries are unchanged.
+/// `types` is mutated to intern `z3()` if it is not already present. All
+/// other type entries are unchanged.
 ///
 /// # Panics
 /// Panics if any Bit-typed polynomial has more than 20 distinct variables
 /// (unreachable in practice — see module documentation).
 pub fn raise_bits_to_z3<P: Clone>(blocks: &IRBlocks<P>, types: &mut IRTypes) -> IRBlocks<P> {
-    let z3_ty_id = types.intern(IrType::Primitive(PrimType::Z3));
+    let z3_ty_id = types.z3();
     let bit_ty_id = types.intern(IrType::Primitive(PrimType::Bit));
 
     IRBlocks {
@@ -391,7 +392,7 @@ mod tests {
     #[test]
     fn test_raise_bits_updates_type() {
         // Build a trivial one-block IRBlocks with a Poly{Bit} statement
-        // and verify the output has a Poly{Z3} statement.
+        // and verify the output has a Poly statement of type `z3()`.
         use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBranchTarget, IRTerminator};
         use volar_ir_common::Node;
 
@@ -417,7 +418,7 @@ mod tests {
         let blocks: IRBlocks<()> = IRBlocks::new(vec![block]);
         let lifted = raise_bits_to_z3(&blocks, &mut types);
 
-        let z3_id = types.intern(IrType::Primitive(PrimType::Z3));
+        let z3_id = types.z3();
         assert!(matches!(
             &lifted.blocks[0].stmts[0].kind,
             Stmt::Poly { ty, .. } if *ty == z3_id

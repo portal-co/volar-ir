@@ -1,5 +1,19 @@
 # volar-ir Agent Context
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in GitHub Issues for `portal-co/volar-ir`; use `gh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default canonical labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository using root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
 ## Project Mission
 
 This repo is the reusable IR/circuit-compilation layer split out of
@@ -10,10 +24,10 @@ It's generic compiler engineering — SSA IRs, CFG transforms, peephole
 optimizations — that happens to be designed to eventually feed a
 cryptographic proving/garbling backend, but has no cryptography of its own.
 
+Pinnedness and stability tags are tracked here as downstream-facing evidence metadata. This repository is not required to mark every file, but dependents may use `docs/reliability.md` when assessing correctness and change risk.
+
 Treat this as an ordinary compiler-IR codebase: no ZK/non-ZK discipline
-boundary, no `.insecure` quarantine convention, no pinnedness/stability
-tagging — those are `volar`'s conventions for its cryptographic spec layer,
-not this repo's.
+boundary and no cryptographic protocol claims. The pinnedness/stability policy is nevertheless available in `docs/reliability.md` for downstream correctness tracking; tags are optional here. Any protocol-specific quarantine or security policy remains outside this repository.
 
 ## Crate Constraints
 

@@ -12,7 +12,8 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId,
 };
 use volar_ir_common::{
-    ActionDecl, Constant, IrType, OracleDecl, RngDecl, Stmt, StorageId, Type, TypeId, TypeTable,
+    ActionDecl, Constant, IrType, OracleDecl, PolyCoeffs, RngDecl, Stmt, StorageId, Type, TypeId,
+    TypeTable,
 };
 
 use super::{error::ParseError, lexer::Lexer};
@@ -71,7 +72,23 @@ fn read_type_id_list(lex: &mut Lexer) -> Result<Vec<TypeId>, ParseError> {
     Ok(lex.read_u32_list()?.into_iter().map(mk_type).collect())
 }
 
-fn parse_ir_type(kw: &str, lex: &mut Lexer) -> Result<IrType, ParseError> {
+fn canonical_named_field(
+    types: &[IrType],
+    degree: u32,
+    irreducible: Vec<u64>,
+) -> Result<IrType, ParseError> {
+    let bit = types
+        .iter()
+        .position(|ty| matches!(ty, IrType::Primitive(Type::Bit)))
+        .ok_or_else(|| ParseError::MissingField("prim bit".into()))?;
+    Ok(volar_ir_common::ext_field_type(
+        TypeId(bit as u32),
+        degree,
+        irreducible,
+    ))
+}
+
+fn parse_ir_type(kw: &str, lex: &mut Lexer, types: &[IrType]) -> Result<IrType, ParseError> {
     match kw {
         "prim" => {
             let prim_kw = lex.read_ident()?;
@@ -83,8 +100,6 @@ fn parse_ir_type(kw: &str, lex: &mut Lexer) -> Result<IrType, ParseError> {
                 "u64" => Type::_64,
                 "u128" => Type::_128,
                 "u256" => Type::_256,
-                "aes8" => Type::AES8,
-                "galois64" => Type::Galois64,
                 other => return Err(ParseError::UnknownPrimType(other.into())),
             };
             Ok(IrType::Primitive(ty))
@@ -107,6 +122,33 @@ fn parse_ir_type(kw: &str, lex: &mut Lexer) -> Result<IrType, ParseError> {
             lex.expect_str("->")?;
             let results = read_type_id_list(lex)?;
             Ok(IrType::Func { params, results })
+        }
+        "extfield" => {
+            let wrapped = mk_type(lex.read_u32()?);
+            let degree = lex.read_u32()?;
+            let mut irreducible = Vec::with_capacity(degree as usize + 1);
+            for _ in 0..=degree {
+                irreducible.push(lex.read_u64()?);
+            }
+            Ok(IrType::ExtField {
+                wrapped,
+                degree,
+                irreducible,
+            })
+        }
+        "aes8" => canonical_named_field(types, 8, volar_ir_common::aes8_irreducible()),
+        "galois64" => canonical_named_field(types, 64, volar_ir_common::galois64_irreducible()),
+        "z3" => Ok(IrType::PrimeField { k: 2, n: vec![1] }),
+        "primefield" => {
+            let k = lex.read_u32()?;
+            let mut n = Vec::new();
+            while matches!(lex.peek_byte(), Some(b'0'..=b'9')) {
+                n.push(lex.read_u64()?);
+            }
+            if n.is_empty() {
+                return Err(ParseError::MissingField("primefield limb".into()));
+            }
+            Ok(IrType::PrimeField { k, n })
         }
         other => Err(ParseError::UnknownDirective(other.into())),
     }
@@ -167,7 +209,7 @@ fn parse_ir_stmt(kw: &str, lex: &mut Lexer) -> Result<Stmt<IRVarId>, ParseError>
             let ty = mk_type(lex.read_u32()?);
             lex.expect_key("const")?;
             let constant = read_constant(lex)?;
-            let mut coeffs: BTreeMap<Vec<IRVarId>, u8> = BTreeMap::new();
+            let mut coeffs = PolyCoeffs::new();
             while lex.peek_byte() == Some(b'c') {
                 let kw2 = lex.read_ident()?;
                 if kw2 != "coeff" {
@@ -473,7 +515,7 @@ pub(crate) fn parse_saved_ir_blocks(s: &str) -> Result<SavedIrBlocks, ParseError
             "type" => {
                 let _idx = lex.read_u32()?; // ignored; must be sequential
                 let ty_kw = lex.read_ident()?;
-                let ty = parse_ir_type(ty_kw, &mut lex)?;
+                let ty = parse_ir_type(ty_kw, &mut lex, &types)?;
                 types.push(ty);
             }
             "oracle" => {

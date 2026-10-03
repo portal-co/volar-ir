@@ -38,7 +38,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypeId,
     IRTypes, IRVarId, PrimType as Type,
 };
-use volar_ir_common::{Constant, PolyCoeffs, StorageId};
+use volar_ir_common::{Constant, PolyCoeffs, StorageAccess, StorageId, StorageTable};
 
 /// Which storage id to eliminate, the value type of each cell, and the
 /// declared cell count.
@@ -56,6 +56,9 @@ pub struct StorageToMuxConfig {
 /// Why a Volar IR storage-to-MUX promotion failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageToMuxError {
+    /// The sidecar proves this storage immutable, but the input contains a
+    /// write; do not lower an invalid immutable claim.
+    ReadOnlyWrite { storage: StorageId },
     /// The input isn't a single `Jmp(Return)`-terminated block; run
     /// `movfuscate_ir` / `unroll_ir_everything` first.
     NotSingleBlockCircuit,
@@ -72,6 +75,10 @@ pub enum StorageToMuxError {
 impl core::fmt::Display for StorageToMuxError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            StorageToMuxError::ReadOnlyWrite { storage } => write!(
+                f,
+                "storage_to_mux_ir: read-only storage {storage:?} has a write"
+            ),
             StorageToMuxError::NotSingleBlockCircuit => write!(
                 f,
                 "storage_to_mux_ir requires single-block circuit-shaped Volar IR; run movfuscate_ir or unroll_ir_everything first"
@@ -105,6 +112,25 @@ pub fn storage_to_mux_ir<P: Clone + Default>(
     types: &mut IRTypes,
     cfg: &StorageToMuxConfig,
 ) -> Result<IRBlocks<P>, StorageToMuxError> {
+    storage_to_mux_ir_with_access(blocks, types, cfg, None)
+}
+
+/// As [`storage_to_mux_ir`], with an optional mutability sidecar. A read-only
+/// target may be promoted from its static `pre_init` image, but any write is
+/// rejected rather than silently weakening the proof.
+pub fn storage_to_mux_ir_with_access<P: Clone + Default>(
+    blocks: &IRBlocks<P>,
+    types: &mut IRTypes,
+    cfg: &StorageToMuxConfig,
+    storage_access: Option<&StorageTable>,
+) -> Result<IRBlocks<P>, StorageToMuxError> {
+    if storage_access.is_some_and(|table| table.access_of(cfg.storage) == StorageAccess::ReadOnly)
+        && blocks.blocks.iter().flat_map(|block| block.stmts.iter()).any(|node| {
+            matches!(node.kind, IRStmt::StorageWrite { storage, .. } if storage == cfg.storage)
+        })
+    {
+        return Err(StorageToMuxError::ReadOnlyWrite { storage: cfg.storage });
+    }
     if !blocks.is_circuit() {
         return Err(StorageToMuxError::NotSingleBlockCircuit);
     }
@@ -245,9 +271,6 @@ fn bit_width_for_ty(types: &IRTypes, ty: IRTypeId) -> Result<usize, StorageToMux
             Type::_64 => 64,
             Type::_128 => 128,
             Type::_256 => 256,
-            Type::AES8 => 8,
-            Type::Galois64 => 64,
-            Type::Z3 => return Err(StorageToMuxError::UnsupportedAddressType { ty }),
             _ => return Err(StorageToMuxError::UnsupportedAddressType { ty }),
         }),
         _ => Err(StorageToMuxError::UnsupportedAddressType { ty }),
@@ -794,6 +817,71 @@ mod tests {
             &eval(&rewritten.blocks[0].stmts, &[], &mut no_storage),
         );
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn readonly_sidecar_rejects_writes() {
+        let storage = StorageId(0);
+        let mut types = bit_types();
+        let blocks = build_fixture(IRTypeId(0));
+        let mut sidecar = StorageTable::new();
+        sidecar.set(storage, StorageAccess::ReadOnly);
+        assert_eq!(
+            storage_to_mux_ir_with_access(
+                &blocks,
+                &mut types,
+                &StorageToMuxConfig {
+                    storage,
+                    ty: IRTypeId(0),
+                    num_cells: 2,
+                },
+                Some(&sidecar),
+            ),
+            Err(StorageToMuxError::ReadOnlyWrite { storage })
+        );
+    }
+
+    #[test]
+    fn readonly_sidecar_allows_read_only_promotion() {
+        let storage = StorageId(0);
+        let mut types = bit_types();
+        let mut block: IRBlock<()> = IRBlock {
+            params: vec![],
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
+            },
+        };
+        let address = block.push_stmt(IRStmt::Const(Constant { hi: 0, lo: 1 }, IRTypeId(0)), ());
+        let value = block.push_stmt(
+            IRStmt::StorageRead {
+                storage,
+                ty: IRTypeId(0),
+                addr: address,
+            },
+            (),
+        );
+        block.terminator = IRTerminator::Jmp {
+            target: IRBranchTarget::new(IRBlockTargetId::Return, vec![value]),
+        };
+        let blocks = IRBlocks::new(vec![block]);
+        let mut sidecar = StorageTable::new();
+        sidecar.set(storage, StorageAccess::ReadOnly);
+        let rewritten = storage_to_mux_ir_with_access(
+            &blocks,
+            &mut types,
+            &StorageToMuxConfig {
+                storage,
+                ty: IRTypeId(0),
+                num_cells: 2,
+            },
+            Some(&sidecar),
+        )
+        .expect("read-only storage can be promoted");
+        assert!(rewritten.is_circuit());
+        assert!(!rewritten.blocks[0].stmts.iter().any(
+            |node| matches!(node.kind, IRStmt::StorageRead { storage: s, .. } if s == storage)
+        ));
     }
 
     #[test]
