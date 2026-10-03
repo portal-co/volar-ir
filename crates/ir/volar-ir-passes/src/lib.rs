@@ -8,6 +8,7 @@ pub mod from_reversible;
 pub mod fuse_to_circuit;
 pub mod lower_ir_to_boolar;
 pub mod lower_lir;
+pub mod lower_to_native;
 pub mod lower_to_circuit;
 pub mod movfuscate;
 pub mod raise_to_z3;
@@ -27,6 +28,7 @@ pub use fuse_to_circuit::{
 pub use lower_ir_to_boolar::{
     ir_type_bits, lower_ir_to_boolar, lower_ir_to_boolar_with_lane_table,
 };
+pub use lower_to_native::{NativeLowering, lower_to_native};
 pub use lower_to_circuit::{
     LoweringMode, lower_to_circuit, lower_to_circuit_ir,
     lower_to_circuit_ir_with_control_provenance, lower_to_circuit_with_control_provenance,

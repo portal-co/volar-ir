@@ -23,7 +23,9 @@ pub fn ir_type_bit_width(types: &IRTypes, id: TypeId) -> Result<usize, EmitError
         IrType::Primitive(Type::_256) => Err(EmitError::TypeUnsupported {
             ty: "u256".into(),
         }),
-        IrType::Primitive(Type::Z3) => Err(EmitError::TypeUnsupported { ty: "Z3".into() }),
+        IrType::PrimeField { .. } => Err(EmitError::TypeUnsupported {
+            ty: "PrimeField".into(),
+        }),
         IrType::ExtField { .. } => Err(EmitError::TypeUnsupported {
             ty: "ExtField".into(),
         }),

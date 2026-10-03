@@ -611,8 +611,8 @@ fn ir_type_to_lir(ty: &IRType, types: &IRTypes) -> LirType {
         IRType::Primitive(Type::_128) => LirType::U128,
         IRType::Primitive(Type::_256) => LirType::U256,
         IRType::ExtField { .. } => lir_uint(ir_type_bits(ty, types)),
-        IRType::Primitive(Type::Z3) => {
-            panic!("ir_type_to_lir: Z3 values cannot lower through the GF(2) native targets")
+        IRType::PrimeField { .. } => {
+            panic!("ir_type_to_lir: prime fields lower through the native field sink, not an integer LIR type")
         }
         IRType::Vec(lanes, element) => LirType::Vector(
             Box::new(ir_type_to_lir(&types.0[element.0 as usize], types)),

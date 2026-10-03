@@ -204,6 +204,16 @@ impl WriteText for TypeTable {
                         }
                     }
                 }
+                IrType::PrimeField { k, n } => {
+                    if *k == 2 && n.as_slice() == [1] {
+                        w.write_str("z3")?;
+                    } else {
+                        write!(w, "primefield {k}")?;
+                        for limb in n {
+                            write!(w, " {limb}")?;
+                        }
+                    }
+                }
                 _ => {
                     w.write_str("unknown")?;
                 }

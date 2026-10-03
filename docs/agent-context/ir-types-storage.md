@@ -13,23 +13,29 @@ When working with `IRType` (in `volar-ir`), use this taxonomy:
 | `Primitive(_8/_16/_32/_64)` | packed bitvector | 8/16/32/64 | Full (`[wire; W]`) |
 | `Primitive(_128/_256)` | packed bitvector | 128/256 | LIR: `unimplemented!`; FHE: `[wire; W]` |
 | `ExtField { wrapped, degree, irreducible }` | extension of `wrapped` | `degree * width(wrapped)` | Boolar: schoolbook product |
+| `PrimeField { k, n }` | prime field `p = 2^k - n` | `k` | Boolar: Solinas on `k` digits |
 
 `aes8()` is `ExtField(Bit, 8, x^8 + x^4 + x^3 + x + 1)`. `galois64()` is `ExtField(Bit, 64, x^64 + x^4 + x^3 + x + 1)`. An element is the LSB-first concatenation of `degree` coefficients of `wrapped`, the same layout as `Vec(degree, wrapped)`. `TypeTable::ext_field` accepts the polynomial only when it is a monic irreducible over `Bit` or another `ExtField`.
 
+`z3()` is `PrimeField { k: 2, n: [1] }` (`p = 3`). `TypeTable::prime_field` accepts `k` in `2..=256` only when `n > 0`, `n < 2^(k-1)`, and `2^k - n` is prime. An element is an integer in `0..p`, stored in `k` bits, LSB first. GF(2) stays `Bit`. A prime field is not a coefficient field of `ExtField`.
+
 - `ir_type_bit_width(ty_id, types)` computes the wire count for any supported type.
 - `FheScheme::wire_type_for_ir` / `public_type_for_ir` convert an `IRTypeId` to the appropriate compiler `IrType` for generated code.
-- Unsupported types (`Z3`; `_128`/`_256` in LIR) panic with an explicit message — do not silently emit wrong code.
+- `_128`/`_256` in LIR, and a prime field passed to the integer LIR path, panic with an explicit message — do not silently emit wrong code. Prime fields lower through `lower_to_native`.
 
 ## `Poly` Statement Semantics
 
-`IRStmt::Poly { ty, coeffs, constant }` is a sum of monomials. The `u8` coefficient is a characteristic-2 repetition count (`coeff & 1`); a non-trivial field scalar is a `Const` factor inside the monomial. The sum across monomials is XOR. The product inside one monomial is type-directed and recurses:
+`IRStmt::Poly { ty, coeffs, constant }` is a sum of monomials. The `u8` coefficient is a repetition count, not a field element. A non-trivial scalar is a `Const` factor inside the monomial. The product inside one monomial is type-directed and recurses:
 
-- **`Bit`**: AND. Repeated factors collapse (`a * a = a`). The empty product is 1.
-- **Integer primitive**: the same product mapped across lanes. A 1-bit factor spreads to every lane.
+- **`Bit`**: AND. The sum is XOR, and `coeff & 1` cancels duplicates. Repeated factors collapse (`a * a = a`). The empty product is 1.
+- **Integer primitive**: the same product mapped across lanes. A 1-bit factor spreads to every lane. The sum is XOR.
 - **`Vec(n, E)`**: for each lane, recurse at `E`. A `Vec(n, E)` factor contributes that lane; an `E` or `Bit` factor spreads. A length mismatch fails closed.
-- **`ExtField`**: schoolbook polynomial multiplication modulo `irreducible`. Coefficient products recurse at `wrapped`. A `Bit` factor is a 0/1 selector. A `wrapped` factor embeds as the degree-0 coefficient. Repeated field factors stay, so `a * a` is the square. The empty product is the field one (only bit 0 set).
+- **`ExtField`**: schoolbook polynomial multiplication modulo `irreducible`. The sum is XOR. Coefficient products recurse at `wrapped`. A `Bit` factor is a 0/1 selector. A `wrapped` factor embeds as the degree-0 coefficient. Repeated field factors stay, so `a * a` is the square. The empty product is the field one (only bit 0 set).
+- **`PrimeField`**: the sum is addition modulo `p` and the product is multiplication modulo `p`. The stored repetition is `coeff mod p` when that residue fits in `u8` (always for `p < 256`). Parity cancellation does not run. `a * a` is the square. The empty product is 1. A `Tuple` of prime fields is the concatenation of those parts.
 
-`Tuple`, `Block`, `Func`, and `Z3` as a `Poly` output fail closed. Folds that assume `a * a = a` or that all-ones is the multiplicative identity run only when `mul_is_idempotent` is true. Pack and unpack stay `Merge` and `Shuffle`.
+`Block` and `Func` as a `Poly` output fail closed. Folds that assume `a * a = a` or that all-ones is the multiplicative identity run only when `mul_is_idempotent` is true. Pack and unpack stay `Merge` and `Shuffle`.
+
+`lower_to_native(blocks, types, native)` lowers every value to wires of `native`. `Bit` produces Boolar (`And` / `Xor` / `Zero` / `One`). Any other native field produces Volar IR whose `Const` and `Poly` evaluate as that field's addition and multiplication. A value of the native field is one wire. `Vec`, `Tuple`, and `ExtField` unroll. A foreign prime is Solinas reduction on `k` boolean digits (`2^k ≡ n`). A bit embedded in an odd prime uses multiplication for AND and `a + b - 2ab` for XOR.
 
 When constructing `Poly` nodes, always supply the `ty` field explicitly. Do not use `ir_stmt_output_ty`'s old fallback (it now returns `Some(*ty)` for `Poly`).
 

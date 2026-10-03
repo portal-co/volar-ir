@@ -79,6 +79,7 @@ pub enum IRType {
     Tuple(Vec<IRTypeId>),           // product type
     Block { params: Vec<IRTypeId> }, // first-class block (closure)
     ExtField { wrapped: IRTypeId, degree: u32, irreducible: Vec<u64> },
+    PrimeField { k: u32, n: Vec<u64> }, // p = 2^k - n, element in 0..p, k bits
 }
 
 pub enum PrimType {
@@ -89,7 +90,6 @@ pub enum PrimType {
     _64,     // packed 64-bit bitvector — 64 wires
     _128,    // packed 128-bit bitvector — 128 wires (LIR: unimplemented)
     _256,    // packed 256-bit bitvector — 256 wires (LIR: unimplemented)
-    Z3,      // not a GF(2) width
 }
 ```
 
@@ -102,6 +102,7 @@ pub enum PrimType {
 | `Primitive(_8/_16/_32/_64)` | packed bitvector | 8/16/32/64 | Full (`[wire; W]`) |
 | `Primitive(_128/_256)` | packed bitvector | 128/256 | LIR: `unimplemented!`; FHE: `[wire; W]` |
 | `ExtField` | extension of `wrapped` | `degree * width(wrapped)` | Boolar schoolbook product |
+| `PrimeField { k, n }` | prime field `2^k - n` | `k` | Boolar Solinas digits; native-field lowering keeps one wire |
 
 `ir_type_bit_width(ty_id, types)` computes the total wire count for any supported type.
 
@@ -129,7 +130,7 @@ variable IDs) to its GF(2⁸) coefficient.
 
 **`Poly` output-type semantics (`ty` field):**
 
-The product inside a monomial follows `ty` and recurses. Bits and integer primitives are a per-bit AND, and a 1-bit factor spreads across lanes. `Vec` maps that product per lane. `ExtField` is schoolbook multiplication modulo its irreducible; several field factors may appear in one monomial, and `a * a` is the square. Boolar lowering emits hash-consed `And` and `Xor`. A single field factor is copied, and the first XOR into an empty accumulator does not invent a zero wire. LIR keeps the whole-value AND/XOR path for idempotent types and bit-blasts an extension product into `and` / `xor` / `shl`.
+The product inside a monomial follows `ty` and recurses. Bits and integer primitives are a per-bit AND, and a 1-bit factor spreads across lanes. `Vec` maps that product per lane. `ExtField` is schoolbook multiplication modulo its irreducible; several field factors may appear in one monomial, and `a * a` is the square. `PrimeField` adds and multiplies modulo `p = 2^k - n`; the `u8` coefficient is a repetition count, and even counts are not cancelled. Boolar lowering emits hash-consed `And` and `Xor`, using Solinas reduction for a prime. A single extension-field factor is copied, and the first XOR into an empty accumulator does not invent a zero wire. `lower_to_native` sends `Bit` through that Boolar sink and any other native field through Volar IR `Const` and `Poly`. LIR keeps the whole-value AND/XOR path for idempotent types and bit-blasts an extension product into `and` / `xor` / `shl`. A prime field has no integer LIR type.
 
 Always supply `ty` explicitly when constructing `Poly` nodes; `ir_stmt_output_ty` now returns `Some(*ty)` for `Poly`.
 

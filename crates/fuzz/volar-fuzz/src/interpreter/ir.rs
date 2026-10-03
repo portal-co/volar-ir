@@ -415,7 +415,23 @@ fn eval_ir_stmt(
             // if that var happens to be the scalar selector, this silently
             // produced a width-1 result even when `ty` (and every real
             // consumer of this statement, e.g. the weaver) says otherwise.
-            if volar_ir_common::mul_is_idempotent(*ty, types) {
+            if volar_ir_common::contains_prime_field(*ty, types) {
+                let width = bit_width(*ty, types);
+                let constant_bits = const_to_bits(constant, width);
+                let mut terms = Vec::new();
+                for (mono, coeff) in coeffs.iter() {
+                    let mut factors = Vec::with_capacity(mono.len());
+                    for var in mono {
+                        let factor_ty = var_tys.get(&var.0).copied().unwrap_or_else(|| {
+                            panic!("eval_ir: factor v{} has no type", var.0)
+                        });
+                        factors.push((factor_ty, get_ir(vars, var)));
+                    }
+                    terms.push((factors, *coeff));
+                }
+                let mut sink = volar_ir_common::BoolRing;
+                volar_ir_common::eval_prime_poly(*ty, &constant_bits, &terms, types, &mut sink)
+            } else if volar_ir_common::mul_is_idempotent(*ty, types) {
                 let width = bit_width(*ty, types);
                 eval_poly(coeffs, constant, width, vars)
             } else {
@@ -562,6 +578,7 @@ pub fn bit_width(ty_id: TypeId, types: &IRTypes) -> usize {
         IrType::ExtField { wrapped, degree, .. } => {
             *degree as usize * bit_width(*wrapped, types)
         }
+        IrType::PrimeField { k, .. } => *k as usize,
         _ => panic!(
             "bit_width: unhandled IrType variant — add bit-width calculation for this variant"
         ),

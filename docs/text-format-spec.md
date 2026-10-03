@@ -257,8 +257,9 @@ File extension: `.vir` ("Volar IR").
 
 ```ebnf
 vir_type ::=
-    "bit" | "u8" | "u16" | "u32" | "u64" | "u128" | "u256" | "aes8" | "galois64"
+    "bit" | "u8" | "u16" | "u32" | "u64" | "u128" | "u256" | "aes8" | "galois64" | "z3"
   | "extfield" type_id nat nat+
+  | "primefield" nat nat+
   | "vec[" "#" nat ", " nat "]"
   | "tuple[" ("#" nat ",")* "]"
   | "block[" ("#" nat ",")* "]"
@@ -266,6 +267,8 @@ vir_type ::=
 ```
 
 `aes8` and `galois64` are writer sugar for the canonical extension fields, accepted by the parser only after `prim bit` is already in the table. The general form is `extfield <wrapped_id> <degree> <c0> … <c_degree>`.
+
+`z3` is writer sugar for `PrimeField { k: 2, n: [1] }`. The general form is `primefield <k> <n0> …`, the little-endian limbs of `n` in `p = 2^k - n`. The directive writer emits `type <i> z3` or `type <i> primefield <k> <n0> …`.
 
 `Constant` (256-bit): `0x` followed by 64 hex digits, zero-padded on the left.
 

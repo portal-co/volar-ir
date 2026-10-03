@@ -81,7 +81,7 @@
         "output": "crates/ir/volar-ir-common/src/generated.rs",
         "name": "Type",
         "kind": "unit-enum",
-        "variants": ["Bit", "_8", "_16", "_32", "_64", "_128", "_256", "Z3"],
+        "variants": ["Bit", "_8", "_16", "_32", "_64", "_128", "_256"],
         "non_exhaustive": true
       },
       "typescript": "PrimitiveType"

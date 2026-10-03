@@ -109,6 +109,8 @@ fn ir_type_table() {
         IrType::Primitive(Type::_64),
         IrType::Primitive(Type::_128),
         IrType::Primitive(Type::_256),
+        IrType::PrimeField { k: 2, n: vec![1] },
+        IrType::PrimeField { k: 3, n: vec![3] },
         volar_ir_common::ext_field_type(ty(0), 8, volar_ir_common::aes8_irreducible()),
         volar_ir_common::ext_field_type(ty(0), 64, volar_ir_common::galois64_irreducible()),
         IrType::Vec(8, ty(0)),

@@ -19,6 +19,7 @@
 //! | `_128`             | 128            |
 //! | `_256`             | 256            |
 //! | `ExtField`         | degree × bits(wrapped) |
+//! | `PrimeField`       | `k`            |
 //! | `Vec(n, T)`        | n × bits(T)    |
 //! | `Tuple(Ts)`        | Σ bits(Tᵢ)    |
 //! | `Block` / `Func`   | 0              |
@@ -64,7 +65,7 @@ use volar_ir::{
         IRVarId, PrimType,
     },
 };
-use volar_ir_common::{BitRing, Constant, PolyCoeffs, StorageId, TypeId};
+use volar_ir_common::{BitRing, Constant, FieldSink, PolyCoeffs, StorageId, TypeId};
 
 /// A source call did not match the external declarations carried by its
 /// containing [`IRBlocks`].  Lowering is deliberately fail-closed: a backend
@@ -546,7 +547,18 @@ fn lower_stmt<P: Clone>(
             // The result type is authoritative. In particular, a pure
             // constant polynomial has no operands from which to infer a
             // width, but still needs one Boolar wire per bit of `ty`.
-            let bits = if volar_ir_common::mul_is_idempotent(*ty, types) {
+            let bits = if volar_ir_common::contains_prime_field(*ty, types) {
+                lower_prime_poly(
+                    *ty,
+                    coeffs,
+                    constant,
+                    var_bits,
+                    var_tys,
+                    emitter,
+                    types,
+                    prov.clone(),
+                )
+            } else if volar_ir_common::mul_is_idempotent(*ty, types) {
                 let w = ir_type_bits(&types.0[ty.0 as usize], types);
                 (0..w)
                     .map(|j| lower_poly_bit(coeffs, constant, j, var_bits, emitter, prov.clone()))
@@ -944,6 +956,34 @@ struct GateRing<'a, P: Clone> {
     one: Option<IRVarId>,
 }
 
+impl<P: Clone> FieldSink for GateRing<'_, P> {
+    type Wire = IRVarId;
+
+    fn zero(&mut self) -> IRVarId {
+        BitRing::bit_zero(self)
+    }
+
+    fn one(&mut self) -> IRVarId {
+        BitRing::bit_one(self)
+    }
+
+    fn add(&mut self, lhs: IRVarId, rhs: IRVarId) -> IRVarId {
+        self.bit_xor(lhs, rhs)
+    }
+
+    fn sub(&mut self, lhs: IRVarId, rhs: IRVarId) -> IRVarId {
+        self.bit_xor(lhs, rhs)
+    }
+
+    fn mul(&mut self, lhs: IRVarId, rhs: IRVarId) -> IRVarId {
+        self.bit_and(lhs, rhs)
+    }
+
+    fn char_two(&self) -> bool {
+        true
+    }
+}
+
 impl<P: Clone> BitRing for GateRing<'_, P> {
     type Bit = IRVarId;
 
@@ -972,6 +1012,51 @@ impl<P: Clone> BitRing for GateRing<'_, P> {
         self.one = Some(one);
         one
     }
+}
+
+/// Lower a prime-field `Poly` by Solinas addition and multiplication on its
+/// boolean digits. Characteristic 2 makes those digits XOR and AND.
+fn lower_prime_poly<P: Clone>(
+    ty: TypeId,
+    coeffs: &PolyCoeffs<IRVarId>,
+    constant: &Constant,
+    var_bits: &BTreeMap<u32, Vec<IRVarId>>,
+    var_tys: &BTreeMap<u32, IRTypeId>,
+    emitter: &mut Emitter<P>,
+    types: &IRTypes,
+    prov: P,
+) -> Vec<IRVarId> {
+    let width = ir_type_bits(&types.0[ty.0 as usize], types);
+    let mut ring = GateRing {
+        emitter,
+        prov: prov.clone(),
+        zero: None,
+        one: None,
+    };
+    let constant_bits: Vec<IRVarId> = (0..width)
+        .map(|bit| {
+            if constant_bit(constant, bit) {
+                ring.one()
+            } else {
+                ring.zero()
+            }
+        })
+        .collect();
+    let mut terms = Vec::new();
+    for (mono, coeff) in coeffs.iter() {
+        let mut factors = Vec::with_capacity(mono.len());
+        for var in mono {
+            let factor_ty = var_tys.get(&var.0).copied().unwrap_or_else(|| {
+                panic!("lower_prime_poly: factor v{} has no type", var.0)
+            });
+            let bits = var_bits.get(&var.0).cloned().unwrap_or_else(|| {
+                panic!("lower_prime_poly: factor v{} has no bits", var.0)
+            });
+            factors.push((factor_ty, bits));
+        }
+        terms.push((factors, *coeff));
+    }
+    volar_ir_common::eval_prime_poly(ty, &constant_bits, &terms, types, &mut ring)
 }
 
 /// Lower a non-idempotent `Poly` (an extension field, or a vector of one).
@@ -1129,13 +1214,7 @@ pub fn ir_type_bits(ty: &IRType, types: &IRTypes) -> usize {
         IRType::Primitive(PrimType::_64) => 64,
         IRType::Primitive(PrimType::_128) => 128,
         IRType::Primitive(PrimType::_256) => 256,
-        IRType::Primitive(PrimType::Z3) => {
-            panic!(
-                "ir_type_bits: Z3 (GF(3)) cannot be lowered to GF(2) bits. \
-                 Z3 values are only valid in the TFHE backend. \
-                 Use raise_to_z3 before the TFHE weaver, not before lower_ir_to_boolar."
-            );
-        }
+        IRType::PrimeField { k, .. } => *k as usize,
         IRType::Vec(n, elem_id) => n * ir_type_bits(&types.0[elem_id.0 as usize], types),
         IRType::Tuple(ids) => ids
             .iter()

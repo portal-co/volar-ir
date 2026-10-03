@@ -105,11 +105,12 @@ fn value_bit_width_of(ty: &IrType, types: &TypeTable) -> Option<usize> {
         IrType::ExtField {
             wrapped, degree, ..
         } => (*degree as usize).checked_mul(types.value_bit_width(*wrapped)?),
+        IrType::PrimeField { k, .. } => Some(*k as usize),
         IrType::Block { .. } | IrType::Func { .. } => None,
     }
 }
 
-/// Bit width of a primitive. `Z3` is not a GF(2) bit vector.
+/// Bit width of a primitive integer or `Bit`.
 pub fn primitive_bit_width(ty: Type) -> Option<usize> {
     Some(match ty {
         Type::Bit => 1,
@@ -119,7 +120,6 @@ pub fn primitive_bit_width(ty: Type) -> Option<usize> {
         Type::_64 => 64,
         Type::_128 => 128,
         Type::_256 => 256,
-        Type::Z3 => return None,
     })
 }
 
@@ -129,7 +129,7 @@ pub fn primitive_bit_width(ty: Type) -> Option<usize> {
 /// extension field, including a vector whose element is one.
 pub fn mul_is_idempotent(ty: TypeId, types: &TypeTable) -> bool {
     match types.0.get(ty.0 as usize) {
-        Some(IrType::Primitive(Type::Z3)) | Some(IrType::Block { .. }) | Some(IrType::Func { .. }) => {
+        Some(IrType::Block { .. }) | Some(IrType::Func { .. }) | Some(IrType::PrimeField { .. }) => {
             false
         }
         Some(IrType::Primitive(_)) => true,
@@ -323,7 +323,7 @@ fn identity_bits<R: BitRing>(ty: TypeId, types: &TypeTable, ops: &mut R) -> Opti
             }
             Some(out)
         }
-        IrType::ExtField { .. } => {
+        IrType::ExtField { .. } | IrType::PrimeField { .. } => {
             let width = types.value_bit_width(ty)?;
             let mut bits = zeros(width, ops);
             if width > 0 {
@@ -418,6 +418,9 @@ pub fn monomial_product<R: BitRing>(
                 }
             }
             acc
+        }
+        Some(IrType::PrimeField { .. }) => {
+            panic!("monomial_product: prime fields multiply modulo p, not by AND")
         }
         Some(IrType::Tuple(_)) | Some(IrType::Block { .. }) | Some(IrType::Func { .. }) | None => {
             panic!("monomial_product: output type cannot carry a polynomial")

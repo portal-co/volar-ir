@@ -271,7 +271,6 @@ fn bit_width_for_ty(types: &IRTypes, ty: IRTypeId) -> Result<usize, StorageToMux
             Type::_64 => 64,
             Type::_128 => 128,
             Type::_256 => 256,
-            Type::Z3 => return Err(StorageToMuxError::UnsupportedAddressType { ty }),
             _ => return Err(StorageToMuxError::UnsupportedAddressType { ty }),
         }),
         _ => Err(StorageToMuxError::UnsupportedAddressType { ty }),

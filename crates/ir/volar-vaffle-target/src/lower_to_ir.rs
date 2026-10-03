@@ -349,6 +349,10 @@ fn remap_type_id(
                 results: results_ir,
             }
         }
+        IrType::PrimeField { k, n } => IrType::PrimeField {
+            k,
+            n: n.clone(),
+        },
         IrType::ExtField {
             wrapped,
             degree,
@@ -2070,7 +2074,6 @@ fn ir_type_bit_width(types: &IRTypes, tid: TypeId) -> usize {
             volar_ir_common::Type::_64 => 64,
             volar_ir_common::Type::_128 => 128,
             volar_ir_common::Type::_256 => 256,
-            volar_ir_common::Type::Z3 => 2,
             _ => 1, // unknown primitive — treat as 1 bit
         },
         IrType::Vec(n, inner) => *n * ir_type_bit_width(types, *inner),
@@ -2079,6 +2082,7 @@ fn ir_type_bit_width(types: &IRTypes, tid: TypeId) -> usize {
         IrType::ExtField { wrapped, degree, .. } => {
             *degree as usize * ir_type_bit_width(types, *wrapped)
         }
+        IrType::PrimeField { k, .. } => *k as usize,
         _ => panic!("ir_type_bit_width: unhandled IrType variant — add bit-width calculation"),
     }
 }

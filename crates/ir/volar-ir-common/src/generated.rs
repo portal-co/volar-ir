@@ -16,7 +16,6 @@ pub enum Type {
     _64,
     _128,
     _256,
-    Z3,
 }
 
 #[cfg(feature = "rkyv")]
@@ -31,7 +30,6 @@ pub enum ArchivedType {
     _64,
     _128,
     _256,
-    Z3,
 }
 
 #[cfg(feature = "rkyv")]
@@ -44,7 +42,6 @@ pub enum TypeResolver {
     _64,
     _128,
     _256,
-    Z3,
 }
 
 #[cfg(feature = "rkyv")]
@@ -64,7 +61,6 @@ impl rkyv::Archive for Type {
             TypeResolver::_64 => ArchivedType::_64,
             TypeResolver::_128 => ArchivedType::_128,
             TypeResolver::_256 => ArchivedType::_256,
-            TypeResolver::Z3 => ArchivedType::Z3,
         };
         // SAFETY: `archived` is a fully initialized repr(u8) discriminant.
         unsafe { out.write_unchecked(archived) }
@@ -82,7 +78,6 @@ impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for Type {
             Type::_64 => TypeResolver::_64,
             Type::_128 => TypeResolver::_128,
             Type::_256 => TypeResolver::_256,
-            Type::Z3 => TypeResolver::Z3,
         })
     }
 }
@@ -100,7 +95,6 @@ impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Type, D>
             ArchivedType::_64 => Type::_64,
             ArchivedType::_128 => Type::_128,
             ArchivedType::_256 => Type::_256,
-            ArchivedType::Z3 => Type::Z3,
         })
     }
 }

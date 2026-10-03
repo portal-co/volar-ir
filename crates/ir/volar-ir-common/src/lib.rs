@@ -9,11 +9,17 @@ pub use complexity::{MeasureSpec, ReentryHint, StructRef};
 
 mod field;
 mod generated;
+mod prime;
 pub use field::{
     contains_ext_field, ext_field_type, format_field_symbol, lower_field_call, monomial_product,
     mul_identity, mul_is_idempotent, parse_field_symbol, primitive_bit_width, BitRing, BoolRing,
     ExtFieldError, FieldArg, FieldCallError, FieldOp, FieldSpec, FieldSymbol, WrappedSpec,
     aes8_irreducible, galois64_irreducible,
+};
+pub use prime::{
+    contains_prime_field, embed_and, embed_xor, eval_prime_poly, is_native_field, prime_spec,
+    repetition_residue, solinas_add, solinas_mul, solinas_repeat, FieldSink, PrimeFieldError,
+    PrimeSpec,
 };
 pub use generated::{
     ActionDecl, Constant, Node, OracleDecl, PreInitSegment, RngDecl, StorageId, Type, TypeId,
@@ -549,6 +555,14 @@ pub enum IrType {
         degree: u32,
         irreducible: alloc::vec::Vec<u64>,
     },
+    /// The prime field of `p = 2^k - n`.
+    ///
+    /// `k` is in `2..=256` and `n < 2^(k-1)`, so `k` is the bit length of `p`.
+    /// An element is an integer in `0..p`, stored in `k` bits, LSB first.
+    PrimeField {
+        k: u32,
+        n: alloc::vec::Vec<u64>,
+    },
 }
 
 /// An interning table for [`IrType`] values.
@@ -760,8 +774,10 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     /// bits and integer primitives multiply per bit (a bit factor spreads),
     /// `Vec` maps that product across lanes, and `ExtField` is schoolbook
     /// multiplication modulo its polynomial. An extension monomial may
-    /// contain several field factors. `Tuple`, `Block`, `Func`, and `Z3`
-    /// fail closed.
+    /// contain several field factors. A `PrimeField` sum is addition modulo
+    /// `p` and its product is multiplication modulo `p`; the `u8` coefficient
+    /// is still a repetition count. A tuple of prime fields is the
+    /// concatenation of its parts. `Block` and `Func` fail closed.
     Poly {
         /// Output (and dominant operand) type.
         ty: Ty,
@@ -1457,6 +1473,10 @@ impl TypeRemapper {
                     irreducible: irreducible.clone(),
                 }
             }
+            IrType::PrimeField { k, n } => IrType::PrimeField {
+                k: *k,
+                n: n.clone(),
+            },
         };
         let host_id = host.intern(remapped);
         map[idx] = host_id;
@@ -1637,12 +1657,6 @@ mod generated_binary_compat_tests {
                 .unwrap()
                 .as_slice(),
             &[0xd0, 0xc0, 0xb0, 0xa0]
-        );
-        assert_eq!(
-            rkyv::to_bytes::<rkyv::rancor::Error>(&Type::Z3)
-                .unwrap()
-                .as_slice(),
-            &[7]
         );
         assert_eq!(
             rkyv::to_bytes::<rkyv::rancor::Error>(&Constant {
