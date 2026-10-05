@@ -1,6 +1,6 @@
 # Boolar ↔ Bristol and Boolar → Summon interoperability plan
 
-**Status:** implementation in progress — circuit validation and Bristol Fashion import/export landed
+**Status:** implementation in progress — circuit validation, Bristol import/export, and Summon source emission landed
 **Scope:** storage-free, circuit-shaped Boolar IR only.
 
 ## Goal and directions
