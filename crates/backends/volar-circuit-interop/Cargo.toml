@@ -9,3 +9,6 @@ repository.workspace = true
 [dependencies]
 volar-ir.workspace = true
 volar-ir-common.workspace = true
+
+[dev-dependencies]
+volar-fuzz.workspace = true

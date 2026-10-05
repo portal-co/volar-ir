@@ -318,6 +318,168 @@ mod tests {
 }
 
 #[cfg(test)]
+mod semantic_tests {
+    use std::process::Command;
+
+    use volar_fuzz::interpreter::biir::eval_biir;
+    use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator};
+    use volar_ir::ir::{IRBlockTargetId, IRVarId};
+
+    use super::{emit_summon_source, export_bristol_fashion, import_bristol_fashion};
+
+    fn circuit(params: u32, stmts: Vec<BIrStmt>, outputs: Vec<IRVarId>) -> BIrBlocks<()> {
+        let mut block = BIrBlock {
+            params,
+            stmts: vec![],
+            terminator: BIrTerminator::Jmp(BIrTarget {
+                block: IRBlockTargetId::Return,
+                args: outputs,
+            }),
+        };
+        for stmt in stmts {
+            block.push_stmt(stmt, ());
+        }
+        BIrBlocks {
+            blocks: vec![block],
+            pre_init: vec![],
+        }
+    }
+
+    #[test]
+    fn export_then_import_preserves_all_small_circuit_inputs() {
+        let original = circuit(
+            3,
+            vec![
+                BIrStmt::Zero,
+                BIrStmt::One,
+                BIrStmt::And(IRVarId(0), IRVarId(1)),
+                BIrStmt::Or(IRVarId(1), IRVarId(2)),
+                BIrStmt::Xor(IRVarId(0), IRVarId(2)),
+                BIrStmt::Not(IRVarId(5)),
+            ],
+            vec![
+                IRVarId(3),
+                IRVarId(4),
+                IRVarId(5),
+                IRVarId(6),
+                IRVarId(7),
+                IRVarId(8),
+            ],
+        );
+        let text = export_bristol_fashion(&original).unwrap();
+        let (imported, _) = import_bristol_fashion(&text).unwrap();
+
+        for mask in 0..8 {
+            let inputs = (0..3).map(|bit| mask & (1 << bit) != 0).collect::<Vec<_>>();
+            assert_eq!(
+                eval_biir(&imported, &inputs),
+                eval_biir(&original, &inputs),
+                "circuit output mismatch for inputs {inputs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_summon_helper_matches_the_interpreter_when_node_is_available() {
+        let original = circuit(
+            3,
+            vec![
+                BIrStmt::Zero,
+                BIrStmt::One,
+                BIrStmt::And(IRVarId(0), IRVarId(1)),
+                BIrStmt::Or(IRVarId(1), IRVarId(2)),
+                BIrStmt::Xor(IRVarId(0), IRVarId(2)),
+                BIrStmt::Not(IRVarId(5)),
+            ],
+            vec![
+                IRVarId(3),
+                IRVarId(4),
+                IRVarId(5),
+                IRVarId(6),
+                IRVarId(7),
+                IRVarId(8),
+            ],
+        );
+        let source = emit_summon_source(&original).unwrap();
+        let javascript = source
+            .replace("export default function ", "function ")
+            .replace("input: boolean[]", "input")
+            .replace("): boolean[] {", ") {");
+        let mut javascript = javascript;
+        javascript.push_str(
+            "\nfor (let mask = 0; mask < 8; mask++) {\n  const input = [0, 1, 2].map(bit => (mask & (1 << bit)) !== 0);\n  console.log(JSON.stringify(evalCircuit(input)));\n}\n",
+        );
+        let output = match Command::new("node").arg("-e").arg(javascript).output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("failed to run Node.js: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "Node.js failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual = String::from_utf8(output.stdout).unwrap();
+        let actual = actual.lines().collect::<Vec<_>>();
+        assert_eq!(actual.len(), 8, "expected one result for each input vector");
+        for mask in 0..8 {
+            let inputs = (0..3).map(|bit| mask & (1 << bit) != 0).collect::<Vec<_>>();
+            let expected = eval_biir(&original, &inputs).unwrap();
+            let expected = format!(
+                "[{}]",
+                expected
+                    .iter()
+                    .map(bool::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            assert_eq!(actual[mask as usize], expected);
+        }
+    }
+
+    #[test]
+    fn imported_bristol_gates_match_their_boolean_truth_tables() {
+        let text = "2 4\n1 2\n1 2\n2 1 0 1 2 XOR\n1 1 2 3 INV\n";
+        let (imported, _) = import_bristol_fashion(text).unwrap();
+
+        for a in [false, true] {
+            for b in [false, true] {
+                assert_eq!(eval_biir(&imported, &[a, b]), Some(vec![a ^ b, !(a ^ b)]));
+            }
+        }
+    }
+
+    #[test]
+    fn imported_mand_preserves_concurrent_wire_reassignment_for_all_inputs() {
+        let text = "2 6\n1 4\n1 2\n4 2 0 1 2 3 2 4 MAND\n1 1 2 5 EQW\n";
+        let (imported, _) = import_bristol_fashion(text).unwrap();
+
+        for mask in 0..16 {
+            let inputs = (0..4).map(|bit| mask & (1 << bit) != 0).collect::<Vec<_>>();
+            let expected = vec![inputs[2] && inputs[3], inputs[0] && inputs[1]];
+            assert_eq!(eval_biir(&imported, &inputs), Some(expected));
+        }
+    }
+
+    #[test]
+    fn malformed_bounded_ascii_inputs_never_panic() {
+        const ALPHABET: &[u8] = b"0123456789 AND XOR INV EQW MAND\n";
+        for seed in 0u32..512 {
+            let mut state = seed.wrapping_add(1);
+            let length = (seed as usize) % 96;
+            let text = (0..length)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    ALPHABET[(state as usize) % ALPHABET.len()]
+                })
+                .map(char::from)
+                .collect::<String>();
+            assert!(std::panic::catch_unwind(|| import_bristol_fashion(&text)).is_ok());
+        }
+    }
+}
+
+#[cfg(test)]
 mod bristol_tests {
     use volar_ir::boolar::{BIrStmt, BIrTerminator};
     use volar_ir::ir::IRVarId;

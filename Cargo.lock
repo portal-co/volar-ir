@@ -1822,6 +1822,15 @@ name = "volar-circuit-exec-core"
 version = "0.1.0"
 
 [[package]]
+name = "volar-circuit-interop"
+version = "0.1.0"
+dependencies = [
+ "volar-fuzz",
+ "volar-ir",
+ "volar-ir-common",
+]
+
+[[package]]
 name = "volar-circuit-source"
 version = "0.1.0"
 dependencies = [
