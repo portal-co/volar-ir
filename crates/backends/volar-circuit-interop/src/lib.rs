@@ -10,11 +10,14 @@ use volar_ir::ir::{IRBlockTargetId, IRVarId};
 use volar_ir_common::Node;
 
 mod bristol;
+mod emit;
+
 pub use bristol::{
     BristolAnd, BristolCircuit, BristolGate, BristolIoLayout, BristolLimits,
     import_bristol_fashion, import_bristol_fashion_with_limits, parse_bristol_fashion,
     parse_bristol_fashion_with_limits,
 };
+pub use emit::{export_bristol_fashion, export_bristol_fashion_with_layout};
 
 /// Why a Boolar program cannot be used by this interoperability layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +41,14 @@ pub enum InteropError {
     BristolParse { line: usize, message: String },
     /// A Bristol gate opcode is outside the supported Boolean subset.
     UnsupportedBristolGate { line: usize, operation: String },
+    /// Bristol input or output groups do not have the circuit's width.
+    IoLayoutMismatch {
+        kind: &'static str,
+        expected: usize,
+        got: usize,
+    },
+    /// A Bristol wire/gate count exceeds the host's representable range.
+    BristolCountOverflow,
 }
 
 impl core::fmt::Display for InteropError {
@@ -70,6 +81,15 @@ impl core::fmt::Display for InteropError {
             Self::UnsupportedBristolGate { line, operation } => {
                 write!(f, "unsupported Bristol gate `{operation}` at line {line}")
             }
+            Self::IoLayoutMismatch {
+                kind,
+                expected,
+                got,
+            } => write!(
+                f,
+                "Bristol {kind} layout has width {got}, expected {expected}"
+            ),
+            Self::BristolCountOverflow => write!(f, "Bristol gate or wire count overflowed"),
         }
     }
 }
@@ -301,7 +321,8 @@ mod bristol_tests {
     use volar_ir::ir::IRVarId;
 
     use super::{
-        BristolGate, BristolLimits, InteropError, import_bristol_fashion, parse_bristol_fashion,
+        BristolGate, BristolIoLayout, BristolLimits, InteropError, export_bristol_fashion,
+        export_bristol_fashion_with_layout, import_bristol_fashion, parse_bristol_fashion,
         parse_bristol_fashion_with_limits,
     };
 
@@ -436,6 +457,86 @@ mod bristol_tests {
             parse_bristol_fashion(text),
             Err(InteropError::UnsupportedBristolGate { line: 4, operation }) if operation == "AAdd"
         ));
+    }
+
+    #[test]
+    fn exports_canonical_fashion_with_final_output_copies() {
+        let blocks = circuit(
+            2,
+            vec![BIrStmt::And(IRVarId(0), IRVarId(1))],
+            vec![IRVarId(2)],
+        );
+        let text = export_bristol_fashion(&blocks).unwrap();
+        assert_eq!(text, "2 4\n1 2\n1 1\n\n2 1 0 1 2 AND\n1 1 2 3 EQW\n");
+
+        let (imported, _) = import_bristol_fashion(&text).unwrap();
+        assert!(matches!(
+            &imported.blocks[0].terminator,
+            BIrTerminator::Jmp(target) if target.args == vec![IRVarId(2)]
+        ));
+    }
+
+    #[test]
+    fn export_expands_or_and_preserves_custom_io_groups() {
+        let blocks = circuit(
+            3,
+            vec![
+                BIrStmt::Or(IRVarId(0), IRVarId(1)),
+                BIrStmt::Xor(IRVarId(0), IRVarId(2)),
+            ],
+            vec![IRVarId(3), IRVarId(4)],
+        );
+        let layout = BristolIoLayout {
+            input_groups: vec![1, 2],
+            output_groups: vec![1, 1],
+        };
+        let text = export_bristol_fashion_with_layout(&blocks, &layout).unwrap();
+        let (imported, imported_layout) = import_bristol_fashion(&text).unwrap();
+        assert_eq!(imported_layout, layout);
+        assert_eq!(imported.blocks[0].stmts.len(), 4);
+        assert!(matches!(
+            &imported.blocks[0].terminator,
+            BIrTerminator::Jmp(target) if target.args.len() == 2
+        ));
+    }
+
+    #[test]
+    fn export_rejects_io_group_width_mismatches() {
+        let blocks = circuit(2, vec![], vec![IRVarId(0)]);
+        let layout = BristolIoLayout {
+            input_groups: vec![1],
+            output_groups: vec![1],
+        };
+        assert_eq!(
+            export_bristol_fashion_with_layout(&blocks, &layout).unwrap_err(),
+            InteropError::IoLayoutMismatch {
+                kind: "input",
+                expected: 2,
+                got: 1,
+            }
+        );
+    }
+
+    fn circuit(
+        params: u32,
+        stmts: Vec<BIrStmt>,
+        outputs: Vec<IRVarId>,
+    ) -> volar_ir::boolar::BIrBlocks<()> {
+        let mut block = volar_ir::boolar::BIrBlock {
+            params,
+            stmts: vec![],
+            terminator: BIrTerminator::Jmp(volar_ir::boolar::BIrTarget {
+                block: volar_ir::ir::IRBlockTargetId::Return,
+                args: outputs,
+            }),
+        };
+        for stmt in stmts {
+            block.push_stmt(stmt, ());
+        }
+        volar_ir::boolar::BIrBlocks {
+            blocks: vec![block],
+            pre_init: vec![],
+        }
     }
 
     #[test]
