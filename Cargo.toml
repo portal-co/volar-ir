@@ -22,6 +22,7 @@ members = [
     "crates/backends/volar-llvm-backend",
     "crates/backends/volar-wasm-backend",
     "crates/backends/volar-circuit-source",
+    "crates/backends/volar-circuit-interop",
     "crates/backends/volar-noir-backend",
     "crates/backends/volar-pod2-backend",
     "crates/frontends/volar-llvm-vaffle-import",
@@ -61,6 +62,7 @@ volar-c-backend         = { path = "crates/backends/volar-c-backend", version = 
 volar-llvm-backend      = { path = "crates/backends/volar-llvm-backend", version = "0.1.0" }
 volar-wasm-backend      = { path = "crates/backends/volar-wasm-backend", version = "0.1.0" }
 volar-circuit-source    = { path = "crates/backends/volar-circuit-source", version = "0.1.0" }
+volar-circuit-interop   = { path = "crates/backends/volar-circuit-interop", version = "0.1.0" }
 volar-noir-backend      = { path = "crates/backends/volar-noir-backend", version = "0.1.0" }
 volar-pod2-backend      = { path = "crates/backends/volar-pod2-backend", version = "0.1.0" }
 volar-ir-build          = { path = "crates/frontends/volar-ir-build", version = "0.1.0" }

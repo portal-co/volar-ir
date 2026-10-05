@@ -1,0 +1,11 @@
+[package]
+name = "volar-circuit-interop"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Bristol and Summon interoperability for storage-free Boolar circuits"
+repository.workspace = true
+
+[dependencies]
+volar-ir.workspace = true
+volar-ir-common.workspace = true

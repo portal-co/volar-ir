@@ -99,6 +99,7 @@ weaving — see `volar`'s `docs/garbling-pipeline.md` and `docs/vole-weaving.md`
 | `volar-ir-virt` | Virtualization (dispatch-mode block interpretation) |
 | `volar-lir` / `volar-lir-text` / `volar-lir-saved` | Mid-level IR shared with backend consumers in `volar` |
 | `volar-circuit-source` | Named-wire walker + `CircuitSourceBackend` for textual circuit libraries |
+| `volar-circuit-interop` | Storage-free Boolar ↔ Bristol Fashion circuits and Boolar → Summon source |
 | `volar-noir-backend` | Noir `type = "lib"` emission (bool + Volar IR); see [`circuit-source.md`](circuit-source.md) |
 | `volar-pod2-backend` | Podlang module emission (bool + Merkle array/dict storage) |
 | `volar-ir` (`region.rs`, `gadget.rs`) | Input/output wire regions + gadget spec/binding types (companion metadata) |
