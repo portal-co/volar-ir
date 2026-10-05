@@ -9,6 +9,13 @@ use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTerminator};
 use volar_ir::ir::{IRBlockTargetId, IRVarId};
 use volar_ir_common::Node;
 
+mod bristol;
+pub use bristol::{
+    BristolAnd, BristolCircuit, BristolGate, BristolIoLayout, BristolLimits,
+    import_bristol_fashion, import_bristol_fashion_with_limits, parse_bristol_fashion,
+    parse_bristol_fashion_with_limits,
+};
+
 /// Why a Boolar program cannot be used by this interoperability layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InteropError {
@@ -27,6 +34,10 @@ pub enum InteropError {
     /// The number of parameters and statements exceeds the Boolar variable-ID
     /// range.
     VarSpaceOverflow,
+    /// A Bristol Fashion text record is malformed or invalid.
+    BristolParse { line: usize, message: String },
+    /// A Bristol gate opcode is outside the supported Boolean subset.
+    UnsupportedBristolGate { line: usize, operation: String },
 }
 
 impl core::fmt::Display for InteropError {
@@ -53,6 +64,12 @@ impl core::fmt::Display for InteropError {
                 )
             }
             Self::VarSpaceOverflow => write!(f, "Boolar variable space exceeds the u32 ID range"),
+            Self::BristolParse { line, message } => {
+                write!(f, "invalid Bristol Fashion input at line {line}: {message}")
+            }
+            Self::UnsupportedBristolGate { line, operation } => {
+                write!(f, "unsupported Bristol gate `{operation}` at line {line}")
+            }
         }
     }
 }
@@ -275,5 +292,185 @@ mod tests {
                 var: IRVarId(1),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod bristol_tests {
+    use volar_ir::boolar::{BIrStmt, BIrTerminator};
+    use volar_ir::ir::IRVarId;
+
+    use super::{
+        BristolGate, BristolLimits, InteropError, import_bristol_fashion, parse_bristol_fashion,
+        parse_bristol_fashion_with_limits,
+    };
+
+    #[test]
+    fn parses_and_imports_a_basic_fashion_circuit() {
+        let text = "1 3\n2 1 1\n1 1\n2 1 0 1 2 AND\n";
+
+        let parsed = parse_bristol_fashion(text).unwrap();
+        assert_eq!(parsed.wire_count, 3);
+        assert_eq!(parsed.input_groups, vec![1, 1]);
+        assert_eq!(parsed.output_groups, vec![1]);
+        assert_eq!(parsed.gates, vec![BristolGate::And { a: 0, b: 1, out: 2 }]);
+
+        let (blocks, io) = import_bristol_fashion(text).unwrap();
+        assert_eq!(io.input_groups, vec![1, 1]);
+        assert_eq!(io.output_groups, vec![1]);
+        assert_eq!(blocks.blocks[0].params, 2);
+        assert!(matches!(
+            blocks.blocks[0].stmts[0].kind,
+            BIrStmt::And(IRVarId(0), IRVarId(1))
+        ));
+        assert!(matches!(
+            &blocks.blocks[0].terminator,
+            BIrTerminator::Jmp(target) if target.args == vec![IRVarId(2)]
+        ));
+    }
+
+    #[test]
+    fn imports_xor_and_not_aliases() {
+        let text = "2 4\n2 1 1\n1 1\n2 1 0 1 2 XOR\n1 1 2 3 NOT\n";
+        let (blocks, _) = import_bristol_fashion(text).unwrap();
+        assert_eq!(
+            blocks.blocks[0].stmts[0].kind,
+            BIrStmt::Xor(IRVarId(0), IRVarId(1))
+        );
+        assert_eq!(blocks.blocks[0].stmts[1].kind, BIrStmt::Not(IRVarId(2)));
+        assert!(matches!(
+            &blocks.blocks[0].terminator,
+            BIrTerminator::Jmp(target) if target.args == vec![IRVarId(3)]
+        ));
+    }
+
+    #[test]
+    fn imports_constants_and_wire_copies() {
+        let text = "2 3\n1 1\n1 2\n1 1 1 1 EQ\n1 1 1 2 EQW\n";
+        let (blocks, _) = import_bristol_fashion(text).unwrap();
+
+        assert_eq!(blocks.blocks[0].params, 1);
+        assert_eq!(blocks.blocks[0].stmts.len(), 1);
+        assert_eq!(blocks.blocks[0].stmts[0].kind, BIrStmt::One);
+        assert!(matches!(
+            &blocks.blocks[0].terminator,
+            BIrTerminator::Jmp(target) if target.args == vec![IRVarId(1), IRVarId(1)]
+        ));
+    }
+
+    #[test]
+    fn eq_constant_literals_are_not_wire_references() {
+        let text = "1 1\n0\n1 1\n1 1 1 0 EQ\n";
+        let (blocks, _) = import_bristol_fashion(text).unwrap();
+        assert_eq!(blocks.blocks[0].stmts[0].kind, BIrStmt::One);
+        assert!(matches!(
+            &blocks.blocks[0].terminator,
+            BIrTerminator::Jmp(target) if target.args == vec![IRVarId(0)]
+        ));
+    }
+
+    #[test]
+    fn expands_extended_mand_into_independent_and_gates() {
+        let text = "1 6\n1 4\n1 2\n4 2 0 1 2 3 4 5 MAND\n";
+        let (blocks, _) = import_bristol_fashion(text).unwrap();
+
+        assert_eq!(blocks.blocks[0].stmts.len(), 2);
+        assert_eq!(
+            blocks.blocks[0].stmts[0].kind,
+            BIrStmt::And(IRVarId(0), IRVarId(1))
+        );
+        assert_eq!(
+            blocks.blocks[0].stmts[1].kind,
+            BIrStmt::And(IRVarId(2), IRVarId(3))
+        );
+        assert!(matches!(
+            &blocks.blocks[0].terminator,
+            BIrTerminator::Jmp(target) if target.args == vec![IRVarId(4), IRVarId(5)]
+        ));
+    }
+
+    #[test]
+    fn mand_pairs_read_a_snapshot_before_any_output_wire_is_reassigned() {
+        let text = "2 6\n1 4\n1 2\n4 2 0 1 2 3 2 4 MAND\n1 1 2 5 EQW\n";
+        let (blocks, _) = import_bristol_fashion(text).unwrap();
+
+        assert_eq!(
+            blocks.blocks[0].stmts[1].kind,
+            BIrStmt::And(IRVarId(2), IRVarId(3)),
+        );
+        assert!(matches!(
+            &blocks.blocks[0].terminator,
+            BIrTerminator::Jmp(target) if target.args == vec![IRVarId(5), IRVarId(4)]
+        ));
+    }
+
+    #[test]
+    fn later_gate_definitions_reuse_wire_ids_without_aliasing_old_ssa_values() {
+        let text = "3 3\n1 1\n1 1\n1 1 0 1 EQ\n1 1 1 1 EQ\n1 1 1 2 EQW\n";
+        let (blocks, _) = import_bristol_fashion(text).unwrap();
+
+        assert_eq!(blocks.blocks[0].stmts.len(), 2);
+        assert_eq!(blocks.blocks[0].stmts[0].kind, BIrStmt::Zero);
+        assert_eq!(blocks.blocks[0].stmts[1].kind, BIrStmt::One);
+        assert!(matches!(
+            &blocks.blocks[0].terminator,
+            BIrTerminator::Jmp(target) if target.args == vec![IRVarId(2)]
+        ));
+    }
+
+    #[test]
+    fn supports_a_wire_passthrough_circuit() {
+        let text = "0 1\n1 1\n1 1\n";
+        let (blocks, _) = import_bristol_fashion(text).unwrap();
+        assert!(blocks.blocks[0].stmts.is_empty());
+        assert!(matches!(
+            &blocks.blocks[0].terminator,
+            BIrTerminator::Jmp(target) if target.args == vec![IRVarId(0)]
+        ));
+    }
+
+    #[test]
+    fn rejects_non_boolean_gate_opcodes() {
+        let text = "1 3\n2 1 1\n1 1\n2 1 0 1 2 AAdd\n";
+        assert!(matches!(
+            parse_bristol_fashion(text),
+            Err(InteropError::UnsupportedBristolGate { line: 4, operation }) if operation == "AAdd"
+        ));
+    }
+
+    #[test]
+    fn rejects_bad_arity_and_configured_resource_overruns() {
+        let wrong_arity = "1 3\n1 1\n1 1\n1 1 0 2 AND\n";
+        assert!(matches!(
+            parse_bristol_fashion(wrong_arity),
+            Err(InteropError::BristolParse { line: 4, .. })
+        ));
+
+        let circuit = "1 3\n2 1 1\n1 1\n2 1 0 1 2 AND\n";
+        assert!(matches!(
+            parse_bristol_fashion_with_limits(
+                circuit,
+                BristolLimits {
+                    max_gates: 0,
+                    ..BristolLimits::default()
+                }
+            ),
+            Err(InteropError::BristolParse { line: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_undefined_wires_and_malformed_gate_counts() {
+        let undefined = "1 3\n1 1\n1 1\n2 1 0 2 1 AND\n";
+        assert!(matches!(
+            parse_bristol_fashion(undefined),
+            Err(InteropError::BristolParse { line: 4, .. })
+        ));
+
+        let truncated = "2 3\n1 2\n1 1\n2 1 0 1 2 AND\n";
+        assert!(matches!(
+            parse_bristol_fashion(truncated),
+            Err(InteropError::BristolParse { .. })
+        ));
     }
 }
