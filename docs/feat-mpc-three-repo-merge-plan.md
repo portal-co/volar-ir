@@ -164,7 +164,7 @@ The Volar feature worktree's uncommitted source/docs/examples will be reviewed a
 |---|---|---|
 | Approved plan and branch/input snapshot | Complete | `ff91ad2`; user approved local tips and dependency order. Pre-existing `Cargo.lock` state remains unstaged and preserved. |
 | `volar-ir` feature integration | Complete | `579274c` merges local `feat/mpc` (`7b2c19a`) into `main`; `feat/mpc` ancestry confirmed retained. Focused suites plus `cargo test --offline --quiet --workspace` passed (86 successful test-result groups; ignored tests remain ignored). `volar-ir-common` Poly remap regression fixed by restoring generic map-style collision behavior; 17 common tests pass. No remote refs updated. |
-| Volar feature-worktree checkpoint | Pending | |
+| Volar feature-worktree checkpoint | Complete | `../mpc/volar` commit `5306e25` records the reviewed benchmark examples/docs; the pre-existing Volar feature `Cargo.lock` remains dirty and unstaged. Rebuilt and ran all three ML-KEM profiles and all four field candidates (three process runs each); field IR/Boolar results matched the independent reference. The `volar-mpc` library's 23 tests and `ferret_ot_tcp` passed; the 600-second `volar-mpc` integration-suite invocation timed out while later TCP/MPC tests were still running, so those gates remain for Phase 2. Cargo used a temporary explicit overlay selecting the local feature worktrees to avoid mixing the parent and `../mpc` patches. |
 | `volar` feature integration | Pending | |
 | `cirrus` feature integration | Pending | |
 | Cross-repository validation and retained-branch sync | Pending | |
