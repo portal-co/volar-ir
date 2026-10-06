@@ -3,7 +3,7 @@
 //! Parser for [`LirType`] and related sub-types.
 
 use super::{error::ParseError, lexer::Lexer};
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use volar_ir_common::Type as NativeType;
 use volar_lir::LirType;
 
@@ -53,6 +53,28 @@ pub(crate) fn parse_lir_type(lex: &mut Lexer<'_>) -> Result<LirType, ParseError>
             lex.expect_byte(b']')?;
             Ok(LirType::Arr(Box::new(elem), len))
         }
+        "extfield" => {
+            lex.expect_byte(b'[')?;
+            let wrapped = parse_lir_type(lex)?;
+            lex.expect_byte(b',')?;
+            let degree = lex.read_u32()?;
+            lex.expect_byte(b',')?;
+            let irreducible = parse_u64_list(lex)?;
+            lex.expect_byte(b']')?;
+            Ok(LirType::ExtField {
+                wrapped: Box::new(wrapped),
+                degree,
+                irreducible,
+            })
+        }
+        "primefield" => {
+            lex.expect_byte(b'[')?;
+            let k = lex.read_u32()?;
+            lex.expect_byte(b',')?;
+            let n = parse_u64_list(lex)?;
+            lex.expect_byte(b']')?;
+            Ok(LirType::PrimeField { k, n })
+        }
         "ptr" => {
             lex.expect_byte(b'[')?;
             let inner = parse_lir_type(lex)?;
@@ -76,6 +98,24 @@ pub(crate) fn parse_lir_type(lex: &mut Lexer<'_>) -> Result<LirType, ParseError>
             col: lex.pos().col,
             got: alloc::format!("unknown LirType token: {:?}", unknown),
         }),
+    }
+}
+
+fn parse_u64_list(lex: &mut Lexer<'_>) -> Result<Vec<u64>, ParseError> {
+    lex.expect_byte(b'[')?;
+    let mut values = Vec::new();
+    loop {
+        lex.skip();
+        if lex.try_byte(b']') {
+            return Ok(values);
+        }
+        values.push(lex.read_u64()?);
+        lex.skip();
+        if lex.try_byte(b',') {
+            continue;
+        }
+        lex.expect_byte(b']')?;
+        return Ok(values);
     }
 }
 

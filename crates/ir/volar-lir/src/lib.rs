@@ -118,17 +118,27 @@ pub enum LirType {
     ),
     /// Named struct registered via `LirTarget::define_struct`.
     Struct(StructId),
-    /// An opaque Volar-IR-native field element, treated as a **single** value
-    /// in both the LirTarget API and (for `VolarIrTarget`) the resulting IR.
+    /// An opaque Volar-IR-native primitive scalar.
     ///
     /// `VolarIrTarget` represents this as one `IRVarId` whose `IrType` is
-    /// `IrType::Primitive(t)` — **not** as N individual `Bit` vars.  Other
-    /// backends (e.g. C) can map it to the closest integer type or a custom
-    /// field-element struct.
-    ///
-    /// Arithmetic on `Native` values in `VolarIrTarget` emits `IRStmt::Poly`
-    /// with the native type, giving correct GF-field semantics automatically.
+    /// `IrType::Primitive(t)` — **not** as N individual `Bit` vars. Compound
+    /// extension and prime fields use the explicit variants below.
     Native(NativeType),
+    /// An extension-field element over `wrapped`, represented as a single
+    /// typed LIR value. The polynomial coefficients are low-degree first and
+    /// include the monic leading coefficient, matching `IrType::ExtField`.
+    ExtField {
+        #[cfg_attr(feature = "rkyv", rkyv(omit_bounds))]
+        wrapped: Box<LirType>,
+        degree: u32,
+        irreducible: Vec<u64>,
+    },
+    /// A prime-field element with modulus `2^k - n`, matching
+    /// `IrType::PrimeField`.
+    PrimeField {
+        k: u32,
+        n: Vec<u64>,
+    },
     /// A typed pointer to a value of the inner type.
     ///
     /// Only meaningful in backends that return `Some` from
@@ -151,8 +161,24 @@ impl LirType {
             LirType::I256 | LirType::U256 => 256,
             LirType::Vector(elem, len) => elem.bit_width() * (*len as u32),
             LirType::Arr(elem, len) => elem.bit_width() * (*len as u32),
+            LirType::ExtField {
+                wrapped, degree, ..
+            } => wrapped
+                .bit_width()
+                .checked_mul(*degree)
+                .expect("extension-field width overflow"),
+            LirType::PrimeField { k, .. } => *k,
+            LirType::Native(native) => match native {
+                NativeType::Bit => 1,
+                NativeType::_8 => 8,
+                NativeType::_16 => 16,
+                NativeType::_32 => 32,
+                NativeType::_64 => 64,
+                NativeType::_128 => 128,
+                NativeType::_256 => 256,
+                _ => panic!("bit_width not defined for native primitive {native:?}"),
+            },
             LirType::Struct(_) => panic!("bit_width not defined for Struct"),
-            LirType::Native(_) => panic!("bit_width not meaningful for Native field elements"),
             LirType::Ptr(_) => panic!("bit_width not meaningful for Ptr (target-dependent size)"),
         }
     }
@@ -892,5 +918,30 @@ pub trait LirTarget<Prov: Clone = ()> {
         _pointee_ty: &LirType,
     ) {
         unimplemented!("ptr_index_store: not supported by this backend")
+    }
+}
+
+#[cfg(test)]
+mod type_width_tests {
+    use super::LirType;
+    use volar_ir_common::Type;
+
+    #[test]
+    fn field_widths_include_native_bit_coefficients() {
+        let aes8 = LirType::ExtField {
+            wrapped: alloc::boxed::Box::new(LirType::Native(Type::Bit)),
+            degree: 8,
+            irreducible: alloc::vec![1, 1, 0, 1, 1, 0, 0, 0, 1],
+        };
+        assert_eq!(aes8.bit_width(), 8);
+        assert_eq!(
+            LirType::PrimeField {
+                k: 2,
+                n: alloc::vec![1]
+            }
+            .bit_width(),
+            2
+        );
+        assert_eq!(LirType::Native(Type::Bit).bit_width(), 1);
     }
 }

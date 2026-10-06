@@ -36,6 +36,22 @@ impl WriteText for LirType {
                 w.write_str("native:")?;
                 write_native_type(nt, w)
             }
+            LirType::ExtField {
+                wrapped,
+                degree,
+                irreducible,
+            } => {
+                w.write_str("extfield[")?;
+                wrapped.write_text(w)?;
+                write!(w, ", {degree}, [")?;
+                write_u64_list(irreducible, w)?;
+                w.write_str("]]")
+            }
+            LirType::PrimeField { k, n } => {
+                write!(w, "primefield[{k}, [")?;
+                write_u64_list(n, w)?;
+                w.write_str("]]")
+            }
             LirType::Ptr(inner) => {
                 w.write_str("ptr[")?;
                 inner.write_text(w)?;
@@ -44,6 +60,16 @@ impl WriteText for LirType {
             _ => w.write_str("<unknown>"),
         }
     }
+}
+
+fn write_u64_list(values: &[u64], w: &mut dyn fmt::Write) -> fmt::Result {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            w.write_str(", ")?;
+        }
+        write!(w, "0x{value:x}")?;
+    }
+    Ok(())
 }
 
 fn write_native_type(nt: &NativeType, w: &mut dyn fmt::Write) -> fmt::Result {

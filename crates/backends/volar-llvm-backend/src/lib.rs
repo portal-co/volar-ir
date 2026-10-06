@@ -47,7 +47,7 @@ use inkwell::{
     types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType},
     values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PhiValue},
 };
-use volar_ir_common::Type as NativeType;
+use volar_ir_common::{Type as NativeType, TypeTable};
 use volar_lir::{
     BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef, StructId,
 };
@@ -248,6 +248,42 @@ impl<'ctx> LlvmBackend<'ctx> {
                 .vec_type(*lanes as u32)
                 .into(),
             LirType::Native(t) => self.native_type_to_llvm(*t).into(),
+            LirType::ExtField {
+                wrapped,
+                degree,
+                irreducible,
+            } => {
+                assert_eq!(
+                    **wrapped,
+                    LirType::Native(NativeType::Bit),
+                    "LlvmBackend currently supports extension fields over Bit coefficients only"
+                );
+                let mut types = TypeTable::new();
+                let bit = types.bit();
+                types
+                    .ext_field(bit, *degree, irreducible.clone())
+                    .unwrap_or_else(|error| {
+                        panic!("LlvmBackend: invalid extension-field descriptor: {error:?}")
+                    });
+                self.context
+                    .custom_width_int_type(
+                        NonZeroU32::new(*degree).expect("extension-field degree is nonzero"),
+                    )
+                    .expect("LLVM supports the extension-field integer width")
+                    .into()
+            }
+            LirType::PrimeField { k, n } => {
+                let mut types = TypeTable::new();
+                types.prime_field(*k, n.clone()).unwrap_or_else(|error| {
+                    panic!("LlvmBackend: invalid prime-field descriptor: {error:?}")
+                });
+                self.context
+                    .custom_width_int_type(
+                        NonZeroU32::new(*k).expect("prime-field width is nonzero"),
+                    )
+                    .expect("LLVM supports the prime-field integer width")
+                    .into()
+            }
             // LLVM 21 opaque pointer.
             LirType::Ptr(_) => self.context.ptr_type(AddressSpace::default()).into(),
             LirType::Arr(_, _) | LirType::Struct(_) => {
@@ -354,6 +390,67 @@ impl<'ctx> LlvmBackend<'ctx> {
         op: IntBinOp,
     ) -> LlvmValue<'ctx> {
         let ty = lhs.ty.clone();
+        let is_shift = matches!(op, IntBinOp::Shl | IntBinOp::Lshr | IntBinOp::Ashr);
+        if is_field_type(&ty) {
+            if is_shift {
+                assert!(
+                    !is_field_type(&rhs.ty),
+                    "field shift amount must be an integer"
+                );
+            } else {
+                assert_eq!(ty, rhs.ty, "field operation requires matching types");
+            }
+        }
+        if let LirType::ExtField {
+            degree,
+            irreducible,
+            ..
+        } = &ty
+        {
+            match op {
+                IntBinOp::Add | IntBinOp::Sub => {
+                    let result = self
+                        .builder
+                        .build_xor(lhs.inner.into_int_value(), rhs.inner.into_int_value(), "")
+                        .unwrap();
+                    return LlvmValue {
+                        inner: result.into(),
+                        ty,
+                    };
+                }
+                IntBinOp::Mul => {
+                    let result = self.ext_field_mul(
+                        lhs.inner.into_int_value(),
+                        rhs.inner.into_int_value(),
+                        *degree,
+                        irreducible,
+                    );
+                    return LlvmValue {
+                        inner: result.into(),
+                        ty,
+                    };
+                }
+                IntBinOp::Udiv | IntBinOp::Sdiv | IntBinOp::Ashr => {
+                    panic!("division and arithmetic shift are not defined for extension fields")
+                }
+                IntBinOp::And | IntBinOp::Or | IntBinOp::Xor | IntBinOp::Shl | IntBinOp::Lshr => {}
+            }
+        }
+        if let LirType::PrimeField { k, n } = &ty {
+            let (l, r) = (lhs.inner.into_int_value(), rhs.inner.into_int_value());
+            let result = self.prime_field_binop(l, r, *k, n, op);
+            return LlvmValue {
+                inner: result.into(),
+                ty,
+            };
+        }
+        if is_shift {
+            if let (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) =
+                (lhs.inner, rhs.inner)
+            {
+                return self.int_shift(l, r, op, ty);
+            }
+        }
         let result = match (lhs.inner, rhs.inner) {
             (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
                 let value = match op {
@@ -392,6 +489,220 @@ impl<'ctx> LlvmBackend<'ctx> {
             _ => panic!("LLVM integer operation requires matching scalar or vector integer values"),
         };
         LlvmValue { inner: result, ty }
+    }
+
+    fn ext_field_mul(
+        &mut self,
+        lhs: inkwell::values::IntValue<'ctx>,
+        rhs: inkwell::values::IntValue<'ctx>,
+        degree: u32,
+        irreducible: &[u64],
+    ) -> inkwell::values::IntValue<'ctx> {
+        assert!(
+            degree <= 256,
+            "LlvmBackend extension-field degree exceeds 256 bits"
+        );
+        assert_eq!(
+            irreducible.len(),
+            degree as usize + 1,
+            "invalid extension-field polynomial length"
+        );
+        assert_eq!(
+            irreducible[degree as usize], 1,
+            "extension-field polynomial must be monic"
+        );
+        let int_ty = lhs.get_type();
+        let zero = int_ty.const_zero();
+        let one = int_ty.const_int(1, false);
+        let mut reduction_words = vec![0u64; (degree as usize).div_ceil(64)];
+        for (index, coefficient) in irreducible.iter().take(degree as usize).enumerate() {
+            assert!(
+                *coefficient <= 1,
+                "GF(2) extension coefficient must be a bit"
+            );
+            if *coefficient != 0 {
+                reduction_words[index / 64] |= 1u64 << (index % 64);
+            }
+        }
+        let reduction = int_ty.const_int_arbitrary_precision(&reduction_words);
+        let mut top_word = vec![0u64; (degree as usize).div_ceil(64)];
+        top_word[(degree as usize - 1) / 64] = 1u64 << ((degree as usize - 1) % 64);
+        let top_mask = int_ty.const_int_arbitrary_precision(&top_word);
+
+        let mut product = zero;
+        let mut multiplicand = lhs;
+        for index in 0..degree {
+            let rhs_mask_words = {
+                let mut words = vec![0u64; (degree as usize).div_ceil(64)];
+                words[index as usize / 64] = 1u64 << (index % 64);
+                words
+            };
+            let rhs_bit = self
+                .builder
+                .build_and(
+                    rhs,
+                    int_ty.const_int_arbitrary_precision(&rhs_mask_words),
+                    "",
+                )
+                .unwrap();
+            let rhs_set = self
+                .builder
+                .build_int_compare(inkwell::IntPredicate::NE, rhs_bit, zero, "")
+                .unwrap();
+            let addend = self
+                .builder
+                .build_select(rhs_set, multiplicand, zero, "")
+                .unwrap()
+                .into_int_value();
+            product = self.builder.build_xor(product, addend, "").unwrap();
+
+            let carry_value = self.builder.build_and(multiplicand, top_mask, "").unwrap();
+            let carry = self
+                .builder
+                .build_int_compare(inkwell::IntPredicate::NE, carry_value, zero, "")
+                .unwrap();
+            multiplicand = self
+                .builder
+                .build_left_shift(multiplicand, one, "")
+                .unwrap();
+            let correction = self
+                .builder
+                .build_select(carry, reduction, zero, "")
+                .unwrap()
+                .into_int_value();
+            multiplicand = self
+                .builder
+                .build_xor(multiplicand, correction, "")
+                .unwrap();
+        }
+        product
+    }
+
+    fn int_shift(
+        &mut self,
+        lhs: inkwell::values::IntValue<'ctx>,
+        rhs: inkwell::values::IntValue<'ctx>,
+        op: IntBinOp,
+        ty: LirType,
+    ) -> LlvmValue<'ctx> {
+        let lhs_ty = lhs.get_type();
+        let lhs_width = lhs_ty.get_bit_width();
+        let rhs_ty = rhs.get_type();
+        let rhs_width = rhs_ty.get_bit_width();
+        let rhs_range_contains_invalid_shift =
+            rhs_width >= 32 || u64::from(lhs_width) < (1u64 << rhs_width);
+        let valid = rhs_range_contains_invalid_shift.then(|| {
+            self.builder
+                .build_int_compare(
+                    inkwell::IntPredicate::ULT,
+                    rhs,
+                    rhs_ty.const_int(u64::from(lhs_width), false),
+                    "",
+                )
+                .unwrap()
+        });
+        let shift = if rhs_width < lhs_width {
+            self.builder.build_int_z_extend(rhs, lhs_ty, "").unwrap()
+        } else if rhs_width > lhs_width {
+            self.builder.build_int_truncate(rhs, lhs_ty, "").unwrap()
+        } else {
+            rhs
+        };
+        let shifted = match op {
+            IntBinOp::Shl => self.builder.build_left_shift(lhs, shift, "").unwrap(),
+            IntBinOp::Lshr => self
+                .builder
+                .build_right_shift(lhs, shift, false, "")
+                .unwrap(),
+            IntBinOp::Ashr => self
+                .builder
+                .build_right_shift(lhs, shift, true, "")
+                .unwrap(),
+            _ => unreachable!("int_shift called for a non-shift operation"),
+        };
+        let result = match valid {
+            Some(valid) => self
+                .builder
+                .build_select(valid, shifted, lhs_ty.const_zero(), "")
+                .unwrap()
+                .into_int_value(),
+            None => shifted,
+        };
+        LlvmValue {
+            inner: result.into(),
+            ty,
+        }
+    }
+
+    fn prime_field_binop(
+        &mut self,
+        lhs: inkwell::values::IntValue<'ctx>,
+        rhs: inkwell::values::IntValue<'ctx>,
+        k: u32,
+        n: &[u64],
+        op: IntBinOp,
+    ) -> inkwell::values::IntValue<'ctx> {
+        assert!(
+            matches!(op, IntBinOp::Add | IntBinOp::Sub | IntBinOp::Mul),
+            "bitwise operations and division are not defined for prime fields"
+        );
+        let modulus_words = prime_modulus_words(k, n);
+        let result_width = match op {
+            IntBinOp::Add | IntBinOp::Sub => k.checked_add(1).expect("prime-field width overflow"),
+            IntBinOp::Mul => k.checked_mul(2).expect("prime-field width overflow"),
+            _ => unreachable!(),
+        };
+        let wide_ty = self
+            .context
+            .custom_width_int_type(
+                NonZeroU32::new(result_width).expect("prime-field intermediate width is nonzero"),
+            )
+            .expect("LLVM supports the prime-field intermediate width");
+        let lhs_wide = self.builder.build_int_z_extend(lhs, wide_ty, "").unwrap();
+        let rhs_wide = self.builder.build_int_z_extend(rhs, wide_ty, "").unwrap();
+        let modulus = wide_ty.const_int_arbitrary_precision(&modulus_words);
+        let lhs_reduced = self
+            .builder
+            .build_int_unsigned_rem(lhs_wide, modulus, "")
+            .unwrap();
+        let rhs_reduced = self
+            .builder
+            .build_int_unsigned_rem(rhs_wide, modulus, "")
+            .unwrap();
+        let wide_result = match op {
+            IntBinOp::Add => {
+                let sum = self
+                    .builder
+                    .build_int_add(lhs_reduced, rhs_reduced, "")
+                    .unwrap();
+                self.builder
+                    .build_int_unsigned_rem(sum, modulus, "")
+                    .unwrap()
+            }
+            IntBinOp::Sub => {
+                let sum = self
+                    .builder
+                    .build_int_add(lhs_reduced, modulus, "")
+                    .unwrap();
+                let difference = self.builder.build_int_sub(sum, rhs_reduced, "").unwrap();
+                self.builder
+                    .build_int_unsigned_rem(difference, modulus, "")
+                    .unwrap()
+            }
+            IntBinOp::Mul => {
+                let product = self
+                    .builder
+                    .build_int_mul(lhs_reduced, rhs_reduced, "")
+                    .unwrap();
+                self.builder
+                    .build_int_unsigned_rem(product, modulus, "")
+                    .unwrap()
+            }
+            _ => unreachable!(),
+        };
+        self.builder
+            .build_int_truncate(wide_result, lhs.get_type(), "")
+            .unwrap()
     }
 
     /// Return the current insertion block (panics if builder is not positioned).
@@ -626,10 +937,16 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
     fn iconst(&mut self, ty: LirType, val: i64) -> LlvmValue<'ctx> {
         let llvm_ty = self.lir_type_to_llvm(&ty);
         let int_ty = llvm_ty.into_int_type();
-        // sign_extend=true so negative i64 values are represented correctly
-        // in narrower types (the truncation to the correct bit width is
-        // implicit in `const_int`'s bit pattern).
-        let int_val = int_ty.const_int(val as u64, true);
+        // Field constants are canonical representatives, including negative
+        // and out-of-range input values. Other scalar constants retain their
+        // ordinary signed/truncating bit-pattern behavior.
+        let int_val = match &ty {
+            LirType::PrimeField { k, n } => {
+                let words = prime_field_constant_words(*k, n, val);
+                int_ty.const_int_arbitrary_precision(&words)
+            }
+            _ => int_ty.const_int(val as u64, true),
+        };
         LlvmValue {
             inner: int_val.into(),
             ty,
@@ -674,6 +991,10 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
 
     fn not(&mut self, val: LlvmValue<'ctx>) -> LlvmValue<'ctx> {
         let ty = val.ty.clone();
+        assert!(
+            !matches!(ty, LirType::PrimeField { .. }),
+            "bitwise NOT is not defined for prime fields"
+        );
         let v = val.inner.into_int_value();
         let result = if ty == LirType::Bool {
             // LLVM has no logical NOT; XOR with true (1) is correct for i1.
@@ -711,6 +1032,14 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         rhs: LlvmValue<'ctx>,
     ) -> LlvmValue<'ctx> {
         use inkwell::IntPredicate;
+        let lhs_ty = lhs.ty.clone();
+        if is_field_type(&lhs_ty) || is_field_type(&rhs.ty) {
+            assert_eq!(lhs_ty, rhs.ty, "field comparison requires matching types");
+            assert!(
+                matches!(pred, IcmpPred::Eq | IcmpPred::Ne),
+                "ordered comparisons are not defined for field values"
+            );
+        }
         let llvm_pred = match pred {
             IcmpPred::Eq => IntPredicate::EQ,
             IcmpPred::Ne => IntPredicate::NE,
@@ -735,6 +1064,10 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
     // ---- Conversions --------------------------------------------------------
 
     fn zext(&mut self, val: LlvmValue<'ctx>, dst_ty: LirType) -> LlvmValue<'ctx> {
+        assert!(
+            !is_field_type(&val.ty) && !is_field_type(&dst_ty),
+            "integer extension involving field values is unsupported"
+        );
         let llvm_dst = self.lir_type_to_llvm(&dst_ty).into_int_type();
         let src = val.inner.into_int_value();
         let result = self.builder.build_int_z_extend(src, llvm_dst, "").unwrap();
@@ -745,6 +1078,10 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
     }
 
     fn sext(&mut self, val: LlvmValue<'ctx>, dst_ty: LirType) -> LlvmValue<'ctx> {
+        assert!(
+            !is_field_type(&val.ty) && !is_field_type(&dst_ty),
+            "integer extension involving field values is unsupported"
+        );
         let llvm_dst = self.lir_type_to_llvm(&dst_ty).into_int_type();
         let src = val.inner.into_int_value();
         let result = self.builder.build_int_s_extend(src, llvm_dst, "").unwrap();
@@ -755,6 +1092,10 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
     }
 
     fn trunc(&mut self, val: LlvmValue<'ctx>, dst_ty: LirType) -> LlvmValue<'ctx> {
+        assert!(
+            !is_field_type(&val.ty) && !is_field_type(&dst_ty),
+            "integer truncation involving field values is unsupported"
+        );
         let llvm_dst = self.lir_type_to_llvm(&dst_ty).into_int_type();
         let src = val.inner.into_int_value();
         let result = self.builder.build_int_truncate(src, llvm_dst, "").unwrap();
@@ -772,6 +1113,10 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
         then_val: LlvmValue<'ctx>,
         else_val: LlvmValue<'ctx>,
     ) -> LlvmValue<'ctx> {
+        assert_eq!(
+            then_val.ty, else_val.ty,
+            "select values must have matching types"
+        );
         let ty = then_val.ty.clone();
         let c = cond.inner.into_int_value();
         let result = self
@@ -1211,6 +1556,63 @@ impl<'ctx> StackAllocExt for LlvmBackend<'ctx> {
     }
 }
 
+fn is_field_type(ty: &LirType) -> bool {
+    matches!(ty, LirType::ExtField { .. } | LirType::PrimeField { .. })
+}
+
+/// Build the little-endian limbs of `p = 2^k - n` for an LIR prime field.
+/// The returned vector includes enough high zero words for either the `k+1`
+/// addition intermediate or the `2k` multiplication intermediate.
+fn prime_modulus_words(k: u32, n: &[u64]) -> Vec<u64> {
+    assert!((2..=256).contains(&k), "unsupported prime-field width");
+    assert!(
+        n.iter().any(|word| *word != 0),
+        "prime-field offset must be nonzero"
+    );
+    let bit_width = k as usize + 1;
+    let mut modulus = vec![0u64; bit_width.div_ceil(64)];
+    let high_word = k as usize / 64;
+    let high_bit = k % 64;
+    modulus[high_word] = 1u64 << high_bit;
+
+    let mut borrow = 0u128;
+    for (index, limb) in modulus.iter_mut().enumerate() {
+        let subtrahend = u128::from(n.get(index).copied().unwrap_or(0)) + borrow;
+        let minuend = u128::from(*limb);
+        if minuend >= subtrahend {
+            *limb = (minuend - subtrahend) as u64;
+            borrow = 0;
+        } else {
+            *limb = ((1u128 << 64) + minuend - subtrahend) as u64;
+            borrow = 1;
+        }
+    }
+    assert_eq!(borrow, 0, "prime-field offset exceeds 2^k");
+    modulus
+}
+
+fn prime_field_constant_words(k: u32, n: &[u64], value: i64) -> Vec<u64> {
+    assert!((2..=256).contains(&k), "unsupported prime-field width");
+    let mut words = vec![0u64; (k as usize).div_ceil(64)];
+    let modulus = prime_modulus_words(k, n);
+    if k <= 64 {
+        let p = u128::from(modulus[0]) | (u128::from(modulus.get(1).copied().unwrap_or(0)) << 64);
+        words[0] = i128::from(value).rem_euclid(p as i128) as u64;
+    } else if value >= 0 {
+        words[0] = value as u64;
+    } else {
+        let (low, mut borrow) = modulus[0].overflowing_sub(value.unsigned_abs());
+        words[0] = low;
+        for index in 1..words.len() {
+            let (limb, next_borrow) = modulus[index].overflowing_sub(u64::from(borrow));
+            words[index] = limb;
+            borrow = next_borrow;
+        }
+        assert!(!borrow, "negative constant magnitude exceeds field modulus");
+    }
+    words
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1329,6 +1731,206 @@ mod tests {
         assert!(ir.contains("i256"), "{ir}");
         assert!(ir.contains("add <4 x i32>"), "{ir}");
         assert!(ir.contains("xor i256"), "{ir}");
+    }
+
+    #[test]
+    fn aes8_multiplication_matches_fips_197_product_in_jit() {
+        let field = LirType::ExtField {
+            wrapped: Box::new(LirType::Native(Type::Bit)),
+            degree: 8,
+            irreducible: vec![1, 1, 0, 1, 1, 0, 0, 0, 1],
+        };
+        let context = Context::create();
+        let mut backend = LlvmBackend::new(&context, "aes8_field");
+        let (entry, params) =
+            backend.begin_function("aes8_mul", &[field.clone(), field.clone()], Some(field));
+        backend.switch_to_block(entry);
+        let product = backend.mul(params[0][0].clone(), params[1][0].clone());
+        backend.ret(&[product]);
+        backend.end_function();
+
+        let engine = backend
+            .finish()
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .expect("create LLVM JIT engine");
+        let multiply = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn(u8, u8) -> u8>("aes8_mul")
+                .expect("look up generated field multiply")
+        };
+        let actual = unsafe { multiply.call(0x57, 0x13) };
+        assert_eq!(actual, 0xfe);
+        for lhs in 0..=u8::MAX {
+            for rhs in 0..=u8::MAX {
+                assert_eq!(
+                    unsafe { multiply.call(lhs, rhs) },
+                    gf256_mul_reference(lhs, rhs),
+                    "GF(2^8) product mismatch for {lhs:#04x} * {rhs:#04x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extension_field_shift_uses_integer_shift_amount_and_zeroes_large_shifts() {
+        let field = LirType::ExtField {
+            wrapped: Box::new(LirType::Native(Type::Bit)),
+            degree: 8,
+            irreducible: vec![1, 1, 0, 1, 1, 0, 0, 0, 1],
+        };
+        let context = Context::create();
+        let mut backend = LlvmBackend::new(&context, "aes8_shift");
+        let (entry, params) =
+            backend.begin_function("aes8_shl", &[field.clone(), LirType::U32], Some(field));
+        backend.switch_to_block(entry);
+        let shifted = backend.shl(params[0][0].clone(), params[1][0].clone());
+        backend.ret(&[shifted]);
+        backend.end_function();
+
+        let engine = backend
+            .finish()
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .expect("create LLVM JIT engine");
+        let shift = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn(u8, u32) -> u8>("aes8_shl")
+                .expect("look up extension-field shift")
+        };
+        assert_eq!(unsafe { shift.call(1, 3) }, 8);
+        assert_eq!(unsafe { shift.call(0x80, 1) }, 0);
+        assert_eq!(unsafe { shift.call(1, 8) }, 0);
+        assert_eq!(unsafe { shift.call(1, u32::MAX) }, 0);
+    }
+
+    fn gf256_mul_reference(mut lhs: u8, mut rhs: u8) -> u8 {
+        let mut product = 0;
+        while rhs != 0 {
+            if rhs & 1 != 0 {
+                product ^= lhs;
+            }
+            let carry = lhs & 0x80 != 0;
+            lhs <<= 1;
+            if carry {
+                lhs ^= 0x1b;
+            }
+            rhs >>= 1;
+        }
+        product
+    }
+
+    #[test]
+    fn prime_field_arithmetic_matches_gf3_in_jit() {
+        let field = LirType::PrimeField { k: 2, n: vec![1] };
+        let context = Context::create();
+        let mut backend = LlvmBackend::new(&context, "gf3_field");
+        for (name, op) in [
+            ("gf3_add", IntBinOp::Add),
+            ("gf3_sub", IntBinOp::Sub),
+            ("gf3_mul", IntBinOp::Mul),
+        ] {
+            let (entry, params) =
+                backend.begin_function(name, &[field.clone(), field.clone()], Some(field.clone()));
+            backend.switch_to_block(entry);
+            let result = backend.int_binop(params[0][0].clone(), params[1][0].clone(), op);
+            backend.ret(&[result]);
+            backend.end_function();
+        }
+
+        let engine = backend
+            .finish()
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .expect("create LLVM JIT engine");
+        let add = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn(u8, u8) -> u8>("gf3_add")
+                .expect("look up GF(3) addition")
+        };
+        let sub = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn(u8, u8) -> u8>("gf3_sub")
+                .expect("look up GF(3) subtraction")
+        };
+        let mul = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn(u8, u8) -> u8>("gf3_mul")
+                .expect("look up GF(3) multiplication")
+        };
+        for lhs in 0..3 {
+            for rhs in 0..3 {
+                assert_eq!(unsafe { add.call(lhs, rhs) }, (lhs + rhs) % 3);
+                assert_eq!(unsafe { sub.call(lhs, rhs) }, (lhs + 3 - rhs) % 3);
+                assert_eq!(unsafe { mul.call(lhs, rhs) }, (lhs * rhs) % 3);
+            }
+        }
+    }
+
+    #[test]
+    fn prime_field_normalizes_constants_and_arithmetic_operands_in_jit() {
+        let field = LirType::PrimeField { k: 3, n: vec![3] }; // GF(5)
+        let context = Context::create();
+        let mut backend = LlvmBackend::new(&context, "gf5_field");
+        for (name, op) in [
+            ("gf5_add", IntBinOp::Add),
+            ("gf5_sub", IntBinOp::Sub),
+            ("gf5_mul", IntBinOp::Mul),
+        ] {
+            let (entry, params) =
+                backend.begin_function(name, &[field.clone(), field.clone()], Some(field.clone()));
+            backend.switch_to_block(entry);
+            let result = backend.int_binop(params[0][0].clone(), params[1][0].clone(), op);
+            backend.ret(&[result]);
+            backend.end_function();
+        }
+        for (name, value) in [("gf5_negative_one", -1), ("gf5_const_seven", 7)] {
+            let (entry, _) = backend.begin_function(name, &[], Some(field.clone()));
+            backend.switch_to_block(entry);
+            let result = backend.iconst(field.clone(), value);
+            backend.ret(&[result]);
+            backend.end_function();
+        }
+
+        let engine = backend
+            .finish()
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .expect("create LLVM JIT engine");
+        let add = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn(u8, u8) -> u8>("gf5_add")
+                .expect("look up GF(5) addition")
+        };
+        let sub = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn(u8, u8) -> u8>("gf5_sub")
+                .expect("look up GF(5) subtraction")
+        };
+        let mul = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn(u8, u8) -> u8>("gf5_mul")
+                .expect("look up GF(5) multiplication")
+        };
+        let negative_one = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> u8>("gf5_negative_one")
+                .expect("look up GF(5) negative constant")
+        };
+        let seven = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> u8>("gf5_const_seven")
+                .expect("look up GF(5) out-of-range constant")
+        };
+        assert_eq!(unsafe { add.call(7, 7) }, 4);
+        assert_eq!(unsafe { sub.call(0, 7) }, 3);
+        assert_eq!(unsafe { mul.call(7, 7) }, 4);
+        assert_eq!(unsafe { negative_one.call() }, 4);
+        assert_eq!(unsafe { seven.call() }, 2);
+    }
+
+    #[test]
+    fn prime_field_modulus_limb_builder_handles_word_boundaries() {
+        assert_eq!(prime_modulus_words(2, &[1]), vec![3]);
+        assert_eq!(prime_modulus_words(64, &[1]), vec![u64::MAX, 0]);
+        assert_eq!(prime_modulus_words(65, &[2]), vec![u64::MAX - 1, 1]);
+        assert_eq!(prime_modulus_words(128, &[1]), vec![u64::MAX, u64::MAX, 0]);
     }
 
     #[test]

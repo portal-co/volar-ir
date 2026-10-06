@@ -59,7 +59,7 @@ use std::{
     string::String,
     vec::Vec,
 };
-use volar_ir_common::Type as NativeType;
+use volar_ir_common::{Type as NativeType, TypeTable};
 use volar_lir::{
     BranchTarget, HeapAllocExt, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt, StructDef,
     StructId,
@@ -321,6 +321,8 @@ pub struct CBackend {
     all_typedefs: Vec<String>,
     /// Set of already-registered array typedef names for deduplication.
     array_typedef_set: BTreeSet<String>,
+    /// Set of already-registered field typedefs and helper implementations.
+    field_helper_set: BTreeSet<String>,
     /// Rendered `extern RetType name(ArgTypes...);` declarations.
     extern_decls: Vec<String>,
     /// Rendered forward declarations (`RetType name(ArgTypes...);`, no
@@ -358,6 +360,7 @@ impl CBackend {
             struct_names: Vec::new(),
             all_typedefs: Vec::new(),
             array_typedef_set: BTreeSet::new(),
+            field_helper_set: BTreeSet::new(),
             defined_sigs: BTreeMap::new(),
             extern_decls: Vec::new(),
             sibling_decls: Vec::new(),
@@ -464,8 +467,219 @@ impl CBackend {
                 }
             }
             LirType::Ptr(inner) => self.register_array_typedef(inner),
+            LirType::ExtField { .. } => self.register_ext_field(ty),
+            LirType::PrimeField { .. } => self.register_prime_field(ty),
             _ => {}
         }
+    }
+
+    fn register_ext_field(&mut self, ty: &LirType) {
+        let LirType::ExtField {
+            wrapped,
+            degree,
+            irreducible,
+        } = ty
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            **wrapped,
+            LirType::Native(NativeType::Bit),
+            "CBackend currently supports extension fields over Bit coefficients only"
+        );
+        let mut types = TypeTable::new();
+        let bit = types.bit();
+        types
+            .ext_field(bit, *degree, irreducible.clone())
+            .unwrap_or_else(|error| {
+                panic!("CBackend: invalid extension-field descriptor: {error:?}")
+            });
+
+        let type_name = ext_field_c_type_name(ty);
+        if !self.field_helper_set.insert(type_name.clone()) {
+            return;
+        }
+        let width = *degree as usize;
+        let words = width.div_ceil(64);
+        let helper = |op: &str| ext_field_helper_name(ty, op);
+        let mut source = format!("typedef struct {{ uint64_t limb[{words}]; }} {type_name};\n");
+        for op in ["add", "sub", "xor", "and", "or"] {
+            let symbol = match op {
+                "add" | "sub" | "xor" => "^",
+                "and" => "&",
+                "or" => "|",
+                _ => unreachable!(),
+            };
+            let name = helper(op);
+            writeln!(
+                source,
+                "static {type_name} {name}({type_name} a, {type_name} b) {{"
+            )
+            .unwrap();
+            writeln!(source, "  {type_name} out = {{0}};").unwrap();
+            writeln!(
+                source,
+                "  for (size_t i = 0; i < {words}; ++i) out.limb[i] = a.limb[i] {symbol} b.limb[i];"
+            )
+            .unwrap();
+            if width % 64 != 0 {
+                writeln!(
+                    source,
+                    "  out.limb[{}] &= UINT64_C(0x{:x});",
+                    words - 1,
+                    (1u64 << (width % 64)) - 1
+                )
+                .unwrap();
+            }
+            writeln!(source, "  return out;\n}}\n").unwrap();
+        }
+        let not_name = helper("not");
+        writeln!(source, "static {type_name} {not_name}({type_name} a) {{").unwrap();
+        writeln!(
+            source,
+            "  for (size_t i = 0; i < {words}; ++i) a.limb[i] = ~a.limb[i];"
+        )
+        .unwrap();
+        if width % 64 != 0 {
+            writeln!(
+                source,
+                "  a.limb[{}] &= UINT64_C(0x{:x});",
+                words - 1,
+                (1u64 << (width % 64)) - 1
+            )
+            .unwrap();
+        }
+        writeln!(source, "  return a;\n}}\n").unwrap();
+
+        for (op, direction) in [("shl", 1i64), ("lshr", -1i64)] {
+            let name = helper(op);
+            writeln!(
+                source,
+                "static {type_name} {name}({type_name} a, uint64_t shift) {{"
+            )
+            .unwrap();
+            writeln!(source, "  {type_name} out = {{0}};").unwrap();
+            writeln!(
+                source,
+                "  if (shift < {width}) for (uint64_t i = 0; i < {width}; ++i) {{"
+            )
+            .unwrap();
+            if direction > 0 {
+                writeln!(source, "    if (i + shift < {width} && ((a.limb[i >> 6] >> (i & 63)) & 1)) out.limb[(i + shift) >> 6] |= UINT64_C(1) << ((i + shift) & 63);").unwrap();
+            } else {
+                writeln!(source, "    if (i >= shift && ((a.limb[i >> 6] >> (i & 63)) & 1)) out.limb[(i - shift) >> 6] |= UINT64_C(1) << ((i - shift) & 63);").unwrap();
+            }
+            writeln!(source, "  }}\n  return out;\n}}\n").unwrap();
+        }
+
+        let eq_name = helper("eq");
+        writeln!(
+            source,
+            "static bool {eq_name}({type_name} a, {type_name} b) {{"
+        )
+        .unwrap();
+        writeln!(source, "  for (size_t i = 0; i < {words}; ++i) if (a.limb[i] != b.limb[i]) return false;\n  return true;\n}}\n").unwrap();
+
+        let mul_name = helper("mul");
+        let mut reduction = vec![0u64; words];
+        for (index, coefficient) in irreducible.iter().take(width).enumerate() {
+            assert!(
+                *coefficient <= 1,
+                "CBackend: GF(2) coefficient is not a bit"
+            );
+            if *coefficient != 0 {
+                reduction[index / 64] |= 1u64 << (index % 64);
+            }
+        }
+        let reduction_values = reduction
+            .iter()
+            .map(|word| format!("UINT64_C(0x{word:x})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            source,
+            "static {type_name} {mul_name}({type_name} a, {type_name} b) {{"
+        )
+        .unwrap();
+        writeln!(source, "  {type_name} out = {{0}};\n  const uint64_t reduction[{words}] = {{{reduction_values}}};").unwrap();
+        writeln!(source, "  for (size_t i = 0; i < {width}; ++i) {{").unwrap();
+        writeln!(source, "    if ((b.limb[i >> 6] >> (i & 63)) & 1) for (size_t j = 0; j < {words}; ++j) out.limb[j] ^= a.limb[j];").unwrap();
+        writeln!(
+            source,
+            "    uint64_t carry = (a.limb[{}] >> {}) & 1;",
+            (width - 1) / 64,
+            (width - 1) % 64
+        )
+        .unwrap();
+        writeln!(source, "    uint64_t previous = 0;\n    for (size_t j = 0; j < {words}; ++j) {{ uint64_t next = a.limb[j] >> 63; a.limb[j] = (a.limb[j] << 1) | previous; previous = next; }}").unwrap();
+        if width % 64 != 0 {
+            writeln!(
+                source,
+                "    a.limb[{}] &= UINT64_C(0x{:x});",
+                words - 1,
+                (1u64 << (width % 64)) - 1
+            )
+            .unwrap();
+        }
+        writeln!(source, "    if (carry) for (size_t j = 0; j < {words}; ++j) a.limb[j] ^= reduction[j];\n  }}\n  return out;\n}}\n").unwrap();
+        self.all_typedefs.push(source);
+    }
+
+    fn register_prime_field(&mut self, ty: &LirType) {
+        let LirType::PrimeField { k, n } = ty else {
+            unreachable!()
+        };
+        assert!(
+            (2..=64).contains(k),
+            "CBackend supports prime fields with 2 <= k <= 64"
+        );
+        assert_eq!(
+            n.len(),
+            1,
+            "CBackend prime-field modulus offset must fit one limb"
+        );
+        assert!(
+            n[0] > 0,
+            "CBackend prime-field modulus offset must be positive"
+        );
+        let type_name = prime_field_c_type(*k);
+        let helper_prefix = prime_field_helper_prefix(ty);
+        if !self.field_helper_set.insert(helper_prefix.clone()) {
+            return;
+        }
+        let modulus = format!("(((__uint128_t)1 << {k}) - UINT64_C(0x{:x}))", n[0]);
+        let mut source = String::new();
+        let a = format!("((__uint128_t)a % {modulus})");
+        let b = format!("((__uint128_t)b % {modulus})");
+        for op in ["add", "sub", "mul"] {
+            let name = format!("{helper_prefix}_{op}");
+            let expr = match op {
+                "add" => format!("(({a} + {b}) % {modulus})"),
+                "sub" => format!("(({a} + {modulus} - {b}) % {modulus})"),
+                "mul" => format!("(({a} * {b}) % {modulus})"),
+                _ => unreachable!(),
+            };
+            writeln!(source, "static {type_name} {name}({type_name} a, {type_name} b) {{ return ({type_name}){expr}; }}").unwrap();
+        }
+        self.all_typedefs.push(format!("{source}\n"));
+    }
+
+    fn field_binop(&mut self, lhs: CValue, rhs: CValue, op: &str) -> CValue {
+        let ty = self.state().type_of(lhs).clone();
+        assert_eq!(
+            ty,
+            *self.state().type_of(rhs),
+            "field operation requires matching types"
+        );
+        self.register_array_typedef(&ty);
+        let c_type = self.type_to_c(&ty);
+        let name = match &ty {
+            LirType::ExtField { .. } => ext_field_helper_name(&ty, op),
+            LirType::PrimeField { .. } => format!("{}_{}", prime_field_helper_prefix(&ty), op),
+            _ => unreachable!(),
+        };
+        let expr = Expr::FnPure(name, vec![Expr::Name(lhs.0), Expr::Name(rhs.0)]);
+        self.state().record_def(ty, c_type, expr, ValKind::Pure)
     }
 
     fn binop(&mut self, lhs: CValue, op: &'static str, rhs: CValue) -> CValue {
@@ -1487,6 +1701,7 @@ impl LirTarget for CBackend {
     }
 
     fn add_block_param(&mut self, block: CBlock, ty: LirType) -> CValue {
+        self.register_array_typedef(&ty);
         let c_type = self.type_to_c(&ty);
         let state = self.state();
         let block_id = block.0;
@@ -1509,55 +1724,137 @@ impl LirTarget for CBackend {
     // ---- Constants ----------------------------------------------------------
 
     fn iconst(&mut self, ty: LirType, val: i64) -> CValue {
+        self.register_array_typedef(&ty);
         let c_type = self.type_to_c(&ty);
-        self.state()
-            .record_def(ty, c_type, Expr::Const(val), ValKind::Pure)
+        let expr = match &ty {
+            LirType::ExtField { .. } => ext_field_constant_expr(&ty, val, &self.struct_names),
+            LirType::PrimeField { .. } => Expr::Const(prime_field_const_value(&ty, val)),
+            _ => Expr::Const(val),
+        };
+        self.state().record_def(ty, c_type, expr, ValKind::Pure)
     }
 
     // ---- Arithmetic ---------------------------------------------------------
 
     fn add(&mut self, lhs: CValue, rhs: CValue) -> CValue {
-        self.binop(lhs, "+", rhs)
+        match self.state().type_of(lhs).clone() {
+            LirType::ExtField { .. } => self.field_binop(lhs, rhs, "add"),
+            LirType::PrimeField { .. } => self.field_binop(lhs, rhs, "add"),
+            LirType::Native(NativeType::Bit) => self.binop(lhs, "^", rhs),
+            _ => self.binop(lhs, "+", rhs),
+        }
     }
     fn sub(&mut self, lhs: CValue, rhs: CValue) -> CValue {
-        self.binop(lhs, "-", rhs)
+        match self.state().type_of(lhs).clone() {
+            LirType::ExtField { .. } => self.field_binop(lhs, rhs, "sub"),
+            LirType::PrimeField { .. } => self.field_binop(lhs, rhs, "sub"),
+            LirType::Native(NativeType::Bit) => self.binop(lhs, "^", rhs),
+            _ => self.binop(lhs, "-", rhs),
+        }
     }
     fn mul(&mut self, lhs: CValue, rhs: CValue) -> CValue {
-        self.binop(lhs, "*", rhs)
+        match self.state().type_of(lhs).clone() {
+            LirType::ExtField { .. } => self.field_binop(lhs, rhs, "mul"),
+            LirType::PrimeField { .. } => self.field_binop(lhs, rhs, "mul"),
+            LirType::Native(NativeType::Bit) => self.binop(lhs, "&", rhs),
+            _ => self.binop(lhs, "*", rhs),
+        }
     }
     fn udiv(&mut self, lhs: CValue, rhs: CValue) -> CValue {
+        assert!(
+            !is_field_type(self.state().type_of(lhs)),
+            "division is not defined for field values"
+        );
         self.binop(lhs, "/", rhs)
     }
     fn sdiv(&mut self, lhs: CValue, rhs: CValue) -> CValue {
+        assert!(
+            !is_field_type(self.state().type_of(lhs)),
+            "division is not defined for field values"
+        );
         self.binop(lhs, "/", rhs)
     }
 
     // ---- Bitwise ------------------------------------------------------------
 
     fn and(&mut self, lhs: CValue, rhs: CValue) -> CValue {
-        self.binop(lhs, "&", rhs)
+        match self.state().type_of(lhs).clone() {
+            LirType::ExtField { .. } => self.field_binop(lhs, rhs, "and"),
+            LirType::PrimeField { .. } => panic!("bitwise AND is not defined for prime fields"),
+            _ => self.binop(lhs, "&", rhs),
+        }
     }
     fn or(&mut self, lhs: CValue, rhs: CValue) -> CValue {
-        self.binop(lhs, "|", rhs)
+        match self.state().type_of(lhs).clone() {
+            LirType::ExtField { .. } => self.field_binop(lhs, rhs, "or"),
+            LirType::PrimeField { .. } => panic!("bitwise OR is not defined for prime fields"),
+            _ => self.binop(lhs, "|", rhs),
+        }
     }
     fn xor(&mut self, lhs: CValue, rhs: CValue) -> CValue {
-        self.binop(lhs, "^", rhs)
+        match self.state().type_of(lhs).clone() {
+            LirType::ExtField { .. } => self.field_binop(lhs, rhs, "xor"),
+            LirType::PrimeField { .. } => panic!("bitwise XOR is not defined for prime fields"),
+            _ => self.binop(lhs, "^", rhs),
+        }
     }
     fn not(&mut self, val: CValue) -> CValue {
         let ty = self.state().type_of(val).clone();
+        if matches!(ty, LirType::ExtField { .. }) {
+            self.register_array_typedef(&ty);
+            let c_type = self.type_to_c(&ty);
+            let expr = Expr::FnPure(ext_field_helper_name(&ty, "not"), vec![Expr::Name(val.0)]);
+            return self.state().record_def(ty, c_type, expr, ValKind::Pure);
+        }
+        assert!(
+            !matches!(ty, LirType::PrimeField { .. }),
+            "bitwise NOT is not defined for prime fields"
+        );
         // For bools, use logical `!`; for integers, use bitwise `~`.
         let op = if ty == LirType::Bool { "!" } else { "~" };
         self.unop(op, val)
     }
     fn shl(&mut self, val: CValue, shift: CValue) -> CValue {
+        let ty = self.state().type_of(val).clone();
+        if matches!(ty, LirType::ExtField { .. }) {
+            self.register_array_typedef(&ty);
+            let c_type = self.type_to_c(&ty);
+            let expr = Expr::FnPure(
+                ext_field_helper_name(&ty, "shl"),
+                vec![Expr::Name(val.0), Expr::Name(shift.0)],
+            );
+            return self.state().record_def(ty, c_type, expr, ValKind::Pure);
+        }
+        assert!(
+            !matches!(ty, LirType::PrimeField { .. }),
+            "bitwise shifts are not defined for prime fields"
+        );
         self.binop(val, "<<", shift)
     }
     fn lshr(&mut self, val: CValue, shift: CValue) -> CValue {
+        let ty = self.state().type_of(val).clone();
+        if matches!(ty, LirType::ExtField { .. }) {
+            self.register_array_typedef(&ty);
+            let c_type = self.type_to_c(&ty);
+            let expr = Expr::FnPure(
+                ext_field_helper_name(&ty, "lshr"),
+                vec![Expr::Name(val.0), Expr::Name(shift.0)],
+            );
+            return self.state().record_def(ty, c_type, expr, ValKind::Pure);
+        }
+        assert!(
+            !matches!(ty, LirType::PrimeField { .. }),
+            "bitwise shifts are not defined for prime fields"
+        );
         self.binop(val, ">>", shift)
     }
 
     fn ashr(&mut self, val: CValue, shift: CValue) -> CValue {
         let ty = self.state().type_of(val).clone();
+        assert!(
+            !is_field_type(&ty),
+            "arithmetic shift is not defined for field values"
+        );
         let c_type = self.type_to_c(&ty);
         let signed_ty = signed_variant(&ty);
         let expr = Expr::Bin(
@@ -1574,6 +1871,41 @@ impl LirTarget for CBackend {
     // ---- Comparison ---------------------------------------------------------
 
     fn icmp(&mut self, pred: IcmpPred, lhs: CValue, rhs: CValue) -> CValue {
+        let ty = self.state().type_of(lhs).clone();
+        if is_field_type(&ty) {
+            assert!(
+                matches!(pred, IcmpPred::Eq | IcmpPred::Ne),
+                "ordered comparisons are not defined for field values"
+            );
+            let equal = match &ty {
+                LirType::ExtField { .. } => {
+                    self.register_array_typedef(&ty);
+                    let expr = Expr::FnPure(
+                        ext_field_helper_name(&ty, "eq"),
+                        vec![Expr::Name(lhs.0), Expr::Name(rhs.0)],
+                    );
+                    self.state()
+                        .record_def(LirType::Bool, "bool".to_string(), expr, ValKind::Pure)
+                }
+                LirType::PrimeField { k, n } => {
+                    let _ = (k, n);
+                    let expr = Expr::Icmp {
+                        op: "==",
+                        signed: None,
+                        l: Box::new(Expr::Name(lhs.0)),
+                        r: Box::new(Expr::Name(rhs.0)),
+                    };
+                    self.state()
+                        .record_def(LirType::Bool, "bool".to_string(), expr, ValKind::Pure)
+                }
+                _ => unreachable!(),
+            };
+            return if pred == IcmpPred::Eq {
+                equal
+            } else {
+                self.not(equal)
+            };
+        }
         let op: &'static str = match pred {
             IcmpPred::Eq => "==",
             IcmpPred::Ne => "!=",
@@ -1602,12 +1934,22 @@ impl LirTarget for CBackend {
     // ---- Conversions --------------------------------------------------------
 
     fn zext(&mut self, val: CValue, dst_ty: LirType) -> CValue {
+        assert!(
+            !is_field_type(self.state().type_of(val)) && !is_field_type(&dst_ty),
+            "integer extension involving field values is unsupported"
+        );
+        self.register_array_typedef(&dst_ty);
         let c_type = self.type_to_c(&dst_ty);
         let expr = Expr::Cast(c_type.clone(), Box::new(Expr::Name(val.0)));
         self.state().record_def(dst_ty, c_type, expr, ValKind::Pure)
     }
 
     fn sext(&mut self, val: CValue, dst_ty: LirType) -> CValue {
+        assert!(
+            !is_field_type(self.state().type_of(val)) && !is_field_type(&dst_ty),
+            "integer extension involving field values is unsupported"
+        );
+        self.register_array_typedef(&dst_ty);
         let src_ty = self.state().type_of(val).clone();
         let signed_src = signed_variant(&src_ty);
         let c_type = self.type_to_c(&dst_ty);
@@ -1622,6 +1964,11 @@ impl LirTarget for CBackend {
     }
 
     fn trunc(&mut self, val: CValue, dst_ty: LirType) -> CValue {
+        assert!(
+            !is_field_type(self.state().type_of(val)) && !is_field_type(&dst_ty),
+            "integer truncation involving field values is unsupported"
+        );
+        self.register_array_typedef(&dst_ty);
         let c_type = self.type_to_c(&dst_ty);
         let expr = Expr::Cast(c_type.clone(), Box::new(Expr::Name(val.0)));
         self.state().record_def(dst_ty, c_type, expr, ValKind::Pure)
@@ -2120,6 +2467,8 @@ fn lir_type_to_c_free(ty: &LirType, struct_names: &[String]) -> String {
         LirType::Struct(id) => struct_names[*id as usize].clone(),
         // Native field elements are exposed as their closest C integer type.
         LirType::Native(t) => native_type_to_c(*t).to_string(),
+        LirType::ExtField { .. } => ext_field_c_type_name(ty),
+        LirType::PrimeField { k, .. } => prime_field_c_type(*k).to_string(),
         // Pointer: emit as `inner_type*`.
         LirType::Ptr(inner) => format!("{}*", lir_type_to_c_free(inner, struct_names)),
         _ => panic!(
@@ -2145,8 +2494,109 @@ fn lir_type_suffix(ty: &LirType) -> String {
         LirType::Arr(elem, len) => format!("Arr_{}_{}", lir_type_suffix(elem), len),
         LirType::Struct(id) => format!("S{id}"),
         LirType::Native(t) => format!("Native_{t:?}"),
+        LirType::ExtField {
+            wrapped,
+            degree,
+            irreducible,
+        } => {
+            let packed = if **wrapped == LirType::Native(NativeType::Bit) {
+                let mut words = vec![0u64; (*degree as usize + 1).div_ceil(64)];
+                for (index, coefficient) in irreducible.iter().enumerate() {
+                    if *coefficient != 0 && index / 64 < words.len() {
+                        words[index / 64] |= 1u64 << (index % 64);
+                    }
+                }
+                words
+                    .iter()
+                    .map(|word| format!("{word:x}"))
+                    .collect::<Vec<_>>()
+                    .join("_")
+            } else {
+                irreducible
+                    .iter()
+                    .map(|coefficient| format!("{coefficient:x}"))
+                    .collect::<Vec<_>>()
+                    .join("_")
+            };
+            format!("Ext_d{degree}_{}_p{packed}", lir_type_suffix(wrapped))
+        }
+        LirType::PrimeField { k, n } => format!(
+            "Prime_k{k}_n{}",
+            n.iter()
+                .map(|limb| format!("{limb:x}"))
+                .collect::<Vec<_>>()
+                .join("_")
+        ),
         LirType::Ptr(inner) => format!("Ptr_{}", lir_type_suffix(inner)),
         _ => panic!("lir_type_suffix: unhandled LirType variant — add suffix for this variant"),
+    }
+}
+
+fn ext_field_c_type_name(ty: &LirType) -> String {
+    format!("Volar_{}", lir_type_suffix(ty))
+}
+
+fn ext_field_helper_name(ty: &LirType, op: &str) -> String {
+    format!("volar_{}_{}", op, lir_type_suffix(ty))
+}
+
+fn prime_field_helper_prefix(ty: &LirType) -> String {
+    format!("volar_{}", lir_type_suffix(ty))
+}
+
+fn prime_field_c_type(k: u32) -> &'static str {
+    match k {
+        1..=8 => "uint8_t",
+        9..=16 => "uint16_t",
+        17..=32 => "uint32_t",
+        33..=64 => "uint64_t",
+        _ => panic!("CBackend supports prime-field widths up to 64 bits"),
+    }
+}
+
+fn is_field_type(ty: &LirType) -> bool {
+    matches!(ty, LirType::ExtField { .. } | LirType::PrimeField { .. })
+}
+
+fn prime_field_const_value(ty: &LirType, value: i64) -> i64 {
+    let LirType::PrimeField { k, n } = ty else {
+        unreachable!()
+    };
+    assert!(
+        (2..=64).contains(k),
+        "CBackend supports prime-field widths up to 64 bits"
+    );
+    assert_eq!(
+        n.len(),
+        1,
+        "CBackend prime-field modulus offset must fit one limb"
+    );
+    let modulus = ((1u128) << k) - u128::from(n[0]);
+    (i128::from(value).rem_euclid(modulus as i128) as u64) as i64
+}
+
+fn ext_field_constant_expr(ty: &LirType, value: i64, struct_names: &[String]) -> Expr {
+    let LirType::ExtField { degree, .. } = ty else {
+        unreachable!()
+    };
+    let words = (*degree as usize).div_ceil(64);
+    let mut limbs = Vec::with_capacity(words);
+    for index in 0..words {
+        let mut limb = if index == 0 {
+            value as u64
+        } else if value < 0 {
+            u64::MAX
+        } else {
+            0
+        };
+        if index + 1 == words && *degree % 64 != 0 {
+            limb &= (1u64 << (*degree % 64)) - 1;
+        }
+        limbs.push(Expr::Const(limb as i64));
+    }
+    Expr::Compound {
+        ty: lir_type_to_c_free(ty, struct_names),
+        inits: vec![Init::List("limb".to_string(), limbs)],
     }
 }
 
@@ -2165,6 +2615,9 @@ fn signed_variant(ty: &LirType) -> &'static str {
         LirType::I64 | LirType::U64 => "int64_t",
         LirType::I128 | LirType::U128 => "__int128_t",
         LirType::Native(t) => native_type_signed(*t),
+        LirType::ExtField { .. } | LirType::PrimeField { .. } => {
+            panic!("signed_variant: field values have no signed integer representation")
+        }
         LirType::Arr(_, _) | LirType::Struct(_) => panic!("signed_variant: aggregate type"),
         LirType::Ptr(_) => panic!("signed_variant: Ptr has no signed variant"),
         _ => {

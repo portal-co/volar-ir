@@ -15,7 +15,7 @@ The LIR ABI has three layers:
 |---|---|---|
 | **Policy** | `volar-lir` | `LirAbi` struct + `LirTarget::abi()` method |
 | **Codegen** | `volar-lir-codegen` | Compiler IR → LIR lowering; queries `abi()` to choose conventions |
-| **Backends** | `volar-c-backend`, `volar-ir-lir-target`, `volar-vaffle-target` | Implement `LirTarget` + declare their ABI |
+| **Backends** | `volar-c-backend`, `volar-llvm-backend`, `volar-ir-lir-target`, `volar-vaffle-target` | Implement `LirTarget` + declare their ABI |
 
 ---
 
@@ -76,12 +76,14 @@ variable per bit, LSB first):
 | `U64` / `I64` | 64 `Bit` vars |
 | `Arr(T, N)` | `N × bits(T)` `Bit` vars |
 | `Struct(id)` | Sum of field widths in `Bit` vars |
-| `Native(t)` | 1 native-typed var (not bit-decomposed) |
+| `Native(t)` | 1 native-typed scalar var (not bit-decomposed) |
+| `ExtField { wrapped, degree, irreducible }` | 1 typed field scalar; width is `degree × width(wrapped)` |
+| `PrimeField { k, n }` | 1 typed field scalar; modulus is `2^k - n` |
 | `Ptr(T)` | 32 `Bit` vars (`VaffleTarget` only) |
 
-**Function parameters**: Flat `Bit`-typed block parameters in the entry block.
+**Function parameters**: Integer and aggregate values are flattened to `Bit`-typed block parameters in the entry block. `Native`, `ExtField`, and `PrimeField` scalar values remain single typed IR variables.
 
-**Function returns**: Flat `Bit`-typed values in the `Return` terminator.
+**Function returns**: Integer and aggregate values are flattened to `Bit`-typed values in the `Return` terminator; native and explicit field scalars remain typed.
 
 **Extern calls**: Inline callee circuits directly (no actual call boundary;
   VolarIrTarget splices the callee's IRBlocks into the caller's block stream).
@@ -170,6 +172,14 @@ typedef'd structs passed **by value** in the C calling convention:
 | `Arr(T, N)` | `typedef struct { T data[N]; } Arr_T_N;` |
 | `Struct(id)` | Named struct typedef |
 | `Ptr(T)` | `T*` |
+| `ExtField` | Limb-struct value with field-aware arithmetic helpers |
+| `PrimeField { k, n }` | Unsigned integer value with modular arithmetic helpers (`k ≤ 64`) |
+
+`CBackend` supports extension fields over `Bit` coefficients and prime fields
+up to 64 bits. The LLVM backend supports extension fields over `Bit` coefficients
+up to 256 bits and prime fields up to 256 bits. Both reject operations that do
+not have field semantics (for example, prime-field bitwise operations and
+ordered field comparisons).
 
 **Function parameters**: One C parameter per logical argument.  Aggregates are
   a single struct-typed parameter, immediately unpacked to scalars in the

@@ -68,6 +68,28 @@ fn lir_type_struct() {
 }
 
 #[test]
+fn lir_type_fields() {
+    rt_lir_type(LirType::ExtField {
+        wrapped: Box::new(LirType::Native(NativeType::Bit)),
+        degree: 8,
+        irreducible: std::vec![1, 1, 0, 1, 1, 0, 0, 0, 1],
+    });
+    rt_lir_type(LirType::ExtField {
+        wrapped: Box::new(LirType::ExtField {
+            wrapped: Box::new(LirType::Native(NativeType::Bit)),
+            degree: 8,
+            irreducible: std::vec![1, 1, 0, 1, 1, 0, 0, 0, 1],
+        }),
+        degree: 2,
+        irreducible: std::vec![1, 1, 1],
+    });
+    rt_lir_type(LirType::PrimeField {
+        k: 2,
+        n: std::vec![1],
+    });
+}
+
+#[test]
 fn lir_type_native() {
     for nt in [
         NativeType::Bit,
