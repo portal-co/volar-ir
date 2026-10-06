@@ -162,8 +162,8 @@ The Volar feature worktree's uncommitted source/docs/examples will be reviewed a
 
 | Checkpoint | Status | Commit / evidence |
 |---|---|---|
-| Approved plan and branch/input snapshot | Pending | |
-| `volar-ir` feature integration | Pending | |
+| Approved plan and branch/input snapshot | Complete | `ff91ad2`; user approved local tips and dependency order. Pre-existing `Cargo.lock` state remains unstaged and preserved. |
+| `volar-ir` feature integration | Complete | `579274c` merges local `feat/mpc` (`7b2c19a`) into `main`; `feat/mpc` ancestry confirmed retained. Focused suites plus `cargo test --offline --quiet --workspace` passed (86 successful test-result groups; ignored tests remain ignored). `volar-ir-common` Poly remap regression fixed by restoring generic map-style collision behavior; 17 common tests pass. No remote refs updated. |
 | Volar feature-worktree checkpoint | Pending | |
 | `volar` feature integration | Pending | |
 | `cirrus` feature integration | Pending | |
