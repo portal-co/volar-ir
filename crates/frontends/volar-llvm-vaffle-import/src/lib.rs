@@ -65,7 +65,7 @@ use inkwell::llvm_sys::core::{
 };
 use inkwell::llvm_sys::{LLVMOpcode, LLVMTypeKind};
 use inkwell::module::Module as LlvmModule;
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{
     AnyValue, AnyValueEnum, AsValueRef, BasicValueEnum, CallSiteValue, FunctionValue,
     InstructionOpcode, InstructionValue, IntValue, PhiValue, PointerValue,
@@ -76,14 +76,15 @@ use vaffle::{
     Terminator, Value, ValueId,
 };
 use volar_ir_common::{
-    Constant, IrType, Node, PolyCoeffs, PreInitSegment, Stmt, StorageAllocator, StorageId, Type,
-    TypeId, TypeTable,
+    ActionDecl, ActionExecutionPolicy, Constant, IrType, Node, OracleDecl, OracleExecutionPolicy,
+    PolyCoeffs, PreInitSegment, Stmt, StorageAllocator, StorageId, Type, TypeId, TypeTable,
+    aes_extern,
 };
 use volar_lir::circuits::{self, BitCircuitBuilder};
-use volar_vaffle_target::circuit_helpers::{
-    helper_result_width, intern_circuit_helper, width_type, CircuitHelperMode, HelperKey, HelperOp,
-};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
+use volar_vaffle_target::circuit_helpers::{
+    CircuitHelperMode, HelperKey, HelperOp, helper_result_width, intern_circuit_helper, width_type,
+};
 
 /// A structural-import failure.
 #[derive(Debug)]
@@ -151,13 +152,86 @@ fn bits_for_max_value(v: usize) -> usize {
 /// data layout (or LLVM's 64-bit default when the module has no layout).
 /// Supplying a width is useful to make a caller's ABI expectation explicit;
 /// it never overrides an incompatible LLVM layout.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Explicit LLVM declaration mapping for a direct external call symbol.
+///
+/// These mappings are opt-in: an unmapped LLVM declaration retains ordinary
+/// call semantics and is never silently treated as an MPC external.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LlvmExternalImportKind {
+    Oracle {
+        execution: OracleExecutionPolicy,
+    },
+    /// LLVM action ABI: `[guard, args (n_args), fallbacks (one per result)]`.
+    Action {
+        n_args: usize,
+        execution: ActionExecutionPolicy,
+    },
+}
+
+/// Optional ABI and explicit external-declaration constraints for structural
+/// LLVM import.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LlvmImportConfig {
     pub pointer_width: Option<PointerWidth>,
+    pub externals: BTreeMap<String, LlvmExternalImportKind>,
     /// Inline `bc_*` into the parent block, or intern one typed function per
     /// `(op, operand widths)` and call it. Address math and stack-pointer
     /// bumps stay inline in both modes.
     pub circuit_helpers: CircuitHelperMode,
+}
+
+impl LlvmImportConfig {
+    pub fn with_oracle_execution(
+        mut self,
+        llvm_symbol: impl Into<String>,
+        execution: OracleExecutionPolicy,
+    ) -> Self {
+        self.externals.insert(
+            llvm_symbol.into(),
+            LlvmExternalImportKind::Oracle { execution },
+        );
+        self
+    }
+
+    pub fn with_action_execution(
+        mut self,
+        llvm_symbol: impl Into<String>,
+        n_args: usize,
+        execution: ActionExecutionPolicy,
+    ) -> Self {
+        self.externals.insert(
+            llvm_symbol.into(),
+            LlvmExternalImportKind::Action { n_args, execution },
+        );
+        self
+    }
+
+    /// Reject contradictory duplicate registrations at the public import
+    /// boundary. The builder methods retain replacement semantics for
+    /// ergonomic construction, while this validator makes import admission
+    /// explicit and fail-closed.
+    fn validate(&self) -> IResult<()> {
+        for (symbol, external) in &self.externals {
+            if symbol.is_empty() {
+                return Err(ImportError::Unsupported(
+                    "configured external symbol must not be empty".into(),
+                ));
+            }
+            if let LlvmExternalImportKind::Action { n_args, .. } = external
+                && n_args.checked_add(2).is_none()
+            {
+                return Err(ImportError::Unsupported(format!(
+                    "configured action `{symbol}` argument count overflows its ABI"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn with_circuit_helpers(mut self, mode: CircuitHelperMode) -> Self {
+        self.circuit_helpers = mode;
+        self
+    }
 }
 
 fn pointer_width_from_layout<'ctx>(
@@ -213,10 +287,14 @@ pub fn import_module_with_config<'ctx>(
     entries: &[&str],
     config: LlvmImportConfig,
 ) -> IResult<Module> {
+    config.validate()?;
+    let pointer_width = pointer_width_from_layout(llvm_module, config.clone())?;
     let mut importer = Importer::new(
-        pointer_width_from_layout(llvm_module, config)?,
+        pointer_width,
+        config.externals.clone(),
         config.circuit_helpers,
     );
+    importer.validate_configured_external_symbols(llvm_module)?;
     // Eagerly assign every module global its `StorageId` before walking any
     // function body, so `dispatch_read`/`dispatch_write` (runtime
     // storage-identity dispatch for a pointer whose provenance isn't
@@ -478,6 +556,15 @@ struct Importer<'ctx> {
     pre_init: Vec<PreInitSegment>,
     bit_tid: TypeId,
     byte_tid: TypeId,
+    /// Oracle declarations registered by circuit-extern lowering (today:
+    /// `aes128_encrypt_block`, see [`translate_aes_extern`]), carried into
+    /// the finished module so the vaffle→IR and IR→boolar lowerings can
+    /// validate the emitted `Stmt::OracleCall`s against them.
+    oracles: Vec<OracleDecl>,
+    /// Action declarations registered by configured LLVM extern lowering.
+    actions: Vec<ActionDecl>,
+    /// Explicit direct-call mappings supplied by [`LlvmImportConfig`].
+    externals: BTreeMap<String, LlvmExternalImportKind>,
     /// Pointer-width type for stack-pointer cells and merged addresses.
     /// A 1-bit address constant would collapse every address to its low bit.
     addr_tid: TypeId,
@@ -486,7 +573,11 @@ struct Importer<'ctx> {
 }
 
 impl<'ctx> Importer<'ctx> {
-    fn new(pointer_width: PointerWidth, helper_mode: CircuitHelperMode) -> Self {
+    fn new(
+        pointer_width: PointerWidth,
+        externals: BTreeMap<String, LlvmExternalImportKind>,
+        helper_mode: CircuitHelperMode,
+    ) -> Self {
         let pointer_bits = pointer_width.bits();
         let mut types = TypeTable::new();
         let bit_tid = types.bit();
@@ -510,18 +601,36 @@ impl<'ctx> Importer<'ctx> {
             pre_init: Vec::new(),
             bit_tid,
             byte_tid,
+            oracles: Vec::new(),
+            actions: Vec::new(),
+            externals,
             addr_tid,
             helper_mode,
             helper_cache: BTreeMap::new(),
         }
     }
 
+    /// Validate every configured mapping against the module before walking
+    /// reachable bodies. A misspelled mapping must not silently succeed just
+    /// because no imported call happened to reference it.
+    fn validate_configured_external_symbols(&self, llvm_module: &LlvmModule<'ctx>) -> IResult<()> {
+        for (symbol, external) in &self.externals {
+            let callee = llvm_module.get_function(symbol).ok_or_else(|| {
+                ImportError::Unsupported(format!(
+                    "configured external `{symbol}` is not declared by the LLVM module"
+                ))
+            })?;
+            self.validate_configured_external_declaration(callee, symbol, external)?;
+        }
+        Ok(())
+    }
+
     fn finish(self) -> Module {
         Module {
             pointer_width: self.pointer_width,
             types: self.types,
-            oracles: Vec::new(),
-            actions: Vec::new(),
+            oracles: self.oracles,
+            actions: self.actions,
             funcs: self.funcs,
             sigs: self.sigs,
             exports: self.exports,
@@ -1272,47 +1381,49 @@ impl<'ctx> Importer<'ctx> {
                         ));
                     };
 
-                    let new_stack_ptr = match (base_ptr.const_offset, idx_int.get_sign_extended_constant())
-                    {
-                        (Some(base_off), Some(idx)) => {
-                            let offset = idx.checked_mul(elem_bits).ok_or_else(|| {
-                                ImportError::Unsupported("gep offset overflow".into())
-                            })?;
-                            let addr = base_off.checked_add_signed(offset).ok_or_else(|| {
-                                ImportError::Unsupported("gep offset out of range".into())
-                            })?;
-                            let addr_bits =
-                                self.add_signed_delta(fctx, cur, &base_ptr.addr_bits, offset);
-                            StackPtr {
-                                storage: base_ptr.storage,
-                                allocation_bits: base_ptr.allocation_bits,
-                                const_offset: Some(addr as u64),
-                                addr_bits,
+                    let new_stack_ptr =
+                        match (base_ptr.const_offset, idx_int.get_sign_extended_constant()) {
+                            (Some(base_off), Some(idx)) => {
+                                let offset = idx.checked_mul(elem_bits).ok_or_else(|| {
+                                    ImportError::Unsupported("gep offset overflow".into())
+                                })?;
+                                let addr =
+                                    base_off.checked_add_signed(offset).ok_or_else(|| {
+                                        ImportError::Unsupported("gep offset out of range".into())
+                                    })?;
+                                let addr_bits =
+                                    self.add_signed_delta(fctx, cur, &base_ptr.addr_bits, offset);
+                                StackPtr {
+                                    storage: base_ptr.storage,
+                                    allocation_bits: base_ptr.allocation_bits,
+                                    const_offset: Some(addr as u64),
+                                    addr_bits,
+                                }
                             }
-                        }
-                        (_, _) => {
-                            let idx_bits = self.value_bits(fctx, idx_val)?;
-                            let idx_bits = resize_bits_signed(&idx_bits, self.pointer_bits);
-                            let new_addr_bits = {
-                                let mut c = Ctx {
-                                    fctx,
-                                    bit_tid: self.bit_tid,
-                                    block: cur,
+                            (_, _) => {
+                                let idx_bits = self.value_bits(fctx, idx_val)?;
+                                let idx_bits = resize_bits_signed(&idx_bits, self.pointer_bits);
+                                let new_addr_bits = {
+                                    let mut c = Ctx {
+                                        fctx,
+                                        bit_tid: self.bit_tid,
+                                        block: cur,
+                                    };
+                                    let elem_bits_const: Vec<ValueId> = (0..self.pointer_bits)
+                                        .map(|b| c.bc_const((elem_bits as u64 >> b) & 1 != 0))
+                                        .collect();
+                                    let scaled =
+                                        circuits::bc_mul(&mut c, &idx_bits, &elem_bits_const);
+                                    circuits::bc_add(&mut c, &base_ptr.addr_bits, &scaled, false)
                                 };
-                                let elem_bits_const: Vec<ValueId> = (0..self.pointer_bits)
-                                    .map(|b| c.bc_const((elem_bits as u64 >> b) & 1 != 0))
-                                    .collect();
-                                let scaled = circuits::bc_mul(&mut c, &idx_bits, &elem_bits_const);
-                                circuits::bc_add(&mut c, &base_ptr.addr_bits, &scaled, false)
-                            };
-                            StackPtr {
-                                storage: base_ptr.storage,
-                                allocation_bits: base_ptr.allocation_bits,
-                                const_offset: None,
-                                addr_bits: new_addr_bits,
+                                StackPtr {
+                                    storage: base_ptr.storage,
+                                    allocation_bits: base_ptr.allocation_bits,
+                                    const_offset: None,
+                                    addr_bits: new_addr_bits,
+                                }
                             }
-                        }
-                    };
+                        };
 
                     let base_bits = fctx
                         .cache
@@ -1518,6 +1629,24 @@ impl<'ctx> Importer<'ctx> {
                     fctx.aggregate_fields
                         .insert(instr.as_any_value_enum(), fields);
                     None
+                } else if callee_name == aes_extern::LLVM_SYMBOL {
+                    // Circuit extern: `__portal_aes128_encrypt_block`
+                    // lowers to an IR-level `Stmt::OracleCall`, never a
+                    // declaration-only `Value::Call`.
+                    self.translate_aes_extern(fctx, instr)?;
+                    None
+                } else if let Some(external) = self.externals.get(callee_name.as_ref()).cloned() {
+                    // Explicitly configured external declarations are the
+                    // only generic LLVM calls admitted as external MPC work.
+                    // Every other direct call retains ordinary VAFFLE call
+                    // semantics below; there is no name-based inference.
+                    self.translate_configured_external(
+                        fctx,
+                        instr,
+                        callee_fn,
+                        &callee_name,
+                        external,
+                    )?
                 } else {
                     // Validate arguments before asking `func_id` to inspect
                     // the callee signature. `FunctionValue::get_params`
@@ -1657,6 +1786,374 @@ impl<'ctx> Importer<'ctx> {
             fctx.cache.insert(instr.as_any_value_enum(), bits);
         }
         Ok(called)
+    }
+
+    fn validate_configured_external_declaration(
+        &self,
+        callee: FunctionValue<'ctx>,
+        symbol: &str,
+        external: &LlvmExternalImportKind,
+    ) -> IResult<()> {
+        if callee.get_first_basic_block().is_some() {
+            return Err(ImportError::Unsupported(format!(
+                "configured external `{symbol}` must target a declaration, not a defined LLVM function"
+            )));
+        }
+        let signature = callee.get_type();
+        if signature.is_var_arg() {
+            return Err(ImportError::Unsupported(format!(
+                "configured external `{symbol}` must not be variadic"
+            )));
+        }
+        let expected_params = match external {
+            LlvmExternalImportKind::Oracle { .. } => signature.count_param_types() as usize,
+            LlvmExternalImportKind::Action { n_args, .. } => {
+                n_args.checked_add(2).ok_or_else(|| {
+                    ImportError::Unsupported(format!(
+                        "configured action `{symbol}` argument count overflows its ABI"
+                    ))
+                })?
+            }
+        };
+        if signature.count_param_types() as usize != expected_params {
+            return Err(ImportError::Unsupported(format!(
+                "configured external `{symbol}` declaration has an incompatible parameter count"
+            )));
+        }
+        for ty in signature.get_param_types() {
+            if !matches!(ty, BasicMetadataTypeEnum::IntType(_)) {
+                return Err(ImportError::Unsupported(format!(
+                    "configured external `{symbol}` declaration requires scalar integer parameters"
+                )));
+            }
+        }
+        let Some(BasicTypeEnum::IntType(_)) = signature.get_return_type() else {
+            return Err(ImportError::Unsupported(format!(
+                "configured external `{symbol}` declaration must return one scalar integer"
+            )));
+        };
+        if matches!(external, LlvmExternalImportKind::Action { .. }) {
+            let types = signature.get_param_types();
+            let BasicMetadataTypeEnum::IntType(guard) = types[0] else {
+                unreachable!("integer parameters checked above");
+            };
+            if guard.get_bit_width() != 1 {
+                return Err(ImportError::Unsupported(format!(
+                    "configured action `{symbol}` declaration guard must be i1"
+                )));
+            }
+            let BasicMetadataTypeEnum::IntType(fallback) = types[types.len() - 1] else {
+                unreachable!("integer parameters checked above");
+            };
+            let Some(BasicTypeEnum::IntType(result)) = signature.get_return_type() else {
+                unreachable!("integer result checked above");
+            };
+            if fallback.get_bit_width() != result.get_bit_width() {
+                return Err(ImportError::Unsupported(format!(
+                    "configured action `{symbol}` declaration fallback type must match its result type"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn register_configured_oracle(
+        &mut self,
+        symbol: &str,
+        params: &[TypeId],
+        results: &[TypeId],
+        execution: OracleExecutionPolicy,
+    ) -> IResult<()> {
+        if let Some(existing) = self.oracles.iter().find(|decl| decl.name == symbol) {
+            if existing.params != params
+                || existing.results != results
+                || existing.execution != execution
+            {
+                return Err(ImportError::Unsupported(format!(
+                    "configured oracle `{symbol}` has inconsistent call signatures or execution policy"
+                )));
+            }
+            return Ok(());
+        }
+        self.oracles.push(OracleDecl {
+            name: symbol.into(),
+            params: params.to_vec(),
+            results: results.to_vec(),
+            execution,
+        });
+        Ok(())
+    }
+
+    fn register_configured_action(
+        &mut self,
+        symbol: &str,
+        params: &[TypeId],
+        results: &[TypeId],
+        execution: ActionExecutionPolicy,
+    ) -> IResult<()> {
+        if let Some(existing) = self.actions.iter().find(|decl| decl.name == symbol) {
+            if existing.params != params
+                || existing.results != results
+                || existing.execution != execution
+            {
+                return Err(ImportError::Unsupported(format!(
+                    "configured action `{symbol}` has inconsistent call signatures or execution policy"
+                )));
+            }
+            return Ok(());
+        }
+        self.actions.push(ActionDecl {
+            name: symbol.into(),
+            params: params.to_vec(),
+            results: results.to_vec(),
+            execution,
+        });
+        Ok(())
+    }
+
+    /// Lower a direct configured LLVM declaration to a real Volar external
+    /// primitive, preserving its explicit execution policy in the module
+    /// declaration table. The present ABI supports scalar integer inputs and
+    /// one scalar integer result; aggregate/pointer host ABI adaptation must
+    /// use a separately reviewed lowering instead of being guessed here.
+    fn translate_configured_external(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        instr: InstructionValue<'ctx>,
+        callee: FunctionValue<'ctx>,
+        symbol: &str,
+        external: LlvmExternalImportKind,
+    ) -> IResult<Option<Bits>> {
+        self.validate_configured_external_declaration(callee, symbol, &external)?;
+        let n_args = instr.get_num_operands().saturating_sub(1) as usize;
+        let mut args = Vec::with_capacity(n_args);
+        let mut params = Vec::with_capacity(n_args);
+        for index in 0..n_args as u32 {
+            let value = call_value_operand(instr, index, "configured external argument")?;
+            let BasicTypeEnum::IntType(_) = value.get_type() else {
+                return Err(ImportError::Unsupported(format!(
+                    "configured external `{symbol}` requires scalar integer arguments"
+                )));
+            };
+            let bits = self.value_bits(fctx, value)?;
+            let ty = self.llvm_type_id(value.get_type())?;
+            let merged = if bits.len() == 1 {
+                bits[0]
+            } else {
+                fctx.emit(fctx.current, Value::Op(Stmt::Merge { parts: bits, ty }))
+            };
+            args.push(merged);
+            params.push(ty);
+        }
+        let result_type: Result<BasicTypeEnum<'ctx>, _> = instr.get_type().try_into();
+        let result_type = result_type.map_err(|_| {
+            ImportError::Unsupported(format!(
+                "configured external `{symbol}` must return one scalar integer"
+            ))
+        })?;
+        let BasicTypeEnum::IntType(_) = result_type else {
+            return Err(ImportError::Unsupported(format!(
+                "configured external `{symbol}` must return one scalar integer"
+            )));
+        };
+        let result_tid = self.llvm_type_id(result_type)?;
+        let output_tys = vec![result_tid];
+        let result_ty = self.types.intern(IrType::Tuple(output_tys.clone()));
+        let cur = fctx.current;
+        let (call, output) = match external {
+            LlvmExternalImportKind::Oracle { execution } => {
+                self.register_configured_oracle(symbol, &params, &output_tys, execution)?;
+                let call = fctx.emit(
+                    cur,
+                    Value::Op(Stmt::OracleCall {
+                        name: symbol.into(),
+                        args,
+                        output_tys: output_tys.clone(),
+                        result_ty,
+                    }),
+                );
+                let output = fctx.emit(
+                    cur,
+                    Value::Op(Stmt::OracleOutput {
+                        call,
+                        idx: 0,
+                        ty: result_tid,
+                    }),
+                );
+                (call, output)
+            }
+            LlvmExternalImportKind::Action { n_args, execution } => {
+                let expected_args = n_args.checked_add(2).ok_or_else(|| {
+                    ImportError::Unsupported("configured action argument count overflow".into())
+                })?;
+                if args.len() != expected_args {
+                    return Err(ImportError::Unsupported(format!(
+                        "configured action `{symbol}` expects guard + {n_args} args + 1 fallback"
+                    )));
+                }
+                let guard_value = call_value_operand(instr, 0, "configured action guard")?;
+                if self.llvm_bit_width(guard_value.get_type())? != 1 {
+                    return Err(ImportError::Unsupported(format!(
+                        "configured action `{symbol}` guard must be i1"
+                    )));
+                }
+                let fallback_value =
+                    call_value_operand(instr, (n_args + 1) as u32, "configured action fallback")?;
+                if fallback_value.get_type() != result_type {
+                    return Err(ImportError::Unsupported(format!(
+                        "configured action `{symbol}` fallback type must match its result type"
+                    )));
+                }
+                let guard = args[0];
+                let action_params = params[1..1 + n_args].to_vec();
+                let fallback = args[n_args + 1];
+                self.register_configured_action(symbol, &action_params, &output_tys, execution)?;
+                let call = fctx.emit(
+                    cur,
+                    Value::Op(Stmt::ActionCall {
+                        name: symbol.into(),
+                        guard,
+                        args: args[1..1 + n_args].to_vec(),
+                        fallbacks: vec![fallback],
+                        output_tys: output_tys.clone(),
+                        result_ty,
+                    }),
+                );
+                let output = fctx.emit(
+                    cur,
+                    Value::Op(Stmt::ActionOutput {
+                        call,
+                        idx: 0,
+                        ty: result_tid,
+                    }),
+                );
+                (call, output)
+            }
+        };
+        let bits = (0..self.llvm_bit_width(instr.get_type())?)
+            .map(|bit| {
+                fctx.emit(
+                    cur,
+                    Value::Op(Stmt::Shuffle {
+                        result_bits: vec![(bit as u8, output)],
+                        ty: self.bit_tid,
+                    }),
+                )
+            })
+            .collect();
+        let _ = call;
+        Ok(Some(bits))
+    }
+
+    /// Lower the `__portal_aes128_encrypt_block` circuit extern (the
+    /// `volar_ir_common::aes_extern` contract): a declaration-only
+    /// `void (u64 out[2], const u64 key[2], const u64 pt[2])` call becomes
+    /// an IR-level `Stmt::OracleCall` against the `aes128_encrypt_block`
+    /// oracle, reading key/plaintext through the memory-intrinsic pointer
+    /// machinery and storing the ciphertext back through `out`.
+    ///
+    /// The oracle is registered in the module's oracle table on first use so
+    /// the vaffle→IR lowering validates every emitted call against it.
+    fn translate_aes_extern(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        instr: InstructionValue<'ctx>,
+    ) -> IResult<()> {
+        let n_args = instr.get_num_operands().saturating_sub(1);
+        if n_args != 3 {
+            return Err(ImportError::Unsupported(format!(
+                "{} takes exactly 3 pointer args (out, key, pt)",
+                aes_extern::LLVM_SYMBOL
+            )));
+        }
+        let operand_ptr = |index: u32| -> IResult<PointerValue<'ctx>> {
+            match call_value_operand(instr, index, "aes128 extern pointer arg")? {
+                BasicValueEnum::PointerValue(p) => Ok(p),
+                _ => Err(ImportError::Unsupported(format!(
+                    "{} arg {index} must be a pointer",
+                    aes_extern::LLVM_SYMBOL
+                ))),
+            }
+        };
+        let out = self.intrinsic_pointer(fctx, operand_ptr(0)?)?;
+        let key = self.intrinsic_pointer(fctx, operand_ptr(1)?)?;
+        let pt = self.intrinsic_pointer(fctx, operand_ptr(2)?)?;
+        self.validate_intrinsic_pointer(&out, aes_extern::CT_BITS / 8)?;
+        self.validate_intrinsic_pointer(&key, aes_extern::KEY_BITS / 8)?;
+        self.validate_intrinsic_pointer(&pt, aes_extern::PT_BITS / 8)?;
+
+        let key_bits = self.intrinsic_load(fctx, &key, aes_extern::KEY_BITS / 8)?;
+        let pt_bits = self.intrinsic_load(fctx, &pt, aes_extern::PT_BITS / 8)?;
+
+        // Oracle signature: params [u64; 4] = (key_lo, key_hi, pt_lo, pt_hi),
+        // results [u64; 2] = (ct_lo, ct_hi), each u64 little-endian
+        // byte-packed (matching the contract's byte-major, LSB-first-in-byte
+        // bit layout).
+        let u64_tid = self.types.primitive(Type::_64);
+        if !self
+            .oracles
+            .iter()
+            .any(|o| o.name == aes_extern::ORACLE_NAME)
+        {
+            self.oracles.push(OracleDecl {
+                name: aes_extern::ORACLE_NAME.into(),
+                params: vec![u64_tid; 4],
+                results: vec![u64_tid; 2],
+
+                execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
+            });
+        }
+        let output_tys = vec![u64_tid; 2];
+        let result_ty = self.types.intern(IrType::Tuple(output_tys.clone()));
+
+        let cur = fctx.current;
+        let arg_vars: Vec<ValueId> = key_bits
+            .iter()
+            .chain(pt_bits.iter())
+            .copied()
+            .collect::<Vec<_>>()
+            .chunks(64)
+            .map(|chunk| {
+                fctx.emit(
+                    cur,
+                    Value::Op(Stmt::Merge {
+                        parts: chunk.to_vec(),
+                        ty: u64_tid,
+                    }),
+                )
+            })
+            .collect();
+        let call = fctx.emit(
+            cur,
+            Value::Op(Stmt::OracleCall {
+                name: aes_extern::ORACLE_NAME.into(),
+                args: arg_vars,
+                output_tys,
+                result_ty,
+            }),
+        );
+        let mut ct_bits: Bits = Vec::with_capacity(aes_extern::CT_BITS);
+        for idx in 0..2usize {
+            let word = fctx.emit(
+                cur,
+                Value::Op(Stmt::OracleOutput {
+                    call,
+                    idx,
+                    ty: u64_tid,
+                }),
+            );
+            for b in 0..64u8 {
+                ct_bits.push(fctx.emit(
+                    cur,
+                    Value::Op(Stmt::Shuffle {
+                        result_bits: vec![(b, word)],
+                        ty: self.bit_tid,
+                    }),
+                ));
+            }
+        }
+        self.intrinsic_store(fctx, &out, &ct_bits)?;
+        Ok(())
     }
 
     /// Lower supported LLVM memory intrinsics before they can become a
@@ -1954,13 +2451,9 @@ impl<'ctx> Importer<'ctx> {
             });
         }
         let ret_bits = self.llvm_bit_width(instr.get_type())?;
-        volar_ir_common::lower_field_call(
-            symbol,
-            &field_args,
-            ret_bits,
-            &mut self.types,
-            |stmt| fctx.emit(cur, Value::Op(stmt)),
-        )
+        volar_ir_common::lower_field_call(symbol, &field_args, ret_bits, &mut self.types, |stmt| {
+            fctx.emit(cur, Value::Op(stmt))
+        })
         .map_err(|err| ImportError::Unsupported(format!("volar.field: {err:?}")))
     }
 
@@ -2239,12 +2732,7 @@ impl<'ctx> Importer<'ctx> {
     }
 
     /// Project `src` into `n` bit values. `src` is the `StackAlloc` result.
-    fn explode_pointer(
-        &mut self,
-        fctx: &mut FuncCtx<'ctx>,
-        block: BlockId,
-        src: ValueId,
-    ) -> Bits {
+    fn explode_pointer(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, src: ValueId) -> Bits {
         (0..self.pointer_bits)
             .map(|i| {
                 fctx.emit(
@@ -2315,10 +2803,7 @@ impl<'ctx> Importer<'ctx> {
         for sp in sps {
             let addr = fctx.emit(
                 entry,
-                Value::Op(Stmt::Const(
-                    Constant { hi: 0, lo: 0 },
-                    self.addr_tid,
-                )),
+                Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, self.addr_tid)),
             );
             let val = fctx.emit(
                 entry,
@@ -2348,10 +2833,7 @@ impl<'ctx> Importer<'ctx> {
             for &(sp, val) in &saved {
                 let addr = fctx.emit(
                     BlockId(i),
-                    Value::Op(Stmt::Const(
-                        Constant { hi: 0, lo: 0 },
-                        self.addr_tid,
-                    )),
+                    Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, self.addr_tid)),
                 );
                 fctx.emit(
                     BlockId(i),
@@ -2393,16 +2875,19 @@ impl<'ctx> Importer<'ctx> {
             .collect();
         let call = fctx.emit(block, Value::Call { func, args });
         (0..result_width)
-            .map(|i| fctx.emit(block, Value::Output { value: call, idx: i }))
+            .map(|i| {
+                fctx.emit(
+                    block,
+                    Value::Output {
+                        value: call,
+                        idx: i,
+                    },
+                )
+            })
             .collect()
     }
 
-    fn merge_operand(
-        &mut self,
-        fctx: &mut FuncCtx<'ctx>,
-        block: BlockId,
-        bits: &Bits,
-    ) -> ValueId {
+    fn merge_operand(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, bits: &Bits) -> ValueId {
         if bits.len() <= 1 {
             return bits[0];
         }
@@ -2934,20 +3419,20 @@ impl<'ctx> Importer<'ctx> {
             };
             c.bc_not(tag_bit)
         };
-        let stack_matches =
-            self.dispatch_id_matches(fctx, cur, ptr_bits, &allocas, not_tag);
+        let stack_matches = self.dispatch_id_matches(fctx, cur, ptr_bits, &allocas, not_tag);
         let zero = self.bc_const_at(fctx, cur, false);
         let mut result = vec![zero; n_bits];
         for (candidate_idx, &sid) in allocas.iter().enumerate() {
-            let loaded = self.stack_load_dynamic(
+            let loaded =
+                self.stack_load_dynamic(fctx, sid, ptr_bits[0], &offset_bits, pointee_ty, n_bits);
+            result = mux_bits(
+                self,
                 fctx,
-                sid,
-                ptr_bits[0],
-                &offset_bits,
-                pointee_ty,
-                n_bits,
+                cur,
+                stack_matches[candidate_idx],
+                &loaded,
+                &result,
             );
-            result = mux_bits(self, fctx, cur, stack_matches[candidate_idx], &loaded, &result);
         }
 
         let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
@@ -2995,8 +3480,7 @@ impl<'ctx> Importer<'ctx> {
             };
             c.bc_not(tag_bit)
         };
-        let stack_matches =
-            self.dispatch_id_matches(fctx, cur, ptr_bits, &allocas, not_tag);
+        let stack_matches = self.dispatch_id_matches(fctx, cur, ptr_bits, &allocas, not_tag);
         let bit_tid = self.bit_tid;
         for (candidate_idx, &sid) in allocas.iter().enumerate() {
             let old =
@@ -3442,12 +3926,10 @@ fn intrinsic_ranges_overlap(
     n_bytes: usize,
 ) -> IResult<bool> {
     match (dest, src) {
-        (
-            IntrinsicPointer::Stack { ptr: dest, .. },
-            IntrinsicPointer::Stack { ptr: src, .. },
-        ) if dest.storage == src.storage
-            && dest.const_offset.is_some()
-            && src.const_offset.is_some() =>
+        (IntrinsicPointer::Stack { ptr: dest, .. }, IntrinsicPointer::Stack { ptr: src, .. })
+            if dest.storage == src.storage
+                && dest.const_offset.is_some()
+                && src.const_offset.is_some() =>
         {
             let (dest_start, dest_end) = dest.intrinsic_range(n_bytes)?;
             let (src_start, src_end) = src.intrinsic_range(n_bytes)?;
@@ -3612,11 +4094,7 @@ impl<'a, 'ctx> BitCircuitBuilder for Ctx<'a, 'ctx> {
         )
     }
 
-    fn bc_poly(
-        &mut self,
-        coeffs: PolyCoeffs<ValueId>,
-        constant: u128,
-    ) -> ValueId {
+    fn bc_poly(&mut self, coeffs: PolyCoeffs<ValueId>, constant: u128) -> ValueId {
         let ty = self.bit_tid;
         self.fctx.emit(
             self.block,

@@ -448,6 +448,8 @@ pub fn build_oracle_decls(types: &mut TypeTable, raw: u8) -> Vec<OracleDecl> {
                 name: format!("o{i}"),
                 params: vec![types.primitive(param_ty)],
                 results: vec![types.primitive(result_ty)],
+
+                execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
             }
         })
         .collect()

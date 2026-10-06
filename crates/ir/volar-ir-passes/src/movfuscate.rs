@@ -97,13 +97,10 @@ fn bit_width_for_eq(ir_types: &[IRType], ty: IRTypeId) -> usize {
             _ => panic!("bit_width_for_eq: unsupported primitive type {:?}", p),
         },
         IRType::Vec(n, inner) => *n * bit_width_for_eq(ir_types, *inner),
-        IRType::ExtField { wrapped, degree, .. } => {
-            *degree as usize * bit_width_for_eq(ir_types, *wrapped)
-        }
-        IRType::Tuple(parts) => parts
-            .iter()
-            .map(|&p| bit_width_for_eq(ir_types, p))
-            .sum(),
+        IRType::ExtField {
+            wrapped, degree, ..
+        } => *degree as usize * bit_width_for_eq(ir_types, *wrapped),
+        IRType::Tuple(parts) => parts.iter().map(|&p| bit_width_for_eq(ir_types, p)).sum(),
         IRType::Block { .. } => 32,
         other => panic!("bit_width_for_eq: unsupported type {:?}", other),
     }
@@ -2980,6 +2977,9 @@ fn movfuscate_ir_impl<P: Clone>(
     // Ensure IRType::Bit is present in the types table.
     let bit_type_id = types.intern(IRType::Primitive(Type::Bit));
 
+    // Normalize control before allocating PC width. Unreachable blocks would
+    // otherwise each emit an equality test which is provably never active.
+    crate::cfg_layout::layout_cfg_for_movfuscation(blocks);
     let n = blocks.blocks.len();
     if n == 1 {
         let empty_init = MovfuscAccumInit {
@@ -3112,7 +3112,7 @@ mod tests {
         IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator,
         IRType, IRTypeId, IRTypes, IRVarId,
     };
-    use volar_ir_common::{ext_field_type, Constant, Node};
+    use volar_ir_common::{Constant, Node, ext_field_type};
 
     fn aes8_ty() -> IRType {
         ext_field_type(IRTypeId(0), 8, volar_ir_common::aes8_irreducible())
@@ -3588,10 +3588,7 @@ mod tests {
 
     #[test]
     fn declared_poly_type_is_authoritative_during_type_collection() {
-        let types = IRTypes(std::vec![
-            IRType::Primitive(Type::Bit),
-            galois64_ty(),
-        ]);
+        let types = IRTypes(std::vec![IRType::Primitive(Type::Bit), galois64_ty(),]);
         let block = IRBlock {
             params: std::vec![IRTypeId(0)],
             stmts: std::vec![Node::new(
@@ -3623,10 +3620,7 @@ mod tests {
     ///   Block 1 (1 param `x: G8`): Jmp(Return, [x])
     fn two_block_ir_g8() -> (IRBlocks, IRTypes) {
         // types[0] = Bit, types[1] = Galois8AES
-        let types = IRTypes(std::vec![
-            IRType::Primitive(Type::Bit),
-            aes8_ty()
-        ]);
+        let types = IRTypes(std::vec![IRType::Primitive(Type::Bit), aes8_ty()]);
         let g8 = IRTypeId(1);
         let bit = IRTypeId(0);
         let blocks = IRBlocks::new(std::vec![
@@ -3743,10 +3737,7 @@ mod tests {
     ///   Block 1: params (x: G8);         Jmp(Return, [x])
     #[test]
     fn test_ir_mixed_types_two_block() {
-        let mut types = IRTypes(std::vec![
-            IRType::Primitive(Type::Bit),
-            aes8_ty()
-        ]);
+        let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit), aes8_ty()]);
         let bit = IRTypeId(0);
         let g8 = IRTypeId(1);
 
@@ -3789,10 +3780,7 @@ mod tests {
             matches!(types.0[p[0].0 as usize], IRType::Primitive(Type::Bit)),
             "PC slot"
         );
-        assert!(
-            is_aes8_type(&types.0[p[1].0 as usize]),
-            "state slot 0"
-        );
+        assert!(is_aes8_type(&types.0[p[1].0 as usize]), "state slot 0");
         assert!(
             matches!(types.0[p[2].0 as usize], IRType::Primitive(Type::Bit)),
             "state slot 1"
@@ -3869,12 +3857,9 @@ mod tests {
                     ),
                 },
             },
-            // Block 2: unreachable from 0/1 in this synthetic example, but
-            // movfuscation processes every block unconditionally regardless
-            // of reachability (each gets its own independent is_active/
-            // dispatch entry) -- this just gives `compute_return_slot_types`
-            // a real `Return` to derive `ret_width` from, without disturbing
-            // blocks 0/1's own Jmp-based pass-through behavior under test.
+            // Block 2 is disconnected and provides a real Return shape for
+            // return-width inference; main's movfuscator excludes it from
+            // executable accumulation steps.
             IRBlock {
                 params: std::vec![bit.clone(), bit.clone()],
                 stmts: std::vec![],
@@ -3886,7 +3871,7 @@ mod tests {
 
         let (result, _boundary, accum_info) = movfuscate_ir_with_boundary(&blocks, &mut types);
         assert!(result.is_movfuscated());
-        assert_eq!(accum_info.steps.len(), 3);
+        assert_eq!(accum_info.steps.len(), 2);
 
         // Block 0 (steps[0]) touches slot 0 (new var, different from the
         // seed) but not slot 1 (must stay exactly accum_init's own var --
@@ -3937,10 +3922,7 @@ mod tests {
     /// instead.
     #[test]
     fn test_ir_position_type_collision_splits_into_separate_slots() {
-        let mut types = IRTypes(std::vec![
-            IRType::Primitive(Type::Bit),
-            aes8_ty()
-        ]);
+        let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit), aes8_ty()]);
         let bit = IRTypeId(0);
         let g8 = IRTypeId(1);
 
@@ -3994,8 +3976,7 @@ mod tests {
         let p = &result.blocks[0].params;
         let is_bit =
             |tid: &IRTypeId| matches!(types.0[tid.0 as usize], IRType::Primitive(Type::Bit));
-        let is_g8 =
-            |tid: &IRTypeId| is_aes8_type(&types.0[tid.0 as usize]);
+        let is_g8 = |tid: &IRTypeId| is_aes8_type(&types.0[tid.0 as usize]);
         assert!(is_bit(&p[0]), "PC slot must be Bit");
         assert!(
             is_bit(&p[1]) && is_g8(&p[2]),
@@ -4007,21 +3988,8 @@ mod tests {
         );
     }
 
-    /// Two structurally unrelated blocks (no jump connects them at all --
-    /// block 1 is unreachable from block 0 here) that merely happen to
-    /// share `(position, type)` MUST still consolidate onto one shared
-    /// slot under this scheme -- there is no dataflow-based distinction
-    /// between "provably the same value" and "coincidentally same shape"
-    /// left to make. This is safe by construction (see
-    /// `compute_static_slot_classes`'s own doc comment: block params are
-    /// never inherited across blocks, so two different blocks' params at
-    /// the same position/type can never be simultaneously live), not
-    /// merely permitted by an absence of a counterexample -- an earlier,
-    /// much more conservative dataflow-edge scheme existed specifically
-    /// to keep cases like this on separate slots, and was found (see
-    /// project memory) to make no difference to a real "wrong answer" bug
-    /// this shape was suspected of causing; the actual root cause was
-    /// unrelated to slot allocation entirely.
+    /// Main's movfuscator excludes disconnected blocks before assigning the
+    /// executable static state layout.
     #[test]
     fn test_ir_unrelated_same_position_same_type_blocks_share_one_slot() {
         let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit)]);
@@ -4055,13 +4023,9 @@ mod tests {
 
         let result = movfuscate_ir(&blocks, &mut types);
         assert!(result.is_movfuscated());
-        // pc(1) + state(1) -- one shared slot for both blocks' position 0,
-        // despite no edge connecting them.
-        assert_eq!(
-            result.blocks[0].params.len(),
-            2,
-            "pc(1) + state(1 shared slot)"
-        );
+        // Only the dispatch pc remains; the disconnected block contributes no
+        // state slot to the executable layout.
+        assert_eq!(result.blocks[0].params.len(), 1, "pc(1) only");
     }
 
     /// Regression guard for the common case: blocks that genuinely *agree*
@@ -4088,10 +4052,7 @@ mod tests {
     fn test_ir_poly_body_subst_correct() {
         // Block 0 (a: G8): c = Poly{[a]:1, constant:0} (= identity); Jmp(B1,[c])
         // Block 1 (x: G8): Jmp(Return,[x])
-        let mut types = IRTypes(std::vec![
-            IRType::Primitive(Type::Bit),
-            aes8_ty()
-        ]);
+        let mut types = IRTypes(std::vec![IRType::Primitive(Type::Bit), aes8_ty()]);
         let g8 = IRTypeId(1);
         let mut coeffs = PolyCoeffs::new();
         coeffs.insert(std::vec![IRVarId(0)], 1u8);

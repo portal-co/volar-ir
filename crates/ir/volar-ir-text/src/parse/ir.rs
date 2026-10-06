@@ -528,6 +528,8 @@ pub(crate) fn parse_saved_ir_blocks(s: &str) -> Result<SavedIrBlocks, ParseError
                     name,
                     params,
                     results,
+
+                    execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
                 });
             }
             "action" => {
@@ -540,6 +542,8 @@ pub(crate) fn parse_saved_ir_blocks(s: &str) -> Result<SavedIrBlocks, ParseError
                     name,
                     params,
                     results,
+
+                    execution: volar_ir_common::ActionExecutionPolicy::legacy_evaluator(),
                 });
             }
             "rng" => {

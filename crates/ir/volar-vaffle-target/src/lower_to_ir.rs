@@ -63,8 +63,8 @@ use volar_ir::ir::{
 };
 use volar_ir_common::{Constant, IrType, PolyCoeffs, Stmt, StorageId, Type, TypeId};
 use volar_lir::circuits::{
-    bc_add, frame_read_cont, frame_reload, frame_spill, frame_write_cont, frame_write_ret, n_packs,
-    pack_bits, unpack_words, BitCircuitBuilder, FrameLayout, StackPtr, StorageEmitter, PACK_W,
+    BitCircuitBuilder, FrameLayout, PACK_W, StackPtr, StorageEmitter, bc_add, frame_read_cont,
+    frame_reload, frame_spill, frame_write_cont, frame_write_ret, n_packs, pack_bits, unpack_words,
 };
 
 /// Number of bits packed into a single `Vec(PACK_W, Bit)` word at block
@@ -170,6 +170,25 @@ const ADDR_TID: TypeId = TypeId(1); // Vec(module.pointer_width, Bit)
 /// `Vec(PACK_W, Bit)` — the packed word type.  Index 2 in the type table.
 const PACK_TID: TypeId = TypeId(2);
 
+/// Return the side annotations on the first function body's entry parameters.
+/// The VAFFLE arena keeps per-value side metadata even though lowered IR
+/// block parameters are represented by types alone, so VC callers need this
+/// parallel projection when constructing Boolar input ownership.
+pub fn entry_param_sides<P: Clone>(module: &Module<P>) -> Option<Vec<Option<volar_side::SideId>>> {
+    let body = module.funcs.iter().find_map(|func| match func {
+        FuncDecl::Body(body) => Some(body),
+        _ => None,
+    })?;
+    let entry = &body.blocks[body.entry.0];
+    Some(
+        entry
+            .params
+            .iter()
+            .map(|(value, _)| body.values[value.0].side)
+            .collect(),
+    )
+}
+
 // ============================================================================
 // BlockEmitter — implements BitCircuitBuilder + StorageEmitter
 // ============================================================================
@@ -178,6 +197,7 @@ struct BlockEmitter<P: Clone = ()> {
     params: Vec<IRTypeId>,
     stmts: Vec<volar_ir_common::Node<IRStmt, P>>,
     current_prov: Option<P>,
+    current_side: Option<volar_side::SideId>,
     next_var: u32,
 }
 
@@ -188,11 +208,15 @@ impl<P: Clone> BlockEmitter<P> {
             params,
             stmts: Vec::new(),
             current_prov: None,
+            current_side: None,
             next_var,
         }
     }
     fn set_prov(&mut self, prov: P) {
         self.current_prov = Some(prov);
+    }
+    fn set_side(&mut self, side: Option<volar_side::SideId>) {
+        self.current_side = side;
     }
     fn emit(&mut self, stmt: IRStmt) -> IRVarId {
         let id = IRVarId(self.next_var);
@@ -200,7 +224,7 @@ impl<P: Clone> BlockEmitter<P> {
         let prov = self.current_prov.clone()
             .expect("BlockEmitter::emit called before set_prov — every emitted stmt must trace back to a source value's provenance");
         self.stmts
-            .push(volar_ir_common::Node::new(stmt, prov, None));
+            .push(volar_ir_common::Node::new(stmt, prov, self.current_side));
         id
     }
     fn finish(self, terminator: IRTerminator) -> IRBlock<P> {
@@ -349,10 +373,7 @@ fn remap_type_id(
                 results: results_ir,
             }
         }
-        IrType::PrimeField { k, n } => IrType::PrimeField {
-            k,
-            n: n.clone(),
-        },
+        IrType::PrimeField { k, n } => IrType::PrimeField { k, n: n.clone() },
         IrType::ExtField {
             wrapped,
             degree,
@@ -472,6 +493,43 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             })
             .collect();
 
+        let oracles = module
+            .oracles
+            .iter()
+            .map(|decl| OracleDecl {
+                name: decl.name.clone(),
+                params: decl
+                    .params
+                    .iter()
+                    .map(|ty| type_map[ty.0 as usize])
+                    .collect(),
+                results: decl
+                    .results
+                    .iter()
+                    .map(|ty| type_map[ty.0 as usize])
+                    .collect(),
+                execution: decl.execution,
+            })
+            .collect();
+        let actions = module
+            .actions
+            .iter()
+            .map(|decl| ActionDecl {
+                name: decl.name.clone(),
+                params: decl
+                    .params
+                    .iter()
+                    .map(|ty| type_map[ty.0 as usize])
+                    .collect(),
+                results: decl
+                    .results
+                    .iter()
+                    .map(|ty| type_map[ty.0 as usize])
+                    .collect(),
+                execution: decl.execution,
+            })
+            .collect();
+
         LowerCtx {
             module,
             pointer_bits,
@@ -479,8 +537,8 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             type_map,
             func_info: Vec::new(),
             blocks: Vec::new(),
-            oracles: module.oracles.clone(),
-            actions: module.actions.clone(),
+            oracles,
+            actions,
             extra_blocks: Vec::new(),
             total_blocks: 0,
             pre_init,
@@ -833,6 +891,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         let n_param_words = info.n_param_words;
         let n_params = info.n_params;
         let cross_block_values = info.cross_block_values.clone();
+        let value_sides = compute_effective_sides(&body.values);
 
         for (vaffle_bi, vaffle_block) in body.blocks.iter().enumerate() {
             let ir_bi = entry_block_offset + vaffle_bi;
@@ -996,6 +1055,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 for &svid in before_call.iter() {
                     future_uses.consume_value(&body.values[svid.0].kind);
                     current_em.set_prov(body.values[svid.0].prov.clone());
+                    current_em.set_side(value_sides[svid.0]);
                     match &body.values[svid.0].kind {
                         Value::Op(stmt) => {
                             let ir_stmt = translate_stmt(stmt, &val_map, &self.type_map);
@@ -1003,17 +1063,9 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             val_map.insert(svid.0, id);
                         }
                         Value::StackAlloc {
-                            elem_ty,
-                            count,
-                            sp,
-                            ..
+                            elem_ty, count, sp, ..
                         } => {
-                            let addr = self.emit_stack_bump(
-                                &mut current_em,
-                                *elem_ty,
-                                *count,
-                                *sp,
-                            );
+                            let addr = self.emit_stack_bump(&mut current_em, *elem_ty, *count, *sp);
                             val_map.insert(svid.0, addr);
                         }
                         Value::PtrLoad { ptr, .. } => {
@@ -1064,6 +1116,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     Some(call_vid) => {
                         future_uses.consume_value(&body.values[call_vid.0].kind);
                         current_em.set_prov(body.values[call_vid.0].prov.clone());
+                        current_em.set_side(value_sides[call_vid.0]);
                         if let Value::Call {
                             func: callee_fid,
                             args: call_args,
@@ -1212,17 +1265,17 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             let mut cont_em = BlockEmitter::new(cont_params);
                             // Continuation infrastructure gets the call stmt's provenance.
                             cont_em.set_prov(body.values[call_vid.0].prov.clone());
+                            cont_em.set_side(value_sides[call_vid.0]);
 
                             // Unpack SP.
                             let cont_sp_word_ids: Vec<IRVarId> =
                                 (0..sp_packs as u32).map(IRVarId).collect();
-                            let cont_sp_bits =
-                                unpack_words(
-                                    &mut cont_em,
-                                    &cont_sp_word_ids,
-                                    self.pointer_bits,
-                                    PACK_W,
-                                );
+                            let cont_sp_bits = unpack_words(
+                                &mut cont_em,
+                                &cont_sp_word_ids,
+                                self.pointer_bits,
+                                PACK_W,
+                            );
 
                             // Unpack return value.
                             if n_ret_bits_orig > 0 {
@@ -1670,9 +1723,8 @@ impl ValueMap {
     }
 
     fn required(&self, value: usize) -> IRVarId {
-        self.get(value).unwrap_or_else(|| {
-            panic!("lower_function: VAFFLE ValueId {value} has no IR mapping")
-        })
+        self.get(value)
+            .unwrap_or_else(|| panic!("lower_function: VAFFLE ValueId {value} has no IR mapping"))
     }
 
     fn contains_key(&self, value: usize) -> bool {
@@ -1856,6 +1908,37 @@ fn collect_uses_into<P: Clone, S: UseSink>(
         collect_value_uses(&values[vid.0].kind, uses);
     }
     collect_terminator_uses(term, uses);
+}
+
+/// Resolve each arena node's inherited side once in SSA order. Explicitly
+/// tagged values are introduction points; untagged values join the effective
+/// sides of their operands, matching the VC taint propagation contract.
+fn compute_effective_sides<P: Clone>(
+    values: &[volar_ir_common::Node<Value, P>],
+) -> Vec<Option<volar_side::SideId>> {
+    struct SideSink(Vec<usize>);
+    impl UseSink for SideSink {
+        fn add_use(&mut self, value: usize) {
+            self.0.push(value);
+        }
+    }
+
+    let mut sides = Vec::with_capacity(values.len());
+    for node in values {
+        if node.side.is_some() {
+            sides.push(node.side);
+            continue;
+        }
+        let mut operands = SideSink(Vec::new());
+        collect_value_uses(&node.kind, &mut operands);
+        let operand_sides: Vec<_> = operands
+            .0
+            .iter()
+            .map(|&value| sides.get(value).copied().flatten())
+            .collect();
+        sides.push(volar_side::propagate(&operand_sides));
+    }
+    sides
 }
 
 fn collect_value_uses<S: UseSink>(val: &Value, out: &mut S) {
@@ -2048,16 +2131,20 @@ pub(crate) fn compute_owner(blocks: &[Block], n_values: usize) -> Vec<usize> {
     let mut owner = vec![usize::MAX; n_values];
     for (bi, block) in blocks.iter().enumerate() {
         for &(vid, _ty) in &block.params {
-            *owner
-                .get_mut(vid.0)
-                .unwrap_or_else(|| panic!("VAFFLE parameter ValueId {} is outside its value arena", vid.0)) =
-                bi;
+            *owner.get_mut(vid.0).unwrap_or_else(|| {
+                panic!(
+                    "VAFFLE parameter ValueId {} is outside its value arena",
+                    vid.0
+                )
+            }) = bi;
         }
         for &vid in &block.stmts {
-            *owner
-                .get_mut(vid.0)
-                .unwrap_or_else(|| panic!("VAFFLE statement ValueId {} is outside its value arena", vid.0)) =
-                bi;
+            *owner.get_mut(vid.0).unwrap_or_else(|| {
+                panic!(
+                    "VAFFLE statement ValueId {} is outside its value arena",
+                    vid.0
+                )
+            }) = bi;
         }
     }
     owner
@@ -2079,9 +2166,9 @@ fn ir_type_bit_width(types: &IRTypes, tid: TypeId) -> usize {
         IrType::Vec(n, inner) => *n * ir_type_bit_width(types, *inner),
         IrType::Tuple(parts) => parts.iter().map(|&p| ir_type_bit_width(types, p)).sum(),
         IrType::Block { .. } | IrType::Func { .. } => 32,
-        IrType::ExtField { wrapped, degree, .. } => {
-            *degree as usize * ir_type_bit_width(types, *wrapped)
-        }
+        IrType::ExtField {
+            wrapped, degree, ..
+        } => *degree as usize * ir_type_bit_width(types, *wrapped),
         IrType::PrimeField { k, .. } => *k as usize,
         _ => panic!("ir_type_bit_width: unhandled IrType variant — add bit-width calculation"),
     }
@@ -2529,10 +2616,7 @@ mod tests {
             storage: data,
             sp,
         }); // 1
-        vals0.push(Value::Op(Stmt::Const(
-            Constant { hi: 0, lo: 0 },
-            addr_tid,
-        ))); // 2: store address
+        vals0.push(Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, addr_tid))); // 2: store address
         vals0.push(Value::Op(Stmt::StorageWrite {
             storage: data,
             src: ValueId(0),
@@ -2543,10 +2627,7 @@ mod tests {
             func: FuncId(1),
             args: std::vec![ValueId(0)],
         }); // 4
-        vals0.push(Value::Op(Stmt::Const(
-            Constant { hi: 0, lo: 0 },
-            addr_tid,
-        ))); // 5: reload address
+        vals0.push(Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, addr_tid))); // 5: reload address
         vals0.push(Value::Op(Stmt::StorageRead {
             storage: data,
             ty: bit_tid,
@@ -2610,8 +2691,14 @@ mod tests {
                 }
             }
         }
-        assert!(saw_sp_read, "StackAlloc must read its virtual stack pointer");
-        assert!(saw_sp_write, "StackAlloc must write the grown stack pointer");
+        assert!(
+            saw_sp_read,
+            "StackAlloc must read its virtual stack pointer"
+        );
+        assert!(
+            saw_sp_write,
+            "StackAlloc must write the grown stack pointer"
+        );
         assert!(
             saw_data,
             "alloca data storage must survive lowering unchanged"

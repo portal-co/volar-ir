@@ -35,23 +35,21 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use volar_ir::boolar::LaneId;
 use volar_ir::circuit::VCircuit;
-use volar_ir::gadget::{
-    AuxSource, GadgetBinding, GadgetLibrary, GadgetSpec, Port, PortKind,
-};
+use volar_ir::gadget::{AuxSource, GadgetBinding, GadgetLibrary, GadgetSpec, Port, PortKind};
 use volar_ir::ir::IRBlocks;
 use volar_ir::region::{RegionEntry, RegionTable};
 use volar_ir::typed_gadget::TypedRegionError;
 use volar_ir::typed_gadget::{
-    constant_bit, typed_bit_width, TypedAnchor, TypedAuxSource, TypedGadgetBinding,
-    TypedGadgetError, TypedGadgetLibrary, TypedGadgetSpec, TypedRegionTable,
+    TypedAnchor, TypedAuxSource, TypedGadgetBinding, TypedGadgetError, TypedGadgetLibrary,
+    TypedGadgetSpec, TypedRegionTable, constant_bit, typed_bit_width,
 };
-use volar_ir::boolar::LaneId;
 use volar_ir_common::{StorageId, Type};
 
-use crate::lower_ir_to_boolar::{LoweredTables, ExternalLoweringError};
+use crate::lower_ir_to_boolar::{ExternalLoweringError, LoweredTables};
 use crate::movfuscate::{compute_return_slot_types, compute_static_slot_classes};
-use crate::to_reversible::{VarWireMap, UnknownVar};
+use crate::to_reversible::{UnknownVar, VarWireMap};
 
 // ============================================================================
 // Typed table → bit-level table
@@ -66,7 +64,10 @@ pub enum LowerTypedError {
     UnknownAnchorCarrier(TypedAnchor),
     /// The anchor kind is not supported at this lowering level (e.g.
     /// `Output` without typed output widths).
-    UnsupportedAnchor { anchor: TypedAnchor, level: &'static str },
+    UnsupportedAnchor {
+        anchor: TypedAnchor,
+        level: &'static str,
+    },
     /// The anchor's bit range extends past the carrier's lowered width.
     RangeOutOfRange {
         anchor: TypedAnchor,
@@ -75,7 +76,10 @@ pub enum LowerTypedError {
         width: usize,
     },
     /// A storage-anchor type has no lane in the lowering run (no traffic).
-    UnknownStorageLane { storage: StorageId, ty: volar_ir::ir::IRTypeId },
+    UnknownStorageLane {
+        storage: StorageId,
+        ty: volar_ir::ir::IRTypeId,
+    },
     /// A wrapped `(StorageId, LaneId)` space has no recorded element-address
     /// width.
     MissingAddrWidth { storage: StorageId, lane: LaneId },
@@ -84,7 +88,11 @@ pub enum LowerTypedError {
     /// The bound gadget name is not in the typed library.
     UnknownGadget(String),
     /// The number of aux sources does not match the declared `Aux` ports.
-    AuxSourceCountMismatch { gadget: String, expected: usize, got: usize },
+    AuxSourceCountMismatch {
+        gadget: String,
+        expected: usize,
+        got: usize,
+    },
     /// A `Const` aux source has the wrong word count for its port.
     AuxWordCountMismatch {
         gadget: String,
@@ -180,27 +188,25 @@ pub fn lower_typed_region_table(
                 addr_start,
                 addr_len,
             } => {
-                let lane = lane_of(tables, *ty)
-                    .ok_or(LowerTypedError::UnknownStorageLane {
-                        storage: *storage,
-                        ty: *ty,
-                    })?;
-                let n = *tables
-                    .addr_widths
-                    .get(&(*storage, lane))
-                    .ok_or(LowerTypedError::MissingAddrWidth {
+                let lane = lane_of(tables, *ty).ok_or(LowerTypedError::UnknownStorageLane {
+                    storage: *storage,
+                    ty: *ty,
+                })?;
+                let n = *tables.addr_widths.get(&(*storage, lane)).ok_or(
+                    LowerTypedError::MissingAddrWidth {
                         storage: *storage,
                         lane,
-                    })? as u64;
-                let planes = typed_bit_width(*ty, types)
-                    .ok_or_else(|| carrier_error(entry))? as u64;
+                    },
+                )? as u64;
+                let planes =
+                    typed_bit_width(*ty, types).ok_or_else(|| carrier_error(entry))? as u64;
                 for plane in 0..planes {
-                    let start = addr_start
-                        .checked_add(plane << n)
-                        .ok_or_else(|| LowerTypedError::StorageRangeOverflow(entry.anchor.clone()))?;
-                    start
-                        .checked_add(*addr_len)
-                        .ok_or_else(|| LowerTypedError::StorageRangeOverflow(entry.anchor.clone()))?;
+                    let start = addr_start.checked_add(plane << n).ok_or_else(|| {
+                        LowerTypedError::StorageRangeOverflow(entry.anchor.clone())
+                    })?;
+                    start.checked_add(*addr_len).ok_or_else(|| {
+                        LowerTypedError::StorageRangeOverflow(entry.anchor.clone())
+                    })?;
                     entries.push(RegionEntry {
                         anchor: volar_ir::region::WireAnchor::Storage {
                             storage: *storage,
@@ -290,7 +296,11 @@ fn param_bit_start(
 }
 
 fn lane_of(tables: &LoweredTables, ty: volar_ir::ir::IRTypeId) -> Option<LaneId> {
-    tables.lanes.iter().find(|(_, t)| **t == ty).map(|(l, _)| *l)
+    tables
+        .lanes
+        .iter()
+        .find(|(_, t)| **t == ty)
+        .map(|(l, _)| *l)
 }
 
 /// Best-effort typed view of a landed anchor for error reporting.
@@ -306,7 +316,12 @@ fn typed_view(anchor: &volar_ir::region::WireAnchor) -> TypedAnchor {
             start: *start as u16,
             len: *len as u16,
         },
-        volar_ir::region::WireAnchor::Storage { storage, lane, start, len } => TypedAnchor::Storage {
+        volar_ir::region::WireAnchor::Storage {
+            storage,
+            lane,
+            start,
+            len,
+        } => TypedAnchor::Storage {
             storage: *storage,
             ty: volar_ir::ir::IRTypeId(lane.0),
             addr_start: *start,
@@ -418,7 +433,10 @@ pub enum LowerGadgetError {
     /// The booleanized body could not be fused.
     Fusion(volar_ir::circuit::CircuitFusionError),
     /// The lowered body's boundary shape does not match the declared ports.
-    ShapeMismatch { gadget: String, reason: &'static str },
+    ShapeMismatch {
+        gadget: String,
+        reason: &'static str,
+    },
 }
 
 impl From<TypedGadgetError> for LowerGadgetError {
@@ -462,7 +480,11 @@ pub fn lower_typed_gadget(
     let total_bits: usize = spec
         .ports
         .iter()
-        .map(|p| typed_bit_width(p.ty, types).unwrap_or(0).saturating_mul(p.count))
+        .map(|p| {
+            typed_bit_width(p.ty, types)
+                .unwrap_or(0)
+                .saturating_mul(p.count)
+        })
         .sum();
     let data_bits = spec
         .data_bit_width(types)
@@ -518,13 +540,18 @@ pub enum RegionThreadError {
     /// movfuscation's slot allocation requires for anchor translation.
     Layout(&'static str),
     /// The anchor kind cannot cross this boundary.
-    UnsupportedAnchor { anchor: TypedAnchor, stage: &'static str },
+    UnsupportedAnchor {
+        anchor: TypedAnchor,
+        stage: &'static str,
+    },
     /// The anchor's carrier does not exist at this stage.
     UnknownCarrier(TypedAnchor),
     /// A bit/position arithmetic overflow.
     Overflow,
     /// A reversible wire translation found a non-contiguous range.
-    NonContiguousWires { var: u32 },
+    NonContiguousWires {
+        var: u32,
+    },
 }
 
 impl From<TypedRegionError> for RegionThreadError {
@@ -570,8 +597,7 @@ pub fn movfuscate_region_layout(
     let pc_width = crate::movfuscate::pc_bits_needed(n);
     let (state_slot_types, slot_of, _sig_fallback) =
         compute_static_slot_classes(blocks, &types_mut.0, &bit_type_id, pc_width);
-    let return_slot_types =
-        compute_return_slot_types(blocks, &types_mut.0, &bit_type_id, pc_width);
+    let return_slot_types = compute_return_slot_types(blocks, &types_mut.0, &bit_type_id, pc_width);
     Ok(MovfuscRegionLayout {
         pc_width: pc_width as u32,
         state_slot_types,
@@ -598,11 +624,14 @@ pub fn translate_regions_movfuscate(
         match &entry.anchor {
             TypedAnchor::Input { param, start, len } => {
                 let slot = slot_param(layout, 0, *param, entry)?;
-                entries.push(renamed(entry, TypedAnchor::Input {
-                    param: slot,
-                    start: *start,
-                    len: *len,
-                }));
+                entries.push(renamed(
+                    entry,
+                    TypedAnchor::Input {
+                        param: slot,
+                        start: *start,
+                        len: *len,
+                    },
+                ));
             }
             TypedAnchor::BlockInput {
                 block,
@@ -611,11 +640,14 @@ pub fn translate_regions_movfuscate(
                 len,
             } => {
                 let slot = slot_param(layout, block.0 as usize, *param, entry)?;
-                entries.push(renamed(entry, TypedAnchor::Input {
-                    param: slot,
-                    start: *start,
-                    len: *len,
-                }));
+                entries.push(renamed(
+                    entry,
+                    TypedAnchor::Input {
+                        param: slot,
+                        start: *start,
+                        len: *len,
+                    },
+                ));
             }
             TypedAnchor::Storage { .. } => entries.push(entry.clone()),
             anchor @ (TypedAnchor::Output { .. }
@@ -721,13 +753,15 @@ pub fn movfuscate_state_regions(
         }
     }
     for (k, ty) in layout.state_slot_types.iter().enumerate() {
-        let Some(regions) = slot_regions.get(k) else { break };
+        let Some(regions) = slot_regions.get(k) else {
+            break;
+        };
         if regions.is_empty() {
             continue;
         }
-        let width = typed_bit_width(*ty, types)
-            .ok_or(RegionThreadError::Layout("state slot type has no Boolean width"))?
-            as u16;
+        let width = typed_bit_width(*ty, types).ok_or(RegionThreadError::Layout(
+            "state slot type has no Boolean width",
+        ))? as u16;
         entries.push(TypedRegionEntry {
             anchor: TA::Input {
                 param: layout.pc_width + k as u32,
@@ -756,10 +790,7 @@ pub fn translate_regions_termination_flag(
             volar_ir::region::WireAnchor::Output { start, len } => {
                 let start = start.checked_add(1).ok_or(RegionThreadError::Overflow)?;
                 entries.push(RegionEntry {
-                    anchor: volar_ir::region::WireAnchor::Output {
-                        start,
-                        len: *len,
-                    },
+                    anchor: volar_ir::region::WireAnchor::Output { start, len: *len },
                     regions: entry.regions.clone(),
                 });
             }
@@ -789,13 +820,9 @@ pub fn translate_regions_to_reversible(
                 for i in 0..*len {
                     let w = map
                         .wire(volar_ir::ir::IRVarId(start + i))
-                        .ok_or(RegionThreadError::NonContiguousWires {
-                            var: start + i,
-                        })?;
+                        .ok_or(RegionThreadError::NonContiguousWires { var: start + i })?;
                     if w != first + i as usize {
-                        return Err(RegionThreadError::NonContiguousWires {
-                            var: start + i,
-                        });
+                        return Err(RegionThreadError::NonContiguousWires { var: start + i });
                     }
                 }
                 entries.push(RegionEntry {
@@ -855,9 +882,9 @@ mod tests {
     use super::*;
     use alloc::collections::BTreeSet;
     use alloc::vec;
+    use volar_ir::boolar::BIrTerminator;
     use volar_ir::circuit::{BCircuit, VCircuit};
     use volar_ir::gadget::PortKind as PK;
-    use volar_ir::boolar::BIrTerminator;
     use volar_ir::ir::{
         IRBlock, IRBlockTargetId, IRBranchTarget, IRTerminator, IRType, IRTypeId, IRVarId,
     };
@@ -897,8 +924,8 @@ mod tests {
 
     /// Evaluate a pure-gate + storage `BCircuit` (static addresses only).
     fn eval_circuit(circ: &BCircuit<()>, params: &[bool]) -> Vec<bool> {
-        use volar_ir::boolar::{BIrPreInitSegment, BIrStmt};
         use volar_ir::boolar::LaneId;
+        use volar_ir::boolar::{BIrPreInitSegment, BIrStmt};
         let mut vals: Vec<Option<bool>> = vec![None; circ.var_space() as usize];
         for (i, &b) in params.iter().enumerate() {
             vals[i] = Some(b);
@@ -918,11 +945,20 @@ mod tests {
                 BIrStmt::Or(a, b) => vals[a.0 as usize].unwrap() | vals[b.0 as usize].unwrap(),
                 BIrStmt::Xor(a, b) => vals[a.0 as usize].unwrap() ^ vals[b.0 as usize].unwrap(),
                 BIrStmt::Not(a) => !vals[a.0 as usize].unwrap(),
-                BIrStmt::StorageRead { storage: s, lane, addr } => {
+                BIrStmt::StorageRead {
+                    storage: s,
+                    lane,
+                    addr,
+                } => {
                     let flat = addr.iter().map(|a| vals[a.0 as usize].unwrap()).collect();
                     *storage.get(&((*s, *lane), flat)).unwrap_or(&false)
                 }
-                BIrStmt::StorageWrite { storage: s, lane, src, addr } => {
+                BIrStmt::StorageWrite {
+                    storage: s,
+                    lane,
+                    src,
+                    addr,
+                } => {
                     let flat = addr.iter().map(|a| vals[a.0 as usize].unwrap()).collect();
                     storage.insert(((*s, *lane), flat), vals[src.0 as usize].unwrap());
                     false
@@ -930,7 +966,10 @@ mod tests {
                 other => panic!("eval_circuit: unsupported stmt {:?}", other),
             });
         }
-        circ.outputs.iter().map(|o| vals[o.0 as usize].unwrap()).collect()
+        circ.outputs
+            .iter()
+            .map(|o| vals[o.0 as usize].unwrap())
+            .collect()
     }
 
     // ---- fixtures ----------------------------------------------------------
@@ -950,10 +989,8 @@ mod tests {
         let mut outs = Vec::with_capacity(8);
         for i in 0..8 {
             // data_i + key_i (two linear monomials) = XOR.
-            let coeffs = PolyCoeffs::from_iter([
-                (vec![IRVarId(i)], 1u8),
-                (vec![IRVarId(8 + i)], 1u8),
-            ]);
+            let coeffs =
+                PolyCoeffs::from_iter([(vec![IRVarId(i)], 1u8), (vec![IRVarId(8 + i)], 1u8)]);
             let o = body.push_stmt(
                 volar_ir::ir::IRStmt::Poly {
                     ty: bit,
@@ -1009,15 +1046,27 @@ mod tests {
         let ta = TypedRegionTable {
             entries: vec![
                 TypedRegionEntry {
-                    anchor: TA::Input { param: 0, start: 0, len: 8 },
+                    anchor: TA::Input {
+                        param: 0,
+                        start: 0,
+                        len: 8,
+                    },
                     regions: BTreeSet::from([RegionId(0)]),
                 },
                 TypedRegionEntry {
-                    anchor: TA::Input { param: 1, start: 0, len: 8 },
+                    anchor: TA::Input {
+                        param: 1,
+                        start: 0,
+                        len: 8,
+                    },
                     regions: BTreeSet::from([RegionId(1)]),
                 },
                 TypedRegionEntry {
-                    anchor: TA::Output { out: 0, start: 0, len: 8 },
+                    anchor: TA::Output {
+                        out: 0,
+                        start: 0,
+                        len: 8,
+                    },
                     regions: BTreeSet::from([RegionId(0)]),
                 },
             ],
@@ -1039,8 +1088,8 @@ mod tests {
 
         let widths = vcircuit_output_widths(&host, &types);
         assert_eq!(widths, vec![8]);
-        let bit_table = lower_typed_region_table(&ta, &tables, &types, Some(&widths))
-            .expect("table lowers");
+        let bit_table =
+            lower_typed_region_table(&ta, &tables, &types, Some(&widths)).expect("table lowers");
         // Landed anchors: inputs at the allocated bit positions, output at 0.
         assert_eq!(
             bit_table.entries[0].anchor,
@@ -1058,12 +1107,15 @@ mod tests {
             BIrTerminator::Jmp(t) => t.args.clone(),
             _ => panic!("expected Jmp(Return)"),
         };
-        assert_eq!(bit_table.validate(&BCircuit {
-            params: bir.blocks[0].params,
-            stmts: bir.blocks[0].stmts.clone(),
-            pre_init: bir.pre_init.clone(),
-            outputs,
-        }), Ok(()));
+        assert_eq!(
+            bit_table.validate(&BCircuit {
+                params: bir.blocks[0].params,
+                stmts: bir.blocks[0].stmts.clone(),
+                pre_init: bir.pre_init.clone(),
+                outputs,
+            }),
+            Ok(())
+        );
 
         // Typed gadget library + binding.
         let lib = TypedGadgetLibrary::new().with(typed_pad(w8, bit));
@@ -1086,16 +1138,17 @@ mod tests {
             &types,
         )
         .expect("bindings lower");
-        assert_eq!(
-            bindings[0].aux_sources[0],
-            AuxSource::Const(key.to_vec())
-        );
+        assert_eq!(bindings[0].aux_sources[0], AuxSource::Const(key.to_vec()));
 
         // Apply and check boundary semantics: wrapped(host, pt ⊕ k) = host(pt) ⊕ k.
         let host_bc = crate::fuse_to_circuit::to_circuit_fused_boolar(&bir).expect("fuses");
-        let applied =
-            crate::apply_gadgets::apply_gadgets(&host_bc, &bit_table, &bindings, &typed_lib_lowered)
-                .expect("applies");
+        let applied = crate::apply_gadgets::apply_gadgets(
+            &host_bc,
+            &bit_table,
+            &bindings,
+            &typed_lib_lowered,
+        )
+        .expect("applies");
         let wrapped = applied.circuit;
         let k: Vec<bool> = key.to_vec();
         for seed in 0u8..=255 {
@@ -1110,11 +1163,7 @@ mod tests {
             ct_in.extend_from_slice(&[false; 8]);
             let wrapped_out = eval_circuit(&wrapped, &ct_in);
             for i in 0..8 {
-                assert_eq!(
-                    wrapped_out[i],
-                    host_out[i] ^ k[i],
-                    "bit {i}, seed {seed}"
-                );
+                assert_eq!(wrapped_out[i], host_out[i] ^ k[i], "bit {i}, seed {seed}");
             }
         }
     }
@@ -1152,12 +1201,16 @@ mod tests {
             }],
             names: BTreeMap::new(),
         };
-        let bit_table =
-            lower_typed_region_table(&ta, &tables, &types, None).expect("lowers");
+        let bit_table = lower_typed_region_table(&ta, &tables, &types, None).expect("lowers");
         assert_eq!(bit_table.entries.len(), 8);
         for (plane, e) in bit_table.entries.iter().enumerate() {
             match &e.anchor {
-                WireAnchor::Storage { storage, lane, start, len } => {
+                WireAnchor::Storage {
+                    storage,
+                    lane,
+                    start,
+                    len,
+                } => {
                     assert_eq!(*storage, s);
                     assert_eq!(*len, 2);
                     assert_eq!(*start, (plane as u64) << 8);
@@ -1216,7 +1269,11 @@ mod tests {
             entries: vec![
                 // `Input` sorts before `BlockInput` (variant order).
                 TypedRegionEntry {
-                    anchor: TA::Input { param: 0, start: 0, len: 1 },
+                    anchor: TA::Input {
+                        param: 0,
+                        start: 0,
+                        len: 1,
+                    },
                     regions: BTreeSet::from([RegionId(8)]),
                 },
                 TypedRegionEntry {
@@ -1239,8 +1296,16 @@ mod tests {
         assert_eq!(
             anchors,
             vec![
-                TA::Input { param: 1, start: 0, len: 1 },
-                TA::Input { param: 1, start: 2, len: 3 },
+                TA::Input {
+                    param: 1,
+                    start: 0,
+                    len: 1
+                },
+                TA::Input {
+                    param: 1,
+                    start: 2,
+                    len: 3
+                },
             ]
         );
         assert!(post.validate_structure().is_ok());
@@ -1253,14 +1318,21 @@ mod tests {
         let layout = movfuscate_region_layout(&blocks, &types).unwrap();
         let pre = TypedRegionTable {
             entries: vec![TypedRegionEntry {
-                anchor: TA::Output { out: 0, start: 0, len: 1 },
+                anchor: TA::Output {
+                    out: 0,
+                    start: 0,
+                    len: 1,
+                },
                 regions: BTreeSet::from([RegionId(0)]),
             }],
             names: BTreeMap::new(),
         };
         assert!(matches!(
             translate_regions_movfuscate(&pre, &layout),
-            Err(RegionThreadError::UnsupportedAnchor { stage: "movfuscate", .. })
+            Err(RegionThreadError::UnsupportedAnchor {
+                stage: "movfuscate",
+                ..
+            })
         ));
     }
 
@@ -1280,8 +1352,16 @@ mod tests {
         assert_eq!(
             anchors,
             vec![
-                TA::Input { param: 0, start: 0, len: 1 }, // PC bit
-                TA::Input { param: 1, start: 0, len: 8 }, // state slot 0
+                TA::Input {
+                    param: 0,
+                    start: 0,
+                    len: 1
+                }, // PC bit
+                TA::Input {
+                    param: 1,
+                    start: 0,
+                    len: 8
+                }, // state slot 0
             ]
         );
         assert!(table.validate_structure().is_ok());
@@ -1298,7 +1378,11 @@ mod tests {
             translate_regions_movfuscate(
                 &TypedRegionTable {
                     entries: vec![TypedRegionEntry {
-                        anchor: TA::Input { param: 0, start: 0, len: 8 },
+                        anchor: TA::Input {
+                            param: 0,
+                            start: 0,
+                            len: 8,
+                        },
                         regions: BTreeSet::from([RegionId(8)]),
                     }],
                     names: BTreeMap::new(),
@@ -1341,7 +1425,9 @@ mod tests {
             &[TypedGadgetBinding {
                 gadget: "pad8".into(),
                 selector: RegionSelector::all_of([RegionId(0)]),
-                aux_sources: vec![key_words(&[true, false, false, false, false, false, false, false])],
+                aux_sources: vec![key_words(&[
+                    true, false, false, false, false, false, false, false,
+                ])],
                 rng_source: None,
             }],
             &lib,
@@ -1443,7 +1529,11 @@ mod tests {
         // Unknown carrier: param 5 doesn't exist.
         let ta = TypedRegionTable {
             entries: vec![TypedRegionEntry {
-                anchor: TA::Input { param: 5, start: 0, len: 1 },
+                anchor: TA::Input {
+                    param: 5,
+                    start: 0,
+                    len: 1,
+                },
                 regions: BTreeSet::from([RegionId(0)]),
             }],
             names: BTreeMap::new(),
@@ -1456,7 +1546,11 @@ mod tests {
         // Out of range: param 0 is 8 bits.
         let ta = TypedRegionTable {
             entries: vec![TypedRegionEntry {
-                anchor: TA::Input { param: 0, start: 6, len: 4 },
+                anchor: TA::Input {
+                    param: 0,
+                    start: 6,
+                    len: 4,
+                },
                 regions: BTreeSet::from([RegionId(0)]),
             }],
             names: BTreeMap::new(),
@@ -1469,7 +1563,11 @@ mod tests {
         // Output anchors require widths.
         let ta = TypedRegionTable {
             entries: vec![TypedRegionEntry {
-                anchor: TA::Output { out: 0, start: 0, len: 1 },
+                anchor: TA::Output {
+                    out: 0,
+                    start: 0,
+                    len: 1,
+                },
                 regions: BTreeSet::from([RegionId(0)]),
             }],
             names: BTreeMap::new(),
@@ -1511,7 +1609,11 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             err,
-            LowerTypedError::AuxWordCountMismatch { expected_words: 8, got_words: 1, .. }
+            LowerTypedError::AuxWordCountMismatch {
+                expected_words: 8,
+                got_words: 1,
+                ..
+            }
         ));
     }
 
@@ -1531,15 +1633,28 @@ mod tests {
         let lib = TypedGadgetLibrary::new().with(TypedGadgetSpec {
             name: "badshape".into(),
             ports: vec![
-                TypedPort { name: "data".into(), kind: PK::Data, ty: bit, count: 8 },
-                TypedPort { name: "key".into(), kind: PK::Aux, ty: bit, count: 8 },
+                TypedPort {
+                    name: "data".into(),
+                    kind: PK::Data,
+                    ty: bit,
+                    count: 8,
+                },
+                TypedPort {
+                    name: "key".into(),
+                    kind: PK::Aux,
+                    ty: bit,
+                    count: 8,
+                },
             ],
             encrypt: body,
             decrypt: None,
         });
         // validate_typed_gadget rejects the param mismatch before lowering.
         let err = lower_gadget_library(&lib, &types).unwrap_err();
-        assert!(matches!(err, LowerGadgetError::Typed(TypedGadgetError::BodyParamMismatch { .. })));
+        assert!(matches!(
+            err,
+            LowerGadgetError::Typed(TypedGadgetError::BodyParamMismatch { .. })
+        ));
         let _ = w8;
     }
 }

@@ -1274,7 +1274,10 @@ mod tests {
         assert_eq!(wires[map.y_base()..map.y_base() + 2], [false, true]);
         // guarded action bit 0 is lookup(0) XOR occurrence parity = 1.
         assert_eq!(
-            storage.get(&((sid, lane), vec![true])).copied().unwrap_or(false),
+            storage
+                .get(&((sid, lane), vec![true]))
+                .copied()
+                .unwrap_or(false),
             true
         );
         rc.inverse()
@@ -1480,7 +1483,10 @@ mod tests {
             wires[0] = x;
             rcw.apply(&mut wires, &mut storage);
             assert_eq!(
-                storage.get(&((sid, lane), vec![false])).copied().unwrap_or(false),
+                storage
+                    .get(&((sid, lane), vec![false]))
+                    .copied()
+                    .unwrap_or(false),
                 x,
                 "cell[0] must hold written bit"
             );

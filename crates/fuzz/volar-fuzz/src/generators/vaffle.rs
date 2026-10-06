@@ -427,6 +427,8 @@ fn build_vaffle_oracle_decls(type_table: &mut TypeTable, raw: u8) -> Vec<OracleD
                 name: format!("o{i}"),
                 params: vec![type_table.primitive(param_ty)],
                 results: vec![type_table.primitive(result_ty)],
+
+                execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
             }
         })
         .collect()

@@ -35,6 +35,12 @@ cc = { workspace = true, optional = true }
 [dev-dependencies]
 wat = "1.212.0"
 volar-fuzz.workspace = true
+volar-side.workspace = true
+volar-vaffle-target = { workspace = true, features = [] }
+
+[[test]]
+name = "vc_sides"
+required-features = ["wasm"]
 
 [[test]]
 name = "wasm_inlined"

@@ -935,6 +935,8 @@ mod tests {
             name: "h".to_string(),
             params: vec![],
             results: vec![u64_ty],
+
+            execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
         });
 
         // Replacement: one block, reads cont from DEFAULT[0], exits via Dyn.
@@ -966,6 +968,8 @@ mod tests {
             name: "h".to_string(),
             params: vec![],
             results: vec![u64_ty],
+
+            execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
         });
 
         let subs = [IrSubstitution::Oracle {
@@ -1008,6 +1012,8 @@ mod tests {
             name: "h".to_string(),
             params: vec![],
             results: vec![u64_ty],
+
+            execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
         });
 
         let repl = make_trivial_oracle_repl(&mut types, u64_ty);
@@ -1053,6 +1059,8 @@ mod tests {
             name: "h".to_string(),
             params: vec![],
             results: vec![u64_ty],
+
+            execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
         });
 
         let repl = make_trivial_oracle_repl(&mut types, u64_ty);
@@ -1126,11 +1134,15 @@ mod tests {
             name: "a".to_string(),
             params: vec![],
             results: vec![u64_ty],
+
+            execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
         });
         host.oracles.push(OracleDecl {
             name: "b".to_string(),
             params: vec![],
             results: vec![u64_ty],
+
+            execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
         });
 
         let repl_a = make_trivial_oracle_repl(&mut types, u64_ty);
@@ -1200,6 +1212,8 @@ mod tests {
             name: "h".to_string(),
             params: vec![],
             results: vec![u64_ty],
+
+            execution: volar_ir_common::OracleExecutionPolicy::legacy_evaluator(),
         });
         repl
     }

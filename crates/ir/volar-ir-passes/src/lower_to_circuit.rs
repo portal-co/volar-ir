@@ -48,7 +48,7 @@ use volar_ir::{
 use volar_ir_common::{Constant, PolyCoeffs};
 
 use crate::dispatch_accumulator::{
-    emit_select_bit, emit_select_slot, DispatchBitPrimitives, DispatchSlotPrimitives,
+    DispatchBitPrimitives, DispatchSlotPrimitives, emit_select_bit, emit_select_slot,
 };
 use crate::movfuscate::subst_ir;
 
@@ -753,12 +753,7 @@ impl<P: Clone> IrEmitter<P> {
         id
     }
 
-    fn emit_poly(
-        &mut self,
-        coeffs: PolyCoeffs<IRVarId>,
-        constant_lo: u128,
-        ty: IRTypeId,
-    ) -> u32 {
+    fn emit_poly(&mut self, coeffs: PolyCoeffs<IRVarId>, constant_lo: u128, ty: IRTypeId) -> u32 {
         self.push(IRStmt::Poly {
             ty,
             coeffs,

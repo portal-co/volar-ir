@@ -6,20 +6,26 @@
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use vaffle::{FuncDecl, PointerWidth, Terminator, Value};
-use volar_ir_common::{Stmt, StorageId};
+use volar_ir_common::{
+    ActionExecutionPolicy, ExternalExecutor, ExternalRevealPolicy, OracleExecutionKind,
+    OracleExecutionPolicy, Stmt, StorageId,
+};
 use volar_llvm_vaffle_import::{
     LlvmImportConfig, import_module, import_module_inlined, import_module_with_config,
 };
 
 /// Data storages and stack-pointer globals recorded by `Value::StackAlloc`.
-fn stack_sites(body: &vaffle::FuncBody) -> (std::collections::HashSet<StorageId>, std::collections::HashSet<StorageId>) {
+fn stack_sites(
+    body: &vaffle::FuncBody,
+) -> (
+    std::collections::HashSet<StorageId>,
+    std::collections::HashSet<StorageId>,
+) {
     let mut data = std::collections::HashSet::new();
     let mut sp = std::collections::HashSet::new();
     for value in &body.values {
         if let Value::StackAlloc {
-            storage,
-            sp: site,
-            ..
+            storage, sp: site, ..
         } = &value.kind
         {
             data.insert(*storage);
@@ -38,6 +44,240 @@ fn parse(source: &str) -> Context {
         ))
         .expect("valid LLVM IR fixture");
     context
+}
+
+#[test]
+fn configured_llvm_oracle_reuses_one_declaration() {
+    let source = r#"
+declare i32 @pure(i32)
+define i32 @entry(i32 %x) {
+entry:
+  %a = call i32 @pure(i32 %x)
+  %b = call i32 @pure(i32 %a)
+  ret i32 %b
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "extern-consistency.ll",
+        ))
+        .unwrap();
+    let imported = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default().with_oracle_execution(
+            "pure",
+            OracleExecutionPolicy {
+                execution: OracleExecutionKind::Assigned,
+                executor: ExternalExecutor::Evaluator,
+                reveal: ExternalRevealPolicy::BothRoles,
+                fingerprint: [0x11; 32],
+            },
+        ),
+    )
+    .expect("repeated calls reuse one declaration");
+    assert_eq!(imported.oracles.len(), 1);
+}
+
+#[test]
+fn configured_llvm_external_rejects_unresolved_symbol() {
+    let source = r#"
+define i32 @entry(i32 %x) {
+entry:
+  ret i32 %x
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "missing-external.ll",
+        ))
+        .unwrap();
+    let error = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default()
+            .with_oracle_execution("pure", OracleExecutionPolicy::legacy_evaluator()),
+    )
+    .expect_err("a configured external must name a module declaration");
+    assert!(
+        error
+            .to_string()
+            .contains("is not declared by the LLVM module")
+    );
+}
+
+#[test]
+fn configured_llvm_external_rejects_variadic_declaration() {
+    let source = r#"
+declare i32 @pure(i32, ...)
+define i32 @entry(i32 %x) {
+entry:
+  %result = call i32 (i32, ...) @pure(i32 %x)
+  ret i32 %result
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "variadic-external.ll",
+        ))
+        .unwrap();
+    let error = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default()
+            .with_oracle_execution("pure", OracleExecutionPolicy::legacy_evaluator()),
+    )
+    .expect_err("configured externals must have a fixed ABI");
+    assert!(error.to_string().contains("must not be variadic"));
+}
+
+#[test]
+fn configured_llvm_external_rejects_defined_callee() {
+    let source = r#"
+define i32 @pure(i32 %x) {
+entry:
+  ret i32 %x
+}
+define i32 @entry(i32 %x) {
+entry:
+  %result = call i32 @pure(i32 %x)
+  ret i32 %result
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "defined-external.ll",
+        ))
+        .unwrap();
+    let error = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default()
+            .with_oracle_execution("pure", OracleExecutionPolicy::legacy_evaluator()),
+    )
+    .expect_err("configured externals must not shadow defined LLVM functions");
+    assert!(error.to_string().contains("must target a declaration"));
+}
+
+#[test]
+fn configured_llvm_external_declaration_must_match_registered_abi() {
+    let source = r#"
+declare i32 @act(i1, i32, i32)
+define i32 @entry(i1 %guard, i32 %arg, i32 %fallback) {
+entry:
+  %a = call i32 @act(i1 %guard, i32 %arg, i32 %fallback)
+  ret i32 %a
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "extern-action-decl.ll",
+        ))
+        .unwrap();
+    let error = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default().with_action_execution(
+            "act",
+            2,
+            ActionExecutionPolicy::legacy_evaluator(),
+        ),
+    )
+    .expect_err("the registered action ABI must match the declaration");
+    assert!(error.to_string().contains("incompatible parameter count"));
+}
+
+#[test]
+fn configured_llvm_action_requires_i1_guard_and_matching_fallback() {
+    let source = r#"
+declare i32 @act(i8, i32, i64)
+define i32 @entry(i8 %guard, i32 %arg, i64 %fallback) {
+entry:
+  %a = call i32 @act(i8 %guard, i32 %arg, i64 %fallback)
+  ret i32 %a
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "extern-action-shape.ll",
+        ))
+        .unwrap();
+    let error = import_module_with_config(
+        &module,
+        &["entry"],
+        LlvmImportConfig::default().with_action_execution(
+            "act",
+            1,
+            ActionExecutionPolicy::legacy_evaluator(),
+        ),
+    )
+    .expect_err("action ABI must be validated");
+    assert!(error.to_string().contains("guard must be i1"));
+}
+
+#[test]
+fn configured_llvm_oracle_and_action_preserve_execution_metadata() {
+    let source = r#"
+declare i32 @pure(i32)
+declare i32 @act(i1, i32, i32)
+define i32 @entry(i32 %x, i1 %guard) {
+entry:
+  %o = call i32 @pure(i32 %x)
+  %a = call i32 @act(i1 %guard, i32 %o, i32 %x)
+  ret i32 %a
+}
+"#;
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            source.as_bytes(),
+            "extern.ll",
+        ))
+        .expect("valid LLVM external fixture");
+    let oracle_policy = OracleExecutionPolicy {
+        execution: OracleExecutionKind::Assigned,
+        executor: ExternalExecutor::Garbler,
+        reveal: ExternalRevealPolicy::BothRoles,
+        fingerprint: [0x11; 32],
+    };
+    let action_policy = ActionExecutionPolicy {
+        executor: ExternalExecutor::Garbler,
+        reveal: ExternalRevealPolicy::BothRoles,
+        fingerprint: [0x22; 32],
+    };
+    let config = LlvmImportConfig::default()
+        .with_oracle_execution("pure", oracle_policy)
+        .with_action_execution("act", 1, action_policy);
+    let imported = import_module_with_config(&module, &["entry"], config).unwrap();
+    assert_eq!(imported.oracles.len(), 1);
+    assert_eq!(imported.actions.len(), 1);
+    assert_eq!(imported.oracles[0].name, "pure");
+    assert_eq!(imported.oracles[0].execution, oracle_policy);
+    assert_eq!(imported.actions[0].name, "act");
+    assert_eq!(imported.actions[0].execution, action_policy);
+    let FuncDecl::Body(body) = &imported.funcs[imported.exports.get("entry").unwrap().0] else {
+        panic!("entry must have a body");
+    };
+    assert!(body.values.iter().any(|node| matches!(
+        node.kind,
+        Value::Op(Stmt::OracleCall { ref name, .. }) if name == "pure"
+    )));
+    assert!(body.values.iter().any(|node| matches!(
+        node.kind,
+        Value::Op(Stmt::ActionCall { ref name, .. }) if name == "act"
+    )));
 }
 
 #[test]
@@ -2119,7 +2359,10 @@ done:
         .filter(|block| matches!(block.terminator, Terminator::Return { .. }))
         .count();
     assert!(returns >= 1);
-    assert_eq!(restores, returns, "every return restores the entry stack pointer");
+    assert_eq!(
+        restores, returns,
+        "every return restores the entry stack pointer"
+    );
     assert!(
         body.values.iter().any(|value| matches!(
             &value.kind,

@@ -88,6 +88,11 @@ Schema: `volar-ir-schema` v1.
 |---|---|---|
 | `primitive-type` | `Type` | `PrimitiveType` |
 | `constant` | `Constant` | `Constant` |
+| `external-executor` | `ExternalExecutor` | `ExternalExecutor` |
+| `external-reveal-policy` | `ExternalRevealPolicy` | `ExternalRevealPolicy` |
+| `oracle-execution-kind` | `OracleExecutionKind` | `OracleExecutionKind` |
+| `action-execution-policy` | `ActionExecutionPolicy` | `ActionExecutionPolicy` |
+| `oracle-execution-policy` | `OracleExecutionPolicy` | `OracleExecutionPolicy` |
 | `oracle-declaration` | `OracleDecl` | `OracleDecl` |
 | `action-declaration` | `ActionDecl` | `ActionDecl` |
 | `rng-declaration` | `RngDecl` | `RngDecl` |

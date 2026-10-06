@@ -226,6 +226,16 @@ pub fn ssa_ify_module<P: Clone>(module: &Module<P>) -> Module<P> {
     let sp_step = compute_sp_step(module);
     let func_sigs = module_func_sigs(&module.funcs);
 
+    // The entry function is the first DEFINED function (imports occupy the
+    // low FuncIds by WASM convention; `fi == 0` wrongly treated an
+    // import-first module's import as the entry and handed the real entry a
+    // threaded-SP param).
+    let entry_fi = module
+        .funcs
+        .iter()
+        .position(|f| matches!(f, FuncDecl::Body(_)))
+        .unwrap_or(0);
+
     let funcs = module
         .funcs
         .iter()
@@ -252,7 +262,8 @@ pub fn ssa_ify_module<P: Clone>(module: &Module<P>) -> Module<P> {
                 addr_tid,
                 bit_tid,
                 sp_step,
-                fi == 0,
+                fi == entry_fi,
+                entry_fi,
             )),
             // `FuncDecl` is `#[non_exhaustive]` (defined in the `vaffle`
             // crate, matched here from a different crate) -- wildcard
@@ -285,6 +296,12 @@ pub fn ssa_ify_module_owned<P: Clone>(mut module: Module<P>) -> Module<P> {
     let sp_step = compute_sp_step(&module);
     let func_sigs = module_func_sigs(&module.funcs);
 
+    let entry_fi = module
+        .funcs
+        .iter()
+        .position(|f| matches!(f, FuncDecl::Body(_)))
+        .unwrap_or(0);
+
     let funcs = core::mem::take(&mut module.funcs)
         .into_iter()
         .enumerate()
@@ -297,7 +314,8 @@ pub fn ssa_ify_module_owned<P: Clone>(mut module: Module<P>) -> Module<P> {
                 addr_tid,
                 bit_tid,
                 sp_step,
-                fi == 0,
+                fi == entry_fi,
+                entry_fi,
             )),
             // `FuncDecl` is `#[non_exhaustive]` (defined in the `vaffle`
             // crate, matched here from a different crate) -- wildcard
@@ -341,6 +359,9 @@ pub fn ssa_ify_function<P: Clone>(
         bit_tid,
         sp_step,
         is_entry,
+        // Standalone single-function context: preserve the legacy
+        // FuncId(0)-is-entry guard.
+        0,
     )
 }
 
@@ -352,6 +373,7 @@ fn ssa_ify_function_owned<P: Clone>(
     bit_tid: TypeId,
     sp_step: u128,
     is_entry: bool,
+    entry_fi: usize,
 ) -> FuncBody<P> {
     let mut blocks = body.blocks;
     let mut values = body.values;
@@ -391,6 +413,7 @@ fn ssa_ify_function_owned<P: Clone>(
         &sp_bits_for,
         sp_step,
         bit_tid,
+        entry_fi,
     );
 
     // ---- Phase 3: dominator-verified cross-block spill/reload ---------------
@@ -782,6 +805,7 @@ fn wire_call_sites<P: Clone>(
     sp_bits_for: &BTreeMap<usize, Vec<ValueId>>,
     sp_step: u128,
     bit_tid: TypeId,
+    entry_fi: usize,
 ) {
     // `sp_bits_for` is empty for the entry function (see
     // `ssa_ify_function`'s Phase 1 comment) -- `.get` yields `None` for
@@ -792,12 +816,17 @@ fn wire_call_sites<P: Clone>(
         let old_stmts = core::mem::take(&mut blocks[bi].stmts);
         let mut new_stmts: Vec<ValueId> = Vec::with_capacity(old_stmts.len());
         for svid in old_stmts {
-            if matches!(&values[svid.0].kind, Value::Call { func, .. } if func.0 == 0) {
+            if matches!(&values[svid.0].kind, Value::Call { func, .. } if func.0 == entry_fi) {
                 panic!(
-                    "vaffle_ssa: a call site targets the module's own entry function (FuncId(0)) -- unsupported, nothing inside a VAFFLE module should call its own entry point"
+                    "vaffle_ssa: a call site targets the module's own entry function (FuncId({entry_fi})) -- unsupported, nothing inside a VAFFLE module should call its own entry point"
                 );
             }
-            let is_call = matches!(&values[svid.0].kind, Value::Call { func, .. } if func.0 != 0);
+            // Only VAFFLE-internal calls (to defined functions other than the
+            // entry) get the SP-advance args; import calls (FuncIds below the
+            // first body — imports occupy the low FuncIds by WASM
+            // convention) carry no threaded-SP param.
+            let is_call =
+                matches!(&values[svid.0].kind, Value::Call { func, .. } if func.0 > entry_fi);
             if is_call {
                 let prov = values[svid.0].prov.clone();
                 let side = values[svid.0].side;
@@ -820,8 +849,8 @@ fn wire_call_sites<P: Clone>(
 
         if let Terminator::ReturnCall { func, args } = &mut blocks[bi].terminator {
             assert_ne!(
-                func.0, 0,
-                "vaffle_ssa: a tail-call site targets the module's own entry function (FuncId(0)) -- unsupported"
+                func.0, entry_fi,
+                "vaffle_ssa: a tail-call site targets the module's own entry function (FuncId({entry_fi})) -- unsupported"
             );
             assert!(
                 !values.is_empty(),
@@ -1224,6 +1253,7 @@ mod tests {
             bit_tid,
             sp_step,
             true,
+            0,
         );
 
         assert_eq!(alloc::format!("{borrowed:?}"), alloc::format!("{owned:?}"));

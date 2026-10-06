@@ -1,4 +1,5 @@
 use alloc::{collections::BTreeMap, string::String};
+use volar_ir_common::{ActionExecutionPolicy, OracleExecutionPolicy};
 use volar_side::SideId;
 
 /// How a WAFFLE function import maps to an oracle or action.
@@ -6,6 +7,9 @@ pub enum WaffleImportKind {
     /// Pure oracle — all WAFFLE params → `OracleDecl::params`; WAFFLE results → `OracleDecl::results`.
     Oracle {
         name: String,
+        /// Explicit executor/reveal/fingerprint policy copied into the
+        /// declaration emitted for this import.
+        execution: OracleExecutionPolicy,
         /// Side to attach to the call/output values emitted at each call
         /// site, if any (see `volar-side`).
         side: Option<SideId>,
@@ -15,6 +19,9 @@ pub enum WaffleImportKind {
     ///   results = [result_0 .. result_{n_results-1}]
     Action {
         name: String,
+        /// Explicit executor/reveal/fingerprint policy copied into the
+        /// declaration emitted for this import.
+        execution: ActionExecutionPolicy,
         n_args: usize,
         /// Side to attach to the call/output values emitted at each call
         /// site, if any (see `volar-side`).
@@ -50,6 +57,7 @@ impl WaffleImportConfig {
             waffle_name.into(),
             WaffleImportKind::Oracle {
                 name: oracle_name.into(),
+                execution: OracleExecutionPolicy::legacy_evaluator(),
                 side: None,
             },
         );
@@ -66,11 +74,85 @@ impl WaffleImportConfig {
             waffle_name.into(),
             WaffleImportKind::Action {
                 name: action_name.into(),
+                execution: ActionExecutionPolicy::legacy_evaluator(),
+                n_args,
+                side: None,
+            }
+        );
+        self
+    }
+
+    /// Map an import to an oracle with its explicit declaration policy.
+    pub fn with_oracle_execution(
+        mut self,
+        waffle_name: impl Into<String>,
+        oracle_name: impl Into<String>,
+        execution: OracleExecutionPolicy,
+    ) -> Self {
+        self.imports.insert(
+            waffle_name.into(),
+            WaffleImportKind::Oracle {
+                name: oracle_name.into(),
+                execution,
+                side: None,
+            },
+        );
+        self
+    }
+
+    /// Map an import to an action with its explicit declaration policy.
+    pub fn with_action_execution(
+        mut self,
+        waffle_name: impl Into<String>,
+        action_name: impl Into<String>,
+        n_args: usize,
+        execution: ActionExecutionPolicy,
+    ) -> Self {
+        self.imports.insert(
+            waffle_name.into(),
+            WaffleImportKind::Action {
+                name: action_name.into(),
+                execution,
                 n_args,
                 side: None,
             },
         );
         self
+    }
+
+    /// Map the `portal_crypto.aes128_enc` WASM import to the
+    /// `aes128_encrypt_block` oracle (the AX circuit-extern contract in
+    /// `volar_ir_common::aes_extern`).
+    ///
+    /// The import's WASM signature is `(param i64 i64 i64 i64) (result i64
+    /// i64)` — `(key_lo, key_hi, pt_lo, pt_hi) -> (ct_lo, ct_hi)`, each i64
+    /// little-endian byte-packed.
+    pub fn with_portal_crypto_aes(self) -> Self {
+        self.with_oracle(
+            volar_ir_common::aes_extern::WAFFLE_IMPORT,
+            volar_ir_common::aes_extern::ORACLE_NAME,
+        )
+    }
+
+    /// Map the fixed-shape TLS 1.3 secret-mixing imports to pure circuit
+    /// oracles. Their realization is deliberately performed by Volar VC;
+    /// registering them as evaluator actions would disclose key material to
+    /// the action host.
+    pub fn with_portal_tls13_oracles(self) -> Self {
+        use volar_ir_common::tls13_extern;
+
+        self.with_oracle(
+            tls13_extern::sha256_64::WAFFLE_IMPORT,
+            tls13_extern::sha256_64::ORACLE_NAME,
+        )
+        .with_oracle(
+            tls13_extern::hmac_sha256_32_32::WAFFLE_IMPORT,
+            tls13_extern::hmac_sha256_32_32::ORACLE_NAME,
+        )
+        .with_oracle(
+            tls13_extern::x25519_step::WAFFLE_IMPORT,
+            tls13_extern::x25519_step::ORACLE_NAME,
+        )
     }
 
     /// Like [`with_oracle`](Self::with_oracle), but attaches `side` to every
@@ -85,6 +167,7 @@ impl WaffleImportConfig {
             waffle_name.into(),
             WaffleImportKind::Oracle {
                 name: oracle_name.into(),
+                execution: OracleExecutionPolicy::legacy_evaluator(),
                 side: Some(side),
             },
         );
@@ -104,9 +187,10 @@ impl WaffleImportConfig {
             waffle_name.into(),
             WaffleImportKind::Action {
                 name: action_name.into(),
+                execution: ActionExecutionPolicy::legacy_evaluator(),
                 n_args,
                 side: Some(side),
-            },
+            }
         );
         self
     }

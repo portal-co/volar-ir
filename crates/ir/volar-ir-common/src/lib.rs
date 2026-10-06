@@ -4,25 +4,29 @@
 
 extern crate alloc;
 
+pub mod aes_extern;
 pub mod complexity;
+pub mod tls13_extern;
 pub use complexity::{MeasureSpec, ReentryHint, StructRef};
 
 mod field;
 mod generated;
 mod prime;
 pub use field::{
-    contains_ext_field, ext_field_type, format_field_symbol, lower_field_call, monomial_product,
-    mul_identity, mul_is_idempotent, parse_field_symbol, primitive_bit_width, BitRing, BoolRing,
-    ExtFieldError, FieldArg, FieldCallError, FieldOp, FieldSpec, FieldSymbol, WrappedSpec,
-    aes8_irreducible, galois64_irreducible,
-};
-pub use prime::{
-    contains_prime_field, embed_and, embed_xor, eval_prime_poly, is_native_field, prime_spec,
-    repetition_residue, solinas_add, solinas_mul, solinas_repeat, FieldSink, PrimeFieldError,
-    PrimeSpec,
+    BitRing, BoolRing, ExtFieldError, FieldArg, FieldCallError, FieldOp, FieldSpec, FieldSymbol,
+    WrappedSpec, aes8_irreducible, contains_ext_field, ext_field_type, format_field_symbol,
+    galois64_irreducible, lower_field_call, monomial_product, mul_identity, mul_is_idempotent,
+    parse_field_symbol, primitive_bit_width,
 };
 pub use generated::{
-    ActionDecl, Constant, Node, OracleDecl, PreInitSegment, RngDecl, StorageId, Type, TypeId,
+    ActionDecl, ActionExecutionPolicy, Constant, ExternalExecutor, ExternalRevealPolicy, Node,
+    OracleDecl, OracleExecutionKind, OracleExecutionPolicy, PreInitSegment, RngDecl, StorageId,
+    Type, TypeId,
+};
+pub use prime::{
+    FieldSink, PrimeFieldError, PrimeSpec, contains_prime_field, embed_and, embed_xor,
+    eval_prime_poly, is_native_field, prime_spec, repetition_residue, solinas_add, solinas_mul,
+    solinas_repeat,
 };
 
 /// Whether a storage namespace may be mutated by a producer.
@@ -176,6 +180,33 @@ impl StorageTable {
 }
 
 use alloc::vec::Vec;
+
+/// Explicit compatibility policy for pre-executor action declarations.
+///
+/// New frontends must select a reviewed policy explicitly. This value exists
+/// only to migrate the repository's established evaluator-hosted action path:
+/// both roles learn the action inputs, and the evaluator owns host execution.
+impl ActionExecutionPolicy {
+    pub const fn legacy_evaluator() -> Self {
+        Self {
+            executor: ExternalExecutor::Evaluator,
+            reveal: ExternalRevealPolicy::BothRoles,
+            fingerprint: [0; 32],
+        }
+    }
+}
+
+/// Explicit compatibility policy for legacy pure-oracle declarations.
+impl OracleExecutionPolicy {
+    pub const fn legacy_evaluator() -> Self {
+        Self {
+            execution: OracleExecutionKind::Assigned,
+            executor: ExternalExecutor::Evaluator,
+            reveal: ExternalRevealPolicy::BothRoles,
+            fingerprint: [0; 32],
+        }
+    }
+}
 
 #[cfg(test)]
 mod storage_access_tests {
@@ -336,7 +367,10 @@ impl<V: Ord> PolyCoeffs<V> {
     /// Rewrite monomial vectors in place and restore canonical key order only
     /// when the rewrite actually changed it. This is the owned movfuscation
     /// fast path: monotonic substitutions retain the existing vector order and
-    /// allocate no replacement coefficient collection.
+    /// allocate no replacement coefficient collection. If rewritten keys
+    /// collide, the later entry replaces the earlier one, matching the
+    /// map-style behavior of this type; callers needing algebraic combination
+    /// must apply the `Poly` type's coefficient semantics themselves.
     pub fn remap_monomials_in_place(&mut self, mut f: impl FnMut(&mut Vec<V>)) {
         for (monomial, _) in &mut self.0 {
             f(monomial);
@@ -350,8 +384,7 @@ impl<V: Ord> PolyCoeffs<V> {
             let mut write = 0;
             for read in 0..self.0.len() {
                 if write > 0 && self.0[write - 1].0 == self.0[read].0 {
-                    // Characteristic 2: two copies of one monomial cancel.
-                    self.0[write - 1].1 ^= self.0[read].1;
+                    self.0[write - 1].1 = self.0[read].1;
                 } else {
                     if write != read {
                         self.0.swap(write, read);
@@ -360,7 +393,6 @@ impl<V: Ord> PolyCoeffs<V> {
                 }
             }
             self.0.truncate(write);
-            self.0.retain(|(_, coeff)| coeff & 1 != 0);
         }
     }
 
@@ -488,6 +520,12 @@ mod poly_coeffs_tests {
 
         coeffs.remap_monomials_in_place(|monomial| monomial[0] = 9);
         assert_eq!(coeffs.into_iter().collect::<Vec<_>>(), vec![(vec![9], 7)]);
+
+        // Coefficients are generic here: remapping must not treat an even
+        // coefficient as zero just because some Poly types have char-2 sums.
+        let mut coeffs = PolyCoeffs::from_iter([(vec![0], 3u8), (vec![1], 4u8)]);
+        coeffs.remap_monomials_in_place(|monomial| monomial[0] = 9);
+        assert_eq!(coeffs.into_iter().collect::<Vec<_>>(), vec![(vec![9], 4)]);
     }
 
     #[test]
@@ -559,10 +597,7 @@ pub enum IrType {
     ///
     /// `k` is in `2..=256` and `n < 2^(k-1)`, so `k` is the bit length of `p`.
     /// An element is an integer in `0..p`, stored in `k` bits, LSB first.
-    PrimeField {
-        k: u32,
-        n: alloc::vec::Vec<u64>,
-    },
+    PrimeField { k: u32, n: alloc::vec::Vec<u64> },
 }
 
 /// An interning table for [`IrType`] values.

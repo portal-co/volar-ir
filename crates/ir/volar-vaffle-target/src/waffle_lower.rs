@@ -166,24 +166,13 @@ pub fn lower_waffle_module_with_vc(
     }
     target.vc = Some(VcLoweringState::new(ids, calls));
 
-    let errors = lower_waffle_module_with_metadata(
-        wasm,
-        target,
-        config,
-        WasmMetadataMode::RespectUnstable,
-    );
+    let errors =
+        lower_waffle_module_with_metadata(wasm, target, config, WasmMetadataMode::RespectUnstable);
     apply_vc_public_mem_writes(target, vc);
 
     let byte_tid = target.byte_tid();
     let state = target.vc.take().expect("vc session");
-    let regions = build_vc_regions(
-        wasm,
-        &target.module,
-        vc,
-        &state.ids,
-        &state.calls,
-        byte_tid,
-    );
+    let regions = build_vc_regions(wasm, &target.module, vc, &state.ids, &state.calls, byte_tid);
     let _ = validate_vc_regions(&regions, &target.module, vc);
     let artifact = VcArtifact {
         regions,
@@ -220,6 +209,145 @@ fn apply_vc_public_mem_writes(target: &mut VaffleTarget, vc: &VcConfig) {
     }
 }
 
+fn configured_external_type(
+    target: &mut VaffleTarget,
+    import_name: &str,
+    ty: WType,
+) -> Result<volar_ir_common::TypeId, UnsupportedOp> {
+    match ty {
+        WType::I32 | WType::I64 => {
+            Ok(target
+                .lir_type_to_tid(&waffle_ty(ty).expect("scalar integer WAFFLE type maps to LIR")))
+        }
+        _ => Err(UnsupportedOp(alloc::format!(
+            "configured external `{import_name}` requires scalar integer parameters and results"
+        ))),
+    }
+}
+
+/// Validate and register one explicitly configured imported external.
+///
+/// This happens before lowering any body so malformed registry entries cannot
+/// become partial declarations or trigger slice indexing during call lowering.
+fn register_configured_external(
+    target: &mut VaffleTarget,
+    wasm: &WModule,
+    sig: portal_pc_waffle_ir::Signature,
+    import_name: &str,
+    kind: &WaffleImportKind,
+) -> Result<(), UnsupportedOp> {
+    let sig_data = &wasm.signatures[sig];
+    let (wasm_params, wasm_results) = match sig_data {
+        portal_pc_waffle_ir::SignatureData::Func {
+            params, returns, ..
+        } => (params.as_slice(), returns.as_slice()),
+        _ => {
+            return Err(UnsupportedOp(alloc::format!(
+                "configured external `{import_name}` must have a function signature"
+            )));
+        }
+    };
+    let results: Vec<_> = wasm_results
+        .iter()
+        .copied()
+        .map(|ty| configured_external_type(target, import_name, ty))
+        .collect::<Result<_, _>>()?;
+    if results.is_empty() {
+        return Err(UnsupportedOp(alloc::format!(
+            "configured external `{import_name}` must return at least one scalar integer"
+        )));
+    }
+    match kind {
+        WaffleImportKind::Oracle {
+            name, execution, ..
+        } => {
+            let params = wasm_params
+                .iter()
+                .copied()
+                .map(|ty| configured_external_type(target, import_name, ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(existing) = target.module.oracles.iter().find(|decl| decl.name == *name) {
+                if existing.params != params
+                    || existing.results != results
+                    || existing.execution != *execution
+                {
+                    return Err(UnsupportedOp(alloc::format!(
+                        "configured oracle `{name}` has inconsistent declarations"
+                    )));
+                }
+            } else {
+                target.register_oracle(volar_ir_common::OracleDecl {
+                    name: name.clone(),
+                    params,
+                    results,
+                    execution: *execution,
+                });
+            }
+        }
+        WaffleImportKind::Action {
+            name,
+            execution,
+            n_args,
+            ..
+        } => {
+            let expected = n_args
+                .checked_add(1)
+                .and_then(|count| count.checked_add(wasm_results.len()))
+                .ok_or_else(|| {
+                    UnsupportedOp(alloc::format!(
+                        "configured action `{import_name}` argument count overflows its ABI"
+                    ))
+                })?;
+            if wasm_params.len() != expected {
+                return Err(UnsupportedOp(alloc::format!(
+                    "configured action `{import_name}` has an incompatible parameter count"
+                )));
+            }
+            if wasm_params[0] != WType::I32 {
+                return Err(UnsupportedOp(alloc::format!(
+                    "configured action `{import_name}` guard must be i32"
+                )));
+            }
+            let fallback_count = wasm_params.len() - 1 - n_args;
+            if fallback_count != wasm_results.len() {
+                return Err(UnsupportedOp(alloc::format!(
+                    "configured action `{import_name}` must have one fallback per result"
+                )));
+            }
+            for (fallback, result) in wasm_params[1 + n_args..].iter().zip(wasm_results) {
+                if fallback != result {
+                    return Err(UnsupportedOp(alloc::format!(
+                        "configured action `{import_name}` fallback types must match result types"
+                    )));
+                }
+            }
+            let params = wasm_params[1..1 + n_args]
+                .iter()
+                .copied()
+                .map(|ty| configured_external_type(target, import_name, ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(existing) = target.module.actions.iter().find(|decl| decl.name == *name) {
+                if existing.params != params
+                    || existing.results != results
+                    || existing.execution != *execution
+                {
+                    return Err(UnsupportedOp(alloc::format!(
+                        "configured action `{name}` has inconsistent declarations"
+                    )));
+                }
+            } else {
+                target.register_action(volar_ir_common::ActionDecl {
+                    name: name.clone(),
+                    params,
+                    results,
+                    execution: *execution,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// As [`lower_waffle_module`], with an explicit source-neutral metadata mode.
 pub fn lower_waffle_module_with_metadata(
     wasm: &WModule,
@@ -237,60 +365,47 @@ pub fn lower_waffle_module_with_metadata(
         BTreeMap::new()
     };
     // Pre-register OracleDecl / ActionDecl for imports named in config.
-    for (_func_ref, decl) in wasm.funcs.entries() {
-        if let FuncDecl::Import(sig, import_name) = decl {
+    // Real-WASM imports carry their names in the module's import table
+    // ("<module>.<field>"), not in `FuncDecl::Import`'s (empty) name field —
+    // resolve through `waffle_import_func_names`.
+    let import_names = waffle_import_func_names(wasm);
+    // Registration must be atomic at the declaration-table level: an invalid
+    // later mapping cannot leave an earlier external usable in a target whose
+    // lowering returned errors.
+    let initial_oracles = target.module.oracles.len();
+    let initial_actions = target.module.actions.len();
+    let mut errors = Vec::new();
+    for import_name in config.imports.keys() {
+        if !import_names.values().any(|name| name == import_name) {
+            errors.push((
+                import_name.clone(),
+                UnsupportedOp(alloc::format!(
+                    "configured external `{import_name}` is not imported by the WASM module"
+                )),
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return errors;
+    }
+    for (func_ref, decl) in wasm.funcs.entries() {
+        if let FuncDecl::Import(sig, decl_name) = decl {
+            let import_name = import_names.get(&func_ref.index()).unwrap_or(decl_name);
             let Some(kind) = config.imports.get(import_name) else {
                 continue;
             };
-            let sig_data = &wasm.signatures[*sig];
-            let (wasm_params, wasm_results) = match sig_data {
-                portal_pc_waffle_ir::SignatureData::Func {
-                    params, returns, ..
-                } => (params.as_slice(), returns.as_slice()),
-                _ => continue,
-            };
-            match kind {
-                WaffleImportKind::Oracle { name, .. } => {
-                    let params: alloc::vec::Vec<_> = wasm_params
-                        .iter()
-                        .filter_map(|&t| waffle_ty(t).ok())
-                        .map(|lt| target.lir_type_to_tid(&lt))
-                        .collect();
-                    let results: alloc::vec::Vec<_> = wasm_results
-                        .iter()
-                        .filter_map(|&t| waffle_ty(t).ok())
-                        .map(|lt| target.lir_type_to_tid(&lt))
-                        .collect();
-                    target.register_oracle(volar_ir_common::OracleDecl {
-                        name: name.clone(),
-                        params,
-                        results,
-                    });
-                }
-                WaffleImportKind::Action { name, n_args, .. } => {
-                    let action_params: alloc::vec::Vec<_> = wasm_params
-                        .iter()
-                        .skip(1) // skip guard
-                        .take(*n_args)
-                        .filter_map(|&t| waffle_ty(t).ok())
-                        .map(|lt| target.lir_type_to_tid(&lt))
-                        .collect();
-                    let results: alloc::vec::Vec<_> = wasm_results
-                        .iter()
-                        .filter_map(|&t| waffle_ty(t).ok())
-                        .map(|lt| target.lir_type_to_tid(&lt))
-                        .collect();
-                    target.register_action(volar_ir_common::ActionDecl {
-                        name: name.clone(),
-                        params: action_params,
-                        results,
-                    });
-                }
+            if let Err(error) = register_configured_external(target, wasm, *sig, import_name, kind)
+            {
+                errors.push((import_name.clone(), error));
             }
         }
     }
+    if !errors.is_empty() {
+        target.module.oracles.truncate(initial_oracles);
+        target.module.actions.truncate(initial_actions);
+        return errors;
+    }
 
-    let mut errors = Vec::new();
     // The compatibility materializer deliberately resolves every non-import
     // function through the same single-function lazy boundary.
     for (func_ref, decl) in wasm.funcs.entries() {
@@ -501,19 +616,38 @@ pub fn lower_waffle_function(
         })
         .collect();
 
+    // ---- Pre-map every non-entry block's value params ----------------------
+    // A block's params must be resolvable before *any* block that references
+    // them is lowered, but `body.blocks.entries()` iterates in block-id order
+    // and a loop-exit block can reference its (dominating) loop header's
+    // params via an alias while carrying a *lower* block id than the header.
+    // Lowering in id order then maps the header's params only after the exit
+    // block is lowered, surfacing `UnsupportedOp("undefined v…")` on a branch
+    // arg that aliases a not-yet-processed block param. Block params are pure
+    // introduction points (they don't depend on other blocks) and
+    // `add_block_param` restores the current block, so mapping them all up
+    // front in a dedicated pass is safe and order-independent. The threaded
+    // globals stay in the main loop (they append after the value params).
+    for (wblock, block_def) in body.blocks.entries() {
+        if wblock == body.entry {
+            continue;
+        }
+        let vblock = block_map[&wblock];
+        for &(ty, wval) in &block_def.params {
+            let lir_ty = waffle_ty(ty)?;
+            let vv = target.add_block_param(vblock, lir_ty);
+            val_map.insert(wval, vv);
+        }
+    }
+
     // ---- Emit each WAFFLE block ---------------------------------------------
     for (wblock, block_def) in body.blocks.entries() {
         let vblock = block_map[&wblock];
         target.switch_to_block(vblock);
 
-        // Non-entry block params become VAFFLE block params.
+        // Non-entry block value params were pre-mapped above; here we only add
+        // the extra block params carrying the threaded globals for this block.
         if wblock != body.entry {
-            for &(ty, wval) in &block_def.params {
-                let lir_ty = waffle_ty(ty)?;
-                let vv = target.add_block_param(vblock, lir_ty);
-                val_map.insert(wval, vv);
-            }
-            // Extra block params carry the threaded globals for this block.
             current_globals = global_lir_tys
                 .iter()
                 .map(|ty| target.add_block_param(vblock, ty.clone()))
@@ -663,9 +797,7 @@ fn lower_op(
 
     Ok(Some(match op {
         // ---- Constants -------------------------------------------------
-        Operator::I32Const { value } => {
-            vc_iconst(tgt, LirType::U32, *value as i32 as i64)
-        }
+        Operator::I32Const { value } => vc_iconst(tgt, LirType::U32, *value as i32 as i64),
         Operator::I64Const { value } => vc_iconst(tgt, LirType::U64, *value as i64),
 
         // ---- I32 arithmetic --------------------------------------------
@@ -939,6 +1071,17 @@ fn lower_op(
             let if_t = get(0)?;
             let if_f = get(1)?;
             let cond = get(2)?;
+            // vc-spec select rule: a *concrete* public condition means the
+            // result takes the selected operand's taint. Check the whole i32
+            // cond for a public constant before OR-reducing (the reduce would
+            // build a fresh, untagged bit and lose the const-ness).
+            let width = cond.bits.len();
+            let public = tgt.vc_public_side();
+            let cond_const = (width <= 64).then(|| tgt.const_u64(&cond.bits)).flatten();
+            let cond_is_public = cond.bits.iter().all(|&b| tgt.side_of(b) == public);
+            if let (Some(v), true) = (cond_const, cond_is_public) {
+                return Ok(Some(if v != 0 { if_t } else { if_f }));
+            }
             // cond is I32; treat as bool via OR-reduce (non-zero = true).
             let cond_bit = or_bits(tgt, &cond.bits);
             let cond_bool = VaffleValue {
@@ -985,8 +1128,11 @@ fn lower_op(
             }
             let name = callee_name(wasm, fid);
 
-            // Oracle / action dispatch: bypass globals threading.
-            if let Some(kind) = config.imports.get(&name) {
+            // Oracle / action dispatch: bypass globals threading. Config
+            // lookup uses the canonical import-table name for imports.
+            let import_names = waffle_import_func_names(wasm);
+            let config_key = callee_config_key(wasm, &import_names, fid);
+            if let Some(kind) = config.imports.get(&config_key) {
                 let all_arg_vals: Vec<VaffleValue> =
                     args.iter()
                         .map(|wv| {
@@ -1004,13 +1150,14 @@ fn lower_op(
                     WaffleImportKind::Oracle {
                         name: oracle_name,
                         side,
+                        ..
                     } => {
                         tgt.set_side(*side);
-                        let r = tgt.call_extern_multi(
-                            &alloc::format!("oracle_{oracle_name}"),
-                            &all_arg_vals,
-                            &orig_ret_tys,
-                        );
+                        // Emit the oracle as an IR-level `OracleCall` (not a
+                        // `Value::Call` to an env import), so it survives the
+                        // vaffle→IR lowering as a real `IRStmt::OracleCall`
+                        // validated against `module.oracles`.
+                        let r = tgt.oracle_call_multi(oracle_name, &all_arg_vals, &orig_ret_tys);
                         tgt.set_side(None);
                         r
                     }
@@ -1018,13 +1165,45 @@ fn lower_op(
                         name: action_name,
                         n_args,
                         side,
+                        ..
                     } => {
+                        let expected = n_args
+                            .checked_add(1)
+                            .and_then(|count| count.checked_add(orig_ret_tys.len()))
+                            .ok_or_else(|| {
+                                UnsupportedOp(alloc::format!(
+                                    "configured action `{action_name}` argument count overflows its ABI"
+                                ))
+                            })?;
+                        if all_arg_vals.len() != expected {
+                            return Err(UnsupportedOp(alloc::format!(
+                                "configured action `{action_name}` call has an incompatible ABI"
+                            )));
+                        }
                         let guard_vv = all_arg_vals[0].clone();
+                        if guard_vv.bits.len() != 32 {
+                            return Err(UnsupportedOp(alloc::format!(
+                                "configured action `{action_name}` guard must be i32"
+                            )));
+                        }
                         let guard_bit = or_bits(tgt, &guard_vv.bits);
                         let real_args = &all_arg_vals[1..=*n_args];
                         let fallbacks = &all_arg_vals[*n_args + 1..];
+                        if fallbacks
+                            .iter()
+                            .zip(&orig_ret_tys)
+                            .any(|(fallback, result)| fallback.ty != *result)
+                        {
+                            return Err(UnsupportedOp(alloc::format!(
+                                "configured action `{action_name}` fallback types must match result types"
+                            )));
+                        }
                         tgt.set_side(*side);
-                        let r = tgt.action_call(
+                        // Emit a real `Stmt::ActionCall` (not a call to an
+                        // env import): the evaluator-hosted action extern
+                        // (e.g. a network socket) survives lowering as an
+                        // `IRStmt::ActionCall`.
+                        let r = tgt.action_call_multi(
                             action_name,
                             guard_bit,
                             real_args,
@@ -1518,6 +1697,51 @@ fn callee_name(wasm: &WModule, fid: portal_pc_waffle_ir::Func) -> String {
             .unwrap_or_else(|| alloc::format!("func_{}", fid.index())),
         _ => alloc::format!("func_{}", fid.index()),
     }
+}
+
+/// Canonical `"<module>.<field>"` names for every *imported* function in
+/// `wasm`, keyed by func index.
+///
+/// The WAFFLE frontend leaves `FuncDecl::Import`'s name field empty for real
+/// WASM binaries (the two-level `(import "mod" "field")` name lives in the
+/// module's import table, keyed by [`ImportKind::Func`]); synthetic modules
+/// (tests, producers) instead fill that name field with a single-segment
+/// name. Config lookups ([`WaffleImportConfig`]) are keyed on the canonical
+/// `"mod.field"` form, falling back to the name field so synthetic modules
+/// keep working.
+pub fn waffle_import_func_names(wasm: &WModule) -> BTreeMap<usize, String> {
+    let mut out = BTreeMap::new();
+    for import in &wasm.imports {
+        if let portal_pc_waffle_ir::ImportKind::Func(func) = import.kind {
+            out.insert(
+                func.index(),
+                alloc::format!("{}.{}", import.module, import.name),
+            );
+        }
+    }
+    for (func_ref, decl) in wasm.funcs.entries() {
+        if let FuncDecl::Import(_, name) = decl {
+            if !name.is_empty() {
+                out.entry(func_ref.index()).or_insert_with(|| name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The config lookup key for `fid`: the canonical import-table name for
+/// imports, the declaration name otherwise.
+fn callee_config_key(
+    wasm: &WModule,
+    import_names: &BTreeMap<usize, String>,
+    fid: portal_pc_waffle_ir::Func,
+) -> String {
+    if let FuncDecl::Import(..) = &wasm.funcs[fid] {
+        if let Some(name) = import_names.get(&fid.index()) {
+            return name.clone();
+        }
+    }
+    callee_name(wasm, fid)
 }
 
 fn vc_iconst(tgt: &mut VaffleTarget, ty: LirType, val: i64) -> VaffleValue {
@@ -2713,6 +2937,35 @@ mod tests {
     }
 
     #[test]
+    fn test_oracle_and_action_registration_with_explicit_policy() {
+        use volar_ir_common::{
+            ActionExecutionPolicy, ExternalExecutor, ExternalRevealPolicy, OracleExecutionKind,
+            OracleExecutionPolicy,
+        };
+
+        let wasm = build_oracle_action_module();
+        let oracle_policy = OracleExecutionPolicy {
+            execution: OracleExecutionKind::Assigned,
+            executor: ExternalExecutor::Garbler,
+            reveal: ExternalRevealPolicy::BothRoles,
+            fingerprint: [0xA1; 32],
+        };
+        let action_policy = ActionExecutionPolicy {
+            executor: ExternalExecutor::Garbler,
+            reveal: ExternalRevealPolicy::BothRoles,
+            fingerprint: [0xB2; 32],
+        };
+        let config = WaffleImportConfig::new()
+            .with_oracle_execution("oracle_hash", "hash", oracle_policy)
+            .with_action_execution("action_send", "send", 1, action_policy);
+        let mut target = VaffleTarget::new();
+        let errors = lower_waffle_module(&wasm, &mut target, &config);
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+        assert_eq!(target.module.oracles[0].execution, oracle_policy);
+        assert_eq!(target.module.actions[0].execution, action_policy);
+    }
+
+    #[test]
     fn test_oracle_and_action_registration() {
         let wasm = build_oracle_action_module();
         let config = WaffleImportConfig::new()
@@ -2751,6 +3004,16 @@ mod tests {
             "action has 1 result"
         );
 
+        // The default convenience builder remains explicitly legacy.
+        assert_eq!(
+            target.module.oracles[0].execution,
+            volar_ir_common::OracleExecutionPolicy::legacy_evaluator()
+        );
+        assert_eq!(
+            target.module.actions[0].execution,
+            volar_ir_common::ActionExecutionPolicy::legacy_evaluator()
+        );
+
         // The caller function should have lowered successfully.
         let caller = target
             .module
@@ -2758,5 +3021,41 @@ mod tests {
             .iter()
             .find(|f| matches!(f, vaffle::FuncDecl::Body(_)));
         assert!(caller.is_some(), "caller function body should be present");
+    }
+
+    /// Regression: a loop whose exit block references the (dominating) loop
+    /// header's block params via an alias, while the exit block carries a
+    /// *lower* block id than the header, must lower without
+    /// `UnsupportedOp("undefined v…")`. The lowering pre-maps every non-entry
+    /// block's value params before emitting any block, so forward references
+    /// resolve regardless of block-id order. (This is the `(block (loop …))`
+    /// counting loop, which previously failed with `undefined v11`.)
+    #[test]
+    fn loop_exit_referencing_header_param_lowers() {
+        let wat_src = r#"(module
+          (func $f (export "f") (param $n i32) (result i32)
+            (local $acc i32)
+            (block $done
+              (loop $l
+                (br_if $done (i32.eqz (local.get $n)))
+                (local.set $acc (i32.add (local.get $acc) (local.get $n)))
+                (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+                (br $l)))
+            (local.get $acc)))"#;
+        let bytes = wat::parse_str(wat_src).expect("wat assembles");
+        let mut wasm = portal_pc_waffle_frontend::from_wasm_bytes(
+            &bytes,
+            &portal_pc_waffle_frontend::FrontendOptions::default(),
+        )
+        .expect("wasm parses");
+        portal_pc_waffle_frontend::expand_all_funcs(&mut wasm).expect("expand");
+
+        let mut target = VaffleTarget::new();
+        let errors = lower_waffle_module(&wasm, &mut target, &WaffleImportConfig::default());
+        assert!(
+            errors.is_empty(),
+            "loop with forward block-param reference must lower: {errors:?}"
+        );
+        assert_eq!(target.module.funcs.len(), 1);
     }
 }

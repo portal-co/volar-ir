@@ -15,8 +15,8 @@ use alloc::{
 };
 
 use volar_ir_common::{
-    ActionDecl, Constant, IrType, Node, OracleDecl, PolyCoeffs, PreInitSegment, Stmt, StorageAllocator,
-    StorageId, Type, TypeId, TypeTable,
+    ActionDecl, Constant, IrType, Node, OracleDecl, PolyCoeffs, PreInitSegment, Stmt,
+    StorageAllocator, StorageId, Type, TypeId, TypeTable,
 };
 use volar_lir::{
     BitCircuitBuilder, BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt,
@@ -34,7 +34,7 @@ use vaffle::{
 };
 
 use crate::circuit_helpers::{
-    helper_result_width, intern_circuit_helper, width_type, CircuitHelperMode, HelperKey, HelperOp,
+    CircuitHelperMode, HelperKey, HelperOp, helper_result_width, intern_circuit_helper, width_type,
 };
 use crate::vc::VcLoweringState;
 
@@ -240,7 +240,10 @@ impl VaffleTarget {
             &widths,
         );
         let result_width = helper_result_width(op, &widths);
-        let args: Vec<ValueId> = operands.iter().map(|bits| self.merge_operand(bits)).collect();
+        let args: Vec<ValueId> = operands
+            .iter()
+            .map(|bits| self.merge_operand(bits))
+            .collect();
         let call = self.fb().emit_value(Value::Call { func, args });
         Some(
             (0..result_width)
@@ -280,10 +283,9 @@ impl VaffleTarget {
         let addr_tid = self.addr_tid;
         let mut saved = Vec::with_capacity(sps.len());
         for sp in sps {
-            let addr = self.fb().emit_value(Value::Op(Stmt::Const(
-                Constant { hi: 0, lo: 0 },
-                addr_tid,
-            )));
+            let addr = self
+                .fb()
+                .emit_value(Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, addr_tid)));
             let val = self.fb().emit_value(Value::Op(Stmt::StorageRead {
                 storage: sp,
                 ty: addr_tid,
@@ -310,10 +312,9 @@ impl VaffleTarget {
         }
         let addr_tid = self.addr_tid;
         for (sp, val) in saved {
-            let addr = self.fb().emit_value(Value::Op(Stmt::Const(
-                Constant { hi: 0, lo: 0 },
-                addr_tid,
-            )));
+            let addr = self
+                .fb()
+                .emit_value(Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, addr_tid)));
             self.fb().emit_value(Value::Op(Stmt::StorageWrite {
                 storage: sp,
                 src: val,
@@ -430,6 +431,25 @@ impl VaffleTarget {
     /// Patch `.side` on an already-emitted arena node (param tagging).
     pub(crate) fn set_node_side(&mut self, id: ValueId, side: Option<volar_side::SideId>) {
         self.fb().all_values[id.0].side = side;
+    }
+
+    /// Read the `.side` of an arena node, if a function is in progress.
+    pub(crate) fn side_of(&self, id: ValueId) -> Option<volar_side::SideId> {
+        self.func.as_ref()?.all_values[id.0].side
+    }
+
+    /// Set the same side on every bit of a value.
+    pub(crate) fn set_value_side(&mut self, v: &VaffleValue, side: Option<volar_side::SideId>) {
+        for &b in &v.bits {
+            self.set_node_side(b, side);
+        }
+    }
+
+    /// Is `bits` a public constant equal to `value` (mod 2^width)? Used for
+    /// the vc-spec annihilator taint exceptions.
+    pub(crate) fn is_public_const(&self, bits: &[ValueId], value: u64) -> bool {
+        let public = self.vc_public_side();
+        self.const_u64(bits) == Some(value) && bits.iter().all(|&b| self.side_of(b) == public)
     }
 
     /// Read an all-`Const` bit vector as `u64` (LSB first). `None` if any
@@ -1101,6 +1121,18 @@ impl LirTarget for VaffleTarget {
     }
     fn mul(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
+        let width = lhs.bits.len();
+        // vc-spec annihilator: `imul` by concrete 0 ⇒ result is concrete 0
+        // (public), regardless of the other operand's taint.
+        let public = self.vc_public_side();
+        let lhs_zero = width <= 64 && self.is_public_const(&lhs.bits, 0);
+        let rhs_zero = width <= 64 && self.is_public_const(&rhs.bits, 0);
+        if lhs_zero || rhs_zero {
+            let bits = (0..width).map(|_| self.bc_const(false)).collect();
+            let r = VaffleValue { bits, ty };
+            self.set_value_side(&r, public);
+            return r;
+        }
         let bits = self
             .extract_bits(HelperOp::Mul, &[lhs.bits.clone(), rhs.bits.clone()])
             .unwrap_or_else(|| bc_mul(self, &lhs.bits, &rhs.bits));
@@ -1122,10 +1154,22 @@ impl LirTarget for VaffleTarget {
     }
     fn and(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        if let Some(bits) = self.extract_bits(HelperOp::And, &[lhs.bits.clone(), rhs.bits.clone()]) {
+        if let Some(bits) = self.extract_bits(HelperOp::And, &[lhs.bits.clone(), rhs.bits.clone()])
+        {
             return VaffleValue { bits, ty };
         }
         let width = lhs.bits.len();
+        // vc-spec annihilator: `iand` by concrete 0 ⇒ result is concrete 0
+        // (public), regardless of the other operand's taint.
+        let public = self.vc_public_side();
+        let lhs_zero = width <= 64 && self.is_public_const(&lhs.bits, 0);
+        let rhs_zero = width <= 64 && self.is_public_const(&rhs.bits, 0);
+        if lhs_zero || rhs_zero {
+            let bits = (0..width).map(|_| self.bc_const(false)).collect();
+            let r = VaffleValue { bits, ty };
+            self.set_value_side(&r, public);
+            return r;
+        }
         if let Some(bits) = self.emit_wide_binop_poly(&lhs.bits, &rhs.bits, WideBinOp::And, width) {
             return VaffleValue { bits, ty };
         }
@@ -1140,6 +1184,22 @@ impl LirTarget for VaffleTarget {
             return VaffleValue { bits, ty };
         }
         let width = lhs.bits.len();
+        // vc-spec annihilator: `ior` by concrete all-ones ⇒ result is concrete
+        // all-ones (public), regardless of the other operand's taint.
+        let public = self.vc_public_side();
+        let mask = if width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+        let lhs_ones = width <= 64 && self.is_public_const(&lhs.bits, mask);
+        let rhs_ones = width <= 64 && self.is_public_const(&rhs.bits, mask);
+        if lhs_ones || rhs_ones {
+            let bits = (0..width).map(|_| self.bc_const(true)).collect();
+            let r = VaffleValue { bits, ty };
+            self.set_value_side(&r, public);
+            return r;
+        }
         if let Some(bits) = self.emit_wide_binop_poly(&lhs.bits, &rhs.bits, WideBinOp::Or, width) {
             return VaffleValue { bits, ty };
         }
@@ -1150,7 +1210,8 @@ impl LirTarget for VaffleTarget {
     }
     fn xor(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
         let ty = lhs.ty.clone();
-        if let Some(bits) = self.extract_bits(HelperOp::Xor, &[lhs.bits.clone(), rhs.bits.clone()]) {
+        if let Some(bits) = self.extract_bits(HelperOp::Xor, &[lhs.bits.clone(), rhs.bits.clone()])
+        {
             return VaffleValue { bits, ty };
         }
         let width = lhs.bits.len();
@@ -1688,6 +1749,128 @@ impl VaffleTarget {
         }
         results
     }
+
+    /// Emit an IR-level oracle call directly as `Value::Op(Stmt::OracleCall)`
+    /// plus one `Stmt::OracleOutput` projection per result (each exploded to
+    /// per-bit `Shuffle` values), instead of the `Value::Call`-to-import used
+    /// by [`call_extern_multi`](Self::call_extern_multi).
+    ///
+    /// Oracle calls are pure IR statements: they bypass the call/SP protocol
+    /// entirely, are validated against `module.oracles` by the vaffle→IR and
+    /// IR→boolar lowerings, and arrive at the boolar level as one
+    /// `BIrStmt::OracleBit` per output bit. The oracle must already be
+    /// registered in `module.oracles` (the waffle lowering's import-config
+    /// pre-registration does this).
+    ///
+    /// Each argument is packed into a single typed var via `Stmt::Merge`
+    /// carrying that param's declared `TypeId`, so the IR-level signature
+    /// validation (`decl.params` vs `args`) sees the declared types.
+    pub fn oracle_call_multi(
+        &mut self,
+        name: &str,
+        args: &[VaffleValue],
+        ret_tys: &[LirType],
+    ) -> Vec<VaffleValue> {
+        debug_assert!(
+            self.module.oracles.iter().any(|d| d.name == name),
+            "oracle_call_multi: oracle `{name}` is not registered in module.oracles"
+        );
+        let arg_vars: Vec<ValueId> = args
+            .iter()
+            .map(|v| {
+                if v.bits.len() == 1 {
+                    return v.bits[0];
+                }
+                let tid = self.lir_type_to_tid(&v.ty);
+                self.fb().emit_value(Value::Op(Stmt::Merge {
+                    parts: v.bits.clone(),
+                    ty: tid,
+                }))
+            })
+            .collect();
+        let output_tys: Vec<TypeId> = ret_tys.iter().map(|t| self.lir_type_to_tid(t)).collect();
+        let result_ty = self.intern_type(IrType::Tuple(output_tys.clone()));
+        let call = self.fb().emit_value(Value::Op(Stmt::OracleCall {
+            name: name.to_string(),
+            args: arg_vars,
+            output_tys: output_tys.clone(),
+            result_ty,
+        }));
+        let mut results = Vec::with_capacity(ret_tys.len());
+        for (idx, ty) in ret_tys.iter().enumerate() {
+            let tid = output_tys[idx];
+            let out = self
+                .fb()
+                .emit_value(Value::Op(Stmt::OracleOutput { call, idx, ty: tid }));
+            let n = self.bits_for(ty);
+            assert!(n <= 256, "oracle_call_multi: result wider than 256 bits");
+            let bits: Vec<ValueId> = (0..n).map(|b| self.extract_bit(out, b as u8)).collect();
+            results.push(VaffleValue {
+                bits,
+                ty: ty.clone(),
+            });
+        }
+        results
+    }
+
+    /// Emit a REAL IR-level action call (`Stmt::ActionCall` + per-output
+    /// `ActionOutput` projections), so it survives the vaffle→IR lowering as
+    /// an `IRStmt::ActionCall` validated against `module.actions` — the
+    /// schedule-level `Gate::ActionBit` extern path (evaluator-hosted
+    /// actions, e.g. network sockets). Unlike [`Self::action_call`], the
+    /// guard/fallback selection is NOT expanded here: it is part of the
+    /// action's execution semantics (the host is not invoked when the guard
+    /// is 0; the fallback bits are used instead).
+    pub fn action_call_multi(
+        &mut self,
+        name: &str,
+        guard_bit: ValueId,
+        args: &[VaffleValue],
+        fallbacks: &[VaffleValue],
+        ret_tys: &[LirType],
+    ) -> Vec<VaffleValue> {
+        debug_assert!(
+            self.module.actions.iter().any(|d| d.name == name),
+            "action_call_multi: action `{name}` is not registered in module.actions"
+        );
+        let merge = |t: &mut Self, v: &VaffleValue| -> ValueId {
+            if v.bits.len() == 1 {
+                return v.bits[0];
+            }
+            let tid = t.lir_type_to_tid(&v.ty);
+            t.fb().emit_value(Value::Op(Stmt::Merge {
+                parts: v.bits.clone(),
+                ty: tid,
+            }))
+        };
+        let arg_vars: Vec<ValueId> = args.iter().map(|v| merge(self, v)).collect();
+        let fb_vars: Vec<ValueId> = fallbacks.iter().map(|v| merge(self, v)).collect();
+        let output_tys: Vec<TypeId> = ret_tys.iter().map(|t| self.lir_type_to_tid(t)).collect();
+        let result_ty = self.intern_type(IrType::Tuple(output_tys.clone()));
+        let call = self.fb().emit_value(Value::Op(Stmt::ActionCall {
+            name: name.to_string(),
+            guard: guard_bit,
+            args: arg_vars,
+            fallbacks: fb_vars,
+            output_tys: output_tys.clone(),
+            result_ty,
+        }));
+        let mut results = Vec::with_capacity(ret_tys.len());
+        for (idx, ty) in ret_tys.iter().enumerate() {
+            let tid = output_tys[idx];
+            let out = self
+                .fb()
+                .emit_value(Value::Op(Stmt::ActionOutput { call, idx, ty: tid }));
+            let n = self.bits_for(ty);
+            assert!(n <= 256, "action_call_multi: result wider than 256 bits");
+            let bits: Vec<ValueId> = (0..n).map(|b| self.extract_bit(out, b as u8)).collect();
+            results.push(VaffleValue {
+                bits,
+                ty: ty.clone(),
+            });
+        }
+        results
+    }
 }
 
 // ============================================================================
@@ -1906,10 +2089,13 @@ mod tests {
         let has_stack_write = body.values.iter().any(|v| {
             matches!(&v.kind, Value::Op(Stmt::StorageWrite { storage, .. }) if *storage == data)
         });
-        let has_stack_read = body.values.iter().any(|v| {
-            matches!(&v.kind, Value::Op(Stmt::StorageRead { storage, .. }) if *storage == data)
-        });
-        assert!(has_stack_write, "ptr_store should write the alloca's storage");
+        let has_stack_read = body.values.iter().any(
+            |v| matches!(&v.kind, Value::Op(Stmt::StorageRead { storage, .. }) if *storage == data),
+        );
+        assert!(
+            has_stack_write,
+            "ptr_store should write the alloca's storage"
+        );
         assert!(has_stack_read, "ptr_load should read the alloca's storage");
     }
 
@@ -1973,8 +2159,14 @@ mod tests {
             })
             .collect();
         assert_eq!(allocs.len(), 2);
-        assert_ne!(allocs[0].0, allocs[1].0, "each alloca has its own data storage");
-        assert_ne!(allocs[0].1, allocs[1].1, "each alloca has its own stack pointer");
+        assert_ne!(
+            allocs[0].0, allocs[1].0,
+            "each alloca has its own data storage"
+        );
+        assert_ne!(
+            allocs[0].1, allocs[1].1,
+            "each alloca has its own stack pointer"
+        );
         assert_eq!(allocs[0].2, 2);
         assert_eq!(allocs[1].2, 4);
     }
@@ -2609,7 +2801,11 @@ mod tests {
                 "each operand and the result is a primitive 32-bit value"
             );
         }
-        assert_eq!(helper.blocks[0].params.len(), 2, "one entry param per operand");
+        assert_eq!(
+            helper.blocks[0].params.len(),
+            2,
+            "one entry param per operand"
+        );
         match &helper.blocks[0].terminator {
             Terminator::Return { values } => assert_eq!(values.len(), 1),
             other => panic!("helper returns one value, got {other:?}"),
