@@ -5,7 +5,7 @@
 //! `cc -O0 -std=c99`, runs the binary, and checks stdout.
 
 use volar_c_backend::CBackend;
-use volar_lir::{LirTarget, LirType, StackAllocExt};
+use volar_lir::{HeapAllocExt, LirTarget, LirType, StackAllocExt};
 use volar_lir_test_corpus::compile_and_run;
 
 // ============================================================================
@@ -16,6 +16,40 @@ use volar_lir_test_corpus::compile_and_run;
 fn test_stack_alloc_ext_returns_some() {
     let mut b = CBackend::new();
     assert!(b.stack_alloc_ext().is_some());
+}
+
+#[test]
+fn test_dynamic_heap_alloc_runtime_count_and_zero_initialization() {
+    let mut b = CBackend::new();
+    let (entry, params) = b.begin_function("heap_dynamic", &[LirType::U64], Some(LirType::U32));
+    b.switch_to_block(entry);
+
+    let count = params[0][0];
+    let ptr = b
+        .heap_alloc_dynamic(LirType::U32, count)
+        .expect("C backend supports dynamic heap allocation");
+    let one = b.iconst(LirType::U64, 1);
+    let last = b.sub(count, one);
+    let value = b.iconst(LirType::U32, 42);
+    b.ptr_index_store(ptr.clone(), last.clone(), &[value], &LirType::U32);
+    let stored = b.ptr_index_load(ptr.clone(), last, &LirType::U32)[0];
+    let first = b.iconst(LirType::U64, 0);
+    let zero = b.ptr_index_load(ptr, first, &LirType::U32)[0];
+    let result = b.add(stored, zero);
+    b.ret(&[result]);
+    b.end_function();
+
+    let c_src = b.finish();
+    assert!(
+        c_src.contains("calloc("),
+        "allocation must be zero-initialized:\n{c_src}"
+    );
+    assert!(
+        c_src.contains("sizeof(uint32_t)"),
+        "allocation must scale by element size:\n{c_src}"
+    );
+    let output = compile_and_run(&c_src, r#"  printf("%u\n", heap_dynamic(4));"#);
+    assert_eq!(output.trim(), "42");
 }
 
 // ============================================================================
@@ -209,8 +243,8 @@ fn test_ptr_to_array_field_registers_typedef() {
     let output = compile_and_run(
         &c_src,
         r#"
-  static uint8_t backing[32];
-  Vec_U8x32 v = { .data = backing, .len = 32 };
+  static Arr_U8_32 backing = { .data = {0} };
+  Vec_U8x32 v = { .data = &backing, .len = 32 };
   printf("%llu\n", (unsigned long long)fat_ptr_len(v));
 "#,
     );

@@ -333,11 +333,11 @@ pub trait StackAllocExt {
 // Heap allocation extension trait
 // ============================================================================
 
-/// Extension trait for backends with a real heap-allocation primitive —
-/// the `Box<T>` counterpart of [`StackAllocExt`].
+/// Extension trait for backends with heap allocation for boxed and
+/// runtime-sized storage — the heap-backed counterpart of [`StackAllocExt`].
 ///
 /// Access via [`LirTarget::heap_alloc_ext`], which returns `None` for
-/// backends without one. `CBackend` returns `Some(self)`, backed by `malloc`.
+/// backends without one. `CBackend` returns `Some(self)`, backed by `calloc`.
 ///
 /// # Pointer type
 ///
@@ -361,9 +361,20 @@ pub trait StackAllocExt {
 pub trait HeapAllocExt {
     type Value: Clone + Eq + core::fmt::Debug;
 
-    /// Allocate heap storage for `count` elements of `elem_ty`, returning a
-    /// value of type `LirType::Ptr(Box::new(elem_ty))`.
+    /// Allocate zero-initialized heap storage for `count` elements of `elem_ty`,
+    /// returning a value of type `LirType::Ptr(Box::new(elem_ty))`.
     fn heap_alloc(&mut self, elem_ty: LirType, count: usize) -> Self::Value;
+
+    /// Allocate zero-initialized heap storage for a runtime number of elements.
+    /// The count is a scalar value in the target's native `usize` representation.
+    /// Backends without dynamic heap allocation return `None`.
+    fn heap_alloc_dynamic(
+        &mut self,
+        _elem_ty: LirType,
+        _count: Self::Value,
+    ) -> Option<Self::Value> {
+        None
+    }
 }
 
 // ============================================================================
@@ -861,14 +872,13 @@ pub trait LirTarget<Prov: Clone = ()> {
     /// this backend, if it supports heap allocation.
     ///
     /// The `Box<T>` abstraction (see `volar_compiler::ir::box_type`/
-    /// `box_new_expr`) lowers through this — unlike [`Self::stack_alloc_ext`],
-    /// a heap allocation's storage outlives the call that produced it and is
-    /// never implicitly freed at function exit, which is exactly what a
-    /// large, statically-sized-but-too-big-for-the-stack buffer (e.g. a
-    /// pool with thousands of slots) needs.
+    /// `box_new_expr`) and runtime-sized vectors lower through this — unlike
+    /// [`Self::stack_alloc_ext`], a heap allocation's storage outlives the call
+    /// that produced it and is never implicitly freed at function exit. This is
+    /// needed both for large fixed pools and for dynamically-sized storage.
     ///
     /// Circuit backends (`VolarIrTarget`, `VaffleTarget`) return `None`.
-    /// `CBackend` returns `Some(self)` (backed by `malloc`).
+    /// `CBackend` returns `Some(self)` (backed by `calloc`).
     fn heap_alloc_ext(&mut self) -> Option<&mut dyn HeapAllocExt<Value = Self::Value>> {
         None
     }

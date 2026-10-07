@@ -106,6 +106,8 @@ enum Expr {
     /// Reference to a value by ID.
     Name(u32),
     Const(i64),
+    /// `sizeof(<C type>)`.
+    Sizeof(String),
     /// `{l} {op} {r}`.
     Bin(&'static str, Box<Expr>, Box<Expr>),
     /// Prefix unary: `{op}{v}`.
@@ -906,7 +908,7 @@ impl FoldPlan {
                         first_use[v] = Some(item_idx);
                     }
                 }
-                Expr::Const(_) => {}
+                Expr::Const(_) | Expr::Sizeof(_) => {}
                 Expr::Bin(_, l, r) => {
                     walk_expr(l, uses, first_use, multi_use, item_idx);
                     walk_expr(r, uses, first_use, multi_use, item_idx);
@@ -1005,7 +1007,7 @@ impl FoldPlan {
         fn subtract_expr(e: &Expr, counts: &mut Vec<u32>) {
             match e {
                 Expr::Name(v) => counts[*v as usize] -= 1,
-                Expr::Const(_) => {}
+                Expr::Const(_) | Expr::Sizeof(_) => {}
                 Expr::Bin(_, l, r) => {
                     subtract_expr(l, counts);
                     subtract_expr(r, counts);
@@ -1160,6 +1162,7 @@ impl<'p> FoldRenderer<'p> {
                 self.state.value_name[idx].clone()
             }
             Expr::Const(c) => format!("{c}"),
+            Expr::Sizeof(ty) => format!("sizeof({ty})"),
             Expr::Bin(op, l, r) => format!("{} {op} {}", self.paren(l), self.paren(r)),
             Expr::Un(op, v) => format!("{op}{}", self.paren(v)),
             Expr::Cast(ty, v) => format!("({ty}){}", self.paren(v)),
@@ -1256,7 +1259,7 @@ impl<'p> FoldRenderer<'p> {
                     out.push((self.plan.def_item[*v as usize], *v));
                 }
             }
-            Expr::Const(_) => {}
+            Expr::Const(_) | Expr::Sizeof(_) => {}
             Expr::Bin(_, l, r) => {
                 self.collect_effecting(l, out);
                 self.collect_effecting(r, out);
@@ -1490,7 +1493,7 @@ impl Expr {
         fn first_name(e: &Expr) -> Option<u32> {
             match e {
                 Expr::Name(v) => Some(*v),
-                Expr::Const(_) => None,
+                Expr::Const(_) | Expr::Sizeof(_) => None,
                 Expr::Bin(_, l, r) => first_name(l).or_else(|| first_name(r)),
                 Expr::Un(_, v) | Expr::Cast(_, v) | Expr::Field(v, _) | Expr::Deref(v) => {
                     first_name(v)
@@ -2418,11 +2421,8 @@ impl StackAllocExt for CBackend {
 impl HeapAllocExt for CBackend {
     type Value = CValue;
 
-    /// Allocate heap storage for `count` elements of `elem_ty` via `malloc`,
-    /// zero-initialized (matching `Box::new(core::array::from_fn(|_| T::default()))`'s
-    /// own value-initialized semantics on the Rust side — `calloc` over
-    /// `malloc`+manual zeroing since every current caller wants a
-    /// zero/default-initialized region up front, not uninitialized memory).
+    /// Allocate heap storage for `count` elements of `elem_ty` via `calloc`,
+    /// zero-initialized to match callers that require value-initialized memory.
     ///
     /// Emits into the function preamble (so the pointer has function scope,
     /// matching `StackAllocExt::alloca`'s own placement):
@@ -2450,6 +2450,27 @@ impl HeapAllocExt for CBackend {
         .unwrap();
 
         state.alloc_value(ptr_ty, ptr_c, ptr_name)
+    }
+
+    /// Emit `calloc(count, sizeof(T))` at the current program point so a
+    /// runtime SSA count remains in scope. The returned pointer is a
+    /// side-effecting call result and, like `heap_alloc`, starts zeroed.
+    fn heap_alloc_dynamic(&mut self, elem_ty: LirType, count: CValue) -> Option<CValue> {
+        self.register_array_typedef(&elem_ty);
+        let elem_c = self.type_to_c(&elem_ty);
+        let ptr_c = format!("{elem_c}*");
+        let ptr_ty = LirType::Ptr(Box::new(elem_ty));
+        let expr = Expr::Cast(
+            ptr_c.clone(),
+            Box::new(Expr::Call(
+                "calloc".to_owned(),
+                vec![Expr::Name(count.0), Expr::Sizeof(elem_c)],
+            )),
+        );
+        Some(
+            self.state()
+                .record_def(ptr_ty, ptr_c, expr, ValKind::CallRet),
+        )
     }
 }
 
