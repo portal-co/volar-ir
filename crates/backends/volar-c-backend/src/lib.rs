@@ -2206,8 +2206,16 @@ impl LirTarget for CBackend {
                 }
                 Some(ty) => {
                     // Aggregate return — pack scalars back into the C type.
+                    let expected = self.lir_scalar_count(&ty);
+                    assert_eq!(
+                        vals.len(), expected,
+                        "ret in '{}': aggregate type {ty:?} needs {expected} scalars, got {}",
+                        self.state().name,
+                        vals.len()
+                    );
                     let mut offset = 0usize;
-                    let packed = self.pack_expr(&ty.clone(), vals, &mut offset);
+                    let packed = self.pack_expr(&ty, vals, &mut offset);
+                    assert_eq!(offset, vals.len(), "ret: aggregate packing left unused scalars");
                     Item::Ret(Some(packed))
                 }
             }

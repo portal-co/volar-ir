@@ -2,8 +2,10 @@
 // @ai: assisted
 //! Serializable "recorded LIR" format.
 //!
-//! [`RecordingTarget`] implements [`LirTarget`] (and [`StackAllocExt`]) by
-//! recording every API call into a [`SavedLirModule`].  The saved module can
+//! [`RecordingTarget`] implements [`LirTarget`] (and optionally [`StackAllocExt`]) by
+//! recording every API call into a [`SavedLirModule`]. The default recorder
+//! advertises only the portable `LirTarget` surface so saved modules can be
+//! replayed into targets without stack allocation. The saved module can
 //! be serialized with `rkyv` (feature `"rkyv"`) and later replayed into any
 //! target via [`SavedLirModule::replay`].
 //!
@@ -15,10 +17,10 @@
 //!
 //! # StackAllocExt
 //!
-//! [`RecordingTarget`] also implements [`StackAllocExt`].  When replaying
-//! into a target that does not support stack allocation (i.e. one whose
-//! [`LirTarget::stack_alloc_ext`] returns `None`), the replay will panic at
-//! runtime on any `Alloca` / `PtrLoad` / `PtrStore` / `PtrOffset` call.
+//! [`RecordingTarget`] can opt into advertising [`StackAllocExt`] with
+//! [`RecordingTarget::with_stack_alloc_ext`]. Use that only when every replay
+//! target supports the extension; otherwise the code generator may emit
+//! stack-allocation calls that a peer target cannot replay.
 
 #![no_std]
 extern crate alloc;
@@ -659,9 +661,16 @@ impl SavedLirModule {
                     ptr,
                     idx,
                     pointee_ty,
-                    ..
+                    outs: recorded_outs,
                 } => {
                     let outs = target.ptr_index_load(val!(ptr), val!(idx), pointee_ty);
+                    assert_eq!(
+                        outs.len(),
+                        recorded_outs.len(),
+                        "SavedLirModule::replay: ptr_index_load for {pointee_ty:?} recorded {} scalar outputs, target returned {}",
+                        recorded_outs.len(),
+                        outs.len()
+                    );
                     for v in outs {
                         push_val!(v);
                     }
@@ -699,6 +708,8 @@ pub struct RecordingTarget {
     val_types: Vec<LirType>,
     /// Struct layouts in define order — needed to flatten aggregate params/returns.
     struct_defs: Vec<StructDef>,
+    /// Whether codegen should emit stack-allocation calls for this recording.
+    supports_stack_alloc_ext: bool,
 }
 
 impl RecordingTarget {
@@ -709,7 +720,15 @@ impl RecordingTarget {
             next_block: 0,
             val_types: Vec::new(),
             struct_defs: Vec::new(),
+            supports_stack_alloc_ext: false,
         }
+    }
+
+    /// Opt into recording stack allocation operations. Every downstream
+    /// replay target must support [`StackAllocExt`].
+    pub fn with_stack_alloc_ext(mut self) -> Self {
+        self.supports_stack_alloc_ext = true;
+        self
     }
 
     fn alloc_val(&mut self, ty: LirType) -> u32 {
@@ -1141,7 +1160,11 @@ impl LirTarget for RecordingTarget {
     }
 
     fn stack_alloc_ext(&mut self) -> Option<&mut dyn StackAllocExt<Value = u32>> {
-        Some(self)
+        if self.supports_stack_alloc_ext {
+            Some(self)
+        } else {
+            None
+        }
     }
 
     fn abi(&self) -> LirAbi {
@@ -1149,8 +1172,14 @@ impl LirTarget for RecordingTarget {
     }
 
     fn ptr_index_load(&mut self, ptr: u32, idx: u32, pointee_ty: &LirType) -> Vec<u32> {
-        let out = self.alloc_val(pointee_ty.clone());
-        let outs = vec![out];
+        // `LirTarget::ptr_index_load` returns the pointee as flat scalars, not
+        // one aggregate handle. Keep the recorded value stream aligned with
+        // every concrete backend so replay's value IDs remain stable.
+        let scalar_tys = self.flatten_scalar_tys(pointee_ty);
+        let outs: Vec<u32> = scalar_tys
+            .into_iter()
+            .map(|ty| self.alloc_val(ty))
+            .collect();
         self.module.calls.push(LirCall::PtrIndexLoad {
             ptr,
             idx,
