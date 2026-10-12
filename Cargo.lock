@@ -1936,6 +1936,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "volar-ir-simd"
+version = "0.1.0"
+dependencies = [
+ "volar-fuzz",
+ "volar-ir",
+ "volar-ir-common",
+]
+
+[[package]]
 name = "volar-ir-text"
 version = "0.1.0"
 dependencies = [

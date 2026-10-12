@@ -4,6 +4,7 @@ members = [
     "crates/ir/volar-ir-common",
     "crates/ir/volar-ir-config",
     "crates/ir/volar-ir-passes",
+    "crates/ir/volar-ir-simd",
     "crates/ir/volar-ir-opt",
     "crates/ir/volar-ir-virt",
     "crates/ir/volar-ir-text",
@@ -44,6 +45,7 @@ repository = "https://github.com/portal-co/volar-ir.git"
 volar-ir-config        = { path = "crates/ir/volar-ir-config", version = "0.1.0" }
 volar-ir               = { path = "crates/ir/volar-ir", version = "0.1.0" }
 volar-ir-passes        = { path = "crates/ir/volar-ir-passes", version = "0.1.0" }
+volar-ir-simd          = { path = "crates/ir/volar-ir-simd", version = "0.1.0" }
 volar-ir-opt           = { path = "crates/ir/volar-ir-opt", version = "0.1.0" }
 volar-ir-virt          = { path = "crates/ir/volar-ir-virt", version = "0.1.0" }
 volar-ir-text          = { path = "crates/ir/volar-ir-text", version = "0.1.0" }
