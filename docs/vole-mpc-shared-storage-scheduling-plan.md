@@ -39,7 +39,10 @@ Cirrus
   existing transport codec in `b102faa`. Resumable strict table loops and
   one-epoch scheduled wrappers are wired in `4853e2f`; action/OT/GRAM-capable
   strict wrappers now exchange the same cursor envelope in Volar `26f1de7`,
-  with scheduled action and GRAM loop coverage in `strict_actions`.
+  with scheduled action and GRAM loop coverage in `strict_actions`. The cursor
+  now drives arbitrary multi-epoch manifests in `bbf1ea1`, all scheduled strict
+  wrappers route through that driver in `e36e1e9`, and split/chain runners
+  expose scheduled multi-round drivers with TCP coverage in `dbbe05b`.
 
 This document specifies a deterministic scheduler for executions in which
 multiple host threads act as virtual cores over a set of shared typed storages.
