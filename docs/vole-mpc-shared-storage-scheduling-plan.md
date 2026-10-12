@@ -1,6 +1,6 @@
 # Shared-storage scheduling for VOLE and lockstep MPC
 
-**Status:** implementation in progress; Phases 1–3 landed in volar-ir; Phases 4–5 adapter seams started
+**Status:** implementation in progress; Phases 1–3 landed in volar-ir; Phases 4–5 role/context and strict-loop integration underway
 **Scope:** Volar's VOLE proving path and main-branch MPC path across Volar and
 Cirrus  
 **Related work:** parallel communication reduction (#14160)
@@ -27,15 +27,17 @@ Cirrus
   `462fda4`, next-ticket cursor access in `9d3bda3`, and typed,
   ticket-bound logical storage-trace fragments in Cirrus `6ce68ad`; a toy
   role-separated StackIo schedule exercise in Cirrus
-  `fc6754a`, using a canonical SHA3 schedule digest in `56724db`;
-  existing ideal-functionality contexts remain unchanged until the real
-  role-separated VOLE path is ready.
+  `fc6754a`, using a canonical SHA3 schedule digest in `56724db`; ticket-bound
+  hat sinks/sources now construct locked role contexts in `633769b`, and the
+  scheduled ML-KEM/Ferret context path is covered by the one-gate replay test
+  in `d4f2260`. Existing ideal-functionality contexts remain unchanged.
 - Phase 5 checkpoint: Volar `volar-mpc` now provides a shared-manifest,
   session/digest-bound lockstep cursor with explicit epoch-open, iteration,
   commit, and acknowledgement phases, plus gate-schedule shape validation in
   `9436626`; `SessionFrame::Schedule` carries the same binding fields on the
-  existing transport codec in `b102faa`. This validates the execution seam
-  but does not yet replace the strict garbled/GRAM transport loops.
+  existing transport codec in `b102faa`. Resumable strict table loops and
+  one-epoch scheduled wrappers are wired in `4853e2f`, but the full
+  action/OT/GRAM-capable strict transport loops still need replacement.
 
 This document specifies a deterministic scheduler for executions in which
 multiple host threads act as virtual cores over a set of shared typed storages.
