@@ -21,8 +21,8 @@ Cirrus
   `VoleScheduleTicket`/`VoleScheduleCursor` replay plumbing in `6ca60b5`,
   plus ticket-bound prover hat sinks/verifier hat sources in `99cbe52`,
   deterministic fragment merging in `7dfe1bc`, and hardened range validation
-  in `071369c`; existing ideal-functionality
-  contexts remain unchanged until the real
+  in `071369c`, with rejection-path coverage in `673dae4`; existing
+  ideal-functionality contexts remain unchanged until the real
   role-separated VOLE path is ready.
 
 This document specifies a deterministic scheduler for executions in which
