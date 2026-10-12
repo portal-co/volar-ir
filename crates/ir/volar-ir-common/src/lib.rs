@@ -7,6 +7,7 @@ extern crate alloc;
 pub mod aes_extern;
 pub mod complexity;
 pub mod schedule;
+pub mod scheduler;
 pub mod tls13_extern;
 pub use complexity::{MeasureSpec, ReentryHint, StructRef};
 
@@ -34,6 +35,10 @@ pub use schedule::{
     ManifestError, OrdinalRange, SCHEDULE_MANIFEST_VERSION, ScheduleHasher, ScheduleLimits,
     ScheduleManifest, StorageClaim, StorageClaimMode, StorageKey, WorkerLane,
     classify_storage_claim,
+};
+pub use scheduler::{
+    AccessKind, ScheduleRuntime, ScheduleTransaction, SchedulerError, SharedStorageBank,
+    StorageAccessEvent, StorageCellKey, TraceFragment,
 };
 
 /// Whether a storage namespace may be mutated by a producer.

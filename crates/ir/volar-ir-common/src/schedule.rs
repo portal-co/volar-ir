@@ -342,6 +342,104 @@ impl ScheduleManifest {
         }
     }
 
+    /// Build deterministic conflict-free consistency epochs from canonical
+    /// iteration descriptors.
+    ///
+    /// Iterations are considered in program order.  A new epoch begins before
+    /// an iteration that conflicts with an existing claim, depends on an
+    /// iteration in the current epoch, or would exceed `epoch_size`.  Worker
+    /// lanes and communication groups are assigned from canonical ordinals;
+    /// host completion order is never consulted.
+    pub fn plan_from_iterations(
+        program_digest: [u8; 32],
+        storage_policy_digest: [u8; 32],
+        protocol_profile: u32,
+        epoch_size: u32,
+        worker_lane_count: u32,
+        mut iterations: Vec<IterationManifest>,
+    ) -> Result<Self, ManifestError> {
+        if epoch_size == 0 {
+            return Err(ManifestError::ZeroEpochSize);
+        }
+        if worker_lane_count == 0 {
+            return Err(ManifestError::ZeroWorkerLanes);
+        }
+        let epoch_capacity =
+            usize::try_from(epoch_size).map_err(|_| ManifestError::LengthOverflow)?;
+        let mut manifest = Self::new(
+            program_digest,
+            storage_policy_digest,
+            protocol_profile,
+            epoch_size,
+            worker_lane_count,
+        );
+        let mut current = EpochManifest::new(EpochId(0), CommunicationGroup(0));
+        let mut next_lane = 0u32;
+
+        for (expected, mut iteration) in iterations.drain(..).enumerate() {
+            let expected = u64::try_from(expected).map_err(|_| ManifestError::OrdinalOverflow)?;
+            if iteration.ordinal.0 != expected {
+                return Err(ManifestError::NonCanonicalIteration {
+                    expected,
+                    found: iteration.ordinal.0,
+                });
+            }
+            iteration.canonicalize();
+            if let Some(dependency) = iteration
+                .dependencies
+                .iter()
+                .copied()
+                .find(|dependency| dependency.0 >= iteration.ordinal.0)
+            {
+                return Err(ManifestError::ForwardDependency {
+                    iteration: iteration.ordinal,
+                    dependency,
+                });
+            }
+            for claim in &iteration.claims {
+                claim.validate()?;
+            }
+
+            let dependency_in_current = current.iterations.iter().any(|candidate| {
+                iteration
+                    .dependencies
+                    .binary_search(&candidate.ordinal)
+                    .is_ok()
+            });
+            let conflicts_in_current = current.iterations.iter().any(|candidate| {
+                candidate.claims.iter().any(|left| {
+                    iteration
+                        .claims
+                        .iter()
+                        .any(|right| left.conflicts_with(*right))
+                })
+            });
+            if !current.iterations.is_empty()
+                && (current.iterations.len() >= epoch_capacity
+                    || dependency_in_current
+                    || conflicts_in_current)
+            {
+                manifest.epochs.push(current);
+                let epoch = u64::try_from(manifest.epochs.len())
+                    .map_err(|_| ManifestError::OrdinalOverflow)?;
+                current = EpochManifest::new(EpochId(epoch), CommunicationGroup(epoch));
+            }
+
+            iteration.worker_lane = WorkerLane(next_lane);
+            next_lane = if next_lane + 1 == worker_lane_count {
+                0
+            } else {
+                next_lane + 1
+            };
+            current.iterations.push(iteration);
+        }
+        if !current.iterations.is_empty() {
+            manifest.epochs.push(current);
+        }
+        manifest.validate(ScheduleLimits::default())?;
+        Ok(manifest)
+    }
+
     /// Validate canonical order, bounds, dependencies, and reservation ranges.
     pub fn validate(&self, limits: ScheduleLimits) -> Result<(), ManifestError> {
         if self.format_version != SCHEDULE_MANIFEST_VERSION {
@@ -873,6 +971,53 @@ mod tests {
         second.epochs[0].iterations[0].claims.reverse();
         second.canonicalize();
         assert_eq!(first_bytes, second.canonical_bytes(LIMITS).unwrap());
+    }
+
+    #[test]
+    fn planner_batches_readers_and_splits_conflicting_writes() {
+        let mut first = IterationManifest::new(IterationId(0), 0, WorkerLane(99));
+        first
+            .claims
+            .push(StorageClaim::whole(key(1, 0), StorageClaimMode::Read));
+        let mut second = IterationManifest::new(IterationId(1), 1, WorkerLane(99));
+        second
+            .claims
+            .push(StorageClaim::whole(key(1, 0), StorageClaimMode::Read));
+        let mut third = IterationManifest::new(IterationId(2), 2, WorkerLane(99));
+        third
+            .claims
+            .push(StorageClaim::whole(key(1, 0), StorageClaimMode::Write));
+        let mut fourth = IterationManifest::new(IterationId(3), 3, WorkerLane(99));
+        fourth.dependencies.push(IterationId(2));
+
+        let planned = ScheduleManifest::plan_from_iterations(
+            [1; 32],
+            [2; 32],
+            3,
+            4,
+            2,
+            vec![first, second, third, fourth],
+        )
+        .unwrap();
+        assert_eq!(planned.epochs.len(), 3);
+        assert_eq!(planned.epochs[0].iterations.len(), 2);
+        assert_eq!(planned.epochs[1].iterations.len(), 1);
+        assert_eq!(planned.epochs[2].iterations.len(), 1);
+        assert_eq!(planned.epochs[0].iterations[0].worker_lane, WorkerLane(0));
+        assert_eq!(planned.epochs[0].iterations[1].worker_lane, WorkerLane(1));
+        assert!(planned.validate(LIMITS).is_ok());
+    }
+
+    #[test]
+    fn planner_rejects_noncanonical_input_ordinals() {
+        let mut iteration = IterationManifest::new(IterationId(4), 0, WorkerLane(0));
+        iteration
+            .claims
+            .push(StorageClaim::whole(key(1, 0), StorageClaimMode::Read));
+        assert!(matches!(
+            ScheduleManifest::plan_from_iterations([0; 32], [0; 32], 0, 1, 1, vec![iteration],),
+            Err(ManifestError::NonCanonicalIteration { .. })
+        ));
     }
 
     #[test]
