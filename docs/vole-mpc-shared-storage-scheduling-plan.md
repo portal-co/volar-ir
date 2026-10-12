@@ -1,6 +1,6 @@
 # Shared-storage scheduling for VOLE and lockstep MPC
 
-**Status:** implementation in progress; Phases 1–3 landed in volar-ir
+**Status:** implementation in progress; Phases 1–3 landed in volar-ir; Phase 4 adapter seam started
 **Scope:** Volar's VOLE proving path and main-branch MPC path across Volar and
 Cirrus  
 **Related work:** parallel communication reduction (#14160)
@@ -17,6 +17,10 @@ Cirrus
   conflict/failure behavior, and canonical trace fragments — landed in the
   follow-up implementation commit. Host-thread/VOLE/MPC adapters remain later
   phases.
+- Phase 4 checkpoint: Cirrus now exposes manifest-bound
+  `VoleScheduleTicket`/`VoleScheduleCursor` replay plumbing in `6ca60b5`;
+  existing ideal-functionality contexts remain unchanged until the real
+  role-separated VOLE path is ready.
 
 This document specifies a deterministic scheduler for executions in which
 multiple host threads act as virtual cores over a set of shared typed storages.
@@ -843,6 +847,12 @@ image.
 - epoch caps and lane assignments are deterministic.
 
 ### Phase 4 — VOLE prover/verifier integration
+
+**Current checkpoint:** the ticket/replay seam is landed in Cirrus, but it is
+not yet wired into the existing ideal-functionality contexts. The remaining
+integration must bind real prover/verifier correlation, storage, and trace
+adapters without using host completion order or reviving the deferred closure
+path.
 
 **Deliverables**
 
