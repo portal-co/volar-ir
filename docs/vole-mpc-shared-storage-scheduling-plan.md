@@ -20,10 +20,10 @@ Cirrus
 - Phase 4 checkpoint: Cirrus now exposes manifest-bound
   `VoleScheduleTicket`/`VoleScheduleCursor` replay plumbing in `6ca60b5`,
   plus ticket-bound prover hat sinks/verifier hat sources in `99cbe52`,
-  deterministic fragment merging in `7dfe1bc`, and hardened range validation
-  in `071369c`, with rejection-path coverage in `673dae4`; existing
-  ideal-functionality contexts remain unchanged until the real
-  role-separated VOLE path is ready.
+  deterministic fragment merging in `7dfe1bc`, hardened range validation
+  in `071369c`, rejection-path coverage in `673dae4`, and manifest-checked
+  fragment merging in `84884f6`; existing ideal-functionality contexts remain
+  unchanged until the real role-separated VOLE path is ready.
 
 This document specifies a deterministic scheduler for executions in which
 multiple host threads act as virtual cores over a set of shared typed storages.
@@ -852,11 +852,11 @@ image.
 ### Phase 4 — VOLE prover/verifier integration
 
 **Current checkpoint:** the ticket/replay seam, per-ticket hat
-buffer/source, canonical fragment merge, and range validation are landed in
-Cirrus, but they are not yet wired into the existing ideal-functionality
-contexts. The remaining integration must bind real prover/verifier
-correlation, storage, and trace adapters without using host completion order
-or reviving the deferred closure path.
+buffer/source, canonical fragment merge, range validation, and manifest-checked
+merge path are landed in Cirrus, but they are not yet wired into the existing
+ideal-functionality contexts. The remaining integration must bind real
+role-separated prover/verifier correlation, storage, and trace adapters
+without using host completion order or reviving the deferred closure path.
 
 **Deliverables**
 
