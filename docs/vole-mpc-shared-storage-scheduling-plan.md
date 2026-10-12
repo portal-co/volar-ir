@@ -1,6 +1,6 @@
 # Shared-storage scheduling for VOLE and lockstep MPC
 
-**Status:** implementation in progress; Phases 1–3 landed in volar-ir; Phase 4 adapter seam started
+**Status:** implementation in progress; Phases 1–3 landed in volar-ir; Phases 4–5 adapter seams started
 **Scope:** Volar's VOLE proving path and main-branch MPC path across Volar and
 Cirrus  
 **Related work:** parallel communication reduction (#14160)
@@ -30,6 +30,11 @@ Cirrus
   `fc6754a`, using a canonical SHA3 schedule digest in `56724db`;
   existing ideal-functionality contexts remain unchanged until the real
   role-separated VOLE path is ready.
+- Phase 5 checkpoint: Volar `volar-mpc` now provides a shared-manifest,
+  session/digest-bound lockstep cursor with explicit epoch-open, iteration,
+  commit, and acknowledgement phases, plus gate-schedule shape validation in
+  `9436626`. This validates the execution seam but does not yet replace the
+  strict garbled/GRAM transport loops.
 
 This document specifies a deterministic scheduler for executions in which
 multiple host threads act as virtual cores over a set of shared typed storages.
