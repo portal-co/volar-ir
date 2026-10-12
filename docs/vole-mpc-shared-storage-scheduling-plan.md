@@ -30,7 +30,8 @@ Cirrus
   `fc6754a`, using a canonical SHA3 schedule digest in `56724db`; ticket-bound
   hat sinks/sources now construct locked role contexts in `633769b`, and the
   scheduled ML-KEM/Ferret context path is covered by the one-gate replay test
-  in `d4f2260`. Existing ideal-functionality contexts remain unchanged.
+  in `d4f2260`. A follow-up binds input-COT consumption after ticket admission
+  in `4c6d162`. Existing ideal-functionality contexts remain unchanged.
 - Phase 5 checkpoint: Volar `volar-mpc` now provides a shared-manifest,
   session/digest-bound lockstep cursor with explicit epoch-open, iteration,
   commit, and acknowledgement phases, plus gate-schedule shape validation in
