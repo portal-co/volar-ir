@@ -22,9 +22,10 @@ Cirrus
   plus ticket-bound prover hat sinks/verifier hat sources in `99cbe52`,
   deterministic fragment merging in `7dfe1bc`, hardened range validation
   in `071369c`, rejection-path coverage in `673dae4`, manifest-checked
-  fragment merging in `84884f6`, and a toy role-separated StackIo schedule
-  exercise in Cirrus `fc6754a`, using a canonical SHA3 schedule digest in
-  `56724db`; existing ideal-functionality contexts remain
+  fragment merging in `84884f6`, bounded explicit-limit consumers in
+  Cirrus `e2d08c5`, and a toy role-separated StackIo schedule exercise in
+  Cirrus `fc6754a`, using a canonical SHA3 schedule digest in `56724db`;
+  existing ideal-functionality contexts remain
   unchanged until the real role-separated VOLE path is ready.
 
 This document specifies a deterministic scheduler for executions in which
