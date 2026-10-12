@@ -36,8 +36,9 @@ Cirrus
   commit, and acknowledgement phases, plus gate-schedule shape validation in
   `9436626`; `SessionFrame::Schedule` carries the same binding fields on the
   existing transport codec in `b102faa`. Resumable strict table loops and
-  one-epoch scheduled wrappers are wired in `4853e2f`, but the full
-  action/OT/GRAM-capable strict transport loops still need replacement.
+  one-epoch scheduled wrappers are wired in `4853e2f`; action/OT/GRAM-capable
+  strict wrappers now exchange the same cursor envelope in Volar `26f1de7`,
+  with scheduled action and GRAM loop coverage in `strict_actions`.
 
 This document specifies a deterministic scheduler for executions in which
 multiple host threads act as virtual cores over a set of shared typed storages.
