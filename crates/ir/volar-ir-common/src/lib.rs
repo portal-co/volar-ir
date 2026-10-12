@@ -6,6 +6,7 @@ extern crate alloc;
 
 pub mod aes_extern;
 pub mod complexity;
+pub mod schedule;
 pub mod tls13_extern;
 pub use complexity::{MeasureSpec, ReentryHint, StructRef};
 
@@ -27,6 +28,12 @@ pub use prime::{
     FieldSink, PrimeFieldError, PrimeSpec, contains_prime_field, embed_and, embed_xor,
     eval_prime_poly, is_native_field, prime_spec, repetition_residue, solinas_add, solinas_mul,
     solinas_repeat,
+};
+pub use schedule::{
+    AddressScope, CommunicationGroup, EpochId, EpochManifest, IterationId, IterationManifest,
+    ManifestError, OrdinalRange, SCHEDULE_MANIFEST_VERSION, ScheduleHasher, ScheduleLimits,
+    ScheduleManifest, StorageClaim, StorageClaimMode, StorageKey, WorkerLane,
+    classify_storage_claim,
 };
 
 /// Whether a storage namespace may be mutated by a producer.
