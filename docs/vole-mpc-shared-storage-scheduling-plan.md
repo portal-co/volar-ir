@@ -24,11 +24,12 @@ Cirrus
   in `071369c`, rejection-path coverage in `673dae4`, manifest-checked
   fragment merging in `84884f6`, bounded explicit-limit consumers in
   Cirrus `e2d08c5`, fail-closed incomplete and over-consumed handling in
-  `462fda4`, next-ticket cursor access in `9d3bda3`, and a toy
+  `462fda4`, next-ticket cursor access in `9d3bda3`, and typed,
+  ticket-bound logical storage-trace fragments in Cirrus `6ce68ad`; a toy
   role-separated StackIo schedule exercise in Cirrus
   `fc6754a`, using a canonical SHA3 schedule digest in `56724db`;
-  existing ideal-functionality contexts remain
-  unchanged until the real role-separated VOLE path is ready.
+  existing ideal-functionality contexts remain unchanged until the real
+  role-separated VOLE path is ready.
 
 This document specifies a deterministic scheduler for executions in which
 multiple host threads act as virtual cores over a set of shared typed storages.
