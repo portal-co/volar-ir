@@ -33,8 +33,9 @@ Cirrus
 - Phase 5 checkpoint: Volar `volar-mpc` now provides a shared-manifest,
   session/digest-bound lockstep cursor with explicit epoch-open, iteration,
   commit, and acknowledgement phases, plus gate-schedule shape validation in
-  `9436626`. This validates the execution seam but does not yet replace the
-  strict garbled/GRAM transport loops.
+  `9436626`; `SessionFrame::Schedule` carries the same binding fields on the
+  existing transport codec in `b102faa`. This validates the execution seam
+  but does not yet replace the strict garbled/GRAM transport loops.
 
 This document specifies a deterministic scheduler for executions in which
 multiple host threads act as virtual cores over a set of shared typed storages.
