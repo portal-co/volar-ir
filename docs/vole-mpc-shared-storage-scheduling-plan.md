@@ -21,8 +21,9 @@ Cirrus
   `VoleScheduleTicket`/`VoleScheduleCursor` replay plumbing in `6ca60b5`,
   plus ticket-bound prover hat sinks/verifier hat sources in `99cbe52`,
   deterministic fragment merging in `7dfe1bc`, hardened range validation
-  in `071369c`, rejection-path coverage in `673dae4`, and manifest-checked
-  fragment merging in `84884f6`; existing ideal-functionality contexts remain
+  in `071369c`, rejection-path coverage in `673dae4`, manifest-checked
+  fragment merging in `84884f6`, and a toy role-separated StackIo schedule
+  exercise in Cirrus `fc6754a`; existing ideal-functionality contexts remain
   unchanged until the real role-separated VOLE path is ready.
 
 This document specifies a deterministic scheduler for executions in which
@@ -853,10 +854,12 @@ image.
 
 **Current checkpoint:** the ticket/replay seam, per-ticket hat
 buffer/source, canonical fragment merge, range validation, and manifest-checked
-merge path are landed in Cirrus, but they are not yet wired into the existing
-ideal-functionality contexts. The remaining integration must bind real
-role-separated prover/verifier correlation, storage, and trace adapters
-without using host completion order or reviving the deferred closure path.
+merge path are landed in Cirrus. A toy StackIo test drives independent
+role-separated ML-KEM/Ferret sessions through identical cursors, but this is
+only schedule/replay evidence: it does not wire schedule tickets into real
+VOLE circuit execution, storage, or trace adapters. The remaining integration
+must do that without using host completion order or reviving the deferred
+closure path.
 
 **Deliverables**
 
