@@ -1,0 +1,273 @@
+// @pinnedness: unpinned
+// @stability: very-unstable
+// @ai: assisted
+
+//! Solidity `assembly`-block emitter (Yul dialect), plus the
+//! `CircuitSourceBackend` adapter for the standard circuit-source pipeline.
+//!
+//! The emitted library uses a deliberately small Yul whitelist — `let`,
+//! `:=`, `and`, `or`, `xor`, `not`, `mload`, `mstore`, `add` (pointer
+//! arithmetic only), and numeric literals — with one `let` binding per lane
+//! slot and no hand stack management, so the solc Yul optimizer owns stack
+//! allocation, CSE, and dead-code elimination. Real optimization requires
+//! compiling with `--via-ir --optimize`; the legacy pipeline does not
+//! optimize inline assembly.
+//!
+//! ABI: `function(uint256[] memory inputs) internal pure returns
+//! (uint256[] memory outputs)`, one packed word per circuit parameter and
+//! output, lane zero = least-significant bit. Array bounds are the caller's
+//! responsibility (the body reads exactly `num_params` words and writes
+//! exactly `outputs.len()` words); parameter and output counts are
+//! compile-time constants, so every offset is a literal and no loops or
+//! jumps are emitted.
+
+use volar_circuit_source::{
+    BackendCaps, CircuitSourceBackend, EmitError, EmitOptions, NamedBoolCircuit, NamedBoolOp,
+    NamedVolarCircuit, SourceFile, SourcePackage,
+};
+use volar_circuit_source::{is_ascii_ident, require_ident};
+
+use crate::emit::EvmEmit;
+
+/// Naming and header options for [`SolidityAsm`].
+#[derive(Debug, Clone)]
+pub struct SolidityOptions {
+    /// SPDX license identifier.
+    pub spdx: String,
+    /// `pragma solidity` version requirement.
+    pub pragma: String,
+    /// Generated library name.
+    pub library_name: String,
+    /// Generated function name.
+    pub function_name: String,
+}
+
+impl Default for SolidityOptions {
+    fn default() -> Self {
+        SolidityOptions {
+            spdx: "MIT".into(),
+            pragma: "^0.8.20".into(),
+            library_name: "VolarEvmSimd".into(),
+            function_name: "eval".into(),
+        }
+    }
+}
+
+/// An [`EvmEmit`] sink rendering a complete Solidity library source file.
+pub struct SolidityAsm {
+    opts: SolidityOptions,
+    /// Input and gate `let` bindings, in schedule order.
+    body: Vec<String>,
+    /// Output word stores, buffered until [`EvmEmit::finish`] wraps them in
+    /// the output-array allocation.
+    out_stores: Vec<String>,
+}
+
+impl SolidityAsm {
+    /// A fresh emitter with the given naming options.
+    pub fn new(opts: SolidityOptions) -> Self {
+        SolidityAsm {
+            opts,
+            body: Vec::new(),
+            out_stores: Vec::new(),
+        }
+    }
+
+    fn var(slot: u32) -> String {
+        format!("v{slot}")
+    }
+
+    /// Byte offset of packed word `index` past an array's length word.
+    fn word_offset(index: u32) -> u64 {
+        0x20 * (u64::from(index) + 1)
+    }
+}
+
+impl EvmEmit for SolidityAsm {
+    type Output = String;
+
+    fn input(&mut self, slot: u32, index: u32) {
+        self.body.push(format!(
+            "let {} := mload(add(inputs, {:#x}))",
+            Self::var(slot),
+            Self::word_offset(index),
+        ));
+    }
+
+    fn constant(&mut self, slot: u32, value: bool) {
+        // `not(0)` is the idiomatic all-ones word for the Yul optimizer.
+        let value = if value { "not(0)" } else { "0" };
+        self.body
+            .push(format!("let {} := {value}", Self::var(slot)));
+    }
+
+    fn and(&mut self, dst: u32, a: u32, b: u32) {
+        self.body.push(format!(
+            "let {} := and({}, {})",
+            Self::var(dst),
+            Self::var(a),
+            Self::var(b),
+        ));
+    }
+
+    fn or(&mut self, dst: u32, a: u32, b: u32) {
+        self.body.push(format!(
+            "let {} := or({}, {})",
+            Self::var(dst),
+            Self::var(a),
+            Self::var(b),
+        ));
+    }
+
+    fn xor(&mut self, dst: u32, a: u32, b: u32) {
+        self.body.push(format!(
+            "let {} := xor({}, {})",
+            Self::var(dst),
+            Self::var(a),
+            Self::var(b),
+        ));
+    }
+
+    fn not(&mut self, dst: u32, a: u32) {
+        self.body
+            .push(format!("let {} := not({})", Self::var(dst), Self::var(a)));
+    }
+
+    fn output(&mut self, index: u32, slot: u32) {
+        self.out_stores.push(format!(
+            "mstore(add(outputs, {:#x}), {})",
+            Self::word_offset(index),
+            Self::var(slot),
+        ));
+    }
+
+    fn finish(self) -> String {
+        let opts = &self.opts;
+        let num_outputs = self.out_stores.len() as u64;
+        let mut out = String::new();
+        out.push_str(&format!("// SPDX-License-Identifier: {}\n", opts.spdx));
+        out.push_str(&format!("pragma solidity {};\n\n", opts.pragma));
+        out.push_str(
+            "/// 256-lane packed Boolean circuit evaluation.\n\
+             /// Lane zero is the least-significant bit of each packed word.\n\
+             /// Generated by volar-evm-backend; compile with `--via-ir --optimize` so the\n\
+             /// Yul optimizer can see this body (the legacy pipeline will not).\n",
+        );
+        out.push_str(&format!("library {} {{\n", opts.library_name));
+        out.push_str(&format!(
+            "    function {}(uint256[] memory inputs) internal pure returns (uint256[] memory outputs) {{\n",
+            opts.function_name,
+        ));
+        out.push_str("        assembly {\n");
+        for line in &self.body {
+            out.push_str(&format!("            {line}\n"));
+        }
+        // Allocate the return array from the free-memory pointer and keep
+        // the pointer consistent for surrounding Solidity code.
+        out.push_str("            outputs := mload(0x40)\n");
+        out.push_str(&format!("            mstore(outputs, {num_outputs})\n"));
+        for line in &self.out_stores {
+            out.push_str(&format!("            {line}\n"));
+        }
+        out.push_str(&format!(
+            "            mstore(0x40, add(outputs, {:#x}))\n",
+            0x20 * (num_outputs + 1),
+        ));
+        out.push_str("        }\n    }\n}\n");
+        out
+    }
+}
+
+/// A [`CircuitSourceBackend`] packaging 256-lane-packed Solidity libraries.
+///
+/// Maps a named Boolar circuit onto the streaming [`EvmEmit`] sink:
+/// `EmitOptions::circuit_name` becomes the Solidity function name;
+/// [`EvmSolidityBackend::solidity`] carries the library/pragma/SPDX naming.
+/// Every named statement is rendered as its own `let` binding (the walk's
+/// `bind` hints are ignored — solc's optimizer prunes and folds them).
+#[derive(Debug, Clone, Default)]
+pub struct EvmSolidityBackend {
+    /// Solidity emission options; `function_name` is overridden by
+    /// `EmitOptions::circuit_name`.
+    pub solidity: SolidityOptions,
+}
+
+impl CircuitSourceBackend for EvmSolidityBackend {
+    fn caps() -> BackendCaps {
+        BackendCaps {
+            bool_circuit: true,
+            volar_ir: false,
+            merkle_storage: false,
+            array_storage: false,
+        }
+    }
+
+    fn sanitize_ident(name: &str) -> Result<String, EmitError> {
+        require_ident(name, "Solidity identifiers must be [A-Za-z_][A-Za-z0-9_]*")?;
+        debug_assert!(is_ascii_ident(name));
+        Ok(name.to_string())
+    }
+
+    fn emit_bool(
+        &self,
+        circuit: &NamedBoolCircuit,
+        opt: &EmitOptions,
+    ) -> Result<SourcePackage, EmitError> {
+        if circuit.has_storage() {
+            return Err(EmitError::unsupported(
+                "storage",
+                "EVM lane packing covers pure Boolean circuits only",
+            ));
+        }
+        if circuit.has_externals() {
+            return Err(EmitError::unsupported(
+                "oracle/action/RNG statements",
+                "EVM lane packing covers pure Boolean circuits only",
+            ));
+        }
+        let mut opts = self.solidity.clone();
+        opts.function_name = opt.circuit_name.clone();
+        let library_name = opts.library_name.clone();
+        let mut emit = SolidityAsm::new(opts);
+        // BCircuit vars are dense (params, then one var per statement), so
+        // `IRVarId` ordinals double as lane slots.
+        for (index, wire) in circuit.inputs.iter().enumerate() {
+            emit.input(wire.id.0, index as u32);
+        }
+        for stmt in &circuit.stmts {
+            let dst = stmt.dst.id.0;
+            match stmt.op {
+                NamedBoolOp::Zero => emit.constant(dst, false),
+                NamedBoolOp::One => emit.constant(dst, true),
+                NamedBoolOp::And(a, b) => emit.and(dst, a.0, b.0),
+                NamedBoolOp::Or(a, b) => emit.or(dst, a.0, b.0),
+                NamedBoolOp::Xor(a, b) => emit.xor(dst, a.0, b.0),
+                NamedBoolOp::Not(a) => emit.not(dst, a.0),
+                _ => {
+                    return Err(EmitError::unsupported(
+                        "statement",
+                        "not in the pure Boolean subset",
+                    ));
+                }
+            }
+        }
+        for (index, &var) in circuit.outputs.iter().enumerate() {
+            emit.output(index as u32, var.0);
+        }
+        Ok(SourcePackage::new(vec![SourceFile::new(
+            format!("{library_name}.sol"),
+            emit.finish(),
+        )]))
+    }
+
+    fn emit_volar(
+        &self,
+        _circuit: &NamedVolarCircuit,
+        _opt: &EmitOptions,
+    ) -> Result<SourcePackage, EmitError> {
+        Err(EmitError::unsupported(
+            "Volar IR",
+            "EVM lane packing covers Boolar circuits only",
+        ))
+    }
+}

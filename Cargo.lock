@@ -1839,6 +1839,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "volar-evm-backend"
+version = "0.1.0"
+dependencies = [
+ "volar-circuit-source",
+ "volar-fuzz",
+ "volar-ir",
+ "volar-ir-common",
+ "volar-ir-simd",
+]
+
+[[package]]
 name = "volar-fuzz"
 version = "0.1.0"
 dependencies = [

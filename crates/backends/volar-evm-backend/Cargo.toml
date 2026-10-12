@@ -1,0 +1,16 @@
+[package]
+name = "volar-evm-backend"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "EVM 256-lane SIMD backends for Boolar circuits: Solidity assembly blocks and raw bytecode"
+repository.workspace = true
+
+[dependencies]
+volar-circuit-source.workspace = true
+volar-ir.workspace = true
+volar-ir-simd.workspace = true
+
+[dev-dependencies]
+volar-fuzz.workspace = true
+volar-ir-common.workspace = true
