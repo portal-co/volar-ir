@@ -14,6 +14,7 @@ pub mod lower_to_native;
 pub mod movfuscate;
 pub mod raise_to_z3;
 pub mod region_lowering;
+pub mod schedule;
 pub mod storage_to_mux_boolar;
 pub mod storage_to_mux_ir;
 pub mod to_reversible;
@@ -43,6 +44,10 @@ pub use movfuscate::{
     remap_movfusc_boundaries, remap_movfusc_boundary, thread_synthetic_slots,
 };
 pub use raise_to_z3::raise_bits_to_z3;
+pub use schedule::{
+    ScheduleExtractionConfig, ScheduleExtractionError, StorageAccessSummary,
+    extract_biir_circuit_schedule, extract_ir_circuit_schedule,
+};
 pub use storage_to_mux_boolar::{
     StorageToMuxBoolarConfig, StorageToMuxBoolarError, storage_to_mux_boolar,
     storage_to_mux_boolar_with_access,

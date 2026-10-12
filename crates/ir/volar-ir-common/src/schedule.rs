@@ -120,10 +120,10 @@ impl StorageClaimMode {
 pub struct StorageClaim {
     /// Typed namespace being accessed.
     pub key: StorageKey,
-    /// Conservative access mode.
-    pub mode: StorageClaimMode,
     /// Whole namespace unless a public partition was proven.
     pub scope: AddressScope,
+    /// Conservative access mode.
+    pub mode: StorageClaimMode,
 }
 
 impl StorageClaim {

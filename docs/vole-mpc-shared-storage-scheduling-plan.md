@@ -1,9 +1,17 @@
 # Shared-storage scheduling for VOLE and lockstep MPC
 
-**Status:** proposed design plan; implementation not started  
+**Status:** implementation in progress; Phases 1–2 landed in volar-ir  
 **Scope:** Volar's VOLE proving path and main-branch MPC path across Volar and
 Cirrus  
 **Related work:** parallel communication reduction (#14160)
+
+**Implementation checkpoints:**
+
+- Phase 1: canonical shared-storage identities, claims, bounded manifests, and
+  adapter-selected digest input — landed in `f4cf67d`.
+- Phase 2: conservative fixed-circuit storage-claim extraction for typed Volar
+  IR and Boolar IR, including read-only policy checks and serial fallback for
+  unsupported control flow — landed in the follow-up implementation commit.
 
 This document specifies a deterministic scheduler for executions in which
 multiple host threads act as virtual cores over a set of shared typed storages.
