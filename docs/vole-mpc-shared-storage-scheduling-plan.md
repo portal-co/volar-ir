@@ -866,12 +866,15 @@ image.
 **Current checkpoint:** the ticket/replay seam, per-ticket hat
 buffer/source, canonical fragment merge, range validation, manifest-checked
 merge path, and fail-closed completeness/consumption checks are landed in
-Cirrus. A toy StackIo test drives independent
+Cirrus. `VoleScheduleHatSink::prover_context` and
+`VoleScheduleHatSource::verifier_context` now wire those buffers into the
+existing role contexts, while still requiring explicit fragment/consumption
+finalization (`4557c75`). A toy StackIo test drives independent
 role-separated ML-KEM/Ferret sessions through identical cursors, but this is
-only schedule/replay evidence: it does not wire schedule tickets into real
-VOLE circuit execution, storage, or trace adapters. The remaining integration
-must do that without using host completion order or reviving the deferred
-closure path.
+still not a complete split-circuit/storage/trace runner: input-COT ordinals,
+transactional storage, and ticket-bound trace observation remain open. The
+remaining integration must avoid host completion order and must not revive the
+deferred closure path.
 
 **Deliverables**
 
@@ -900,7 +903,9 @@ closure path.
 **Deliverables**
 
 - Add manifest validation and epoch/iteration cursor checks to the
-  `volar-mpc` execution seam.
+  `volar-mpc` execution seam. The cursor now has checked transport helpers,
+  and one-iteration scheduled strict wrappers emit/consume the open,
+  iteration, commit, and acknowledgement frames (`7d0cf09`, `4853e2f`).
 - Wrap GateSchedule/GRAM storage operations in transactions. Preserve the
   existing evaluator-side storage topology where applicable; the schedule is
   logical and does not assume shared address-space RAM across parties.
@@ -908,7 +913,10 @@ closure path.
   frames.
 - Permit local preparation on virtual cores only when wire IDs, OT/access
   ordinals, label bases, and frame ordinals remain manifest-derived.
-- Keep action/oracle boundary ordering from the existing external plan.
+- Keep action/oracle boundary ordering from the existing external plan. The
+  strict evaluator's storage-free table loop now delegates gate progression
+  to `StrictGateCursor`; this removes a duplicate gate walker without
+  changing the existing half-gate/OT payload protocol (`4853e2f`).
 
 **Exit gates**
 
