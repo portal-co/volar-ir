@@ -868,8 +868,10 @@ buffer/source, canonical fragment merge, range validation, manifest-checked
 merge path, and fail-closed completeness/consumption checks are landed in
 Cirrus. `VoleScheduleHatSink::prover_context` and
 `VoleScheduleHatSource::verifier_context` now wire those buffers into the
-existing role contexts, while still requiring explicit fragment/consumption
-finalization (`4557c75`). A toy StackIo test drives independent
+existing contexts, and `locked_prover_context`/
+`locked_verifier_context` cover the real thread-safe role contexts while still
+requiring explicit fragment/consumption finalization (`4557c75`, `633769b`).
+A toy StackIo test drives independent
 role-separated ML-KEM/Ferret sessions through identical cursors, but this is
 still not a complete split-circuit/storage/trace runner: input-COT ordinals,
 transactional storage, and ticket-bound trace observation remain open. The
