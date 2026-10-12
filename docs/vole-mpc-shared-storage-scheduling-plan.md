@@ -23,8 +23,9 @@ Cirrus
   deterministic fragment merging in `7dfe1bc`, hardened range validation
   in `071369c`, rejection-path coverage in `673dae4`, manifest-checked
   fragment merging in `84884f6`, bounded explicit-limit consumers in
-  Cirrus `e2d08c5`, and a toy role-separated StackIo schedule exercise in
-  Cirrus `fc6754a`, using a canonical SHA3 schedule digest in `56724db`;
+  Cirrus `e2d08c5`, fail-closed incomplete and over-consumed handling in
+  `462fda4`, and a toy role-separated StackIo schedule exercise in Cirrus
+  `fc6754a`, using a canonical SHA3 schedule digest in `56724db`;
   existing ideal-functionality contexts remain
   unchanged until the real role-separated VOLE path is ready.
 
@@ -855,8 +856,9 @@ image.
 ### Phase 4 — VOLE prover/verifier integration
 
 **Current checkpoint:** the ticket/replay seam, per-ticket hat
-buffer/source, canonical fragment merge, range validation, and manifest-checked
-merge path are landed in Cirrus. A toy StackIo test drives independent
+buffer/source, canonical fragment merge, range validation, manifest-checked
+merge path, and fail-closed completeness/consumption checks are landed in
+Cirrus. A toy StackIo test drives independent
 role-separated ML-KEM/Ferret sessions through identical cursors, but this is
 only schedule/replay evidence: it does not wire schedule tickets into real
 VOLE circuit execution, storage, or trace adapters. The remaining integration
