@@ -12,6 +12,7 @@ pub mod tls13_extern;
 pub use complexity::{MeasureSpec, ReentryHint, StructRef};
 
 mod field;
+pub mod field_markers;
 mod generated;
 mod prime;
 pub use field::{
