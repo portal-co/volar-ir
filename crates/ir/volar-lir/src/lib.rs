@@ -929,6 +929,27 @@ pub trait LirTarget<Prov: Clone = ()> {
     ) {
         unimplemented!("ptr_index_store: not supported by this backend")
     }
+
+    // ---- Field construction --------------------------------------------------
+
+    /// Read a value's constant content as `u128`, if the backend tracks
+    /// constants (used by field constructors with constant payloads). `None`
+    /// when the value is not a known constant or the backend doesn't track
+    /// constants.
+    fn value_as_u128(&self, _value: &Self::Value) -> Option<u128> {
+        None
+    }
+
+    /// Reinterpret an integer value's bits as a field element of
+    /// `field` (same bit width, LSB-first) — the `ExtField`/prime-field
+    /// constructor's runtime-payload path (e.g. a transcript squeeze's
+    /// `from_le_bytes` result). Constant payloads go through
+    /// [`LirTarget::value_as_u128`] + [`LirTarget::iconst`] instead.
+    ///
+    /// Only field-carrying backends implement this.
+    fn int_to_field(&mut self, _value: Self::Value, _field: &LirType) -> Self::Value {
+        unimplemented!("int_to_field: not supported by this backend")
+    }
 }
 
 #[cfg(test)]

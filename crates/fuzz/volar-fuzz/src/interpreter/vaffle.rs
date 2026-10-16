@@ -235,10 +235,46 @@ fn eval_vaffle_value(
             .and_then(|agg| agg.get(*idx))
             .cloned()
             .unwrap_or_default(),
-        Value::StackAlloc { .. } => panic!("eval_vaffle: StackAlloc not supported"),
-        Value::PtrLoad { .. } => panic!("eval_vaffle: PtrLoad not supported"),
-        Value::PtrStore { .. } => panic!("eval_vaffle: PtrStore not supported"),
-        Value::PtrOffset { .. } => panic!("eval_vaffle: PtrOffset not supported"),
+        Value::StackAlloc {
+            elem_ty,
+            count,
+            storage: _,
+            sp,
+        } => {
+            // The result is the site's virtual stack pointer (pre-bump),
+            // matching `lower_vaffle_to_ir`'s explicit read-add-write (see
+            // the vaffle `Value::StackAlloc` doc). The VAFFLE level has no
+            // bump stmts, so the interpreter applies the bump itself.
+            let addr_ty = module
+                .pre_init
+                .iter()
+                .find(|seg| seg.storage == *sp)
+                .map(|seg| seg.ty)
+                .expect("StackAlloc: sp site must have a pre_init segment");
+            let ptr_bits = module.pointer_width.bits();
+            let key = (*sp, addr_ty, 0u64);
+            let base = storage
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| vec![false; ptr_bits]);
+            let elem_bits = bit_width(*elem_ty, &module.types);
+            let bump = (*count * elem_bits) as u64;
+            let bumped = bits_to_u64(&base).wrapping_add(bump);
+            let mut bumped_bits = Vec::with_capacity(ptr_bits);
+            for i in 0..ptr_bits {
+                bumped_bits.push((bumped >> i) & 1 == 1);
+            }
+            storage.insert(key, bumped_bits);
+            let mut result = base;
+            result.resize(ptr_bits, false);
+            result
+        }
+        // Bookkeeping markers: the real memory effects are the
+        // `Stmt::StorageRead`/`Stmt::StorageWrite` values the target emits
+        // around them; the markers' own outputs are unused.
+        Value::PtrLoad { .. } => vec![],
+        Value::PtrStore { .. } => vec![],
+        Value::PtrOffset { .. } => vec![],
         _ => panic!("eval_vaffle_value: unhandled Value variant — add evaluation for this variant"),
     };
     Some(val)

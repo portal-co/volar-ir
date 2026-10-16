@@ -160,6 +160,9 @@ pub struct VaffleTarget {
     pub module: Module,
     func: Option<FuncBuilder>,
     struct_widths: Vec<usize>,
+    /// Field types per defined struct (parallel to `struct_widths`), used to
+    /// decompose struct aggregates in `ptr_index_load`/`ptr_index_store`.
+    struct_field_types: Vec<Vec<LirType>>,
     /// When `true`, parameters wider than `LirAbi::VAFFLE_OPTIMIZED.aggregate_byval_limit`
     /// are passed via `StorageId::STACK` (caller writes bits, passes address;
     /// callee reads bits from address).  Default: `false`.
@@ -208,6 +211,7 @@ impl VaffleTarget {
             },
             func: None,
             struct_widths: vec![],
+            struct_field_types: vec![],
             optimized_abi: false,
             pending_funcs: BTreeMap::new(),
             vc: None,
@@ -255,6 +259,52 @@ impl VaffleTarget {
                 })
                 .collect(),
         )
+    }
+
+    /// Project a call's return into per-scalar-leaf values. Pure-bit types
+    /// keep the historical single-grouped-value shape; field-containing
+    /// types split into one value per leaf (the codegen's flat-scalar
+    /// model), with field leaves as single field-typed projections.
+    pub(crate) fn project_outputs(&mut self, call_id: ValueId, ty: &LirType) -> Vec<VaffleValue> {
+        let leaves = self.leaf_lir_types(ty);
+        if !leaves.iter().any(|leaf| Self::is_field_typed(leaf)) {
+            let n = self.bits_for(ty);
+            let bits: Vec<ValueId> = (0..n)
+                .map(|i| {
+                    self.fb().emit_value(Value::Output {
+                        value: call_id,
+                        idx: i,
+                    })
+                })
+                .collect();
+            return vec![VaffleValue {
+                bits,
+                ty: ty.clone(),
+            }];
+        }
+        let mut offset = 0usize;
+        let mut out = Vec::with_capacity(leaves.len());
+        for leaf in &leaves {
+            let w = if Self::is_field_typed(leaf) {
+                1
+            } else {
+                self.bits_for(leaf)
+            };
+            let bits: Vec<ValueId> = (offset..offset + w)
+                .map(|i| {
+                    self.fb().emit_value(Value::Output {
+                        value: call_id,
+                        idx: i,
+                    })
+                })
+                .collect();
+            offset += w;
+            out.push(VaffleValue {
+                bits,
+                ty: leaf.clone(),
+            });
+        }
+        out
     }
 
     fn merge_operand(&mut self, bits: &[ValueId]) -> ValueId {
@@ -654,6 +704,60 @@ impl VaffleTarget {
         }
     }
 
+    /// Expand a value to its Boolean bit view. Field values (one typed cell)
+    /// expand via per-bit `Shuffle` extraction — mirroring
+    /// `VolarIrTarget::scalar_bits` (the F6 bit-view seam). Non-field values
+    /// keep their existing bit decomposition.
+    pub(crate) fn scalar_bits(&mut self, value: &VaffleValue) -> Vec<ValueId> {
+        if !Self::is_field_typed(&value.ty) {
+            return value.bits.clone();
+        }
+        assert_eq!(
+            value.bits.len(),
+            1,
+            "field value must occupy one typed cell"
+        );
+        let width = match &value.ty {
+            LirType::ExtField { wrapped, degree, .. } => {
+                *degree as usize * self.bits_for(wrapped)
+            }
+            LirType::PrimeField { k, .. } => *k as usize,
+            _ => unreachable!("checked above"),
+        };
+        assert!(
+            width <= 256,
+            "field value wider than Shuffle's 256-bit address space"
+        );
+        (0..width)
+            .map(|index| self.extract_bit(value.bits[0], index as u8))
+            .collect()
+    }
+
+    /// Pack Boolean bits back into one typed field cell (Merge into the
+    /// field type) — mirroring `VolarIrTarget::value_from_bits`.
+    pub(crate) fn value_from_bits(&mut self, bits: Vec<ValueId>, ty: LirType) -> VaffleValue {
+        if !Self::is_field_typed(&ty) {
+            return VaffleValue { bits, ty };
+        }
+        let width = match &ty {
+            LirType::ExtField { wrapped, degree, .. } => {
+                *degree as usize * self.bits_for(wrapped)
+            }
+            LirType::PrimeField { k, .. } => *k as usize,
+            _ => unreachable!("checked above"),
+        };
+        assert_eq!(bits.len(), width, "field bit-width mismatch on repack");
+        let tid = self.lir_type_to_tid(&ty);
+        let id = self.fb().emit_value(Value::Op(Stmt::Merge {
+            parts: bits,
+            ty: tid,
+        }));
+        VaffleValue {
+            bits: vec![id],
+            ty,
+        }
+    }
+
     /// Whether `ty` is a marker/native-resolved extension or prime field —
     /// carried as one typed VAFFLE value rather than a bit decomposition,
     /// with add/sub/mul emitted as field `Poly`s (the acceleration seam).
@@ -665,6 +769,30 @@ impl VaffleTarget {
     /// `ValueId` must never be treated as a bitvector).
     pub(crate) fn is_field_typed(ty: &LirType) -> bool {
         matches!(ty, LirType::ExtField { .. } | LirType::PrimeField { .. })
+    }
+
+    /// The flat scalar-leaf decomposition of `ty` used by
+    /// `ptr_index_load`/`ptr_index_store`: arrays recurse element-wise,
+    /// structs recurse field-wise (via the types recorded at
+    /// `define_struct`), everything else is one leaf.
+    pub(crate) fn leaf_lir_types(&self, ty: &LirType) -> Vec<LirType> {
+        match ty {
+            LirType::Arr(elem, n) => {
+                let mut out = Vec::with_capacity(*n);
+                for _ in 0..*n {
+                    out.extend(self.leaf_lir_types(elem));
+                }
+                out
+            }
+            LirType::Struct(id) => {
+                let mut out = Vec::new();
+                for field in &self.struct_field_types[*id as usize] {
+                    out.extend(self.leaf_lir_types(field));
+                }
+                out
+            }
+            other => alloc::vec![other.clone()],
+        }
     }
 
     /// Emit a type-directed field `Stmt::Poly` — the field-acceleration
@@ -781,18 +909,7 @@ impl VaffleTarget {
         });
         match ret_ty {
             None => vec![],
-            Some(ty) => {
-                let n = self.bits_for(&ty);
-                let bits: Vec<ValueId> = (0..n)
-                    .map(|i| {
-                        self.fb().emit_value(Value::Output {
-                            value: call_id,
-                            idx: i,
-                        })
-                    })
-                    .collect();
-                vec![VaffleValue { bits, ty }]
-            }
+            Some(ty) => self.project_outputs(call_id, &ty),
         }
     }
 }
@@ -958,6 +1075,8 @@ impl LirTarget for VaffleTarget {
         let id = self.struct_widths.len() as StructId;
         let total: usize = def.fields.iter().map(|f| self.bits_for(&f.ty)).sum();
         self.struct_widths.push(total);
+        self.struct_field_types
+            .push(def.fields.iter().map(|f| f.ty.clone()).collect());
         id
     }
 
@@ -983,18 +1102,36 @@ impl LirTarget for VaffleTarget {
 
         // Build signature: direct params contribute N Bit slots,
         // ptr params contribute pointer-width Bit slots.
+        // Per-param scalar-leaf decomposition: field leaves occupy one
+        // field-typed slot, everything else `bits_for(leaf)` bit slots. For
+        // pure-bit params this is exactly `n` bit slots (back-compat); the
+        // leaf split is what makes arrays/structs of fields (and structs
+        // generally) arrive as per-scalar values the codegen's flat model
+        // expects.
         let sig_params: Vec<TypeId> = params
             .iter()
             .zip(param_infos.iter())
             .flat_map(|(ty, &(n, is_ptr))| {
                 if is_ptr {
                     (0..pointer_bits).map(|_| bit_tid).collect::<Vec<_>>()
-                } else if Self::is_field_typed(ty) {
-                    // One typed field slot, mirroring VolarIrTarget's
-                    // begin_function — never `n` unrelated Bit slots.
-                    vec![self.lir_type_to_tid(ty)]
                 } else {
-                    (0..n).map(|_| bit_tid).collect()
+                    let leaves = self.leaf_lir_types(ty);
+                    if !leaves.iter().any(|leaf| Self::is_field_typed(leaf)) {
+                        // Pure-bit params keep the historical flat slot layout.
+                        (0..n).map(|_| bit_tid).collect()
+                    } else {
+                        leaves
+                            .iter()
+                            .flat_map(|leaf| {
+                                if Self::is_field_typed(leaf) {
+                                    vec![self.lir_type_to_tid(leaf)]
+                                } else {
+                                    let w = self.bits_for(leaf);
+                                    (0..w).map(|_| bit_tid).collect::<Vec<_>>()
+                                }
+                            })
+                            .collect()
+                    }
                 }
             })
             .collect();
@@ -1011,11 +1148,22 @@ impl LirTarget for VaffleTarget {
         let sig_results: Vec<TypeId> = ret
             .iter()
             .flat_map(|ty| {
-                if Self::is_field_typed(ty) {
-                    vec![self.lir_type_to_tid(ty)]
-                } else {
+                let leaves = self.leaf_lir_types(ty);
+                if !leaves.iter().any(|leaf| Self::is_field_typed(leaf)) {
                     let n = self.bits_for(ty);
-                    (0..n).map(|_| bit_tid).collect()
+                    (0..n).map(|_| bit_tid).collect::<Vec<_>>()
+                } else {
+                    leaves
+                        .iter()
+                        .flat_map(|leaf| {
+                            if Self::is_field_typed(leaf) {
+                                vec![self.lir_type_to_tid(leaf)]
+                            } else {
+                                let w = self.bits_for(leaf);
+                                (0..w).map(|_| bit_tid).collect::<Vec<_>>()
+                            }
+                        })
+                        .collect()
                 }
             })
             .collect();
@@ -1038,21 +1186,43 @@ impl LirTarget for VaffleTarget {
                     .collect();
                 deferred.push((pi, bits, ty.clone(), n));
                 groups.push(vec![]); // placeholder — filled after loads
-            } else if Self::is_field_typed(ty) {
-                // One typed field param (mirroring VolarIrTarget): the single
-                // ValueId IS the field value, typed by its field TypeId.
-                let field_tid = self.lir_type_to_tid(ty);
-                let id = fb.emit_block_param(0, field_tid);
-                groups.push(vec![VaffleValue {
-                    bits: vec![id],
-                    ty: ty.clone(),
-                }]);
             } else {
-                let bits: Vec<ValueId> = (0..n).map(|_| fb.emit_block_param(0, bit_tid)).collect();
-                groups.push(vec![VaffleValue {
-                    bits,
-                    ty: ty.clone(),
-                }]);
+                let leaves = self.leaf_lir_types(ty);
+                if !leaves.iter().any(|leaf| Self::is_field_typed(leaf)) {
+                    // Pure-bit param: one grouped value, `n` bit cells
+                    // (unchanged historical behavior).
+                    let bits: Vec<ValueId> =
+                        (0..n).map(|_| fb.emit_block_param(0, bit_tid)).collect();
+                    groups.push(vec![VaffleValue {
+                        bits,
+                        ty: ty.clone(),
+                    }]);
+                } else {
+                    // Field-containing or compound param: one typed cell per
+                    // field leaf, `bits_for` bit cells otherwise, and one
+                    // VaffleValue PER LEAF — the flat-scalar param model the
+                    // codegen's indexing/field access expects.
+                    let mut values = Vec::with_capacity(leaves.len());
+                    for leaf in &leaves {
+                        if Self::is_field_typed(leaf) {
+                            let tid = self.lir_type_to_tid(leaf);
+                            let id = fb.emit_block_param(0, tid);
+                            values.push(VaffleValue {
+                                bits: vec![id],
+                                ty: leaf.clone(),
+                            });
+                        } else {
+                            let w = self.bits_for(leaf);
+                            let bits: Vec<ValueId> =
+                                (0..w).map(|_| fb.emit_block_param(0, bit_tid)).collect();
+                            values.push(VaffleValue {
+                                bits,
+                                ty: leaf.clone(),
+                            });
+                        }
+                    }
+                    groups.push(values);
+                }
             }
         }
         self.func = Some(fb);
@@ -1456,12 +1626,27 @@ impl LirTarget for VaffleTarget {
 
     // ---- Comparisons -------------------------------------------------------
     fn icmp(&mut self, pred: IcmpPred, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
-        assert!(
-            !Self::is_field_typed(&lhs.ty) && !Self::is_field_typed(&rhs.ty),
-            "comparisons on field-typed values are not yet supported in VaffleTarget \
-             (a field bit-view expansion, mirroring VolarIrTarget's scalar_bits, is a \
-             recorded F6 op-coverage finding, not yet implemented)"
-        );
+        // Field equality: expand both cells to their bit views
+        // (`scalar_bits`, the F6 seam) and compare bit-by-bit — only
+        // equality is defined for a field (no field ordering).
+        if Self::is_field_typed(&lhs.ty) || Self::is_field_typed(&rhs.ty) {
+            assert_eq!(lhs.ty, rhs.ty, "field comparison requires matching types");
+            assert!(
+                matches!(pred, IcmpPred::Eq | IcmpPred::Ne),
+                "ordering comparisons are not defined for field elements"
+            );
+            let lhs_bits = self.scalar_bits(&lhs);
+            let rhs_bits = self.scalar_bits(&rhs);
+            let bit = match pred {
+                IcmpPred::Eq => bc_eq(self, &lhs_bits, &rhs_bits),
+                IcmpPred::Ne => bc_ne(self, &lhs_bits, &rhs_bits),
+                _ => unreachable!("checked above"),
+            };
+            return VaffleValue {
+                bits: vec![bit],
+                ty: LirType::Bool,
+            };
+        }
         let (op, swap) = match pred {
             IcmpPred::Eq => (HelperOp::Eq, false),
             IcmpPred::Ne => (HelperOp::Ne, false),
@@ -1530,6 +1715,22 @@ impl LirTarget for VaffleTarget {
         else_val: VaffleValue,
     ) -> VaffleValue {
         let ty = then_val.ty.clone();
+        if Self::is_field_typed(&ty) {
+            // Field select as one field Poly: b + cond*(a + b) in char 2 —
+            // the `cond` bit factor embeds into the field by the
+            // type-directed product (volar-ir-common's monomial_product).
+            assert_eq!(ty, else_val.ty, "field select requires matching types");
+            let cond_bit = cond.bits[0];
+            let mut coeffs = PolyCoeffs::new();
+            coeffs.insert(vec![else_val.bits[0]], 1);
+            let mut ca = vec![cond_bit, then_val.bits[0]];
+            ca.sort();
+            let mut cb = vec![cond_bit, else_val.bits[0]];
+            cb.sort();
+            coeffs.insert(ca, 1);
+            coeffs.insert(cb, 1);
+            return self.emit_field_poly(&ty, coeffs);
+        }
         let cond_bit = cond.bits[0];
         let bits = bc_select_vec(self, cond_bit, &then_val.bits, &else_val.bits);
         VaffleValue { bits, ty }
@@ -1537,6 +1738,110 @@ impl LirTarget for VaffleTarget {
 
     fn value_scalar_type(&self, val: &VaffleValue) -> LirType {
         val.ty.clone()
+    }
+
+    // ---- Pointer-indexed memory operations ----------------------------------
+    //
+    // VaffleTarget has a memory model (StackAllocExt), so these are
+    // implemented over `ptr_offset` + `ptr_load`/`ptr_store`: one storage
+    // cell per bit of a scalar, one field-typed cell per field element.
+
+    fn ptr_index_load(
+        &mut self,
+        ptr: VaffleValue,
+        idx: VaffleValue,
+        pointee_ty: &LirType,
+    ) -> Vec<VaffleValue> {
+        let addr = self.ptr_offset(ptr, idx);
+        let loaded = self.ptr_load(addr, pointee_ty.clone());
+        // Split the loaded cells into the flat scalar leaves of the pointee
+        // layout (one VaffleValue per leaf, widths from the leaf types).
+        let leaves = self.leaf_lir_types(pointee_ty);
+        let mut out = Vec::with_capacity(leaves.len());
+        let mut offset = 0usize;
+        for leaf in &leaves {
+            let n = self.bits_for(leaf);
+            out.push(VaffleValue {
+                bits: loaded.bits[offset..offset + n].to_vec(),
+                ty: leaf.clone(),
+            });
+            offset += n;
+        }
+        out
+    }
+
+    fn ptr_index_store(
+        &mut self,
+        ptr: VaffleValue,
+        idx: VaffleValue,
+        vals: &[VaffleValue],
+        pointee_ty: &LirType,
+    ) {
+        let addr = self.ptr_offset(ptr, idx);
+        let bits: Vec<ValueId> = vals
+            .iter()
+            .flat_map(|v| v.bits.iter().copied())
+            .collect();
+        self.ptr_store(
+            addr,
+            VaffleValue {
+                bits,
+                ty: pointee_ty.clone(),
+            },
+        );
+    }
+
+    fn value_as_u128(&self, value: &VaffleValue) -> Option<u128> {
+        // Field constants are one cell holding the whole element (see
+        // iconst's field arm); bit-vectors read LSB-first per cell.
+        if Self::is_field_typed(&value.ty) && value.bits.len() == 1 {
+            let values = &self.func.as_ref()?.all_values;
+            if let Value::Op(volar_ir_common::Stmt::Const(c, _)) =
+                &values.get(value.bits[0].0)?.kind
+            {
+                if c.hi == 0 {
+                    return Some(c.lo);
+                }
+            }
+            return None;
+        }
+        self.constant_bits(&value.bits)
+    }
+
+    fn int_to_field(&mut self, value: VaffleValue, field: &LirType) -> VaffleValue {
+        // Reinterpret the integer's bits as the field element (LSB-first):
+        // merge the bit cells into one packed value, then `Stmt::Transmute`
+        // to the field type (bit-identical by construction).
+        //
+        // Note: the field's *bit* width (degree x wrapped width, or k), not
+        // its `bits_for` cell count (1 — one typed cell per field value).
+        let width = match field {
+            LirType::ExtField { wrapped, degree, .. } => {
+                *degree as usize * self.bits_for(wrapped)
+            }
+            LirType::PrimeField { k, .. } => *k as usize,
+            other => panic!("int_to_field: {other:?} is not a field type"),
+        };
+        assert_eq!(
+            value.bits.len(),
+            width,
+            "int_to_field: integer payload width {} != field width {}",
+            value.bits.len(),
+            width,
+        );
+        let src = self.merge_operand(&value.bits);
+        let bit_tid = self.bit_tid();
+        let src_ty = self.intern_type(IrType::Vec(width, bit_tid));
+        let dst_tid = self.lir_type_to_tid(field);
+        let id = self.fb().emit_value(Value::Op(Stmt::Transmute {
+            src,
+            src_ty,
+            dst_ty: dst_tid,
+        }));
+        VaffleValue {
+            bits: vec![id],
+            ty: field.clone(),
+        }
     }
 
     // ---- Extern calls ------------------------------------------------------
@@ -1934,18 +2239,46 @@ impl VaffleTarget {
         let mut bit_offset = 0usize;
         for ty in ret_tys {
             let n = self.bits_for(ty);
-            let bits: Vec<ValueId> = (bit_offset..bit_offset + n)
-                .map(|i| {
-                    self.fb().emit_value(Value::Output {
-                        value: call_id,
-                        idx: i,
+            let leaves = self.leaf_lir_types(ty);
+            if !leaves.iter().any(|leaf| Self::is_field_typed(leaf)) {
+                let bits: Vec<ValueId> = (bit_offset..bit_offset + n)
+                    .map(|i| {
+                        self.fb().emit_value(Value::Output {
+                            value: call_id,
+                            idx: i,
+                        })
                     })
-                })
-                .collect();
-            results.push(VaffleValue {
-                bits,
-                ty: ty.clone(),
-            });
+                    .collect();
+                results.push(VaffleValue {
+                    bits,
+                    ty: ty.clone(),
+                });
+            } else {
+                // Field-containing return: one value per scalar leaf,
+                // projected at the running bit offset (the flat-scalar
+                // model the codegen expects).
+                let mut offset = bit_offset;
+                for leaf in &leaves {
+                    let w = if Self::is_field_typed(leaf) {
+                        1
+                    } else {
+                        self.bits_for(leaf)
+                    };
+                    let bits: Vec<ValueId> = (offset..offset + w)
+                        .map(|i| {
+                            self.fb().emit_value(Value::Output {
+                                value: call_id,
+                                idx: i,
+                            })
+                        })
+                        .collect();
+                    offset += w;
+                    results.push(VaffleValue {
+                        bits,
+                        ty: leaf.clone(),
+                    });
+                }
+            }
             bit_offset += n;
         }
         results
@@ -2101,6 +2434,13 @@ impl StackAllocExt for VaffleTarget {
     fn ptr_load(&mut self, ptr: VaffleValue, ty: LirType) -> VaffleValue {
         let n = self.bits_for(&ty);
         let bit_tid = self.bit_tid();
+        // A field value occupies ONE field-typed cell, so the read must be
+        // typed as the field — a bit-typed read would slice the element.
+        let cell_tid = if Self::is_field_typed(&ty) {
+            self.lir_type_to_tid(&ty)
+        } else {
+            bit_tid
+        };
         let storage = self.ptr_data_storage(&ptr);
 
         let mut bits = Vec::with_capacity(n);
@@ -2111,7 +2451,7 @@ impl StackAllocExt for VaffleTarget {
                 let padded = self.pad_to_ptr_bits(off);
                 addr_bits = bc_add(self, &addr_bits, &padded, false);
             }
-            let v = self.emit_read(storage, bit_tid, &addr_bits);
+            let v = self.emit_read(storage, cell_tid, &addr_bits);
             bits.push(v);
         }
 
@@ -2127,6 +2467,12 @@ impl StackAllocExt for VaffleTarget {
     fn ptr_store(&mut self, ptr: VaffleValue, val: VaffleValue) {
         let n = val.bits.len();
         let bit_tid = self.bit_tid();
+        // Field values store as one field-typed cell (see ptr_load).
+        let cell_tid = if Self::is_field_typed(&val.ty) {
+            self.lir_type_to_tid(&val.ty)
+        } else {
+            bit_tid
+        };
         let storage = self.ptr_data_storage(&ptr);
 
         for i in 0..n {
@@ -2136,13 +2482,17 @@ impl StackAllocExt for VaffleTarget {
                 let padded = self.pad_to_ptr_bits(off);
                 addr_bits = bc_add(self, &addr_bits, &padded, false);
             }
-            self.emit_write(storage, val.bits[i], bit_tid, &addr_bits);
+            self.emit_write(storage, val.bits[i], cell_tid, &addr_bits);
         }
 
-        let _store_vid = self.fb().emit_value(Value::PtrStore {
-            ptr: ptr.bits[0],
-            val: val.bits[0],
-        });
+        // Zero-cell values (empty aggregates) store nothing and get no
+        // marker node.
+        if !val.bits.is_empty() {
+            let _store_vid = self.fb().emit_value(Value::PtrStore {
+                ptr: ptr.bits[0],
+                val: val.bits[0],
+            });
+        }
     }
 
     fn ptr_offset(&mut self, ptr: VaffleValue, idx: VaffleValue) -> VaffleValue {
