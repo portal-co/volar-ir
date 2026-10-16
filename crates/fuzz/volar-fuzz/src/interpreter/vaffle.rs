@@ -271,7 +271,27 @@ fn eval_vaffle_stmt(
             coeffs,
             constant,
         } => {
-            if volar_ir_common::mul_is_idempotent(*ty, types) {
+            // Prime fields multiply modulo p, not by AND — mirror the IR
+            // interpreter's routing (`eval_prime_poly`); without this arm a
+            // prime-field Poly fell into `eval_typed_poly` →
+            // `monomial_product`, which fails closed on prime fields.
+            if volar_ir_common::contains_prime_field(*ty, types) {
+                let width = bit_width(*ty, types);
+                let constant_bits = const_to_bits(constant, width);
+                let mut terms = Vec::new();
+                for (mono, coeff) in coeffs.iter() {
+                    let mut factors = Vec::with_capacity(mono.len());
+                    for var in mono {
+                        let factor_ty = value_tys.get(&var.0).copied().unwrap_or_else(|| {
+                            panic!("eval_vaffle: factor v{} has no type", var.0)
+                        });
+                        factors.push((factor_ty, get(var)));
+                    }
+                    terms.push((factors, *coeff));
+                }
+                let mut sink = volar_ir_common::BoolRing;
+                volar_ir_common::eval_prime_poly(*ty, &constant_bits, &terms, types, &mut sink)
+            } else if volar_ir_common::mul_is_idempotent(*ty, types) {
                 let width = bit_width(*ty, types);
                 eval_vaffle_poly(coeffs, constant, width, value_table)
             } else {
