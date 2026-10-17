@@ -423,6 +423,33 @@ protected dirty `Cargo.lock` discipline applies).
 
 Each milestone's tests extend, never special-case (repo rule 2).
 
+### M4 status (2026-10-17): substantially complete
+
+The compile-via-IR machinery is proven: `volar-lir-codegen/tests/warp_compile.rs`
+(volar repo) runs the spec module through `lower_module_seeded` → `VaffleTarget`
+and evaluates differentially against the native spec. Five probes pass (field
+identity, ref-array index, array elem-sum, doubling loop with a mutated array,
+and `warp_mle_eval` vs native `Galois128` arithmetic).
+
+Key M4 work (volar-lir-codegen, volar-compiler, volar-vaffle-target, volar-fuzz):
+- Native-loop lowering (`LoopLowering::Native`): per-iteration temporaries are
+  excluded from loop-carried block params; the WARP spec code destructures
+  struct fields into locals around native-loop array writes. The earlier
+  all-concrete-bounds-for-Unroll pressure is superseded for this path.
+- The spec module was refactored to free functions (methods on generic types
+  mistype receivers in the planner).
+- Planner/lowering fixes: type-alias resolution, DefaultValue/ArrayGenerate/
+  Closure call discovery, narrowing casts, `from_fn` element-width
+  reconciliation, field constructors, `is_power_of_two`, forward-reference-safe
+  sibling calls, leaf-aware VaffleTarget params/returns, field bit-view/select/
+  icmp, and the volar-fuzz VAFFLE interpreter's stack-memory model.
+
+Remaining gap: the full `warp_genesis_spec` probe is `#[ignore]`d — the
+native-loop lowering completes, but eval-time cross-block value threading
+(values defined in one loop block referenced in another) is the open
+follow-up. The verify/decide path compile-via-IR differential is the next
+step once that threading lands.
+
 ---
 
 ## 9. Risks and open questions
