@@ -684,6 +684,32 @@ impl CBackend {
         self.state().record_def(ty, c_type, expr, ValKind::Pure)
     }
 
+    /// Bitcast the low bits of a field element to an integer. The field
+    /// element is stored as a `limb[]` array; the low `dst` bits live in
+    /// `limb[0]` (little-endian limb order). Used by `to_le_bytes`/
+    /// `to_be_bytes` on a field element.
+    fn field_to_int_trunc(&mut self, val: CValue, src_ty: &LirType, dst_ty: LirType) -> CValue {
+        self.register_array_typedef(&dst_ty);
+        let c_type = self.type_to_c(&dst_ty);
+        let expr = match src_ty {
+            LirType::ExtField { .. } => {
+                // `(<dst_c_type>)val.limb[0]` — the low limb holds the low
+                // bits; the cast truncates to the destination width.
+                let field_expr = Expr::Field(
+                    Box::new(Expr::Index(
+                        Box::new(Expr::Name(val.0)),
+                        Box::new(Expr::Const(0)),
+                    )),
+                    "limb".to_string(),
+                );
+                Expr::Cast(c_type.clone(), Box::new(field_expr))
+            }
+            LirType::PrimeField { .. } => Expr::Cast(c_type.clone(), Box::new(Expr::Name(val.0))),
+            _ => unreachable!(),
+        };
+        self.state().record_def(dst_ty, c_type, expr, ValKind::Pure)
+    }
+
     fn binop(&mut self, lhs: CValue, op: &'static str, rhs: CValue) -> CValue {
         let ty = self.state().type_of(lhs).clone();
         let c_type = self.type_to_c(&ty);
@@ -1967,9 +1993,20 @@ impl LirTarget for CBackend {
     }
 
     fn trunc(&mut self, val: CValue, dst_ty: LirType) -> CValue {
+        let src_ty = self.state().type_of(val).clone();
+        if is_field_type(&src_ty) {
+            // A field element's low bits live in its limb array; truncating
+            // to a small integer extracts the low bits (a bitcast, used by
+            // `to_le_bytes`/`to_be_bytes` on a field element).
+            assert!(
+                !is_field_type(&dst_ty),
+                "field-to-field truncation is unsupported"
+            );
+            return self.field_to_int_trunc(val, &src_ty, dst_ty);
+        }
         assert!(
-            !is_field_type(self.state().type_of(val)) && !is_field_type(&dst_ty),
-            "integer truncation involving field values is unsupported"
+            !is_field_type(&dst_ty),
+            "integer-to-field truncation is unsupported"
         );
         self.register_array_typedef(&dst_ty);
         let c_type = self.type_to_c(&dst_ty);
@@ -2211,14 +2248,19 @@ impl LirTarget for CBackend {
                     // Aggregate return — pack scalars back into the C type.
                     let expected = self.lir_scalar_count(&ty);
                     assert_eq!(
-                        vals.len(), expected,
+                        vals.len(),
+                        expected,
                         "ret in '{}': aggregate type {ty:?} needs {expected} scalars, got {}",
                         self.state().name,
                         vals.len()
                     );
                     let mut offset = 0usize;
                     let packed = self.pack_expr(&ty, vals, &mut offset);
-                    assert_eq!(offset, vals.len(), "ret: aggregate packing left unused scalars");
+                    assert_eq!(
+                        offset,
+                        vals.len(),
+                        "ret: aggregate packing left unused scalars"
+                    );
                     Item::Ret(Some(packed))
                 }
             }

@@ -950,6 +950,14 @@ pub trait LirTarget<Prov: Clone = ()> {
     fn int_to_field(&mut self, _value: Self::Value, _field: &LirType) -> Self::Value {
         unimplemented!("int_to_field: not supported by this backend")
     }
+
+    /// A field value's bit-level view as the same-width integer value — the
+    /// dual of [`LirTarget::int_to_field`], used by `to_le_bytes` and friends
+    /// to decompose a field element into bytes. Default: the value is already
+    /// an integer (non-field targets).
+    fn field_to_bits(&mut self, value: Self::Value) -> Self::Value {
+        value
+    }
 }
 
 #[cfg(test)]

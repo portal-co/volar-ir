@@ -85,7 +85,7 @@ use alloc::{
     vec::Vec,
 };
 
-use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigId, Terminator, Value, ValueId};
+use vaffle::{Block, BlockId, FuncBody, FuncDecl, Module, SigId, Terminator, Value, ValueId};
 use volar_ir_common::{Constant, IrType, Node, PolyCoeffs, Stmt, StorageId, TypeId};
 use volar_lir::circuits::{BitCircuitBuilder, bc_add};
 
@@ -505,7 +505,7 @@ fn ssa_ify_function_owned<P: Clone>(
                 storage: StorageId::VAFFLE_SSA_SPILL,
                 src: vid,
                 ty,
-                addr: ValueId(addr_vid as usize),
+                addr: ValueId(addr_vid),
             }),
             prov,
             side,
@@ -1041,7 +1041,7 @@ fn dominates(a: usize, mut b: usize, idom: &[usize]) -> bool {
 mod tests {
     use super::*;
     use alloc::vec;
-    use vaffle::{SigDecl, SigId, Target};
+    use vaffle::{FuncId, SigDecl, SigId, Target};
     use volar_ir_common::{IrType, Stmt as CommonStmt, TypeTable};
 
     fn mk_module(n_types: usize) -> Module<()> {

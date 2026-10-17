@@ -67,6 +67,20 @@ fn eval_vaffle_depth(
 
     // Seed the entry block's params from `inputs`.
     let entry_block = &body.blocks[body.entry.0];
+    if inputs.len() != entry_block.params.len() {
+        let name = module
+            .exports
+            .iter()
+            .find(|(_, f)| f.0 == func_id.0)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| "?".to_string());
+        eprintln!(
+            "[eval] func {name} (id {}) expects {} params, got {} inputs",
+            func_id.0,
+            entry_block.params.len(),
+            inputs.len()
+        );
+    }
     assert_eq!(
         inputs.len(),
         entry_block.params.len(),
@@ -230,11 +244,25 @@ fn eval_vaffle_value(
             call_agg.insert(vid.0, results);
             vec![] // projected by Value::Output
         }
-        Value::Output { value, idx } => call_agg
-            .get(&value.0)
-            .and_then(|agg| agg.get(*idx))
-            .cloned()
-            .unwrap_or_default(),
+        Value::Output { value, idx } => {
+            // Record the projection's type from the callee's signature —
+            // `stmt_output_type` only sees `Value::Op`, and a `Poly` factor
+            // referencing an unprojected call output must still resolve.
+            let kind = &values[(*value).0].kind;
+            if let Value::Call { func, .. } = kind {
+                if let vaffle::FuncDecl::Body(body) = &module.funcs[func.0] {
+                    let sig = &module.sigs[body.sig.0];
+                    if let Some(ty) = sig.results.get(*idx) {
+                        value_tys.insert(vid.0, *ty);
+                    }
+                }
+            }
+            call_agg
+                .get(&value.0)
+                .and_then(|agg| agg.get(*idx))
+                .cloned()
+                .unwrap_or_default()
+        }
         Value::StackAlloc {
             elem_ty,
             count,

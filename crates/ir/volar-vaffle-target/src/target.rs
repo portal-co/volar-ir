@@ -267,7 +267,7 @@ impl VaffleTarget {
     /// model), with field leaves as single field-typed projections.
     pub(crate) fn project_outputs(&mut self, call_id: ValueId, ty: &LirType) -> Vec<VaffleValue> {
         let leaves = self.leaf_lir_types(ty);
-        if !leaves.iter().any(|leaf| Self::is_field_typed(leaf)) {
+        if !leaves.iter().any(Self::is_field_typed) {
             let n = self.bits_for(ty);
             let bits: Vec<ValueId> = (0..n)
                 .map(|i| {
@@ -452,6 +452,11 @@ impl VaffleTarget {
     pub fn with_optimized_abi(mut self) -> Self {
         self.optimized_abi = true;
         self
+    }
+
+    /// Names currently reserved as forward-reference call stubs (test/debug).
+    pub fn pending_func_names(&self) -> Vec<&str> {
+        self.pending_funcs.keys().map(|s| s.as_str()).collect()
     }
 
     /// Query whether the optimized ABI is enabled.
@@ -1116,7 +1121,7 @@ impl LirTarget for VaffleTarget {
                     (0..pointer_bits).map(|_| bit_tid).collect::<Vec<_>>()
                 } else {
                     let leaves = self.leaf_lir_types(ty);
-                    if !leaves.iter().any(|leaf| Self::is_field_typed(leaf)) {
+                    if !leaves.iter().any(Self::is_field_typed) {
                         // Pure-bit params keep the historical flat slot layout.
                         (0..n).map(|_| bit_tid).collect()
                     } else {
@@ -1149,7 +1154,7 @@ impl LirTarget for VaffleTarget {
             .iter()
             .flat_map(|ty| {
                 let leaves = self.leaf_lir_types(ty);
-                if !leaves.iter().any(|leaf| Self::is_field_typed(leaf)) {
+                if !leaves.iter().any(Self::is_field_typed) {
                     let n = self.bits_for(ty);
                     (0..n).map(|_| bit_tid).collect::<Vec<_>>()
                 } else {
@@ -1188,9 +1193,9 @@ impl LirTarget for VaffleTarget {
                 groups.push(vec![]); // placeholder — filled after loads
             } else {
                 let leaves = self.leaf_lir_types(ty);
-                if !leaves.iter().any(|leaf| Self::is_field_typed(leaf)) {
-                    // Pure-bit param: one grouped value, `n` bit cells
-                    // (unchanged historical behavior).
+                if !leaves.iter().any(Self::is_field_typed) && leaves.len() == 1 {
+                    // Single pure-bit leaf (scalar/param integer): one
+                    // grouped value, `n` bit cells (unchanged behavior).
                     let bits: Vec<ValueId> =
                         (0..n).map(|_| fb.emit_block_param(0, bit_tid)).collect();
                     groups.push(vec![VaffleValue {
@@ -1367,7 +1372,11 @@ impl LirTarget for VaffleTarget {
         let n = self.bits_for(&ty);
         let bit_tid = self.bit_tid();
         let bits: Vec<ValueId> = (0..n)
-            .map(|i| self.emit_const(((val >> i) & 1) as u128, bit_tid))
+            .map(|i| {
+                // `val` is an i64: bits above 63 are the sign extension.
+                let bit = if i < 64 { (val >> i) & 1 != 0 } else { val < 0 };
+                self.emit_const(bit as u128, bit_tid)
+            })
             .collect();
         VaffleValue { bits, ty }
     }
@@ -1428,6 +1437,16 @@ impl LirTarget for VaffleTarget {
             };
             coeffs.insert(vec![b], negative_one);
             return self.emit_field_poly(&ty, coeffs);
+        }
+        if lhs.bits.len() != rhs.bits.len() {
+            panic!(
+                "sub width mismatch in {}: lhs={} bits ({:?}) rhs={} bits ({:?})",
+                self.func.as_ref().map(|f| f.name.as_str()).unwrap_or("<none>"),
+                lhs.bits.len(),
+                lhs.ty,
+                rhs.bits.len(),
+                rhs.ty
+            );
         }
         let bits = self
             .extract_bits(HelperOp::Sub, &[lhs.bits.clone(), rhs.bits.clone()])
@@ -1702,6 +1721,15 @@ impl LirTarget for VaffleTarget {
     }
     fn trunc(&mut self, val: VaffleValue, dst_ty: LirType) -> VaffleValue {
         let dst_n = self.bits_for(&dst_ty);
+        assert!(
+            val.bits.len() >= dst_n,
+            "trunc in {}: value has {} cells ({:?}), cannot truncate to {} ({:?})",
+            self.func.as_ref().map(|f| f.name.as_str()).unwrap_or("<none>"),
+            val.bits.len(),
+            val.ty,
+            dst_n,
+            dst_ty
+        );
         VaffleValue {
             bits: val.bits[..dst_n].to_vec(),
             ty: dst_ty,
@@ -1798,14 +1826,38 @@ impl LirTarget for VaffleTarget {
             let values = &self.func.as_ref()?.all_values;
             if let Value::Op(volar_ir_common::Stmt::Const(c, _)) =
                 &values.get(value.bits[0].0)?.kind
-            {
-                if c.hi == 0 {
+                && c.hi == 0 {
                     return Some(c.lo);
                 }
-            }
             return None;
         }
         self.constant_bits(&value.bits)
+    }
+
+    fn field_to_bits(&mut self, value: VaffleValue) -> VaffleValue {
+        if !Self::is_field_typed(&value.ty) {
+            return value;
+        }
+        // The bit view: one bit per coefficient bit, as the same-width
+        // unsigned integer (the dialect's byte-decomposition input).
+        let width = match &value.ty {
+            LirType::ExtField { wrapped, degree, .. } => {
+                *degree as usize * self.bits_for(wrapped)
+            }
+            LirType::PrimeField { k, .. } => *k as usize,
+            other => panic!("field_to_bits: {other:?} is not a field type"),
+        };
+        let bits = self.scalar_bits(&value);
+        let int_ty = match width {
+            8 => LirType::U8,
+            16 => LirType::U16,
+            32 => LirType::U32,
+            64 => LirType::U64,
+            128 => LirType::U128,
+            256 => LirType::U256,
+            other => panic!("field_to_bits: no integer type for width {other}"),
+        };
+        VaffleValue { bits, ty: int_ty }
     }
 
     fn int_to_field(&mut self, value: VaffleValue, field: &LirType) -> VaffleValue {
@@ -2240,7 +2292,7 @@ impl VaffleTarget {
         for ty in ret_tys {
             let n = self.bits_for(ty);
             let leaves = self.leaf_lir_types(ty);
-            if !leaves.iter().any(|leaf| Self::is_field_typed(leaf)) {
+            if !leaves.iter().any(Self::is_field_typed) {
                 let bits: Vec<ValueId> = (bit_offset..bit_offset + n)
                     .map(|i| {
                         self.fb().emit_value(Value::Output {
@@ -2973,9 +3025,15 @@ mod tests {
         let (entry, groups) = t.begin_function("f", &[arr_ty.clone()], None);
         t.switch_to_block(entry);
 
-        // Flat ABI: 128 block params, 128 bits in the VaffleValue.
+        // Flat ABI: 128 block params; the codegen's flat-scalar model gets
+        // one VaffleValue per leaf (16 u8 leaves of 8 cells each).
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0][0].bits.len(), 128);
+        assert_eq!(groups[0].len(), 16);
+        assert!(groups[0].iter().all(|v| v.bits.len() == 8));
+        assert_eq!(
+            groups[0].iter().map(|v| v.bits.len()).sum::<usize>(),
+            128
+        );
 
         // Count the block params.
         let body = t.func.as_ref().unwrap();

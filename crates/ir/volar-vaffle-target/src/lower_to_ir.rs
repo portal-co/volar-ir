@@ -55,7 +55,7 @@ use alloc::{
 };
 
 use vaffle::{
-    Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, Target, Terminator, Value, ValueId,
+    Block, FuncBody, FuncDecl, FuncId, Module, SigDecl, Terminator, Value, ValueId,
 };
 use volar_ir::ir::{
     ActionDecl, IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt,
@@ -885,7 +885,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             .entry_block
             .expect("lower_function requires a function body");
         let own_layout = info.own_layout.clone();
-        let callee_layout = info.callee_layout.clone();
+        let _callee_layout = info.callee_layout.clone();
 
         let sp_packs = n_packs(self.pointer_bits);
         let n_param_words = info.n_param_words;
@@ -1092,8 +1092,8 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     // `compute_cross_block_values`), so a later block that
                     // references it directly (not via an explicit param/arg)
                     // needs to be able to reload it.
-                    if cross_block_values.contains(&svid.0) {
-                        if let Some(var) = val_map.get(svid.0) {
+                    if cross_block_values.contains(&svid.0)
+                        && let Some(var) = val_map.get(svid.0) {
                             self.spill_trace.push(alloc::format!(
                                 "SPILL(stmt) vaffle_bi={vaffle_bi} vid={} addr={} src_var={}",
                                 svid.0,
@@ -1109,7 +1109,6 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                 BIT_TID,
                             );
                         }
-                    }
                 }
 
                 match at_call {
@@ -1308,8 +1307,8 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
 
                             // Cross-block spill of the call's own result (see
                             // the `before_call` loop's identical comment).
-                            if cross_block_values.contains(&call_vid.0) {
-                                if let Some(var) = val_map.get(call_vid.0) {
+                            if cross_block_values.contains(&call_vid.0)
+                                && let Some(var) = val_map.get(call_vid.0) {
                                     frame_spill(
                                         &mut cont_em,
                                         &cont_frame_sp,
@@ -1319,7 +1318,6 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                         BIT_TID,
                                     );
                                 }
-                            }
 
                             let n_spill_words = spill_words.len();
                             let mut reloaded_words = Vec::with_capacity(n_spill_words);
@@ -1442,7 +1440,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 // Pack SP, append unpacked VAFFLE block args (internal).
                 let sp_words = pack_bits(em, sp_bits, PACK_W);
                 let mut args: Vec<IRVarId> = sp_words;
-                args.extend(target.args.iter().map(|v| s(v)));
+                args.extend(target.args.iter().map(&s));
                 IRTerminator::Jmp {
                     target: IRBranchTarget {
                         dest: IRBlockTargetId::Block(ir_block),
@@ -1460,9 +1458,9 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 let else_block = IRBlockId((entry_off + else_target.block.0) as u32);
                 let sp_words = pack_bits(em, sp_bits, PACK_W);
                 let mut then_args: Vec<IRVarId> = sp_words.clone();
-                then_args.extend(then_target.args.iter().map(|v| s(v)));
+                then_args.extend(then_target.args.iter().map(&s));
                 let mut else_args: Vec<IRVarId> = sp_words;
-                else_args.extend(else_target.args.iter().map(|v| s(v)));
+                else_args.extend(else_target.args.iter().map(&s));
                 IRTerminator::JumpCond {
                     condition: s(cond),
                     then_target: IRBranchTarget {
@@ -1488,7 +1486,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     };
                 }
                 let callee_info = &self.func_info[callee_idx];
-                let cl = callee_info.callee_layout.clone();
+                let _cl = callee_info.callee_layout.clone();
 
                 // The tail call reuses F's continuation, which F's caller wrote at
                 // F's frame base.  With the fix where callers advance SP by
@@ -1546,7 +1544,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 for (i, t) in targets.iter().enumerate() {
                     let ir_block = IRBlockId((entry_off + t.block.0) as u32);
                     let mut args: Vec<IRVarId> = sp_words.clone();
-                    args.extend(t.args.iter().map(|v| s(v)));
+                    args.extend(t.args.iter().map(&s));
                     cases.insert(
                         Constant {
                             hi: 0,
@@ -1561,7 +1559,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 }
                 let default_block = IRBlockId((entry_off + default_target.block.0) as u32);
                 let mut default_args: Vec<IRVarId> = sp_words;
-                default_args.extend(default_target.args.iter().map(|v| s(v)));
+                default_args.extend(default_target.args.iter().map(&s));
                 cases.insert(
                     Constant {
                         hi: 0,
@@ -1735,7 +1733,7 @@ impl ValueMap {
         let slot = self.values.get_mut(value).unwrap_or_else(|| {
             panic!("lower_function: VAFFLE ValueId {value} is outside its value arena")
         });
-        core::mem::replace(slot, Some(ir_var))
+        slot.replace(ir_var)
     }
 
     fn iter(&self) -> impl Iterator<Item = (usize, IRVarId)> + '_ {
@@ -2414,6 +2412,7 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::target::VaffleTarget;
+    use vaffle::BlockId;
     use volar_lir::{LirTarget, LirType, StackAllocExt};
 
     #[test]

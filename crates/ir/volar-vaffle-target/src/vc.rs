@@ -331,12 +331,11 @@ fn import_aliases(wasm: &WModule, fid: Func) -> Vec<String> {
         names.push(decl_name.to_string());
     }
     for imp in &wasm.imports {
-        if let ImportKind::Func(f) = imp.kind {
-            if f == fid {
+        if let ImportKind::Func(f) = imp.kind
+            && f == fid {
                 names.push(imp.name.clone());
                 names.push(alloc::format!("{}.{}", imp.module, imp.name));
             }
-        }
     }
     names
 }
@@ -345,14 +344,13 @@ fn import_aliases(wasm: &WModule, fid: Func) -> Vec<String> {
 /// onto the WAFFLE function's declaration name used by `begin_function`.
 pub(crate) fn resolve_call_func_name(wasm: &WModule, key: &str) -> String {
     for exp in &wasm.exports {
-        if exp.name == key {
-            if let ExportKind::Func(f) = exp.kind {
+        if exp.name == key
+            && let ExportKind::Func(f) = exp.kind {
                 let name = wasm.funcs[f].name();
                 if !name.is_empty() {
                     return name.to_string();
                 }
             }
-        }
     }
     key.to_string()
 }

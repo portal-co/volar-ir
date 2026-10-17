@@ -71,7 +71,6 @@ use portal_pc_waffle_ir::{
     MemoryArg,
     Module as WModule,
     Operator,
-    SignatureData,
     Terminator,
     Type as WType,
     Value as WValue,
@@ -1121,11 +1120,10 @@ fn lower_op(
         // ---- Direct call (multi-result, globals threaded) --------------
         Operator::Call { function_index } => {
             let fid = *function_index;
-            if tgt.vc.is_some() {
-                if let Some(op) = vci_op_for_func(wasm, fid) {
+            if tgt.vc.is_some()
+                && let Some(op) = vci_op_for_func(wasm, fid) {
                     return lower_vci_reveal(op, args, val_map, tgt, body);
                 }
-            }
             let name = callee_name(wasm, fid);
 
             // Oracle / action dispatch: bypass globals threading. Config
@@ -1438,7 +1436,7 @@ fn lower_term(
 
         Terminator::Return { values } => {
             let mut vals: Vec<VaffleValue> =
-                values.iter().map(|v| get(v)).collect::<Result<_, _>>()?;
+                values.iter().map(&get).collect::<Result<_, _>>()?;
             vals.extend_from_slice(current_globals);
             tgt.ret(&vals);
         }
@@ -1458,7 +1456,7 @@ fn lower_term(
         Terminator::ReturnCall { func, args } => {
             let name = alloc::format!("func_{}", func.index());
             let mut arg_vals: Vec<VaffleValue> =
-                args.iter().map(|a| get(a)).collect::<Result<_, _>>()?;
+                args.iter().map(get).collect::<Result<_, _>>()?;
             arg_vals.extend_from_slice(current_globals);
             tgt.ret_call(&name, &arg_vals);
         }
@@ -1720,11 +1718,10 @@ pub fn waffle_import_func_names(wasm: &WModule) -> BTreeMap<usize, String> {
         }
     }
     for (func_ref, decl) in wasm.funcs.entries() {
-        if let FuncDecl::Import(_, name) = decl {
-            if !name.is_empty() {
+        if let FuncDecl::Import(_, name) = decl
+            && !name.is_empty() {
                 out.entry(func_ref.index()).or_insert_with(|| name.clone());
             }
-        }
     }
     out
 }
@@ -1736,11 +1733,10 @@ fn callee_config_key(
     import_names: &BTreeMap<usize, String>,
     fid: portal_pc_waffle_ir::Func,
 ) -> String {
-    if let FuncDecl::Import(..) = &wasm.funcs[fid] {
-        if let Some(name) = import_names.get(&fid.index()) {
+    if let FuncDecl::Import(..) = &wasm.funcs[fid]
+        && let Some(name) = import_names.get(&fid.index()) {
             return name.clone();
         }
-    }
     callee_name(wasm, fid)
 }
 
