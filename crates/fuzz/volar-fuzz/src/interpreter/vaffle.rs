@@ -12,8 +12,8 @@
 
 use std::collections::BTreeMap;
 
-use vaffle::{BlockId, FuncDecl, FuncId, Module, Terminator, Value, ValueId};
-use volar_ir_common::{Constant, OracleDecl, PolyCoeffs, Stmt, StorageId, TypeId, TypeTable};
+use vaffle::{FuncDecl, FuncId, Module, Terminator, Value, ValueId};
+use volar_ir_common::{Constant, OracleDecl, PolyCoeffs, Stmt, TypeId, TypeTable};
 
 use crate::generators::oracle::hash_oracle;
 use crate::interpreter::ir::{
@@ -28,6 +28,12 @@ use crate::interpreter::ir::{
 /// Maximum number of times the entry block may be re-entered before the
 /// interpreter gives up.
 pub const MAX_ITERS: usize = 512;
+/// Total block-execution guard across a whole function call — a robust
+/// infinite-loop bound. (The `MAX_ITERS` entry-block check alone cannot catch
+/// a native loop whose header is a separate block.)
+const MAX_TOTAL_ITERS: usize = 20_000_000;
+/// Default call-depth guard for [`eval_vaffle`] (a fuzzing DoS bound).
+pub const MAX_CALL_DEPTH: usize = 4;
 
 /// Evaluate function `func_id` in `module` with the given inputs.
 ///
@@ -36,7 +42,20 @@ pub const MAX_ITERS: usize = 512;
 /// Returns the values listed in the `Return` terminator, or `None` if the
 /// iteration guard is exceeded.
 pub fn eval_vaffle(module: &Module, func_id: FuncId, inputs: &[IrValue]) -> Option<Vec<IrValue>> {
-    eval_vaffle_depth(module, func_id, inputs, &mut BTreeMap::new(), 0)
+    eval_vaffle_with_limits(module, func_id, inputs, MAX_CALL_DEPTH)
+}
+
+/// [`eval_vaffle`] with an explicit call-depth guard. Compiled (not fuzzed)
+/// modules with legitimately deep static call chains — the spec WARP genesis
+/// path nests `genesis → hash → sponge → permute` past the fuzzing default —
+/// use this to raise the bound without changing the fuzzing default.
+pub fn eval_vaffle_with_limits(
+    module: &Module,
+    func_id: FuncId,
+    inputs: &[IrValue],
+    max_call_depth: usize,
+) -> Option<Vec<IrValue>> {
+    eval_vaffle_depth(module, func_id, inputs, &mut BTreeMap::new(), 0, max_call_depth)
 }
 
 /// Internal recursive evaluator with a call-depth guard and shared storage.
@@ -46,9 +65,9 @@ fn eval_vaffle_depth(
     inputs: &[IrValue],
     storage: &mut StorageMap,
     depth: usize,
+    max_call_depth: usize,
 ) -> Option<Vec<IrValue>> {
-    const MAX_CALL_DEPTH: usize = 4;
-    if depth > MAX_CALL_DEPTH {
+    if depth > max_call_depth {
         return None;
     }
 
@@ -67,20 +86,6 @@ fn eval_vaffle_depth(
 
     // Seed the entry block's params from `inputs`.
     let entry_block = &body.blocks[body.entry.0];
-    if inputs.len() != entry_block.params.len() {
-        let name = module
-            .exports
-            .iter()
-            .find(|(_, f)| f.0 == func_id.0)
-            .map(|(n, _)| n.clone())
-            .unwrap_or_else(|| "?".to_string());
-        eprintln!(
-            "[eval] func {name} (id {}) expects {} params, got {} inputs",
-            func_id.0,
-            entry_block.params.len(),
-            inputs.len()
-        );
-    }
     assert_eq!(
         inputs.len(),
         entry_block.params.len(),
@@ -95,8 +100,16 @@ fn eval_vaffle_depth(
 
     let mut current_block_id = body.entry;
     let mut loop_count = 0usize;
+    // Total block executions across the whole function — a robust infinite-loop
+    // guard (the `loop_count`/`MAX_ITERS` check above only counts *entry*-block
+    // re-entries, which a native loop with a separate header block never hits).
+    let mut total_iters = 0usize;
 
     loop {
+        total_iters += 1;
+        if total_iters > MAX_TOTAL_ITERS {
+            return None;
+        }
         if current_block_id == body.entry {
             loop_count += 1;
             if loop_count > MAX_ITERS {
@@ -118,12 +131,13 @@ fn eval_vaffle_depth(
                 &mut call_agg,
                 storage,
                 depth,
+                max_call_depth,
             )?;
             value_table.insert(vid.0, val);
-            if let Value::Op(stmt) = &body.values[vid.0].kind {
-                if let Some(ty) = volar_ir_opt::common::stmt_output_type(stmt) {
-                    value_tys.insert(vid.0, ty);
-                }
+            if let Value::Op(stmt) = &body.values[vid.0].kind
+                && let Some(ty) = volar_ir_opt::common::stmt_output_type(stmt)
+            {
+                value_tys.insert(vid.0, ty);
             }
         }
 
@@ -220,6 +234,7 @@ fn eval_vaffle_value(
     call_agg: &mut BTreeMap<usize, Vec<IrValue>>,
     storage: &mut StorageMap,
     depth: usize,
+    max_call_depth: usize,
 ) -> Option<IrValue> {
     let val = match &values[vid.0].kind {
         Value::Param { ty, .. } => {
@@ -240,7 +255,8 @@ fn eval_vaffle_value(
             // Collect argument values.
             let arg_vals: Vec<IrValue> = args.iter().map(|a| get_val(value_table, *a)).collect();
             // Recursive eval with depth guard.
-            let results = eval_vaffle_depth(module, *func, &arg_vals, storage, depth + 1)?;
+            let results =
+                eval_vaffle_depth(module, *func, &arg_vals, storage, depth + 1, max_call_depth)?;
             call_agg.insert(vid.0, results);
             vec![] // projected by Value::Output
         }
@@ -248,13 +264,13 @@ fn eval_vaffle_value(
             // Record the projection's type from the callee's signature —
             // `stmt_output_type` only sees `Value::Op`, and a `Poly` factor
             // referencing an unprojected call output must still resolve.
-            let kind = &values[(*value).0].kind;
-            if let Value::Call { func, .. } = kind {
-                if let vaffle::FuncDecl::Body(body) = &module.funcs[func.0] {
-                    let sig = &module.sigs[body.sig.0];
-                    if let Some(ty) = sig.results.get(*idx) {
-                        value_tys.insert(vid.0, *ty);
-                    }
+            let kind = &values[value.0].kind;
+            if let Value::Call { func, .. } = kind
+                && let vaffle::FuncDecl::Body(body) = &module.funcs[func.0]
+            {
+                let sig = &module.sigs[body.sig.0];
+                if let Some(ty) = sig.results.get(*idx) {
+                    value_tys.insert(vid.0, *ty);
                 }
             }
             call_agg
@@ -312,7 +328,7 @@ fn eval_vaffle_stmt(
     stmt: &Stmt<ValueId>,
     stmt_vid: usize,
     types: &TypeTable,
-    oracles: &[OracleDecl],
+    _oracles: &[OracleDecl],
     value_table: &mut BTreeMap<usize, IrValue>,
     value_tys: &BTreeMap<usize, TypeId>,
     oracle_agg: &mut BTreeMap<usize, Vec<IrValue>>,
@@ -360,9 +376,10 @@ fn eval_vaffle_stmt(
                 eval_vaffle_poly(coeffs, constant, width, value_table)
             } else {
                 eval_typed_poly(*ty, coeffs, constant, types, |var| {
-                    let factor_ty = value_tys.get(&var.0).copied().unwrap_or_else(|| {
-                        panic!("eval_vaffle: factor v{} has no type", var.0)
-                    });
+                    let factor_ty = value_tys
+                        .get(&var.0)
+                        .copied()
+                        .unwrap_or_else(|| panic!("eval_vaffle: factor v{} has no type", var.0));
                     (factor_ty, get(var))
                 })
             }
@@ -418,7 +435,7 @@ fn eval_vaffle_stmt(
             let oracle_idx: u32 = name
                 .bytes()
                 .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
-            let flat_inputs: Vec<bool> = args.iter().flat_map(|v| get(v)).collect();
+            let flat_inputs: Vec<bool> = args.iter().flat_map(&get).collect();
             let output_widths: Vec<usize> =
                 output_tys.iter().map(|&ty| bit_width(ty, types)).collect();
             let total_w: usize = output_widths.iter().sum();
