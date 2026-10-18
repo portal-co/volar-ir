@@ -463,14 +463,15 @@ Struct field *construction* now reconciles each field value's scalar width to
 the declared field width (a U64 literal in a u32 field was shifting every
 later field's offset).
 
-Remaining gap: a `match` on a runtime index whose arms return *captured*
-(let-bound) struct values miscompiles (wrong result + a block blowup) — the
-`from_fn(|i| match i { 0 => mk0, ... })` shape used to build the toy PESAT
-index in the genesis probe. That makes the genesis constraint eval read
-`n_vars` as 0, so `warp_genesis_spec` returns `None`. Fixing
-`lower_match_arm_chain`'s multi-scalar (struct) result threading is the next
-correctness step; see the `#[ignore]`d `probe_match_captured_struct` minimal
-repro.
+Remaining gap: the genesis now runs to completion and produces a real Merkle
+root (the constraint eval, Keccak permutation, sponge absorb, and byte<->lane
+conversions are all validated by passing probes). The last divergence is the
+`le16` field->bytes conversion (the Merkle leaf encoding): a field cell's
+`to_le_bytes` produces 1 byte instead of 16 — the field cell's bit width is
+being read as 8 bits. See the `#[ignore]`d `probe_le16` / `probe_hash_leaf`
+repros. A separate known-open bug: a `match` on a runtime index whose arms
+return *captured* (let-bound) struct values miscompiles (the genesis probe
+sidesteps it by inlining the struct literals); see `probe_match_captured_struct`.
 
 ---
 
