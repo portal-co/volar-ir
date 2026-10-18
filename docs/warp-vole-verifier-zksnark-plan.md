@@ -451,12 +451,26 @@ canonicalization (`canonical_type`) was normalized so planning and lowering
 agree on monomorphized call targets. The full `warp_genesis_spec` probe now
 lowers AND threads correctly.
 
-Remaining gap: eval *scale*. The in-circuit Keccak module flattens to
-millions of VAFFLE values, so the tree-walking `eval_vaffle` interpreter is
-too slow to finish the genesis evaluation in a test budget. That is a
-data-flow compaction problem (CSE / memory-backing of the flattened state),
-not a correctness gap. The verify/decide path compile-via-IR differential is
-the next step once eval is fast enough.
+Eval scale: **resolved** (2026-10-17). The volar-fuzz VAFFLE interpreter's
+value tables are now dense Vec-indexed (O(1)) with in-place single-bit reads,
+~15x faster, enough to run the genesis eval to completion in a test budget.
+Instance duplication was deduplicated in the mono planner (non-generic callees
+no longer inherit the caller's generic env). A unified shared-stack memory
+model (all allocas on `StorageId::STACK` + one global stack pointer) makes
+cross-call mutable references alias correctly; the spec-Keccak-f1600
+differential probe (compiled permutation == known zero-state answer) passes.
+Struct field *construction* now reconciles each field value's scalar width to
+the declared field width (a U64 literal in a u32 field was shifting every
+later field's offset).
+
+Remaining gap: a `match` on a runtime index whose arms return *captured*
+(let-bound) struct values miscompiles (wrong result + a block blowup) — the
+`from_fn(|i| match i { 0 => mk0, ... })` shape used to build the toy PESAT
+index in the genesis probe. That makes the genesis constraint eval read
+`n_vars` as 0, so `warp_genesis_spec` returns `None`. Fixing
+`lower_match_arm_chain`'s multi-scalar (struct) result threading is the next
+correctness step; see the `#[ignore]`d `probe_match_captured_struct` minimal
+repro.
 
 ---
 
