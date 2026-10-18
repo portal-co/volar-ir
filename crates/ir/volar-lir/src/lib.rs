@@ -327,6 +327,15 @@ pub trait StackAllocExt {
     ///
     /// Returns a pointer of the same type as `ptr`.
     fn ptr_offset(&mut self, ptr: Self::Value, idx: Self::Value) -> Self::Value;
+
+    /// Allocate `count` elements of `elem_ty` in a region whose storage is
+    /// shared across function calls, so a pointer passed to a callee resolves
+    /// to the same cells the caller wrote. Used for `&mut` call arguments
+    /// that must alias the caller's local. Defaults to [`StackAllocExt::alloca`]
+    /// (per-function storage) for targets without a shared stack.
+    fn alloca_shared(&mut self, elem_ty: LirType, count: usize) -> Self::Value {
+        self.alloca(elem_ty, count)
+    }
 }
 
 // ============================================================================

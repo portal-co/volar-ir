@@ -181,6 +181,12 @@ pub struct VaffleTarget {
     addr_tid: TypeId,
     /// `alloca` result bit 0 → that site's data storage.
     ptr_storage: BTreeMap<ValueId, StorageId>,
+    /// The shared `StorageId::STACK` runtime stack-pointer global, created on
+    /// first use. Cross-call mutable-reference (`&mut`) arguments promote the
+    /// caller's local into a shared-stack frame so the callee's writes through
+    /// the pointer are visible to the caller; the per-site `alloca` storage
+    /// model is intra-function only and loses the storage id across a call.
+    stack_sp: Option<StorageId>,
     helper_mode: CircuitHelperMode,
     helper_cache: BTreeMap<HelperKey, FuncId>,
 }
@@ -218,6 +224,7 @@ impl VaffleTarget {
             storage_alloc: StorageAllocator::new(64),
             addr_tid,
             ptr_storage: BTreeMap::new(),
+            stack_sp: None,
             helper_mode: CircuitHelperMode::Inline,
             helper_cache: BTreeMap::new(),
         }
@@ -394,16 +401,18 @@ impl VaffleTarget {
     }
 
     fn alloc_stack_site(&mut self) -> (StorageId, StorageId) {
-        let storage = self.storage_alloc.alloc();
-        let sp = self.storage_alloc.alloc();
-        self.module.pre_init.push(PreInitSegment {
-            storage: sp,
-            ty: self.addr_tid,
-            offset: 0,
-            data: vec![Constant { hi: 0, lo: 0 }],
-        });
-        self.fb().sp_globals.push(sp);
-        (storage, sp)
+        // All allocas share the `StorageId::STACK` data storage and a single
+        // module-global stack-pointer cell. A unified stack is what lets a
+        // pointer passed across a call boundary (`&mut` argument) resolve to
+        // the same cells in the callee — the per-site storage id is local to
+        // a function and would be lost at the boundary. Addresses stay unique
+        // because every alloca bumps the one shared sp, and each function's
+        // entry/exit saves/restores it so a callee's frame is released.
+        let sp = self.shared_stack_sp();
+        if !self.fb().sp_globals.contains(&sp) {
+            self.fb().sp_globals.push(sp);
+        }
+        (StorageId::STACK, sp)
     }
 
     fn explode_pointer(&mut self, alloc_vid: ValueId) -> Vec<ValueId> {
@@ -425,11 +434,59 @@ impl VaffleTarget {
         }
     }
 
+    /// The shared `StorageId::STACK` runtime stack-pointer global, created on
+    /// first use with a zero `pre_init` segment. All cross-call
+    /// mutable-reference frames bump this one cell so their addresses are
+    /// globally unique within the shared stack.
+    fn shared_stack_sp(&mut self) -> StorageId {
+        if let Some(sp) = self.stack_sp {
+            return sp;
+        }
+        let sp = self.storage_alloc.alloc();
+        self.module.pre_init.push(PreInitSegment {
+            storage: sp,
+            ty: self.addr_tid,
+            offset: 0,
+            data: vec![Constant { hi: 0, lo: 0 }],
+        });
+        self.stack_sp = Some(sp);
+        sp
+    }
+
+    /// Allocate `count` elements of `elem_ty` on the shared `StorageId::STACK`
+    /// runtime stack (the cross-call frame region). Unlike the per-site
+    /// `alloca`, the result points into storage the whole module shares, so a
+    /// pointer passed to a callee resolves to the same cells the caller wrote.
+    pub(crate) fn alloca_shared(&mut self, elem_ty: LirType, count: usize) -> VaffleValue {
+        let sp = self.shared_stack_sp();
+        let elem_tid = self.lir_type_to_tid(&elem_ty);
+        let alloc_vid = self.fb().emit_value(Value::StackAlloc {
+            elem_ty: elem_tid,
+            count,
+            storage: StorageId::STACK,
+            sp,
+        });
+        // The shared sp participates in the entry-save/exit-restore discipline
+        // (so a callee's frame is released on return), like the per-site sps.
+        if !self.fb().sp_globals.contains(&sp) {
+            self.fb().sp_globals.push(sp);
+        }
+        let addr_bits = self.explode_pointer(alloc_vid);
+        self.remember_ptr(&addr_bits, StorageId::STACK);
+        VaffleValue {
+            bits: addr_bits,
+            ty: LirType::Ptr(alloc::boxed::Box::new(elem_ty)),
+        }
+    }
+
     fn ptr_data_storage(&self, ptr: &VaffleValue) -> StorageId {
+        // Unregistered pointers are call-boundary references (`&mut` params):
+        // they point into the shared `StorageId::STACK` runtime stack, which is
+        // exactly where the caller's `alloca_shared` promotion placed the data.
         self.ptr_storage
             .get(&ptr.bits[0])
             .copied()
-            .expect("pointer was not produced by alloca or ptr_offset")
+            .unwrap_or(StorageId::STACK)
     }
 
     /// The pointer ABI used by the module being assembled.
@@ -2461,6 +2518,10 @@ impl VaffleTarget {
 impl StackAllocExt for VaffleTarget {
     type Value = VaffleValue;
 
+    fn alloca_shared(&mut self, elem_ty: LirType, count: usize) -> VaffleValue {
+        VaffleTarget::alloca_shared(self, elem_ty, count)
+    }
+
     fn alloca(&mut self, elem_ty: LirType, count: usize) -> VaffleValue {
         let (storage, sp) = self.alloc_stack_site();
         let elem_tid = self.lir_type_to_tid(&elem_ty);
@@ -2973,16 +3034,25 @@ mod tests {
             })
             .collect();
         assert_eq!(allocs.len(), 2);
-        assert_ne!(
-            allocs[0].0, allocs[1].0,
-            "each alloca has its own data storage"
-        );
-        assert_ne!(
-            allocs[0].1, allocs[1].1,
-            "each alloca has its own stack pointer"
-        );
+        // The unified stack: both allocas share `StorageId::STACK` and the one
+        // global stack pointer, and are non-overlapping because each bumps the
+        // shared sp. (This supersedes the earlier per-site storage model; the
+        // shared stack is what lets a pointer cross a call boundary.)
+        assert_eq!(allocs[0].0, StorageId::STACK, "allocas share the stack");
+        assert_eq!(allocs[1].0, StorageId::STACK, "allocas share the stack");
+        assert_eq!(allocs[0].1, allocs[1].1, "allocas share the one global sp");
         assert_eq!(allocs[0].2, 2);
         assert_eq!(allocs[1].2, 4);
+        // The two allocas are emitted as distinct StackAlloc values (distinct
+        // bases in the shared stack).
+        let alloc_vids: std::vec::Vec<_> = body
+            .values
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| matches!(&v.kind, Value::StackAlloc { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(alloc_vids.len(), 2, "two distinct StackAlloc values");
     }
 
     #[test]

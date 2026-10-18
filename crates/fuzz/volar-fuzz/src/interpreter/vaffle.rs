@@ -55,7 +55,14 @@ pub fn eval_vaffle_with_limits(
     inputs: &[IrValue],
     max_call_depth: usize,
 ) -> Option<Vec<IrValue>> {
-    eval_vaffle_depth(module, func_id, inputs, &mut BTreeMap::new(), 0, max_call_depth)
+    eval_vaffle_depth(
+        module,
+        func_id,
+        inputs,
+        &mut BTreeMap::new(),
+        0,
+        max_call_depth,
+    )
 }
 
 /// Internal recursive evaluator with a call-depth guard and shared storage.
@@ -77,8 +84,8 @@ fn eval_vaffle_depth(
         _ => panic!("eval_vaffle: unhandled FuncDecl variant — add evaluation for this variant"),
     };
 
-    let mut value_table: BTreeMap<usize, IrValue> = BTreeMap::new();
-    let mut value_tys: BTreeMap<usize, TypeId> = BTreeMap::new();
+    let mut value_table: Vec<Option<IrValue>> = vec![None; body.values.len()];
+    let mut value_tys: Vec<Option<TypeId>> = vec![None; body.values.len()];
     // Side-table for OracleCall aggregates: vid → Vec<IrValue>.
     let mut oracle_agg: BTreeMap<usize, Vec<IrValue>> = BTreeMap::new();
     // Side-table for Value::Call aggregates: vid → Vec<IrValue>.
@@ -86,6 +93,20 @@ fn eval_vaffle_depth(
 
     // Seed the entry block's params from `inputs`.
     let entry_block = &body.blocks[body.entry.0];
+    if inputs.len() != entry_block.params.len() {
+        let name = module
+            .exports
+            .iter()
+            .find(|(_, f)| f.0 == func_id.0)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| "?".to_string());
+        eprintln!(
+            "[eval] arity mismatch at func {name} (id {}): expects {} params, got {} inputs",
+            func_id.0,
+            entry_block.params.len(),
+            inputs.len()
+        );
+    }
     assert_eq!(
         inputs.len(),
         entry_block.params.len(),
@@ -94,8 +115,8 @@ fn eval_vaffle_depth(
         inputs.len(),
     );
     for ((vid, tid), val) in entry_block.params.iter().zip(inputs.iter()) {
-        value_table.insert(vid.0, val.clone());
-        value_tys.insert(vid.0, *tid);
+        value_table[vid.0] = Some(val.clone());
+        value_tys[vid.0] = Some(*tid);
     }
 
     let mut current_block_id = body.entry;
@@ -104,6 +125,9 @@ fn eval_vaffle_depth(
     // guard (the `loop_count`/`MAX_ITERS` check above only counts *entry*-block
     // re-entries, which a native loop with a separate header block never hits).
     let mut total_iters = 0usize;
+    let throughput = std::env::var("VAFFLE_EVAL_TP").is_ok();
+    let tp_start = std::time::Instant::now();
+    let mut tp_count = 0usize;
 
     loop {
         total_iters += 1;
@@ -133,11 +157,24 @@ fn eval_vaffle_depth(
                 depth,
                 max_call_depth,
             )?;
-            value_table.insert(vid.0, val);
+            value_table[vid.0] = Some(val);
             if let Value::Op(stmt) = &body.values[vid.0].kind
                 && let Some(ty) = volar_ir_opt::common::stmt_output_type(stmt)
             {
-                value_tys.insert(vid.0, ty);
+                value_tys[vid.0] = Some(ty);
+            }
+            if throughput {
+                tp_count += 1;
+                if tp_count % 5_000_000 == 0 {
+                    let el = tp_start.elapsed().as_secs_f64();
+                    eprintln!(
+                        "[tp] func={} evals={}M rate={:.0}K/s depth={}",
+                        func_id.0,
+                        tp_count / 1_000_000,
+                        tp_count as f64 / el / 1000.0,
+                        depth
+                    );
+                }
             }
         }
 
@@ -159,8 +196,8 @@ fn eval_vaffle_depth(
                     .collect();
                 let next_block = &body.blocks[target.block.0];
                 for ((param_vid, tid), val) in next_block.params.iter().zip(args.iter()) {
-                    value_table.insert(param_vid.0, val.clone());
-                    value_tys.insert(param_vid.0, *tid);
+                    value_table[param_vid.0] = Some(val.clone());
+                    value_tys[param_vid.0] = Some(*tid);
                 }
                 current_block_id = target.block;
             }
@@ -182,8 +219,8 @@ fn eval_vaffle_depth(
                     .collect();
                 let next_block = &body.blocks[target.block.0];
                 for ((param_vid, tid), val) in next_block.params.iter().zip(args.iter()) {
-                    value_table.insert(param_vid.0, val.clone());
-                    value_tys.insert(param_vid.0, *tid);
+                    value_table[param_vid.0] = Some(val.clone());
+                    value_tys[param_vid.0] = Some(*tid);
                 }
                 current_block_id = target.block;
             }
@@ -207,8 +244,8 @@ fn eval_vaffle_depth(
                     .collect();
                 let next_block = &body.blocks[target.block.0];
                 for ((param_vid, tid), val) in next_block.params.iter().zip(args.iter()) {
-                    value_table.insert(param_vid.0, val.clone());
-                    value_tys.insert(param_vid.0, *tid);
+                    value_table[param_vid.0] = Some(val.clone());
+                    value_tys[param_vid.0] = Some(*tid);
                 }
                 current_block_id = target.block;
             }
@@ -228,8 +265,8 @@ fn eval_vaffle_value(
     vid: ValueId,
     values: &[volar_ir_common::Node<Value>],
     module: &Module,
-    value_table: &mut BTreeMap<usize, IrValue>,
-    value_tys: &mut BTreeMap<usize, TypeId>,
+    value_table: &mut [Option<IrValue>],
+    value_tys: &mut [Option<TypeId>],
     oracle_agg: &mut BTreeMap<usize, Vec<IrValue>>,
     call_agg: &mut BTreeMap<usize, Vec<IrValue>>,
     storage: &mut StorageMap,
@@ -238,7 +275,7 @@ fn eval_vaffle_value(
 ) -> Option<IrValue> {
     let val = match &values[vid.0].kind {
         Value::Param { ty, .. } => {
-            value_tys.insert(vid.0, *ty);
+            value_tys[vid.0] = Some(*ty);
             get_val(value_table, vid)
         }
         Value::Op(stmt) => eval_vaffle_stmt(
@@ -270,7 +307,7 @@ fn eval_vaffle_value(
             {
                 let sig = &module.sigs[body.sig.0];
                 if let Some(ty) = sig.results.get(*idx) {
-                    value_tys.insert(vid.0, *ty);
+                    value_tys[vid.0] = Some(*ty);
                 }
             }
             call_agg
@@ -329,8 +366,8 @@ fn eval_vaffle_stmt(
     stmt_vid: usize,
     types: &TypeTable,
     _oracles: &[OracleDecl],
-    value_table: &mut BTreeMap<usize, IrValue>,
-    value_tys: &BTreeMap<usize, TypeId>,
+    value_table: &mut [Option<IrValue>],
+    value_tys: &[Option<TypeId>],
     oracle_agg: &mut BTreeMap<usize, Vec<IrValue>>,
     storage: &mut StorageMap,
 ) -> IrValue {
@@ -362,7 +399,7 @@ fn eval_vaffle_stmt(
                 for (mono, coeff) in coeffs.iter() {
                     let mut factors = Vec::with_capacity(mono.len());
                     for var in mono {
-                        let factor_ty = value_tys.get(&var.0).copied().unwrap_or_else(|| {
+                        let factor_ty = value_tys[var.0].unwrap_or_else(|| {
                             panic!("eval_vaffle: factor v{} has no type", var.0)
                         });
                         factors.push((factor_ty, get(var)));
@@ -376,9 +413,7 @@ fn eval_vaffle_stmt(
                 eval_vaffle_poly(coeffs, constant, width, value_table)
             } else {
                 eval_typed_poly(*ty, coeffs, constant, types, |var| {
-                    let factor_ty = value_tys
-                        .get(&var.0)
-                        .copied()
+                    let factor_ty = value_tys[var.0]
                         .unwrap_or_else(|| panic!("eval_vaffle: factor v{} has no type", var.0));
                     (factor_ty, get(var))
                 })
@@ -501,7 +536,7 @@ fn eval_vaffle_poly(
     coeffs: &PolyCoeffs<ValueId>,
     constant: &Constant,
     width: usize,
-    value_table: &BTreeMap<usize, IrValue>,
+    value_table: &[Option<IrValue>],
 ) -> IrValue {
     let mut result = vec![false; width];
     for k in 0..width {
@@ -515,9 +550,16 @@ fn eval_vaffle_poly(
             if coeff & 1 == 0 {
                 continue;
             }
-            let product = monomial
-                .iter()
-                .all(|var| get_val(value_table, *var).get(k).copied().unwrap_or(false));
+            // Read the single bit in place — `get_val` would clone the whole
+            // factor vector just to read one bit (the dominant interpreter
+            // cost over a large Boolean circuit).
+            let product = monomial.iter().all(|var| {
+                value_table[var.0]
+                    .as_ref()
+                    .and_then(|v| v.get(k))
+                    .copied()
+                    .unwrap_or(false)
+            });
             acc ^= product;
         }
         result[k] = acc;
@@ -529,9 +571,8 @@ fn eval_vaffle_poly(
 // Utilities
 // ============================================================================
 
-fn get_val(value_table: &BTreeMap<usize, IrValue>, vid: ValueId) -> IrValue {
-    value_table
-        .get(&vid.0)
-        .cloned()
+fn get_val(value_table: &[Option<IrValue>], vid: ValueId) -> IrValue {
+    value_table[vid.0]
+        .clone()
         .unwrap_or_else(|| panic!("eval_vaffle: value {} not in table", vid.0))
 }
