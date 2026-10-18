@@ -444,11 +444,19 @@ Key M4 work (volar-lir-codegen, volar-compiler, volar-vaffle-target, volar-fuzz)
   sibling calls, leaf-aware VaffleTarget params/returns, field bit-view/select/
   icmp, and the volar-fuzz VAFFLE interpreter's stack-memory model.
 
-Remaining gap: the full `warp_genesis_spec` probe is `#[ignore]`d — the
-native-loop lowering completes, but eval-time cross-block value threading
-(values defined in one loop block referenced in another) is the open
-follow-up. The verify/decide path compile-via-IR differential is the next
-step once that threading lands.
+Cross-block threading gap: **resolved** (2026-10-17). `lower_if` now
+SSA-merges outer variables reassigned in either branch through join-block
+params (validated by `probe_native_loop_if_assign`); the instance-key
+canonicalization (`canonical_type`) was normalized so planning and lowering
+agree on monomorphized call targets. The full `warp_genesis_spec` probe now
+lowers AND threads correctly.
+
+Remaining gap: eval *scale*. The in-circuit Keccak module flattens to
+millions of VAFFLE values, so the tree-walking `eval_vaffle` interpreter is
+too slow to finish the genesis evaluation in a test budget. That is a
+data-flow compaction problem (CSE / memory-backing of the flattened state),
+not a correctness gap. The verify/decide path compile-via-IR differential is
+the next step once eval is fast enough.
 
 ---
 
