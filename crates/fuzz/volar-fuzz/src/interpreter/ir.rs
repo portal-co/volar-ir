@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use volar_ir::ir::{IRBlockId, IRBlockTargetId, IRBlocks, IRStmt, IRTerminator, IRTypes, IRVarId};
+use volar_ir::ir::{IRBlockTargetId, IRBlocks, IRStmt, IRTerminator, IRTypes, IRVarId};
 use volar_ir_common::{
     Constant, IrType, OracleDecl, PolyCoeffs, PreInitSegment, Stmt, StorageId, Type, TypeId,
 };
@@ -384,7 +384,7 @@ fn eval_ir_stmt(
     stmt: &IRStmt,
     stmt_id: u32,
     types: &IRTypes,
-    oracles: &[OracleDecl],
+    _oracles: &[OracleDecl],
     vars: &BTreeMap<u32, IrValue>,
     var_tys: &BTreeMap<u32, TypeId>,
     oracle_agg: &mut BTreeMap<u32, Vec<IrValue>>,

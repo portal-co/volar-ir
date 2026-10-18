@@ -4,11 +4,10 @@ use arbitrary::{Arbitrary, Result, Unstructured};
 use vaffle::{FuncId, Module};
 
 use crate::generators::ir::PRIM_TYPES;
-use crate::generators::ir::PRIM_TYPES as _PRIM_TYPES;
 use crate::generators::vaffle::{
     interpret_vaffle, interpret_vaffle_extended, interpret_vaffle_two_func,
 };
-use crate::interpreter::ir::{IrValue, primitive_width};
+use crate::interpreter::ir::IrValue;
 
 fn raw_stmt(u: &mut Unstructured<'_>) -> Result<(u8, u32, u32, u128, u128)> {
     Ok((

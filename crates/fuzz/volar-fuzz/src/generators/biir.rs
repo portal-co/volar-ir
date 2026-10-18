@@ -107,7 +107,7 @@ pub fn interpret_biir(
     let blocks: Vec<BIrBlock<()>> = param_counts
         .iter()
         .zip(raw_blocks.iter())
-        .zip(all_stmts.into_iter())
+        .zip(all_stmts)
         .enumerate()
         .map(|(i, ((&n_params, (_, raw_term)), stmts))| {
             let n_vars = n_params + stmts.len() as u32;

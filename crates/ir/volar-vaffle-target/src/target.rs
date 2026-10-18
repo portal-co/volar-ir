@@ -22,9 +22,9 @@ use volar_lir::{
     BitCircuitBuilder, BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt,
     StructDef, StructId,
     circuits::{
-        StorageEmitter, bc_add, bc_and_vec, bc_ashr, bc_eq, bc_lshr, bc_mul, bc_ne,
-        bc_not_vec, bc_or_vec, bc_sdiv, bc_select_vec, bc_shl, bc_sle, bc_slt, bc_sub, bc_udiv,
-        bc_ule, bc_ult, bc_xor_vec,
+        StorageEmitter, bc_add, bc_and_vec, bc_ashr, bc_eq, bc_lshr, bc_mul, bc_ne, bc_not_vec,
+        bc_or_vec, bc_sdiv, bc_select_vec, bc_shl, bc_sle, bc_slt, bc_sub, bc_udiv, bc_ule, bc_ult,
+        bc_xor_vec,
     },
 };
 
@@ -723,9 +723,9 @@ impl VaffleTarget {
             "field value must occupy one typed cell"
         );
         let width = match &value.ty {
-            LirType::ExtField { wrapped, degree, .. } => {
-                *degree as usize * self.bits_for(wrapped)
-            }
+            LirType::ExtField {
+                wrapped, degree, ..
+            } => *degree as usize * self.bits_for(wrapped),
             LirType::PrimeField { k, .. } => *k as usize,
             _ => unreachable!("checked above"),
         };
@@ -745,9 +745,9 @@ impl VaffleTarget {
             return VaffleValue { bits, ty };
         }
         let width = match &ty {
-            LirType::ExtField { wrapped, degree, .. } => {
-                *degree as usize * self.bits_for(wrapped)
-            }
+            LirType::ExtField {
+                wrapped, degree, ..
+            } => *degree as usize * self.bits_for(wrapped),
             LirType::PrimeField { k, .. } => *k as usize,
             _ => unreachable!("checked above"),
         };
@@ -757,10 +757,7 @@ impl VaffleTarget {
             parts: bits,
             ty: tid,
         }));
-        VaffleValue {
-            bits: vec![id],
-            ty,
-        }
+        VaffleValue { bits: vec![id], ty }
     }
 
     /// Whether `ty` is a marker/native-resolved extension or prime field —
@@ -1364,10 +1361,7 @@ impl LirTarget for VaffleTarget {
             // `val` is the field element's integer representation.
             let tid = self.lir_type_to_tid(&ty);
             let id = self.emit_const(val as u128, tid);
-            return VaffleValue {
-                bits: vec![id],
-                ty,
-            };
+            return VaffleValue { bits: vec![id], ty };
         }
         let n = self.bits_for(&ty);
         let bit_tid = self.bit_tid();
@@ -1388,10 +1382,7 @@ impl LirTarget for VaffleTarget {
             // Field acceleration: one typed field op, not a bit network
             // (mirrors VolarIrTarget::add — the type-directed `Poly` sum is
             // the field's own addition; in a prime field, a + a = 2·a).
-            assert_eq!(
-                ty, rhs.ty,
-                "field addition requires matching operand types"
-            );
+            assert_eq!(ty, rhs.ty, "field addition requires matching operand types");
             let a = lhs.bits[0];
             let b = rhs.bits[0];
             let mut coeffs = PolyCoeffs::new();
@@ -1441,7 +1432,10 @@ impl LirTarget for VaffleTarget {
         if lhs.bits.len() != rhs.bits.len() {
             panic!(
                 "sub width mismatch in {}: lhs={} bits ({:?}) rhs={} bits ({:?})",
-                self.func.as_ref().map(|f| f.name.as_str()).unwrap_or("<none>"),
+                self.func
+                    .as_ref()
+                    .map(|f| f.name.as_str())
+                    .unwrap_or("<none>"),
                 lhs.bits.len(),
                 lhs.ty,
                 rhs.bits.len(),
@@ -1724,7 +1718,10 @@ impl LirTarget for VaffleTarget {
         assert!(
             val.bits.len() >= dst_n,
             "trunc in {}: value has {} cells ({:?}), cannot truncate to {} ({:?})",
-            self.func.as_ref().map(|f| f.name.as_str()).unwrap_or("<none>"),
+            self.func
+                .as_ref()
+                .map(|f| f.name.as_str())
+                .unwrap_or("<none>"),
             val.bits.len(),
             val.ty,
             dst_n,
@@ -1806,10 +1803,7 @@ impl LirTarget for VaffleTarget {
         pointee_ty: &LirType,
     ) {
         let addr = self.ptr_offset(ptr, idx);
-        let bits: Vec<ValueId> = vals
-            .iter()
-            .flat_map(|v| v.bits.iter().copied())
-            .collect();
+        let bits: Vec<ValueId> = vals.iter().flat_map(|v| v.bits.iter().copied()).collect();
         self.ptr_store(
             addr,
             VaffleValue {
@@ -1826,9 +1820,10 @@ impl LirTarget for VaffleTarget {
             let values = &self.func.as_ref()?.all_values;
             if let Value::Op(volar_ir_common::Stmt::Const(c, _)) =
                 &values.get(value.bits[0].0)?.kind
-                && c.hi == 0 {
-                    return Some(c.lo);
-                }
+                && c.hi == 0
+            {
+                return Some(c.lo);
+            }
             return None;
         }
         self.constant_bits(&value.bits)
@@ -1841,9 +1836,9 @@ impl LirTarget for VaffleTarget {
         // The bit view: one bit per coefficient bit, as the same-width
         // unsigned integer (the dialect's byte-decomposition input).
         let width = match &value.ty {
-            LirType::ExtField { wrapped, degree, .. } => {
-                *degree as usize * self.bits_for(wrapped)
-            }
+            LirType::ExtField {
+                wrapped, degree, ..
+            } => *degree as usize * self.bits_for(wrapped),
             LirType::PrimeField { k, .. } => *k as usize,
             other => panic!("field_to_bits: {other:?} is not a field type"),
         };
@@ -1868,9 +1863,9 @@ impl LirTarget for VaffleTarget {
         // Note: the field's *bit* width (degree x wrapped width, or k), not
         // its `bits_for` cell count (1 — one typed cell per field value).
         let width = match field {
-            LirType::ExtField { wrapped, degree, .. } => {
-                *degree as usize * self.bits_for(wrapped)
-            }
+            LirType::ExtField {
+                wrapped, degree, ..
+            } => *degree as usize * self.bits_for(wrapped),
             LirType::PrimeField { k, .. } => *k as usize,
             other => panic!("int_to_field: {other:?} is not a field type"),
         };
@@ -2622,9 +2617,7 @@ mod tests {
         LirType::ExtField {
             wrapped: alloc::boxed::Box::new(LirType::Native(Type::Bit)),
             degree: 128,
-            irreducible: volar_ir_common::field_markers::GF2_128
-                .irreducible
-                .to_vec(),
+            irreducible: volar_ir_common::field_markers::GF2_128.irreducible.to_vec(),
         }
     }
 
@@ -2689,16 +2682,22 @@ mod tests {
     }
 
     fn bits_to_u128(bits: &[bool]) -> u128 {
-        bits.iter().enumerate().fold(0u128, |acc, (i, b)| {
-            if *b { acc | (1u128 << i) } else { acc }
-        })
+        bits.iter().enumerate().fold(
+            0u128,
+            |acc, (i, b)| {
+                if *b { acc | (1u128 << i) } else { acc }
+            },
+        )
     }
 
     /// Build `fn f(a, b) = a * b + a` over `field` through the VAFFLE target.
     fn build_field_mul_add(field: LirType) -> VaffleTarget {
         let mut t = VaffleTarget::new();
-        let (entry, params) =
-            t.begin_function("field_mul_add", &[field.clone(), field.clone()], Some(field.clone()));
+        let (entry, params) = t.begin_function(
+            "field_mul_add",
+            &[field.clone(), field.clone()],
+            Some(field.clone()),
+        );
         t.switch_to_block(entry);
         let a = params[0][0].clone();
         let b = params[1][0].clone();
@@ -2774,8 +2773,9 @@ mod tests {
 
         let (blocks, types) = crate::lower_to_ir::lower_vaffle_to_ir(&t.module);
         let flat_params: Vec<bool> = inputs.into_iter().flatten().collect();
-        let ir_out = volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &pack_flat_bits(&flat_params))
-            .expect("lowered field arithmetic evaluates");
+        let ir_out =
+            volar_fuzz::interpreter::ir::eval_ir(&blocks, &types, &pack_flat_bits(&flat_params))
+                .expect("lowered field arithmetic evaluates");
         let flat_ir: Vec<bool> = ir_out.into_iter().flatten().collect();
         assert_eq!(
             flat_ir, flat_vaffle,
@@ -2786,7 +2786,12 @@ mod tests {
     #[test]
     fn field_arithmetic_evaluates_like_native_gf128() {
         let t = build_field_mul_add(gf128_lir());
-        for (a, b) in [(0u128, 0u128), (1, 1), (5, 9), (0xDEADBEEF, 0x1234567890ABCDEF)] {
+        for (a, b) in [
+            (0u128, 0u128),
+            (1, 1),
+            (5, 9),
+            (0xDEADBEEF, 0x1234567890ABCDEF),
+        ] {
             let expected = gf128_mul_reference(a, b) ^ a;
             assert_field_mul_add(&t, a, b, 128, expected);
         }
@@ -3030,10 +3035,7 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].len(), 16);
         assert!(groups[0].iter().all(|v| v.bits.len() == 8));
-        assert_eq!(
-            groups[0].iter().map(|v| v.bits.len()).sum::<usize>(),
-            128
-        );
+        assert_eq!(groups[0].iter().map(|v| v.bits.len()).sum::<usize>(), 128);
 
         // Count the block params.
         let body = t.func.as_ref().unwrap();

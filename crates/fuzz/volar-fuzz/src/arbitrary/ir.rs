@@ -7,7 +7,7 @@ use volar_ir_common::TypeTable;
 use crate::generators::ir::{
     PRIM_TYPES, interpret_ir, interpret_ir_extended, interpret_ir_multiblock,
 };
-use crate::interpreter::ir::{IrValue, primitive_width};
+use crate::interpreter::ir::IrValue;
 
 /// A newtype wrapper that implements [`Arbitrary`] for use in cargo-fuzz targets.
 #[derive(Debug)]

@@ -97,9 +97,7 @@ impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for IcmpPred {
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<IcmpPred, D>
-    for ArchivedIcmpPred
-{
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<IcmpPred, D> for ArchivedIcmpPred {
     fn deserialize(&self, _: &mut D) -> Result<IcmpPred, D::Error> {
         Ok(match self {
             ArchivedIcmpPred::Eq => IcmpPred::Eq,
@@ -144,7 +142,8 @@ unsafe impl rkyv::Portable for ArchivedFieldDef
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Portable,
     <crate::LirType as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for FieldDef {
@@ -176,8 +175,7 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<FieldDef, D>
-    for ArchivedFieldDef
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<FieldDef, D> for ArchivedFieldDef
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::string::String, D>,
     <crate::LirType as rkyv::Archive>::Archived: rkyv::Deserialize<crate::LirType, D>,
@@ -300,7 +298,8 @@ where
     <u32 as rkyv::Archive>::Archived: rkyv::Portable,
     <Value as rkyv::Archive>::Archived: rkyv::Portable,
     <crate::LirType as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl<Value: rkyv::Archive> rkyv::Archive for ActionStoreTarget<Value> {
@@ -324,7 +323,8 @@ impl<Value: rkyv::Archive> rkyv::Archive for ActionStoreTarget<Value> {
 }
 
 #[cfg(feature = "rkyv")]
-impl<Value: rkyv::Archive, S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for ActionStoreTarget<Value>
+impl<Value: rkyv::Archive, S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S>
+    for ActionStoreTarget<Value>
 where
     u64: rkyv::Serialize<S>,
     u32: rkyv::Serialize<S>,
@@ -342,8 +342,8 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<Value: rkyv::Archive, D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ActionStoreTarget<Value>, D>
-    for ArchivedActionStoreTarget<Value>
+impl<Value: rkyv::Archive, D: rkyv::rancor::Fallible + ?Sized>
+    rkyv::Deserialize<ActionStoreTarget<Value>, D> for ArchivedActionStoreTarget<Value>
 where
     <u64 as rkyv::Archive>::Archived: rkyv::Deserialize<u64, D>,
     <u32 as rkyv::Archive>::Archived: rkyv::Deserialize<u32, D>,
@@ -388,7 +388,8 @@ unsafe impl rkyv::Portable for ArchivedStructDef
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<crate::FieldDef> as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for StructDef {
@@ -420,11 +421,11 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<StructDef, D>
-    for ArchivedStructDef
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<StructDef, D> for ArchivedStructDef
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::string::String, D>,
-    <alloc::vec::Vec<crate::FieldDef> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<crate::FieldDef>, D>,
+    <alloc::vec::Vec<crate::FieldDef> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<crate::FieldDef>, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<StructDef, D::Error> {
         Ok(StructDef {
@@ -433,4 +434,3 @@ where
         })
     }
 }
-

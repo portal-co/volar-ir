@@ -24,7 +24,7 @@ use vaffle::{
     ValueId,
 };
 use volar_ir_common::{
-    Constant, IrType, Node, OracleDecl, PolyCoeffs, Stmt, StorageId, Type, TypeId, TypeTable,
+    Constant, IrType, Node, OracleDecl, PolyCoeffs, Stmt, StorageId, TypeId, TypeTable,
 };
 
 use crate::generators::ir::{PRIM_TYPES, RawIrStmt, RawTypeIdx};
@@ -236,7 +236,7 @@ fn build_vaffle_extended_block(
     Vec<Value>,                    // new values (params + stmts for this block)
     Vec<ValueId>,                  // stmt_vids for this block
 ) {
-    use volar_ir_common::{Constant, IrType, Type};
+    use volar_ir_common::{Constant, IrType};
     let param_type_ids: Vec<TypeId> = raw_param_type_idxs
         .iter()
         .map(|&idx| type_table.primitive(PRIM_TYPES[idx as usize % PRIM_TYPES.len()]))

@@ -322,7 +322,7 @@ fn build_extended_ir_stmts(
                 .filter(|(_, (_, w, _))| {
                     // Keep appended-index addresses within the 64-bit flat
                     // cell space (max value width 128 -> 7 index bits).
-                    *w <= 50 && want_w.map_or(true, |lw| *w == lw)
+                    *w <= 50 && want_w.is_none_or(|lw| *w == lw)
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -356,7 +356,7 @@ fn build_extended_ir_stmts(
             let cands: Vec<usize> = var_info
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, aw, _))| *aw <= 50 && want_w.map_or(true, |lw| *aw == lw))
+                .filter(|(_, (_, aw, _))| *aw <= 50 && want_w.is_none_or(|lw| *aw == lw))
                 .map(|(i, _)| i)
                 .collect();
             if cands.is_empty() {

@@ -100,10 +100,7 @@ pub trait BitCircuitBuilder {
         ac.sort();
         let mut bc = vec![b.clone(), c.clone()];
         bc.sort();
-        self.bc_poly(
-            PolyCoeffs::from_iter([(ab, 1u8), (ac, 1u8), (bc, 1u8)]),
-            0,
-        )
+        self.bc_poly(PolyCoeffs::from_iter([(ab, 1u8), (ac, 1u8), (bc, 1u8)]), 0)
     }
 }
 
@@ -618,7 +615,7 @@ pub const PACK_W: usize = 64;
 /// Number of packed words needed to hold `n` bits at [`PACK_W`].
 #[inline]
 pub fn n_packs(n: usize) -> usize {
-    (n + PACK_W - 1) / PACK_W
+    n.div_ceil(PACK_W)
 }
 
 /// Pack `bits` into `ceil(bits.len() / pack_w)` words via
