@@ -165,7 +165,7 @@ fn eval_vaffle_depth(
             }
             if throughput {
                 tp_count += 1;
-                if tp_count % 5_000_000 == 0 {
+                if tp_count.is_multiple_of(5_000_000) {
                     let el = tp_start.elapsed().as_secs_f64();
                     eprintln!(
                         "[tp] func={} evals={}M rate={:.0}K/s depth={}",
