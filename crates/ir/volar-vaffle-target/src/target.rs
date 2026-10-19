@@ -274,7 +274,11 @@ impl VaffleTarget {
     /// model), with field leaves as single field-typed projections.
     pub(crate) fn project_outputs(&mut self, call_id: ValueId, ty: &LirType) -> Vec<VaffleValue> {
         let leaves = self.leaf_lir_types(ty);
-        if !leaves.iter().any(Self::is_field_typed) {
+        // Whole-type shortcut is only valid for a SINGLE scalar leaf: for a
+        // multi-leaf aggregate (e.g. `Arr(u8, 16)`), the codegen expects one
+        // projected value per leaf, so a multi-leaf type must take the
+        // per-leaf path below even when no leaf is field-typed.
+        if leaves.len() == 1 && !Self::is_field_typed(&leaves[0]) {
             let n = self.bits_for(ty);
             let bits: Vec<ValueId> = (0..n)
                 .map(|i| {
