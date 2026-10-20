@@ -359,7 +359,7 @@ link-pairing manifest's well-formedness is such an invariant).
 | E3 | Storage boundary: memory-accumulator absorption + carry (§3.3) | **landed** (volar `5cf7041`): a write+read memory loop carries `(mem_prod, mem_cons)` across the boundary; a flipped read is caught by the absorption constraint; a perturbed accumulator boundary breaks the chain. Timestamp/drain simplification documented in `emit.rs`. |
 | E4 | Endless stream via accumulation across calls (§4) | **landed** (volar `507a6c2`): a 6-step stream accumulates segment-transparently (single-shot == two-call resumed) via the `StreamAccumulator` token; a 3-step prefix's accumulator is well-formed. Uses the Vec-based native oracle (`volar-iop::warp`). |
 | E5 | Independent per-step proof (§3.4.1, §6) | **landed** (volar `ea992e1`): a minimal self-loop step instance is emitted, flattened (`flatten_index`), and its satisfaction relation checked in-circuit via the M4 path — honest trace accepted, tampered rejected, differential vs native `check_instance`. Caveat: drives the relation over flat arrays, not the canonical `warp_is_instance_satisfied` — see the registration finding below. |
-| E6 | In-circuit decision (§5): decide/verify loops → step circuit | A toy accumulator chain is decided in-circuit: `warp_decide_spec`'s loops (Merkle, MLE, eq-evals) compile to a step circuit and evaluate to the native decider's verdict, differentially. **Blocked** on the const-generic registration bug (below) plus marshalling a full `WarpAcc` (Merkle tree + codeword) as in-circuit input. |
+| E6 | In-circuit decision (§5): decide/verify loops → step circuit | A toy accumulator chain is decided in-circuit: `warp_decide_spec`'s loops (Merkle, MLE, eq-evals) compile to a step circuit and evaluate to the native decider's verdict, differentially. **Unblocked** (the E5 "registration bug" was a harness issue — see below); needs `parse_with_driver` + a toy `WarpAcc` marshalled as input. The main cost is decider compile/eval time. |
 | E7 (review checkpoint) | Emitter design review + D4 handoff note | Reviewed note; no code required. |
 
 ### The E5/E6 const-generic bridge (finding from E4/E5)
@@ -384,16 +384,20 @@ requires its sizes as compile-time typenum constants. Two consequences:
 The in-circuit *machinery* is not in question (the M4 genesis gate compiles
 and runs `check_instance`/`warp_evaluate_bundled` via IR); the bridge is.
 
-**Concrete blocker found during E5** (volar-lir-codegen): a const-generic
-struct (`WarpIndex<U16, U3, U2>`) constructed as an *in-circuit local* via a
-nested `from_fn` whose body reads *input arrays* fails struct registration
-("struct ... not in registry") — the same shape built from constant match-arm
-literals (the M4 genesis probe) registers fine. Until that registration gap is
-closed, the in-circuit checker drives the satisfaction *relation* over flat
-input arrays (differentially validated), which is what E5 landed. E6
-(in-circuit decision over a marshalled `WarpAcc`) hits the same gap and
-additionally needs the accumulator marshalled as input, so it is the larger
-follow-on.
+**Correction (E5 follow-up)**: there is no const-generic registration bug.
+The E5 "struct not in registry" failure was a *harness* issue — the driver was
+parsed with `parse_driver_only` (driver source only), so the canonical checker
+`warp_is_instance_satisfied` was never in-module, never planned, and its
+`WarpIndex` never registered. Parsed with `parse_with_driver` (which includes
+the full `warp.rs`), the canonical checker compiles and accepts the honest
+step trace in-circuit (proven by the #[ignore]d `probe_e5_canonical_check`,
+~14 min). E5's committed gate uses the flat-array relation for speed (~110s).
+
+So **E6 is not blocked on a compiler bug** — it needs (a) `parse_with_driver`,
+and (b) marshalling a toy `WarpAcc` (instance + witness + Merkle tree) as
+in-circuit input. The remaining cost is compile/eval time of the large decider
+(`warp_decide_spec`: Merkle root recompute, MLE, eq-evals, nested loops) —
+sizeable but on the proven M4 native-loop path.
 
 Each milestone's tests extend, never special-case (repo rule 2). Each gate's
 differential runs on fixed seeds, mirroring the M4 probe discipline
