@@ -1320,3 +1320,63 @@ proptest! {
         );
     }
 }
+
+/// Standalone repro for the prop_o extended-unroll divergence (persisted
+/// regression case d7862e...): a Bit-typed `Const` carrying a huge hi/lo
+/// payload, used as a `Poly` factor alongside a _64 const.
+#[test]
+fn repro_prop_o_bit_const_payload() {
+    use volar_ir::ir::{IRBlock, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRVarId};
+    use volar_ir::ir::IRBlockTargetId;
+    use volar_ir_common::TypeId;
+    let types = volar_ir_common::TypeTable(vec![
+        IrType::Primitive(Type::_64),
+        IrType::Primitive(Type::_8),
+        IrType::Primitive(Type::Bit),
+    ]);
+    let mk = |kind: IRStmt<IRVarId>| Node::new(kind, (), None);
+    let block = IRBlock {
+        params: vec![],
+        stmts: vec![
+            mk(IRStmt::Const(Constant { hi: 0, lo: 0 }, TypeId(0))),
+            mk(IRStmt::Const(Constant { hi: 0, lo: 1 }, TypeId(0))),
+            mk(IRStmt::Const(Constant { hi: 0, lo: 0 }, TypeId(1))),
+            mk(IRStmt::Const(
+                Constant {
+                    hi: 66345845008987397684477440506235498277u128,
+                    lo: 15827352661842564234121040752666422727u128,
+                },
+                TypeId(2),
+            )),
+            mk(IRStmt::Poly {
+                ty: TypeId(2),
+                coeffs: PolyCoeffs::from_iter([(vec![IRVarId(1), IRVarId(3)], 1u8)]),
+                constant: Constant { hi: 0, lo: 0 },
+            }),
+        ],
+        terminator: IRTerminator::JumpCond {
+            condition: IRVarId(3),
+            then_target: IRBranchTarget::new(
+                IRBlockTargetId::Return,
+                vec![IRVarId(0), IRVarId(1), IRVarId(2), IRVarId(3), IRVarId(4)],
+            ),
+            else_target: IRBranchTarget::new(
+                IRBlockTargetId::Return,
+                vec![IRVarId(0), IRVarId(1), IRVarId(2), IRVarId(3), IRVarId(4)],
+            ),
+        },
+    };
+    let ir = IRBlocks {
+        oracles: vec![],
+        actions: vec![],
+        rngs: vec![],
+        blocks: vec![block],
+        pre_init: vec![],
+    };
+    let ir_out = eval_ir(&ir, &types, &[]).expect("eval_ir");
+    let lhs: Vec<bool> = bit_flatten(&ir_out);
+    let unrolled = unroll_ir_everything(&ir, &types).expect("unroll");
+    let boolar = lower_ir_to_boolar(&unrolled, &types);
+    let rhs = eval_biir(&boolar, &[]).expect("eval_biir");
+    assert_eq!(lhs, rhs, "unroll+boolar changed semantics");
+}

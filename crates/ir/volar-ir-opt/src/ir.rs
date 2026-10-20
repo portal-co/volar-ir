@@ -1329,7 +1329,9 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
                         ty: poly_ty,
                     } if coeffs.is_empty() => Some(IrPolyResult::Const(*constant, *poly_ty)),
                     Stmt::Poly {
-                        coeffs, constant, ..
+                        coeffs,
+                        constant,
+                        ty: poly_ty,
                     } if coeffs.len() == 1
                         && constant_is_zero(*constant)
                         && coeffs
@@ -1339,7 +1341,21 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
                             .unwrap_or(false) =>
                     {
                         let v = *coeffs.iter().next().unwrap().0.first().unwrap();
-                        Some(IrPolyResult::Alias(v))
+                        // Aliasing is only sound when the surviving factor
+                        // carries exactly the poly's bit width: a width-1
+                        // (Bit) poly over a wider factor computes the
+                        // factor's BIT 0, so aliasing the whole factor would
+                        // silently widen the result downstream (e.g. a Bit
+                        // poly over a _64 const folding to the full 64-bit
+                        // value in a return list).
+                        let poly_w = types.value_bit_width(*poly_ty);
+                        let factor_w = type_map
+                            .get(&v)
+                            .and_then(|t| types.value_bit_width(*t));
+                        match (poly_w, factor_w) {
+                            (Some(a), Some(b)) if a == b => Some(IrPolyResult::Alias(v)),
+                            _ => None,
+                        }
                     }
                     _ => None,
                 };
