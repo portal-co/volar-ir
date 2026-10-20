@@ -457,3 +457,69 @@ in `volar-ir-passes` for the step-circuit shape).
    (E6) is where constraint counts peak. If E6 shows the in-circuit decider is
    infeasible at toy scale, that gates the whole self-decision composition and
    must be reported before further investment.
+
+---
+
+## 11. E7 review + D4 handoff
+
+All six build milestones (E1–E6) are landed and differentially validated; this
+section is the E7 design review and the handoff to D4 (production
+code/parameter selection, soundness derivation, serialization).
+
+### 11.1 What the emitter delivers
+
+- **E1** — a movfuscated Volar IR step circuit emits one PESAT instance per
+  executed step over `Galois128` (one relational constraint per output bit +
+  booleanity per wire, padded to a power of two).
+- **E2** — `(pc, state)` inter-step linking with a canonical manifest.
+- **E3** — a storage boundary: `StorageRead`/`StorageWrite` absorbed into a
+  `(mem_prod, mem_cons)` multiset accumulator carried across the boundary.
+- **E4** — endless streams via resumable WARP accumulation (native oracle),
+  segment-transparent.
+- **E5** — an independent per-step satisfaction proof, checked in-circuit.
+- **E6** — in-circuit decision: `warp_decide_spec` compiles via the M4 path and
+  its verdict matches the native decider, differentially.
+
+### 11.2 Status of the §10 risks
+
+1. **Constraint-count scale** — recorded, not optimized (per the directive).
+   E6's in-circuit decider runs in ~25 min at toy scale; the cost driver is the
+   Merkle/Keccak eval, which scales with `N`/`NODES`/`M`. Feasible; production
+   sizing is a D4 concern.
+2. **Memory-accumulator completeness** — the carry mechanism is landed and
+   differentially validated, but the challenges are **deterministic
+   placeholders, not Fiat-Shamir-bound to a program digest**, and full
+   read-consistency (per-access timestamps + final drain) is not implemented.
+   This is the emitter's one real soundness gap; D4 must close it before any
+   real proof (see §11.3).
+3. **`pc`-dispatch faithfulness** — retired: E1/E2 use multi-block CFGs with
+   data-dependent branches, and the emission constrains the selector's
+   booleanity and binds the selected value in the witness.
+4. **Segment-boundary canonical ordering** — retired: the boundary is derived
+   at emission time (ordered `pc`, then `state`, then the accumulators) and
+   packaged by `chain_manifest`; E4's segment-transparency gate validates it.
+5. **Decide-loop blowup** — retired at toy scale: E6 shows the in-circuit
+   decider is feasible. Production scale remains a D4 sizing concern, not a
+   correctness blocker.
+
+### 11.3 D4 handoff — what remains before real proofs
+
+1. **Fiat-Shamir binding.** Replace the E3 placeholder challenges with
+   challenges derived from a Fiat-Shamir transcript over the program digest and
+   the public boundary, so a cheating prover cannot choose the accumulator
+   challenges.
+2. **Memory read-consistency.** Add per-access timestamps and the final drain
+   so the multiset accumulator actually enforces that every read returns the
+   last write to that address (§3.3). The carry shape is in place; the
+   bookkeeping is not.
+3. **Parameter/soundness derivation.** Derive soundness parameters and pick
+   production sizes (`M`, `N`, `NODES`, code parameters) — the in-circuit
+   decider cost scales with these, and the toy-scale numbers do not transfer
+   directly.
+4. **Serialization.** A canonical, versioned encoding of the emitted instance,
+   manifest, and accumulator for transport between prover and verifier.
+
+None of these change the emitter's architecture; they are the production
+hardening D4 owns. The emitter's correctness signal throughout was
+**differential validation against the native spec/oracle** (C2), which every
+milestone gate exercised.
