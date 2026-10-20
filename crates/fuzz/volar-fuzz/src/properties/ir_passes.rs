@@ -621,7 +621,7 @@ fn build_xor_chain(
     n: usize,
     consts: &[u8],
 ) -> (IRBlocks<()>, volar_ir_common::TypeTable, IRTypeId) {
-    use volar_ir_common::{ext_field_type, TypeId, TypeTable};
+    use volar_ir_common::{TypeId, TypeTable, ext_field_type};
     let types = TypeTable(vec![
         ext_field_type(TypeId(1), 8, volar_ir_common::aes8_irreducible()),
         IrType::Primitive(Type::Bit),
@@ -727,7 +727,7 @@ proptest! {
 /// regardless of `a`.
 #[test]
 fn test_movfuscate_sequential_unrelated_same_slot_no_aliasing() {
-    use volar_ir_common::{ext_field_type, TypeId, TypeTable};
+    use volar_ir_common::{TypeId, TypeTable, ext_field_type};
 
     let types = TypeTable(vec![
         ext_field_type(TypeId(1), 8, volar_ir_common::aes8_irreducible()),
@@ -1326,8 +1326,8 @@ proptest! {
 /// payload, used as a `Poly` factor alongside a _64 const.
 #[test]
 fn repro_prop_o_bit_const_payload() {
-    use volar_ir::ir::{IRBlock, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRVarId};
     use volar_ir::ir::IRBlockTargetId;
+    use volar_ir::ir::{IRBlock, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRVarId};
     use volar_ir_common::TypeId;
     let types = volar_ir_common::TypeTable(vec![
         IrType::Primitive(Type::_64),

@@ -457,7 +457,10 @@ impl VaffleTarget {
             storage: sp,
             ty: self.addr_tid,
             offset: 0,
-            data: vec![Constant { hi: 0, lo: base as u128 }],
+            data: vec![Constant {
+                hi: 0,
+                lo: base as u128,
+            }],
         });
         self.stack_sp = Some(sp);
         sp
@@ -3897,4 +3900,3 @@ mod tests {
         );
     }
 }
-

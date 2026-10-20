@@ -290,11 +290,7 @@ fn poly_vars(coeffs: &PolyCoeffs<IRVarId>) -> BTreeSet<IRVarId> {
 /// collide after substitution via GF(2) coefficient XOR (dropping any
 /// that cancel to an even coefficient) -- mirrors `merge_poly_into`'s own
 /// GF(2) discipline elsewhere in this crate.
-fn substitute_var(
-    coeffs: &PolyCoeffs<IRVarId>,
-    from: IRVarId,
-    to: IRVarId,
-) -> PolyCoeffs<IRVarId> {
+fn substitute_var(coeffs: &PolyCoeffs<IRVarId>, from: IRVarId, to: IRVarId) -> PolyCoeffs<IRVarId> {
     let mut out = PolyCoeffs::new();
     for (mono, &c) in coeffs {
         let mut new_mono: Vec<IRVarId> = mono
@@ -1202,8 +1198,7 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
     let mut type_map: BTreeMap<IRVarId, TypeId> = BTreeMap::new();
     let mut alias_map: BTreeMap<IRVarId, IRVarId> = BTreeMap::new();
     // poly_map: var → (coeffs, constant, TypeId) for surviving Poly stmts.
-    let mut poly_map: BTreeMap<IRVarId, (PolyCoeffs<IRVarId>, Constant, TypeId)> =
-        BTreeMap::new();
+    let mut poly_map: BTreeMap<IRVarId, (PolyCoeffs<IRVarId>, Constant, TypeId)> = BTreeMap::new();
     let mut changed = false;
 
     // Seed type_map from block params.
@@ -1349,9 +1344,7 @@ fn fold_ir_block_once<P: Clone>(block: &mut IRBlock<P>, types: &IRTypes) -> bool
                         // poly over a _64 const folding to the full 64-bit
                         // value in a return list).
                         let poly_w = types.value_bit_width(*poly_ty);
-                        let factor_w = type_map
-                            .get(&v)
-                            .and_then(|t| types.value_bit_width(*t));
+                        let factor_w = type_map.get(&v).and_then(|t| types.value_bit_width(*t));
                         match (poly_w, factor_w) {
                             (Some(a), Some(b)) if a == b => Some(IrPolyResult::Alias(v)),
                             _ => None,
@@ -1535,7 +1528,10 @@ fn compute_action(
         }
 
         Stmt::Shuffle { result_bits, ty } => {
-            if result_bits.iter().all(|(_, src)| const_map.contains_key(src)) {
+            if result_bits
+                .iter()
+                .all(|(_, src)| const_map.contains_key(src))
+            {
                 let mut result = Constant { hi: 0, lo: 0 };
                 for (lane, &(bit, src)) in result_bits.iter().enumerate() {
                     let source = const_map.get(&src).copied().unwrap();
@@ -2103,7 +2099,10 @@ mod cse_tests {
             // (originally var 3) must have been remapped, not left
             // dangling.
             Stmt::Poly { coeffs, .. } => {
-                assert_eq!(coeffs, &PolyCoeffs::from_iter([(alloc::vec![IRVarId(2)], 1u8)]))
+                assert_eq!(
+                    coeffs,
+                    &PolyCoeffs::from_iter([(alloc::vec![IRVarId(2)], 1u8)])
+                )
             }
             other => panic!("expected the consumer Poly at position 1, got {other:?}"),
         }
