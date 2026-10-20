@@ -358,8 +358,8 @@ link-pairing manifest's well-formedness is such an invariant).
 | E2 | `(pc, state)` linking + chain manifest (§3.2, §3.4.2) | **landed** (volar `faf05ea`): a 4-step chain links per-wire; a perturbed boundary wire breaks the link; the manifest round-trips its canonical text form (the manifest is emitter metadata, not an IRBlocks, so the IR text format is not a fit — canonical text instead). |
 | E3 | Storage boundary: memory-accumulator absorption + carry (§3.3) | **landed** (volar `5cf7041`): a write+read memory loop carries `(mem_prod, mem_cons)` across the boundary; a flipped read is caught by the absorption constraint; a perturbed accumulator boundary breaks the chain. Timestamp/drain simplification documented in `emit.rs`. |
 | E4 | Endless stream via accumulation across calls (§4) | **landed** (volar `507a6c2`): a 6-step stream accumulates segment-transparently (single-shot == two-call resumed) via the `StreamAccumulator` token; a 3-step prefix's accumulator is well-formed. Uses the Vec-based native oracle (`volar-iop::warp`). |
-| E5 | Independent per-step proof (§3.4.1, §6) | The satisfaction checker for one emitted step instance compiles via IR (M4 path) and evaluates to acceptance on the native trace in-circuit, differential vs native `check_instance`. **Partially unblocked**: the in-circuit satisfaction checker is already proven by the M4 genesis gate (`warp_genesis_spec` runs `check_instance` in-circuit). The remaining work is the const-generic bridge — see the finding below. |
-| E6 | In-circuit decision (§5): decide/verify loops → step circuit | A toy accumulator chain is decided in-circuit: `warp_decide_spec`'s loops (Merkle, MLE, eq-evals) compile to a step circuit and evaluate to the native decider's verdict, differentially. Same const-generic bridge prerequisite as E5. |
+| E5 | Independent per-step proof (§3.4.1, §6) | **landed** (volar `ea992e1`): a minimal self-loop step instance is emitted, flattened (`flatten_index`), and its satisfaction relation checked in-circuit via the M4 path — honest trace accepted, tampered rejected, differential vs native `check_instance`. Caveat: drives the relation over flat arrays, not the canonical `warp_is_instance_satisfied` — see the registration finding below. |
+| E6 | In-circuit decision (§5): decide/verify loops → step circuit | A toy accumulator chain is decided in-circuit: `warp_decide_spec`'s loops (Merkle, MLE, eq-evals) compile to a step circuit and evaluate to the native decider's verdict, differentially. **Blocked** on the const-generic registration bug (below) plus marshalling a full `WarpAcc` (Merkle tree + codeword) as in-circuit input. |
 | E7 (review checkpoint) | Emitter design review + D4 handoff note | Reviewed note; no code required. |
 
 ### The E5/E6 const-generic bridge (finding from E4/E5)
@@ -383,6 +383,17 @@ requires its sizes as compile-time typenum constants. Two consequences:
 
 The in-circuit *machinery* is not in question (the M4 genesis gate compiles
 and runs `check_instance`/`warp_evaluate_bundled` via IR); the bridge is.
+
+**Concrete blocker found during E5** (volar-lir-codegen): a const-generic
+struct (`WarpIndex<U16, U3, U2>`) constructed as an *in-circuit local* via a
+nested `from_fn` whose body reads *input arrays* fails struct registration
+("struct ... not in registry") — the same shape built from constant match-arm
+literals (the M4 genesis probe) registers fine. Until that registration gap is
+closed, the in-circuit checker drives the satisfaction *relation* over flat
+input arrays (differentially validated), which is what E5 landed. E6
+(in-circuit decision over a marshalled `WarpAcc`) hits the same gap and
+additionally needs the accumulator marshalled as input, so it is the larger
+follow-on.
 
 Each milestone's tests extend, never special-case (repo rule 2). Each gate's
 differential runs on fixed seeds, mirroring the M4 probe discipline
