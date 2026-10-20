@@ -447,11 +447,17 @@ impl VaffleTarget {
             return sp;
         }
         let sp = self.storage_alloc.alloc();
+        // The runtime stack (promoted locals, cross-call frames) grows up
+        // from a HIGH base so it can never collide with the compile-time
+        // argument-spill scratch region (`next_stack_slot`), which starts at
+        // 0 — both live in `StorageId::STACK` and a spill would otherwise
+        // clobber the first promoted local.
+        let base: u64 = 1u64 << (self.module.pointer_width.bits() / 2);
         self.module.pre_init.push(PreInitSegment {
             storage: sp,
             ty: self.addr_tid,
             offset: 0,
-            data: vec![Constant { hi: 0, lo: 0 }],
+            data: vec![Constant { hi: 0, lo: base as u128 }],
         });
         self.stack_sp = Some(sp);
         sp
@@ -766,7 +772,18 @@ impl VaffleTarget {
                 .types
                 .prime_field(*k, n.clone())
                 .unwrap_or_else(|error| panic!("invalid LIR prime field type: {error:?}")),
-            _ => self.bit_tid(), // fallback for Struct/Ptr
+            // A struct reserves one storage CELL per scalar leaf (see
+            // `ptr_load`): intern it as a bit-vector of its cell count so
+            // `bit_width` — which drives the `StackAlloc` sp bump — reserves
+            // the whole footprint, not one bit.
+            LirType::Struct(id) => {
+                let cells = self.struct_widths[*id as usize];
+                let bit_tid = self.bit_tid();
+                self.intern_type(IrType::Vec(cells, bit_tid))
+            }
+            // A pointer value occupies one pointer-width address cell.
+            LirType::Ptr(_) => self.addr_tid,
+            _ => self.bit_tid(),
         }
     }
 
@@ -885,6 +902,46 @@ impl VaffleTarget {
         }
     }
 
+    /// Resolve a bit value to a known constant, if it is a 1-bit `Const`.
+    pub(crate) fn const_bit(&self, vid: ValueId) -> Option<bool> {
+        let fb = self.func.as_ref()?;
+        if let Value::Op(Stmt::Const(c, _)) = &fb.all_values.get(vid.0)?.kind {
+            Some(c.lo & 1 != 0)
+        } else {
+            None
+        }
+    }
+
+    /// `addr + k` for a compile-time-constant cell offset `k`. When every
+    /// bit of `addr` is itself a known constant (spill slots, alloca bases),
+    /// the sum is computed outright — no adder gates at all.
+    pub(crate) fn addr_plus_const(&mut self, addr: &[ValueId], k: usize) -> Vec<ValueId> {
+        if addr.len() <= 64 {
+            let mut val: u64 = 0;
+            let mut all_const = true;
+            for (i, b) in addr.iter().enumerate() {
+                match self.const_bit(*b) {
+                    Some(true) => val |= 1u64 << i,
+                    Some(false) => {}
+                    None => {
+                        all_const = false;
+                        break;
+                    }
+                }
+            }
+            if all_const {
+                let sum = val.wrapping_add(k as u64);
+                let bit_tid = self.bit_tid();
+                return (0..addr.len())
+                    .map(|i| self.emit_const(((sum >> i) & 1) as u128, bit_tid))
+                    .collect();
+            }
+        }
+        let off = self.iconst(LirType::U32, k as i64);
+        let padded = self.pad_to_ptr_bits(off);
+        bc_add(self, addr, &padded, false)
+    }
+
     /// Pad or truncate a `VaffleValue` to exactly this module's pointer width.
     pub(crate) fn pad_to_ptr_bits(&mut self, val: VaffleValue) -> Vec<ValueId> {
         let mut bits = val.bits;
@@ -948,17 +1005,28 @@ impl VaffleTarget {
                     .map(|i| self.bc_const((base_slot >> i) & 1 != 0))
                     .collect();
 
-                let bit_tid = self.bit_tid();
                 let storage = StorageId::STACK;
-                for (i, &bit) in arg.bits.iter().enumerate() {
-                    if i == 0 {
-                        self.emit_write(storage, bit, bit_tid, &addr_const);
+                // Cell-granular spill, matching the callee-side deferred
+                // read in `begin_function` (see `ptr_store`).
+                let leaves = self.leaf_lir_types(&arg.ty);
+                let mut entry = 0usize;
+                for (k, leaf) in leaves.iter().enumerate() {
+                    let w = self.bits_for(leaf);
+                    let leaf_bits = &arg.bits[entry..entry + w];
+                    entry += w;
+                    let addr = if k == 0 {
+                        addr_const.clone()
                     } else {
-                        let off = self.iconst(LirType::U32, i as i64);
-                        let off_bits = self.pad_to_ptr_bits(off);
-                        let addr = bc_add(self, &addr_const, &off_bits, false);
-                        self.emit_write(storage, bit, bit_tid, &addr);
-                    }
+                        self.addr_plus_const(&addr_const, k)
+                    };
+                    let cell_tid = self.lir_type_to_tid(leaf);
+                    let cell = if Self::is_field_typed(leaf) {
+                        debug_assert_eq!(w, 1);
+                        leaf_bits[0]
+                    } else {
+                        self.merge_operand(leaf_bits)
+                    };
+                    self.emit_write(storage, cell, cell_tid, &addr);
                 }
                 flat_args.extend(addr_const);
             } else {
@@ -1006,12 +1074,65 @@ impl BitCircuitBuilder for VaffleTarget {
 
     fn bc_poly(&mut self, coeffs: PolyCoeffs<ValueId>, constant: u128) -> ValueId {
         let bit_tid = self.bit_tid();
+        // Constant-fold over GF(2): a const-false factor annihilates its
+        // monomial, a const-true factor drops out, empty monomials fold into
+        // the constant, and duplicate monomials cancel pairwise. This is
+        // what makes constant-offset address arithmetic (`addr + k`, `k` a
+        // compile-time constant) cheap instead of a full ripple-carry adder.
+        let mut folded: BTreeMap<Vec<ValueId>, u8> = BTreeMap::new();
+        let mut konst = (constant & 1) as u8;
+        for (mono, coeff) in coeffs.iter() {
+            if coeff & 1 == 0 {
+                continue;
+            }
+            let mut keep: Vec<ValueId> = Vec::with_capacity(mono.len());
+            let mut killed = false;
+            for f in mono {
+                match self.const_bit(*f) {
+                    Some(false) => {
+                        killed = true;
+                        break;
+                    }
+                    Some(true) => {}
+                    None => keep.push(*f),
+                }
+            }
+            if killed {
+                continue;
+            }
+            keep.sort();
+            keep.dedup();
+            if keep.is_empty() {
+                konst ^= 1;
+            } else {
+                *folded.entry(keep).or_insert(0) ^= 1;
+            }
+        }
+        let mut out = PolyCoeffs::new();
+        for (mono, c) in folded {
+            if c & 1 == 1 {
+                out.insert(mono, 1);
+            }
+        }
+        if out.iter().next().is_none() {
+            return self.emit_const(konst as u128, bit_tid);
+        }
+        // Alias: `x + 0` is `x` itself — no new value.
+        if konst == 0 && out.iter().count() == 1 {
+            let alias = {
+                let (mono, _) = out.iter().next().expect("one monomial");
+                (mono.len() == 1).then(|| mono[0])
+            };
+            if let Some(vid) = alias {
+                return vid;
+            }
+        }
         let v = Value::Op(Stmt::Poly {
             ty: bit_tid,
-            coeffs,
+            coeffs: out,
             constant: Constant {
                 hi: 0,
-                lo: constant,
+                lo: konst as u128,
             },
         });
         self.fb().emit_value(v)
@@ -1291,20 +1412,35 @@ impl LirTarget for VaffleTarget {
         self.func = Some(fb);
 
         // Emit StorageReads for ptr-passed params (now self.func is set).
-        for (pi, addr_bits, ty, n) in deferred {
+        for (pi, addr_bits, ty, _n) in deferred {
             let storage = StorageId::STACK;
             let bit_tid = self.bit_tid();
-            let mut loaded = Vec::with_capacity(n);
-            for i in 0..n {
-                if i == 0 {
-                    let v = self.emit_read(storage, bit_tid, &addr_bits);
-                    loaded.push(v);
+            // Cell-granular read of the spilled aggregate, matching the
+            // caller-side spill in `emit_call` (see `ptr_load`).
+            let leaves = self.leaf_lir_types(&ty);
+            let mut loaded = Vec::new();
+            for (k, leaf) in leaves.iter().enumerate() {
+                let addr = if k == 0 {
+                    addr_bits.clone()
                 } else {
-                    let off = self.iconst(LirType::U32, i as i64);
-                    let off_bits = self.pad_to_ptr_bits(off);
-                    let addr = bc_add(self, &addr_bits, &off_bits, false);
-                    let v = self.emit_read(storage, bit_tid, &addr);
-                    loaded.push(v);
+                    self.addr_plus_const(&addr_bits, k)
+                };
+                let cell_tid = self.lir_type_to_tid(leaf);
+                let cell = self.emit_read(storage, cell_tid, &addr);
+                if Self::is_field_typed(leaf) {
+                    loaded.push(cell);
+                } else {
+                    let w = self.bits_for(leaf);
+                    if w == 1 {
+                        loaded.push(cell);
+                    } else {
+                        for i in 0..w {
+                            loaded.push(self.fb().emit_value(Value::Op(Stmt::Shuffle {
+                                result_bits: vec![(i as u8, cell)],
+                                ty: bit_tid,
+                            })));
+                        }
+                    }
                 }
             }
             groups[pi] = vec![VaffleValue { bits: loaded, ty }];
@@ -2544,27 +2680,40 @@ impl StackAllocExt for VaffleTarget {
     }
 
     fn ptr_load(&mut self, ptr: VaffleValue, ty: LirType) -> VaffleValue {
-        let n = self.bits_for(&ty);
-        let bit_tid = self.bit_tid();
-        // A field value occupies ONE field-typed cell, so the read must be
-        // typed as the field — a bit-typed read would slice the element.
-        let cell_tid = if Self::is_field_typed(&ty) {
-            self.lir_type_to_tid(&ty)
-        } else {
-            bit_tid
-        };
+        // Memory is addressed in units of typed CELLS, one cell per scalar
+        // leaf of the pointee layout (a field leaf is one field-typed cell;
+        // a bit scalar is one multi-bit integer-typed cell). One
+        // `StorageRead` per leaf replaces the old per-bit-cell loop (which
+        // also recomputed the address with a full adder per bit). Bit
+        // scalars are split back into per-bit values with `Shuffle`
+        // extraction, which is gate-free.
         let storage = self.ptr_data_storage(&ptr);
-
-        let mut bits = Vec::with_capacity(n);
-        for i in 0..n {
-            let mut addr_bits = ptr.bits.clone();
-            if i > 0 {
-                let off = self.iconst(LirType::U32, i as i64);
-                let padded = self.pad_to_ptr_bits(off);
-                addr_bits = bc_add(self, &addr_bits, &padded, false);
+        let leaves = self.leaf_lir_types(&ty);
+        let bit_tid = self.bit_tid();
+        let mut bits = Vec::new();
+        for (k, leaf) in leaves.iter().enumerate() {
+            let addr_bits = if k == 0 {
+                ptr.bits.clone()
+            } else {
+                self.addr_plus_const(&ptr.bits, k)
+            };
+            let cell_tid = self.lir_type_to_tid(leaf);
+            let cell = self.emit_read(storage, cell_tid, &addr_bits);
+            if Self::is_field_typed(leaf) {
+                bits.push(cell);
+            } else {
+                let w = self.bits_for(leaf);
+                if w == 1 {
+                    bits.push(cell);
+                } else {
+                    for i in 0..w {
+                        bits.push(self.fb().emit_value(Value::Op(Stmt::Shuffle {
+                            result_bits: vec![(i as u8, cell)],
+                            ty: bit_tid,
+                        })));
+                    }
+                }
             }
-            let v = self.emit_read(storage, cell_tid, &addr_bits);
-            bits.push(v);
         }
 
         let pointee_tid = self.lir_type_to_tid(&ty);
@@ -2577,24 +2726,28 @@ impl StackAllocExt for VaffleTarget {
     }
 
     fn ptr_store(&mut self, ptr: VaffleValue, val: VaffleValue) {
-        let n = val.bits.len();
-        let bit_tid = self.bit_tid();
-        // Field values store as one field-typed cell (see ptr_load).
-        let cell_tid = if Self::is_field_typed(&val.ty) {
-            self.lir_type_to_tid(&val.ty)
-        } else {
-            bit_tid
-        };
+        // Cell-granular store, mirroring `ptr_load`: one `StorageWrite` per
+        // scalar leaf at consecutive cell addresses (see `ptr_load`).
         let storage = self.ptr_data_storage(&ptr);
-
-        for i in 0..n {
-            let mut addr_bits = ptr.bits.clone();
-            if i > 0 {
-                let off = self.iconst(LirType::U32, i as i64);
-                let padded = self.pad_to_ptr_bits(off);
-                addr_bits = bc_add(self, &addr_bits, &padded, false);
-            }
-            self.emit_write(storage, val.bits[i], cell_tid, &addr_bits);
+        let leaves = self.leaf_lir_types(&val.ty);
+        let mut entry = 0usize;
+        for (k, leaf) in leaves.iter().enumerate() {
+            let w = self.bits_for(leaf);
+            let leaf_bits = &val.bits[entry..entry + w];
+            entry += w;
+            let addr_bits = if k == 0 {
+                ptr.bits.clone()
+            } else {
+                self.addr_plus_const(&ptr.bits, k)
+            };
+            let cell_tid = self.lir_type_to_tid(leaf);
+            let cell = if Self::is_field_typed(leaf) {
+                debug_assert_eq!(w, 1);
+                leaf_bits[0]
+            } else {
+                self.merge_operand(leaf_bits)
+            };
+            self.emit_write(storage, cell, cell_tid, &addr_bits);
         }
 
         // Zero-cell values (empty aggregates) store nothing and get no
@@ -2613,14 +2766,32 @@ impl StackAllocExt for VaffleTarget {
             LirType::Ptr(inner) => inner.as_ref().clone(),
             other => other.clone(),
         };
-        let elem_bits = self.bits_for(&pointee_ty);
+        // Addresses are in units of typed cells: one cell per scalar leaf
+        // of the pointee layout (see `ptr_load`). A field leaf is one cell,
+        // so the stride is the leaf count, not the bit width.
+        let elem_bits = self.leaf_lir_types(&pointee_ty).len();
 
         // Address scale stays inline in both helper modes.
-        let scale = self.iconst(LirType::U32, elem_bits as i64);
+        // `idx * elem_cells` with a compile-time-constant cell count: a
+        // power of two is a plain left shift (bit rearrangement, no adder),
+        // avoiding the full shift-and-add multiplier (~20K gates per
+        // element access at pointer width).
         let padded_idx = self.pad_to_ptr_bits(idx);
-        let padded_scale = self.pad_to_ptr_bits(scale);
-        let scaled = bc_mul(self, &padded_idx, &padded_scale);
-        let padded = scaled;
+        let pointer_bits = self.module.pointer_width.bits();
+        let padded: Vec<ValueId> = if elem_bits == 1 {
+            padded_idx
+        } else if elem_bits.is_power_of_two() {
+            let sh = elem_bits.trailing_zeros() as usize;
+            let zero = self.bc_const(false);
+            let mut v = vec![zero; sh.min(pointer_bits)];
+            let take = pointer_bits.saturating_sub(sh);
+            v.extend_from_slice(&padded_idx[..take]);
+            v
+        } else {
+            let scale = self.iconst(LirType::U32, elem_bits as i64);
+            let padded_scale = self.pad_to_ptr_bits(scale);
+            bc_mul(self, &padded_idx, &padded_scale)
+        };
         let new_bits = bc_add(self, &ptr.bits, &padded, false);
 
         let _offset_vid = self.fb().emit_value(Value::PtrOffset {
@@ -3001,13 +3172,16 @@ mod tests {
             vaffle::FuncDecl::Body(b) => b,
             _ => panic!("expected function body"),
         };
+        // Addresses are in units of typed cells (one cell per scalar leaf),
+        // so a U32 element has stride 1 — the marker's `elem_bits` field
+        // records the cell stride.
         let has_ptr_offset = body
             .values
             .iter()
-            .any(|v| matches!(&v.kind, Value::PtrOffset { elem_bits: 32, .. }));
+            .any(|v| matches!(&v.kind, Value::PtrOffset { elem_bits: 1, .. }));
         assert!(
             has_ptr_offset,
-            "VAFFLE should contain a PtrOffset with elem_bits=32"
+            "VAFFLE should contain a PtrOffset with elem_bits=1"
         );
     }
 
@@ -3723,3 +3897,4 @@ mod tests {
         );
     }
 }
+

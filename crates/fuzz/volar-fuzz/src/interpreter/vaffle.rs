@@ -55,14 +55,17 @@ pub fn eval_vaffle_with_limits(
     inputs: &[IrValue],
     max_call_depth: usize,
 ) -> Option<Vec<IrValue>> {
-    eval_vaffle_depth(
-        module,
-        func_id,
-        inputs,
-        &mut BTreeMap::new(),
-        0,
-        max_call_depth,
-    )
+    let mut storage = BTreeMap::new();
+    // Seed module-level `pre_init` segments (e.g. the shared stack pointer's
+    // initial value) — the IR interpreter's `apply_pre_init` equivalent.
+    for seg in &module.pre_init {
+        let w = bit_width(seg.ty, &module.types);
+        for (i, c) in seg.data.iter().enumerate() {
+            let addr = (seg.offset + i) as u64;
+            storage.insert((seg.storage, seg.ty, addr), const_to_bits(c, w));
+        }
+    }
+    eval_vaffle_depth(module, func_id, inputs, &mut storage, 0, max_call_depth)
 }
 
 /// Internal recursive evaluator with a call-depth guard and shared storage.
