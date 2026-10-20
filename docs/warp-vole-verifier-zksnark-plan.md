@@ -463,15 +463,43 @@ Struct field *construction* now reconciles each field value's scalar width to
 the declared field width (a U64 literal in a u32 field was shifting every
 later field's offset).
 
-Remaining gap: the genesis now runs to completion and produces a real Merkle
-root (the constraint eval, Keccak permutation, sponge absorb, and byte<->lane
-conversions are all validated by passing probes). The last divergence is the
-`le16` field->bytes conversion (the Merkle leaf encoding): a field cell's
-`to_le_bytes` produces 1 byte instead of 16 — the field cell's bit width is
-being read as 8 bits. See the `#[ignore]`d `probe_le16` / `probe_hash_leaf`
-repros. A separate known-open bug: a `match` on a runtime index whose arms
+Remaining gap: **closed** (2026-10-19). The genesis differential
+(`warp_genesis_compiles_via_ir_and_matches_native`) PASSES end-to-end (~240s):
+the compiled WARP genesis matches the native spec's Merkle root exactly. Three
+fixes closed it:
+
+- The `le16` field->bytes divergence was VaffleTarget::project_outputs
+  collapsing a multi-leaf non-field return (Arr(u8,16)) into ONE
+  whole-type value; it now projects per-leaf (volar-ir 2e15791).
+- The absorb-loop scale/correctness pathology was VaffleTarget's per-bit
+  memory model: every element access did a full 64x64 shift-and-add multiply
+  (idx*elem_bits) plus a full ripple-carry adder PER BIT of every address —
+  a [u8;200] init alone made ~3.7M VAFFLE values. Memory is now cell-granular
+  (one typed cell per scalar leaf, one StorageRead/Write per leaf instead of
+  per bit, gate-free Shuffle/Merge to split/join), `idx*cells` is a shift
+  when the cell count is a power of two, and `bc_poly` constant-folds over
+  GF(2) so constant-offset address adds are ~1 gate/bit. The [0u8;200] init
+  dropped ~94x (3.75M -> 40K values) (volar-ir 4b5b3cc).
+- Two memory-model collisions fixed with it: the compile-time argument-spill
+  scratch region and the runtime shared stack both started at address 0 in
+  StorageId::STACK (the first spilled argument clobbered the first promoted
+  local — visible whenever a >64-bit transparent arg met a promoted local),
+  now disjoint with the runtime stack based at 1 << (pointer_bits/2) and the
+  volar-fuzz VAFFLE interpreter honoring module pre_init segments; and
+  lir_type_to_tid(Struct/Ptr) fell back to the 1-bit type, so a struct-typed
+  StackAlloc bumped the shared sp by ONE BIT and the next alloca overlapped
+  the struct's footprint — structs now intern as Vec(cell_count, bit)
+  (volar-ir 4b5b3cc).
+
+A separate latent bug the fuzzer surfaced during this work:
+fold_ir_block_once's single-monomial Poly alias fold ignored widths — a Bit
+poly over a _64 factor aliased the whole 64-bit factor, widening the result;
+now width-guarded (volar-ir 2301a53, repro_prop_o_bit_const_payload).
+
+Still open (non-blocking for M4): a `match` on a runtime index whose arms
 return *captured* (let-bound) struct values miscompiles (the genesis probe
-sidesteps it by inlining the struct literals); see `probe_match_captured_struct`.
+sidesteps it by inlining the struct literals); see the `#[ignore]`d
+`probe_match_captured_struct`.
 
 ---
 
