@@ -115,6 +115,21 @@ The boolean 256-lane path (`volar-evm-backend`) remains the right tool for
 *many small independent circuits* (its intended regime), not for one large
 uniform verifier.
 
+## Status: codegen bootstrapped
+
+`volar-compiler::printer_sol` (an AST-to-Solidity printer on the compiler IR)
+is the seed of the native path. It keeps operations at the word level —
+`Galois128` → `uint256`, `a * b` → `Gf128.mul`, `a + b` → `^` — and emits the
+measured `Gf128` library inline. Validated end-to-end: a spec-source
+dot-product and the full `eq_evals` + `mle_eval` kernel compile to native
+Solidity that (a) is bit-exact against the native reference and (b) costs
+~103K gas (dot4) / ~362K gas (MLE N=8) — within 4% of the hand-written native,
+versus infeasible on the boolean path.
+
+Remaining to reach the full decider: spec **structs** (`WarpIndex`/`WarpAcc`),
+the **Keccak re-anchoring** (SHAKE128 sponge → a `KECCAK256` extern the printer
+maps to the native opcode), and the Merkle / bundled-eval logic.
+
 ## Reproducing
 
 - Boolean path: `cargo test -p volar-lir-codegen --test warp_compile --
