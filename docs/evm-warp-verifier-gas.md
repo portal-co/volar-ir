@@ -160,6 +160,24 @@ runs at ~950 gas/hash. `docs/native-evm/` has the full foundry project
 (`Gf128.sol`, `Merkle.sol`, the generated `GenWarp.sol`, tests, and the
 `via_ir` `foundry.toml`).
 
+### The full toy decider, end-to-end
+
+`probe_sol_codegen_decider` compiles a concrete WARP decider — Merkle commit
+(native `KECCAK256`), the identity-code check, the MLE eval, the bundled
+constraint eval, and the four verdict checks — to one `GenDecider` contract.
+forge validates it: accepts a valid toy accumulator, rejects a tampered `eta`
+and a tampered codeword.
+
+| artifact | gas (`--via-ir`) | result |
+|---|---|---|
+| `decide_toy` (full toy decider, N=8 / M=16) | **~1,352,274** | accepts valid, rejects tampered |
+
+So a complete WARP decider deploys on-chain in one block at toy scale via the
+native path — where the boolean-circuit path cannot represent it at all. The
+structural caveat stands: the decider is *linear* in codeword size, so the
+real-size on-chain artifact is the succinct final verifier (logarithmic Merkle
+queries + a succinct eval), which this same native path is built to emit.
+
 ## Reproducing
 
 - Boolean path: `cargo test -p volar-lir-codegen --test warp_compile --
