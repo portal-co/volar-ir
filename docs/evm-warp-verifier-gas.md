@@ -58,6 +58,15 @@ shift-and-reduce).
 | Keccak-256 (64-byte node) | ~519 | infeasible | infeasible |
 | MLE eval, N=8 | 349,321 | — | — |
 | MLE eval, N=256 | 11,895,127 | — | — |
+| Merkle path verify, depth 3 (N=8) | 2,084 | — | — |
+| Merkle path verify, depth 20 (N=2²⁰) | 13,138 | — | — |
+
+The Merkle *path* verify is **logarithmic** — ~13K gas even for a 2²⁰-leaf
+proof — so the verifier's hashing is cheap at any size. The *linear* cost is
+only the codeword-wide field arithmetic (`commit_codeword` + `mle_eval` +
+`evaluate_bundled`, ~23K gas per field mul). This is the structural reason the
+on-chain artifact must be the succinct verifier (logarithmic queries + a
+succinct eval), not the linear decider, at real sizes.
 
 Findings:
 
