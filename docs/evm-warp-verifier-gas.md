@@ -139,6 +139,27 @@ Remaining to reach the full decider: spec **structs** (`WarpIndex`/`WarpAcc`),
 the **Keccak re-anchoring** (SHAKE128 sponge → a `KECCAK256` extern the printer
 maps to the native opcode), and the Merkle / bundled-eval logic.
 
+### Measured: codegen output under `--via-ir` (forge)
+
+`probe_sol_codegen` (volar `warp_compile.rs`) compiles a combined contract
+(`GenWarp`: dot4 + MLE-eval N=8 + a native-Keccak Merkle commit) and the forge
+test validates each against a native reference. The printer's output requires
+`--via-ir` (the verifier's nested loops exceed the legacy 16-slot stack; the
+Yul optimizer owns stack allocation — the same requirement as
+`volar-evm-backend`). With `--via-ir` + optimizer:
+
+| kernel | gas (`--via-ir`) | correct |
+|---|---|---|
+| `mle_dot` (dot4) | 89,871 | ✓ |
+| `mle8` (MLE eval, N=8) | 316,379 | ✓ |
+| `merkle8` (7 native `KECCAK256`) | 6,669 | ✓ |
+
+The optimizer both fixes the stack depth *and* cuts gas vs. the unoptimized
+native numbers above. The Merkle commit — infeasible on the boolean path —
+runs at ~950 gas/hash. `docs/native-evm/` has the full foundry project
+(`Gf128.sol`, `Merkle.sol`, the generated `GenWarp.sol`, tests, and the
+`via_ir` `foundry.toml`).
+
 ## Reproducing
 
 - Boolean path: `cargo test -p volar-lir-codegen --test warp_compile --
