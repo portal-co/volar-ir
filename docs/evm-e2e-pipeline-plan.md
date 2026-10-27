@@ -33,23 +33,60 @@ the codeword size `N`), not `warp_decide` (linear — off-chain or itself proven
 per the prove-the-verifier plan). The prior `printer_sol` work compiles the
 field arithmetic + Keccak cores; this extends it to the full succinct verifier.
 
-## Official-style parameters
+## Parameters: there are no official ones — derivation from Theorem 9.1
 
-WARP over GF(2^128) (the VOLE field). Theorem 9.1 needs `n`, `M`, `ell`, and
-`1 + s + t` powers of two. Per the WARP plan (§2), *production* code/parameter
-selection against the paper's bounds is a separate reviewed step; for this
-analysis we use a documented **illustrative** set and record the soundness
-reasoning, not a certified claim:
+**Finding (searched the paper, ePrint 2025/753, in-repo at
+`volar/docs/research/papers/2025-753.txt`).** WARP has **no official concrete
+parameter set**. The "Choice of parameters" section (§, p.23) discusses
+trade-offs qualitatively and explicitly defers selection: *"Carefully
+navigating these tradeoffs requires an implementation (and suitable
+optimizations). We leave such efforts to future work."* So we derive the set
+from **Theorem 9.1** (p.51), which gives exact formulas.
 
-- field `GF(2^128)`; code = the seeded two-cascade **Spielman** code
-  (`volar-spec`'s `SpielmanCode`), distance uncertified (C3 follow-on).
-- `log_codeword_len` (`n`) sized to the statement's witness.
-- `s` out-of-domain + `t` shift queries, `1 + s + t` a power of two; `t`
-  drives the `(1-δ)^t` proximity soundness, `s` the out-of-domain term.
-- `ell` (fold arity) a power of two.
+Theorem 9.1 (for a code `C: F^k→F^n`, fold arity `ℓ`, degree `d`, `κ=N−k`):
 
-The gas profile's *shape* (which ops dominate, how it scales) is
-parameter-robust; the exact constants move with `(s, t, code distance)`.
+- **Rounds**: `log ℓ + log n + 3`.
+- **Query complexity (Merkle openings checked by the verifier)**: `ℓ·t`.
+- **Verifier field ops**: `O(ℓ·(log n + log M + κ + t) + log ℓ·d + (t+s)·log n)`.
+- **Prover time**: `O(ℓ·(n + d·(|p̂|+M)) + s·n + t·log n)`.
+- **Soundness ≤ 2^−λ** requires (Eq. 13) **`t ≥ λ / −log(1−δ)`** and (Eq. 12)
+  **`|F| ≥ 2^λ · max{ (log ℓ+1)·|Λ(C^ℓ,δ)|,
+  (1+max{log n+1, log M+d})·|Λ(C^ℓ,δ)| + (ℓ/2)·err_PG·|F|,
+  2^(λ/s−1)·|Λ(C,δ)|^(2/s)·log n,  |Λ(C,δ)|·max{2, log(1+s+t)} }`**.
+
+`n, M, ℓ, 1+s+t` all powers of two (Remark 9.3). For `δ ≤ δ(C)/2` (unique
+decoding radius) out-of-domain samples are unnecessary → **`s = 0`** (§,
+p.23), which we take.
+
+### Derived set (documented assumptions, not a certified claim)
+
+- **Field**: the soundness field-size term `err_PG·|F| ≲ |F|/2^λ` with
+  `err_PG ≈ poly(n)/|F|` forces roughly `|F| ≳ 2^(λ + O(log n))`. **So
+  GF(2^128) reaches only ~`128 − O(log n)`-bit security** at codeword size
+  `n` — e.g. ~88-bit at `n = 2^20`. True 128-bit at real sizes needs the
+  larger `Galois256` (which the spec already has) or the Section-D
+  extension-field variant (small base field, challenges from a large `F`).
+  **This is a genuine deployment finding.**
+- **Code**: the spec's seeded two-cascade **Spielman** code (linear-time
+  encoding — required for linear-time accumulation) is the production target,
+  but its distance/proximity-radius is uncertified (C3 follow-on). For the
+  analysis we assume a constant relative distance `δ(C)` and use the
+  Reed–Solomon-like proximity bound as a stand-in; the *shape* of the gas
+  profile is robust to this.
+- **Proximity bound** `δ = δ(C)/2` (unique decoding → `s = 0`).
+- **`t ≥ λ / −log2(1−δ)`**; with `δ = 1/4`, `−log2(3/4) ≈ 0.415`, so
+  `t ≈ 2.41·λ`. For `λ = 100`: `t = 255` (so `1+0+255 = 256 = 2^8`). For
+  `λ = 128`: `t = 511` (`1+511 = 512 = 2^9`).
+- **`ℓ = 2`** (one fresh instance + one running accumulator per step, as in the
+  PESAT stream fold).
+
+### Verifier gas drivers (what the analysis measures)
+
+- **Merkle openings**: `ℓ·t` paths × `log n` hashes each (native `KECCAK256`,
+  ~519 gas/hash measured).
+- **Field arithmetic**: `(t+s)·log n + ℓ·(...)` field ops, dominated by
+  `Gf128.mul` (~23K gas measured) — **the dominant verifier cost and the top
+  optimization target** (a windowed/table carry-less mul can cut it ~5–10×).
 
 ## Milestones
 
