@@ -375,7 +375,10 @@ impl VolarIrBitSink {
                     &mut |_ctx, s: StorageId| -> Result<StorageId, Infallible> { Ok(s) },
                 )
                 .unwrap();
-            new_stmts.push(Node::new(remapped, node.prov, node.side));
+            new_stmts.push({
+                let _: () = node.prov;
+                Node::new(remapped, (), node.side)
+            });
         }
 
         let params = vec![bit_tid; n_inputs];

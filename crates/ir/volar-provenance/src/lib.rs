@@ -108,7 +108,7 @@ pub struct NoProvenance;
 impl<P: Clone> ProvenanceHandler<P> for NoProvenance {
     type Output = ();
     #[inline]
-    fn map(&self, _prov: &P) -> () {}
+    fn map(&self, _prov: &P) {}
 }
 
 /// Provenance handler that forwards input provenance unchanged.

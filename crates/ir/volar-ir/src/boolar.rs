@@ -11,17 +11,17 @@ pub use generated::{BIrBlock, BIrBlocks, BIrPreInitSegment, BIrTarget, LaneId};
 
 impl<P: Clone> BIrBlocks<P> {
     pub fn is_movfuscated(&self) -> bool {
-        return self.blocks.len() == 1;
+        self.blocks.len() == 1
     }
     pub fn is_circuit(&self) -> bool {
-        return self.is_movfuscated()
+        self.is_movfuscated()
             && match &self.blocks[0].terminator {
                 BIrTerminator::Jmp(BIrTarget {
                     block: IRBlockTargetId::Return,
                     ..
                 }) => true,
                 _ => false,
-            };
+            }
     }
 }
 

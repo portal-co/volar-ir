@@ -42,6 +42,7 @@ use volar_lir::{
 
 /// Options for [`import_module`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Default)]
 pub struct WasmCircuitImportOptions {
     /// Restrict memory storage addresses to this many low i32 bits after
     /// normal 32-bit effective-address arithmetic. `None` keeps all 32 bits.
@@ -51,14 +52,6 @@ pub struct WasmCircuitImportOptions {
     pub control_limits: ControlLimits,
 }
 
-impl Default for WasmCircuitImportOptions {
-    fn default() -> Self {
-        Self {
-            memory_address_bits: None,
-            control_limits: ControlLimits::default(),
-        }
-    }
-}
 
 /// Caller-owned memory metadata required to execute a [`VCircuit`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,7 +142,7 @@ pub fn import_module<'a>(
         .exports
         .iter()
         .find_map(|export| {
-            (export.name == entry).then(|| match &export.kind {
+            (export.name == entry).then_some(match &export.kind {
                 ExportKind::Func(function) => Some(*function),
                 _ => None,
             })
@@ -388,7 +381,7 @@ impl<'a> Compiler<'a> {
             .globals
             .entries()
             .filter(|(_, global)| global.mutable)
-            .map(|(_, global)| self.constant(global.ty, global.value.unwrap_or(0) as u64))
+            .map(|(_, global)| self.constant(global.ty, global.value.unwrap_or(0)))
             .collect()
     }
 
@@ -426,7 +419,7 @@ impl<'a> Compiler<'a> {
         self.next_frame = self
             .next_frame
             .checked_add(1)
-            .ok_or_else(|| ImportError::Control(ControlError::ResourceLimit))?;
+            .ok_or(ImportError::Control(ControlError::ResourceLimit))?;
         let mut state = State {
             values: BTreeMap::new(),
             globals,
@@ -869,8 +862,8 @@ impl<'a> Compiler<'a> {
         }
 
         let value = match operator {
-            Operator::I32Const { value } => self.constant(WType::I32, *value as u32 as u64)?,
-            Operator::I64Const { value } => self.constant(WType::I64, *value as u64)?,
+            Operator::I32Const { value } => self.constant(WType::I32, *value as u64)?,
+            Operator::I64Const { value } => self.constant(WType::I64, (*value))?,
             Operator::I32Clz | Operator::I64Clz => {
                 let input = arg(0)?;
                 let input_width = input.width() as u32;
@@ -997,7 +990,7 @@ impl<'a> Compiler<'a> {
                     let index = self.mutable_global_index(*global_index)?;
                     return Ok(Some(state.globals[index].clone()));
                 }
-                self.constant(global.ty, global.value.unwrap_or(0) as u64)?
+                self.constant(global.ty, global.value.unwrap_or(0))?
             }
             Operator::GlobalSet { global_index } => {
                 let global = &self.wasm.globals[*global_index];

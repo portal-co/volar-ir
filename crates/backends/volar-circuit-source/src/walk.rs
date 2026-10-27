@@ -238,11 +238,10 @@ fn take_name(
 ) -> Result<String, EmitError> {
     let name = sanitize(raw)?;
     require_ident(&name, "wire name")?;
-    if let Some(prev) = used.get(&name) {
-        if *prev != id {
+    if let Some(prev) = used.get(&name)
+        && *prev != id {
             return Err(EmitError::NameCollision { name });
         }
-    }
     used.insert(name.clone(), id);
     Ok(name)
 }

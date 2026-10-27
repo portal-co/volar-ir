@@ -524,7 +524,7 @@ impl CBackend {
                 "  for (size_t i = 0; i < {words}; ++i) out.limb[i] = a.limb[i] {symbol} b.limb[i];"
             )
             .unwrap();
-            if width % 64 != 0 {
+            if !width.is_multiple_of(64) {
                 writeln!(
                     source,
                     "  out.limb[{}] &= UINT64_C(0x{:x});",
@@ -542,7 +542,7 @@ impl CBackend {
             "  for (size_t i = 0; i < {words}; ++i) a.limb[i] = ~a.limb[i];"
         )
         .unwrap();
-        if width % 64 != 0 {
+        if !width.is_multiple_of(64) {
             writeln!(
                 source,
                 "  a.limb[{}] &= UINT64_C(0x{:x});",
@@ -614,7 +614,7 @@ impl CBackend {
         )
         .unwrap();
         writeln!(source, "    uint64_t previous = 0;\n    for (size_t j = 0; j < {words}; ++j) {{ uint64_t next = a.limb[j] >> 63; a.limb[j] = (a.limb[j] << 1) | previous; previous = next; }}").unwrap();
-        if width % 64 != 0 {
+        if !width.is_multiple_of(64) {
             writeln!(
                 source,
                 "    a.limb[{}] &= UINT64_C(0x{:x});",
@@ -2333,7 +2333,7 @@ impl LirTarget for CBackend {
         action_result
             .iter()
             .zip(fallbacks.iter())
-            .map(|(r, f)| self.select(guard.clone(), r.clone(), f.clone()))
+            .map(|(r, f)| self.select(guard, *r, *f))
             .collect()
     }
 

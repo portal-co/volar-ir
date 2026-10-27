@@ -304,7 +304,7 @@ fn elem_is_zero(elem: &[bool]) -> bool {
 /// Multiplicative identity of `ty` as an LSB-first bit vector.
 pub fn mul_identity(ty: TypeId, types: &TypeTable) -> Option<Vec<bool>> {
     let mut ops = BoolRing;
-    Some(identity_bits(ty, types, &mut ops)?)
+    identity_bits(ty, types, &mut ops)
 }
 
 fn identity_bits<R: BitRing>(ty: TypeId, types: &TypeTable, ops: &mut R) -> Option<Vec<R::Bit>> {
@@ -805,9 +805,9 @@ fn distinct_primes(mut n: u32) -> Vec<u32> {
     let mut primes = Vec::new();
     let mut divisor = 2u32;
     while divisor.saturating_mul(divisor) <= n {
-        if n % divisor == 0 {
+        if n.is_multiple_of(divisor) {
             primes.push(divisor);
-            while n % divisor == 0 {
+            while n.is_multiple_of(divisor) {
                 n /= divisor;
             }
         }
@@ -867,10 +867,9 @@ pub fn parse_field_symbol(name: &str) -> Option<FieldSymbol> {
         (FieldOp::Mul, rest)
     } else if let Some(rest) = rest.strip_prefix("pack.") {
         (FieldOp::Pack, rest)
-    } else if let Some(rest) = rest.strip_prefix("unpack.") {
-        (FieldOp::Unpack, rest)
     } else {
-        return None;
+        let rest = rest.strip_prefix("unpack.")?;
+        (FieldOp::Unpack, rest)
     };
     let (field, rest) = parse_field_body(rest)?;
     if !rest.is_empty() {

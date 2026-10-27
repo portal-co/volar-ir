@@ -230,8 +230,8 @@ fn write_bir_terminator(term: &BIrTerminator, w: &mut dyn fmt::Write) -> fmt::Re
 // ============================================================================
 
 fn write_bir_block(id: usize, block: &BIrBlock<()>, w: &mut dyn fmt::Write) -> fmt::Result {
-    write!(w, "begin_block {}\n", id)?;
-    write!(w, "params {}\n", block.params)?;
+    writeln!(w, "begin_block {}", id)?;
+    writeln!(w, "params {}", block.params)?;
     let base = block.params;
     for (i, stmt) in block.stmts.iter().enumerate() {
         write_bir_stmt(IRVarId(base + i as u32), &stmt.kind, w)?;

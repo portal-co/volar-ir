@@ -170,10 +170,7 @@ fn lower_stmt<P: Clone>(
     }
 }
 
-fn lower_terminator(
-    term: &IRTerminator,
-    var_wires: &BTreeMap<u32, Vec<IRVarId>>,
-) -> IRTerminator {
+fn lower_terminator(term: &IRTerminator, var_wires: &BTreeMap<u32, Vec<IRVarId>>) -> IRTerminator {
     match term {
         IRTerminator::Jmp { target } => IRTerminator::Jmp {
             target: flatten_target(target, var_wires),
@@ -276,7 +273,9 @@ fn const_from_bits<P: Clone>(
             }
             out
         }
-        Some(IrType::ExtField { wrapped, degree, .. }) => {
+        Some(IrType::ExtField {
+            wrapped, degree, ..
+        }) => {
             let coeff = types.value_bit_width(*wrapped).unwrap_or(0);
             let mut out = Vec::new();
             for index in 0..*degree as usize {
@@ -305,20 +304,22 @@ fn lower_poly<P: Clone>(
     sink: &mut IrSink<P>,
     types: &IRTypes,
 ) -> Vec<IRVarId> {
-    let width = types.value_bit_width(ty).unwrap_or_else(|| {
-        panic!("lower_to_native: polynomial output has no bit width")
-    });
+    let width = types
+        .value_bit_width(ty)
+        .unwrap_or_else(|| panic!("lower_to_native: polynomial output has no bit width"));
     let bits = constant_bits(constant, width);
     let mut terms = Vec::new();
     for (mono, coeff) in coeffs.iter() {
         let mut factors = Vec::with_capacity(mono.len());
         for var in mono {
-            let factor_ty = var_tys.get(&var.0).copied().unwrap_or_else(|| {
-                panic!("lower_to_native: factor v{} has no type", var.0)
-            });
-            let wires = var_wires.get(&var.0).cloned().unwrap_or_else(|| {
-                panic!("lower_to_native: factor v{} has no wires", var.0)
-            });
+            let factor_ty = var_tys
+                .get(&var.0)
+                .copied()
+                .unwrap_or_else(|| panic!("lower_to_native: factor v{} has no type", var.0));
+            let wires = var_wires
+                .get(&var.0)
+                .cloned()
+                .unwrap_or_else(|| panic!("lower_to_native: factor v{} has no wires", var.0));
             factors.push((factor_ty, wires));
         }
         terms.push((factors, *coeff));
@@ -347,12 +348,8 @@ fn lower_poly_rec<P: Clone>(
                     for (factor_ty, wires) in factors {
                         if same_type(*factor_ty, ty, types) {
                             let at = lane * lane_wires;
-                            lane_factors.push((
-                                *elem,
-                                wires[at..at + lane_wires].to_vec(),
-                            ));
-                        } else if same_type(*factor_ty, *elem, types) || is_bit(*factor_ty, types)
-                        {
+                            lane_factors.push((*elem, wires[at..at + lane_wires].to_vec()));
+                        } else if same_type(*factor_ty, *elem, types) || is_bit(*factor_ty, types) {
                             lane_factors.push((*factor_ty, wires.clone()));
                         } else {
                             panic!("lower_to_native: vector factor type does not match the lane");
@@ -383,12 +380,9 @@ fn lower_poly_rec<P: Clone>(
                     let mut part_factors = Vec::new();
                     for (factor_ty, wires) in factors {
                         if same_type(*factor_ty, ty, types) {
-                            part_factors.push((
-                                part,
-                                wires[wire_at..wire_at + part_wires].to_vec(),
-                            ));
-                        } else if same_type(*factor_ty, part, types) || is_bit(*factor_ty, types)
-                        {
+                            part_factors
+                                .push((part, wires[wire_at..wire_at + part_wires].to_vec()));
+                        } else if same_type(*factor_ty, part, types) || is_bit(*factor_ty, types) {
                             part_factors.push((*factor_ty, wires.clone()));
                         } else {
                             panic!("lower_to_native: tuple factor type does not match this part");
@@ -413,10 +407,8 @@ fn lower_poly_rec<P: Clone>(
             vec![field_wire(ty, const_bits, terms, sink, types)]
         }
         Some(IrType::PrimeField { .. }) => {
-            let constant_wires: Vec<IRVarId> = const_bits
-                .iter()
-                .map(|bit| sink.bit_wire(*bit))
-                .collect();
+            let constant_wires: Vec<IRVarId> =
+                const_bits.iter().map(|bit| sink.bit_wire(*bit)).collect();
             eval_prime_poly(ty, &constant_wires, terms, types, sink)
         }
         _ if mul_is_idempotent(ty, types) => (0..const_bits.len())
@@ -453,9 +445,9 @@ fn field_wire<P: Clone>(
         }
         let mut prod = None;
         for (_, wires) in factors {
-            let wire = *wires.first().unwrap_or_else(|| {
-                panic!("lower_to_native: native-field factor has no wire")
-            });
+            let wire = *wires
+                .first()
+                .unwrap_or_else(|| panic!("lower_to_native: native-field factor has no wire"));
             prod = Some(match prod {
                 None => wire,
                 Some(prev) => sink.mul(prev, wire),
@@ -536,13 +528,7 @@ fn ext_wires<P: Clone>(
     acc
 }
 
-fn rotate(
-    wires: &[IRVarId],
-    ty: TypeId,
-    n: usize,
-    left: bool,
-    types: &IRTypes,
-) -> Vec<IRVarId> {
+fn rotate(wires: &[IRVarId], ty: TypeId, n: usize, left: bool, types: &IRTypes) -> Vec<IRVarId> {
     let bits = types.value_bit_width(ty).unwrap_or(wires.len());
     assert_eq!(
         wires.len(),
@@ -717,10 +703,7 @@ impl<P: Clone> IrSink<P> {
         if self.characteristic_two {
             return prev ^ add;
         }
-        let spec = self
-            .spec
-            .as_ref()
-            .expect("lower_to_native: odd prime sink");
+        let spec = self.spec.as_ref().expect("lower_to_native: odd prime sink");
         let sum = prev as u16 + add as u16;
         if spec.k > 8 {
             assert!(sum <= 255, "lower_to_native: repetition does not fit in u8");
@@ -739,10 +722,7 @@ impl<P: Clone> FieldSink for IrSink<P> {
         if let Some(zero) = self.zero {
             return zero;
         }
-        let zero = self.emit(Stmt::Const(
-            Constant { hi: 0, lo: 0 },
-            self.native,
-        ));
+        let zero = self.emit(Stmt::Const(Constant { hi: 0, lo: 0 }, self.native));
         self.zero = Some(zero);
         zero
     }
@@ -751,10 +731,7 @@ impl<P: Clone> FieldSink for IrSink<P> {
         if let Some(one) = self.one {
             return one;
         }
-        let one = self.emit(Stmt::Const(
-            Constant { hi: 0, lo: 1 },
-            self.native,
-        ));
+        let one = self.emit(Stmt::Const(Constant { hi: 0, lo: 1 }, self.native));
         self.one = Some(one);
         one
     }

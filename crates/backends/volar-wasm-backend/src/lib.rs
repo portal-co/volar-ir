@@ -842,11 +842,10 @@ fn local_decls_in_alloc_order(state: &FunctionState) -> Vec<(u32, ValType)> {
             }
         }
     }
-    if let Some(pc) = state.pc_local {
-        if pc >= param_count {
+    if let Some(pc) = state.pc_local
+        && pc >= param_count {
             local_ty.insert(pc, ValType::I32);
         }
-    }
     for (local, ty) in &state.temp_locals {
         if *local >= param_count {
             local_ty.insert(*local, *ty);

@@ -444,13 +444,12 @@ impl<'ctx> LlvmBackend<'ctx> {
                 ty,
             };
         }
-        if is_shift {
-            if let (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) =
+        if is_shift
+            && let (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) =
                 (lhs.inner, rhs.inner)
             {
                 return self.int_shift(l, r, op, ty);
             }
-        }
         let result = match (lhs.inner, rhs.inner) {
             (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
                 let value = match op {
@@ -1421,7 +1420,7 @@ impl<'ctx> LirTarget for LlvmBackend<'ctx> {
             .size_of()
             .unwrap()
             .get_zero_extended_constant()
-            .unwrap_or(8)) as u64;
+            .unwrap_or(8));
 
         // Alloca the slot.
         let slot = self.builder.build_alloca(llvm_ty, "rng_slot").unwrap();

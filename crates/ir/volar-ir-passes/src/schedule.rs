@@ -12,12 +12,12 @@ use volar_ir::{
     ir::{IRBlock, IRBlocks, IRStmt},
 };
 use volar_ir_common::{
-    ManifestError, StorageClaim, StorageClaimMode, StorageKey, StorageTable, StorageTableError,
-    TypeId,
-};
-use volar_ir_common::{
     CommunicationGroup, EpochId, EpochManifest, IterationId, IterationManifest, ScheduleManifest,
     WorkerLane,
+};
+use volar_ir_common::{
+    ManifestError, StorageClaim, StorageClaimMode, StorageKey, StorageTable, StorageTableError,
+    TypeId,
 };
 
 /// Inputs that identify a schedule independently of the storage operations
@@ -309,7 +309,8 @@ mod tests {
                 addr: volar_ir::ir::IRVarId(2),
             },
         ])]);
-        let manifest = extract_ir_circuit_schedule(&circuit, &StorageTable::new(), config()).unwrap();
+        let manifest =
+            extract_ir_circuit_schedule(&circuit, &StorageTable::new(), config()).unwrap();
         let claims = &manifest.epochs[0].iterations[0].claims;
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].mode, StorageClaimMode::Unknown);
@@ -363,7 +364,8 @@ mod tests {
     #[test]
     fn claims_from_empty_circuit_are_empty_but_manifest_is_valid() {
         let circuit = IRBlocks::new(vec![ir_block(Vec::new())]);
-        let manifest = extract_ir_circuit_schedule(&circuit, &StorageTable::new(), config()).unwrap();
+        let manifest =
+            extract_ir_circuit_schedule(&circuit, &StorageTable::new(), config()).unwrap();
         assert!(manifest.epochs[0].iterations[0].claims.is_empty());
         assert!(manifest.validate(Default::default()).is_ok());
     }

@@ -59,10 +59,12 @@ impl rkyv::Archive for ChunkedBCircuit {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).version) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.version, resolver.version, field_out);
+        let _: () = resolver.version;
+        rkyv::Archive::resolve(&self.version, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).params) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.params, resolver.params, field_out);
+        let _: () = resolver.params;
+        rkyv::Archive::resolve(&self.params, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).pre_init) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.pre_init, resolver.pre_init, field_out);
@@ -168,10 +170,12 @@ impl rkyv::Archive for BStmtChunkRef {
         rkyv::Archive::resolve(&self.chunk, resolver.chunk, field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).first) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.first, resolver.first, field_out);
+        let _: () = resolver.first;
+        rkyv::Archive::resolve(&self.first, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).statements) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.statements, resolver.statements, field_out);
+        let _: () = resolver.statements;
+        rkyv::Archive::resolve(&self.statements, (), field_out);
     }
 }
 
@@ -246,7 +250,8 @@ impl<P: Clone + rkyv::Archive> rkyv::Archive for BStmtChunk<P> {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).first) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.first, resolver.first, field_out);
+        let _: () = resolver.first;
+        rkyv::Archive::resolve(&self.first, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).stmts) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.stmts, resolver.stmts, field_out);
@@ -328,10 +333,12 @@ impl rkyv::Archive for WireSchedule {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).resident_wires) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.resident_wires, resolver.resident_wires, field_out);
+        let _: () = resolver.resident_wires;
+        rkyv::Archive::resolve(&self.resident_wires, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).temporary_wires) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.temporary_wires, resolver.temporary_wires, field_out);
+        let _: () = resolver.temporary_wires;
+        rkyv::Archive::resolve(&self.temporary_wires, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).last_use) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.last_use, resolver.last_use, field_out);

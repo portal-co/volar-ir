@@ -2,7 +2,7 @@
 
 use alloc::{string::String, vec::Vec};
 use volar_ir_common::{
-    ActionDecl, Node, OracleDecl, PreInitSegment, Stmt, StorageId, TypeId, TypeTable,
+    Stmt, StorageId, TypeId,
 };
 
 extern crate alloc;

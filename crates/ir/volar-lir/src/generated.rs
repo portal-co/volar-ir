@@ -309,10 +309,12 @@ impl<Value: rkyv::Archive> rkyv::Archive for ActionStoreTarget<Value> {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).storage) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.storage, resolver.storage, field_out);
+        let _: () = resolver.storage;
+        rkyv::Archive::resolve(&self.storage, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).lane) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.lane, resolver.lane, field_out);
+        let _: () = resolver.lane;
+        rkyv::Archive::resolve(&self.lane, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).address) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.address, resolver.address, field_out);

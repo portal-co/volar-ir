@@ -679,8 +679,8 @@ fn typescript_field_type(schema: &Schema, rust_type: &str, generics: &[GenericPa
     if generics.iter().any(|generic| generic.name == rust_type) {
         return rust_type.to_owned();
     }
-    if let Some((base, arguments)) = split_generic_type(rust_type) {
-        if let Some(ty) = schema.generated.iter().find(|ty| {
+    if let Some((base, arguments)) = split_generic_type(rust_type)
+        && let Some(ty) = schema.generated.iter().find(|ty| {
             ty.rust.name == base || base.strip_suffix(&format!("::{}", ty.rust.name)).is_some()
         }) {
             return format!(
@@ -693,7 +693,6 @@ fn typescript_field_type(schema: &Schema, rust_type: &str, generics: &[GenericPa
                     .join(", ")
             );
         }
-    }
     match rust_type {
         "bool" => "boolean".to_owned(),
         "alloc::string::String" => "string".to_owned(),

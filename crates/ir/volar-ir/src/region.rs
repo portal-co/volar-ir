@@ -220,8 +220,8 @@ impl RegionTable {
             if entry.regions.is_empty() {
                 return Err(RegionError::EmptyRegions(entry.anchor.clone()));
             }
-            if let Some(p) = prev {
-                if p >= &entry.anchor {
+            if let Some(p) = prev
+                && p >= &entry.anchor {
                     if p == &entry.anchor {
                         return Err(RegionError::OverlappingEntries {
                             first: p.clone(),
@@ -230,7 +230,6 @@ impl RegionTable {
                     }
                     return Err(RegionError::Unsorted);
                 }
-            }
             prev = Some(&entry.anchor);
 
             // Collect observed storage traffic first? No — anchors are

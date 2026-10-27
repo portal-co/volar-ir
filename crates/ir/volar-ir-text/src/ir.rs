@@ -251,7 +251,7 @@ fn write_action_decl(d: &ActionDecl, w: &mut dyn fmt::Write) -> fmt::Result {
 fn write_rng_decl(d: &RngDecl, w: &mut dyn fmt::Write) -> fmt::Result {
     w.write_str("rng ")?;
     write_quoted_str(&d.name, w)?;
-    write!(w, " ty={}\n", d.ty.0)
+    writeln!(w, " ty={}", d.ty.0)
 }
 
 // ============================================================================
@@ -447,7 +447,7 @@ fn write_ir_terminator(term: &IRTerminator, w: &mut dyn fmt::Write) -> fmt::Resu
 // ============================================================================
 
 fn write_ir_block(id: usize, block: &IRBlock<()>, w: &mut dyn fmt::Write) -> fmt::Result {
-    write!(w, "begin_block {}\n", id)?;
+    writeln!(w, "begin_block {}", id)?;
     w.write_str("params ")?;
     write_type_id_list(&block.params, w)?;
     w.write_char('\n')?;

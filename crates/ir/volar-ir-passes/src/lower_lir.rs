@@ -581,9 +581,9 @@ fn ir_type_bits(ty: &IRType, types: &IRTypes) -> u32 {
         IRType::Vec(n, elem_tid) => {
             (*n as u32) * ir_type_bits(&types.0[elem_tid.0 as usize], types)
         }
-        IRType::ExtField { wrapped, degree, .. } => {
-            *degree * ir_type_bits(&types.0[wrapped.0 as usize], types)
-        }
+        IRType::ExtField {
+            wrapped, degree, ..
+        } => *degree * ir_type_bits(&types.0[wrapped.0 as usize], types),
         other => unimplemented!("ir_type_bits: unsupported type {:?}", other),
     }
 }
@@ -612,7 +612,9 @@ fn ir_type_to_lir(ty: &IRType, types: &IRTypes) -> LirType {
         IRType::Primitive(Type::_256) => LirType::U256,
         IRType::ExtField { .. } => lir_uint(ir_type_bits(ty, types)),
         IRType::PrimeField { .. } => {
-            panic!("ir_type_to_lir: prime fields lower through the native field sink, not an integer LIR type")
+            panic!(
+                "ir_type_to_lir: prime fields lower through the native field sink, not an integer LIR type"
+            )
         }
         IRType::Vec(lanes, element) => LirType::Vector(
             Box::new(ir_type_to_lir(&types.0[element.0 as usize], types)),
@@ -851,9 +853,9 @@ fn lower_field_poly<Q: Clone, T: LirTarget<Q>>(
                 .copied()
                 .flatten()
                 .unwrap_or_else(|| panic!("lower_field_poly: factor v{} has no type", var.0));
-            let factor_bits = types.value_bit_width(factor_ty).unwrap_or_else(|| {
-                panic!("lower_field_poly: factor type has no bit width")
-            });
+            let factor_bits = types
+                .value_bit_width(factor_ty)
+                .unwrap_or_else(|| panic!("lower_field_poly: factor type has no bit width"));
             let factor_lir = ir_type_to_lir(&types.0[factor_ty.0 as usize], types);
             owned.push((
                 factor_ty,
@@ -865,7 +867,10 @@ fn lower_field_poly<Q: Clone, T: LirTarget<Q>>(
                 ),
             ));
         }
-        let refs: Vec<(TypeId, &[T::Value])> = owned.iter().map(|(ty, bits)| (*ty, bits.as_slice())).collect();
+        let refs: Vec<(TypeId, &[T::Value])> = owned
+            .iter()
+            .map(|(ty, bits)| (*ty, bits.as_slice()))
+            .collect();
         let product = {
             let mut ring = LirBitRing {
                 target,

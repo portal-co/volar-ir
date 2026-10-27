@@ -168,7 +168,7 @@ fn lower_vaffle_func<P, T, H>(
         for ((vid, _tid), group) in entry_block
             .params
             .iter()
-            .zip(entry_param_groups.into_iter())
+            .zip(entry_param_groups)
         {
             vals[vid.0] = Some(group.into_iter().next().expect("empty param scalar group"));
         }

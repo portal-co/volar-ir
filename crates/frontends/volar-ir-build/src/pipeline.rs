@@ -266,6 +266,7 @@ impl PipelinePass<VolarIrStage> for Movfuscate {
 /// Unroll Volar IR into a combinational circuit (`is_circuit()`). Requires
 /// concrete control flow; fails closed otherwise.
 #[derive(Debug, Clone, Copy)]
+#[derive(Default)]
 pub struct UnrollIrEverything {
     /// Explicit compiler-resource caps for this finite concrete-control walk.
     pub limits: volar_ir_passes::UnrollLimits,
@@ -284,13 +285,6 @@ pub enum PreMovfuscationUnroll {
     RetainedLoop(volar_ir_passes::UnrollError),
 }
 
-impl Default for UnrollIrEverything {
-    fn default() -> Self {
-        Self {
-            limits: volar_ir_passes::UnrollLimits::default(),
-        }
-    }
-}
 
 impl PipelinePass<VolarIrStage> for UnrollIrEverything {
     type Output = VolarIrStage;

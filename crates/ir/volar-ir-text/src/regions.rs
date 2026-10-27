@@ -20,16 +20,10 @@
 //! printed as a comment-like `#names` suffix map and is printer-only —
 //! round-trips compare ids, never names.
 
-use crate::boolar::SavedBIrBlocks;
 use crate::WriteText;
-use alloc::format;
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use core::fmt;
-use volar_ir::boolar::LaneId;
 use volar_ir::gadget::{AuxSource, GadgetBinding};
-use volar_ir::region::{RegionEntry, RegionTable, WireAnchor};
-use volar_ir_common::StorageId;
+use volar_ir::region::{RegionTable, WireAnchor};
 
 // ============================================================================
 // WriteText for RegionTable

@@ -106,7 +106,8 @@ impl rkyv::Archive for RCircuit {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).num_wires) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.num_wires, resolver.num_wires, field_out);
+        let _: () = resolver.num_wires;
+        rkyv::Archive::resolve(&self.num_wires, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).gates) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.gates, resolver.gates, field_out);

@@ -141,14 +141,12 @@ pub fn emit_bool(
     let mut publics = vec![String::from("wires")];
     for (sid, name) in &circuit.storage_names {
         publics.push(name.clone());
-        if storage_write_count.get(sid).copied().unwrap_or(0) > 0 {
-            if let Some(final_root) = storage_cur.get(sid) {
-                if final_root != name {
+        if storage_write_count.get(sid).copied().unwrap_or(0) > 0
+            && let Some(final_root) = storage_cur.get(sid)
+                && final_root != name {
                     publics.push(final_root.clone());
                     privates.remove(final_root);
                 }
-            }
-        }
     }
 
     let mut out = String::from(

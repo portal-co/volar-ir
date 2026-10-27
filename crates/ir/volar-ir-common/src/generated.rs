@@ -136,10 +136,12 @@ impl rkyv::Archive for Constant {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).hi) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.hi, resolver.hi, field_out);
+        let _: () = resolver.hi;
+        rkyv::Archive::resolve(&self.hi, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).lo) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.lo, resolver.lo, field_out);
+        let _: () = resolver.lo;
+        rkyv::Archive::resolve(&self.lo, (), field_out);
     }
 }
 
@@ -783,7 +785,8 @@ impl rkyv::Archive for RngDecl {
         rkyv::Archive::resolve(&self.name, resolver.name, field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).ty) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.ty, resolver.ty, field_out);
+        let _: () = resolver.ty;
+        rkyv::Archive::resolve(&self.ty, (), field_out);
     }
 }
 
@@ -862,13 +865,16 @@ impl rkyv::Archive for PreInitSegment {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).storage) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.storage, resolver.storage, field_out);
+        let _: () = resolver.storage;
+        rkyv::Archive::resolve(&self.storage, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).ty) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.ty, resolver.ty, field_out);
+        let _: () = resolver.ty;
+        rkyv::Archive::resolve(&self.ty, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).offset) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        rkyv::Archive::resolve(&self.offset, resolver.offset, field_out);
+        let _: () = resolver.offset;
+        rkyv::Archive::resolve(&self.offset, (), field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).data) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.data, resolver.data, field_out);

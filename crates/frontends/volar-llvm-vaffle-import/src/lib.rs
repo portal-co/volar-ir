@@ -261,15 +261,14 @@ fn pointer_width_from_layout<'ctx>(
             )));
         }
     };
-    if let Some(explicit) = config.pointer_width {
-        if explicit != width {
+    if let Some(explicit) = config.pointer_width
+        && explicit != width {
             return Err(ImportError::Unsupported(format!(
                 "configured pointer width {} does not match LLVM data layout width {}",
                 explicit.bits(),
                 width.bits()
             )));
         }
-    }
     Ok(width)
 }
 
@@ -1043,13 +1042,11 @@ impl<'ctx> Importer<'ctx> {
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                (!reachable.contains(&blocks[i]))
-                    .then(|| {
+                if !reachable.contains(&blocks[i]) { {
                         (0..return_bits)
                             .map(|_| self.bc_const_at(&mut fctx, BlockId(i), false))
                             .collect()
-                    })
-                    .unwrap_or_default()
+                    } } else { Default::default() }
             })
             .collect();
         // Symbolic memcpy loops append their own fully-terminated VAFFLE
@@ -1077,11 +1074,10 @@ impl<'ctx> Importer<'ctx> {
     /// Parameters, phis, and instruction results remain cached: LLVM SSA
     /// guarantees their definitions dominate their uses.
     fn value_bits(&mut self, fctx: &mut FuncCtx<'ctx>, v: BasicValueEnum<'ctx>) -> IResult<Bits> {
-        if let BasicValueEnum::IntValue(i) = v {
-            if i.is_const() {
+        if let BasicValueEnum::IntValue(i) = v
+            && i.is_const() {
                 return self.int_const_bits(fctx, i);
             }
-        }
         // Like immediate integers, LLVM's singleton `null` is a constant
         // that must be materialized in each use block rather than cached
         // function-wide. Caching a block-local `Stmt::Const` for a sibling
@@ -1396,7 +1392,7 @@ impl<'ctx> Importer<'ctx> {
                                 StackPtr {
                                     storage: base_ptr.storage,
                                     allocation_bits: base_ptr.allocation_bits,
-                                    const_offset: Some(addr as u64),
+                                    const_offset: Some(addr),
                                     addr_bits,
                                 }
                             }
@@ -2657,11 +2653,10 @@ impl<'ctx> Importer<'ctx> {
     }
 
     fn validate_intrinsic_pointer(&self, ptr: &IntrinsicPointer, n_bytes: usize) -> IResult<()> {
-        if let IntrinsicPointer::Stack { ptr, .. } = ptr {
-            if ptr.const_offset.is_some() {
+        if let IntrinsicPointer::Stack { ptr, .. } = ptr
+            && ptr.const_offset.is_some() {
                 ptr.intrinsic_range(n_bytes)?;
             }
-        }
         Ok(())
     }
 
@@ -3005,13 +3000,12 @@ impl<'ctx> Importer<'ctx> {
                 "too many distinct globals for the pointer-value encoding".into(),
             ));
         }
-        if let GlobalPtr::Const(g) = &gp {
-            if g.byte_offset >= (1u64 << self.global_addr_bits()) {
+        if let GlobalPtr::Const(g) = &gp
+            && g.byte_offset >= (1u64 << self.global_addr_bits()) {
                 return Err(ImportError::Unsupported(
                     "global byte offset too large for the pointer-value encoding".into(),
                 ));
             }
-        }
         let offset_bits = self.global_ptr_offset_bits(fctx, block, &gp);
         let global_addr_bits = self.global_addr_bits();
         let mut bits = Vec::with_capacity(self.pointer_bits);

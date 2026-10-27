@@ -36,10 +36,8 @@ use core::fmt;
 use volar_ir::gadget::PortKind;
 use volar_ir::region::{RegionId, RegionSelector};
 use volar_ir::typed_gadget::{
-    TypedAnchor, TypedAuxSource, TypedGadgetBinding, TypedGadgetLibrary, TypedPort,
-    TypedRegionEntry, TypedRegionTable,
+    TypedAnchor, TypedAuxSource, TypedGadgetBinding, TypedGadgetLibrary, TypedPort, TypedRegionTable,
 };
-use volar_ir_common::{Constant, StorageId};
 
 // ============================================================================
 // Printing
