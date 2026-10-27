@@ -92,10 +92,57 @@ p.23), which we take.
 
 | M | Workstream | Gate |
 |---|---|---|
-| P1 | Official-style parameter set + a real proof (native) for a small program | `warp_prove`/`warp_verify`/`warp_decide` round-trip on pipeline-emitted instances; sizes recorded |
-| P2 | Succinct-verifier codegen to native Solidity (`printer_sol` extension: structs, transcript→KECCAK256, sumchecks, Merkle-verify) | `warp_verify` compiles, correct vs native, gas measured |
-| P3 | Gas analysis: L1 (30M) vs L2 limits; the binding constraints | measured gas vs limits; bottleneck breakdown |
-| P4 | Optimization analysis: SIMD lanes, multi-tx proofs, pre-Solidity IR opts, Keccak externs | a costed recommendation per lever |
+| P1 | Official-style parameter set + a real proof (native) for a small program | **landed** (`volar` pipeline test): a 6-step program → PESAT instances → `warp_prove` → `warp_verify` + `warp_decide` both accept, at `t=255` (λ≈100), `s=0`, identity code, `witness_len=512`, `log_n=9`. Verifier structure measured: **510 Merkle openings** (ℓ·t), 10 sumcheck rounds. |
+| P2 | Succinct-verifier cost core in native Solidity (both fields) | **landed** (forge, `--via-ir`): `WarpVerifyFull.sol` (GF(2^128)) + `WarpVerifyFull256.sol` (GF(2^256)) measure the full verify core (eq_evals + Merkle openings + batching + sumchecks). |
+| P3 | Gas analysis: L1 vs L2 | **landed** — see the results table below |
+| P4 | Optimization analysis | **landed** — see the lever analysis below |
+
+## Results (measured, forge, `--via-ir`)
+
+Full succinct-verifier gas (the `warp_verify` cost core: eq_evals + `ℓ·t`
+Merkle openings + eq-weighted batching + the two sumchecks):
+
+| parameters | GF(2^128) | GF(2^256) | L1 (~30M) | L2 |
+|---|---|---|---|---|
+| `t=255` (λ≈100), `logN=9` (small stmt) | **27.4M** | 44.2M | ✓ fits | ✓ |
+| `t=511` (λ=128), `logN=9` | 59.5M | 92.7M | ✗ | ✓ most |
+| `t=255` (λ≈100), `logN=20` (big stmt) | 41.7M | 59.2M | ✗ | ✓ |
+| `t=511` (λ=128), `logN=20` (big) | 108.6M | 142.5M | ✗ | ✓ big L2s |
+
+Supporting primitive measurements (bit-exact vs `volar-primitives`):
+- `GF(2^128)` mul ~22.5K gas; `GF(2^256)` mul ~31.8K gas (**1.41×** for the
+  field doubling).
+- The **field arithmetic dominates** the verifier (~78%); the `ℓ·t` Merkle
+  openings on native `KECCAK256` are cheap by comparison (~2.4M of the 27.4M).
+- A **windowed/table mul does not help** single muls (table build dominates:
+  33K vs 22.5K) — EVM has no `CLMUL`, so the field mul is hard to speed up
+  except where a multiplicand is reused (the eq_evals challenge coordinate).
+
+## What needs optimizing (P4) — the levers, costed
+
+1. **L2 deployment is the primary answer.** The verifier fits L1 only for the
+   smallest config; L2s' higher block gas limits absorb the rest. This is the
+   cheapest lever (no code change).
+2. **Fewer queries (`t`).** `t ≈ 2.41λ` at `δ=1/4`. A code with a larger
+   proximity radius (larger δ) or a larger field cuts `t` linearly. This is a
+   *parameter* lever, trading against the field-size requirement (Eq. 12).
+3. **Field-mul strength.** The dominant cost. Hard to optimize on EVM (no
+   `CLMUL`); the win is a targeted shared-table windowed mul for the eq_evals
+   (fixed coordinate per level). Real but partial.
+4. **Multi-transaction proofs.** Split the `ℓ·t` openings across txs with a
+   resumable on-chain accumulator — caps per-tx gas at the cost of `log n`
+   per-chunk + state continuity. Needed if a single-config verifier exceeds the
+   target chain's limit.
+5. **SIMD 256× lanes — does NOT apply to the verifier.** The 256-lane SIMD is
+   a *bit-level* batching for boolean circuits (many small independent
+   instances). The verifier is a single large *word-level* computation; its
+   field arithmetic is already 128/256-bit words, so there is no bit-lane
+   batching to exploit. 256× batching would only help *batch-verifying many
+   independent proofs*, and there the boolean-circuit path's quadratic memory
+   is the blocker (see `evm-warp-verifier-gas.md`).
+6. **Native-Keccak externs** — already realized in the native path; the
+   transcript + Merkle use `KECCAK256` (~519 gas/hash) instead of a boolean
+   sponge (infeasible).
 
 ## Optimization levers to evaluate (P4)
 
