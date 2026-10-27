@@ -118,14 +118,54 @@ Supporting primitive measurements (bit-exact vs `volar-primitives`):
   33K vs 22.5K) — EVM has no `CLMUL`, so the field mul is hard to speed up
   except where a multiplicand is reused (the eq_evals challenge coordinate).
 
-## What needs optimizing (P4) — the levers, costed
+## Reed-Solomon: the well-known larger-δ code (supported + remeasured)
+
+The table above assumed a `δ=1/4` proximity bound — but the pipeline's
+`IdentityCode` has relative distance `1/n → 0`, so that `t=255` carried **no
+real soundness**. The WARP paper's named larger-distance alternative ("Choice
+of parameters") is **Reed-Solomon** (MDS, relative distance `1 − rate`). We
+implemented `ReedSolomonCode` (`volar-iop`, with `Field::from_u128` for the
+evaluation points) and validated the full pipeline over it (the
+`volar-pesat-emit` `pipeline` test, `#[ignore]`d slow, passes: succinct verify
++ decide both accept).
+
+`δ` up to the unique-decoding radius `(1 − rate)/2` needs `s = 0`; then
+`t = λ / −log2(1 − δ)`. Remeasured verifier gas (`WarpVerifyRS.t.sol`):
+
+| code | λ | `t` | `logN` | GF(2^128) | GF(2^256) | L1 (~30M) |
+|---|---|---|---|---|---|---|
+| (IdentityCode, δ→0) | ~0 (unsound) | 255 | 9 | 27.4M | 44.2M | ✓ |
+| RS rate-1/4 (δ=3/8) | **173** | 255 | 11 | 29.7M | 46.6M | ✓ |
+| RS rate-1/4 (δ=3/8) | 100 | 148 | 11 | **21.2M** | 34.7M | ✓ |
+| RS rate-1/8 (δ=7/16) | **128** | 189 | 12 | **25.0M** | — | ✓ |
+
+Two findings:
+
+1. **RS makes the soundness real.** At the same `t=255`, RS rate-1/4 yields
+   **173-bit** soundness (vs IdentityCode's ~0-bit) at ~29.7M gas — the first
+   *sound* on-chain WARP verifier configuration in this pipeline.
+2. **The larger δ brings λ=128 within an L1 block.** At fixed λ, larger `δ`
+   means fewer shift queries `t` (the dominant verifier cost), so a lower-rate
+   RS cuts the gas: λ=100 drops from ~28M (δ=1/4, `t=255`) to **21.2M** (RS
+   rate-1/4, `t=148`), and **λ=128 fits L1 at 25.0M** (RS rate-1/8, `t=189`)
+   — previously 59.5M and L2-only. (The reduced-`t` rows pad `s` to keep
+   `1+s+t` a power of two; the out-of-domain samples are sumcheck-checked, not
+   Merkle-opened, so they add negligible cost.)
+
+Note the codeword lengthens as the rate drops (`n = k/rate`, so `log n` grows
+by 1–2), which slightly increases the Merkle path length — but the `t`
+reduction dominates. Encoding is the naive `O(n·k)` here; production would use
+an additive FFT (`O(n log n)`), a prover-side (off-chain) concern only.
+
+## What needs optimizing (P4) — the levers, costed (updated after RS)
 
 1. **L2 deployment is the primary answer.** The verifier fits L1 only for the
    smallest config; L2s' higher block gas limits absorb the rest. This is the
    cheapest lever (no code change).
-2. **Fewer queries (`t`).** `t ≈ 2.41λ` at `δ=1/4`. A code with a larger
-   proximity radius (larger δ) or a larger field cuts `t` linearly. This is a
-   *parameter* lever, trading against the field-size requirement (Eq. 12).
+2. **Fewer queries (`t`) via a larger-δ code — REALIZED.** Reed-Solomon
+   (above) is the well-known larger-δ code; it cuts `t` from 2.41λ (δ=1/4) to
+   ~1.5λ (rate-1/4) or ~1.47λ (rate-1/8), bringing λ=128 within an L1 block.
+   This was the single most effective lever.
 3. **Field-mul strength.** The dominant cost. Hard to optimize on EVM (no
    `CLMUL`); the win is a targeted shared-table windowed mul for the eq_evals
    (fixed coordinate per level). Real but partial.
