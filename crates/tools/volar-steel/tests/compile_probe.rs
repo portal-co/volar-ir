@@ -25,19 +25,116 @@ fn reference_native(key: u64, value: u64, n: u64, path: [u64; 4]) -> u64 {
     acc
 }
 
-/// Import the reference program via the LLVM frontend and lower to Volar IR.
-fn import_to_ir() -> (volar_ir::ir::IRBlocks<()>, volar_ir::ir::IRTypes) {
-    let ll = std::fs::read_to_string(artifacts().join("reference.ll")).expect("reference.ll");
+/// Import a program via the LLVM frontend and lower to Volar IR.
+fn import_program_to_ir(file: &str, entry: &str) -> (volar_ir::ir::IRBlocks<()>, volar_ir::ir::IRTypes) {
+    let ll = std::fs::read_to_string(artifacts().join(file)).expect(file);
     let context = Context::create();
     let module = context
         .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
             ll.as_bytes(),
-            "reference.ll",
+            file,
         ))
-        .expect("reference.ll parses");
+        .expect("LLVM IR parses");
     let vaffle =
-        volar_llvm_vaffle_import::import_module(&module, &["steel_view_call"]).expect("LLVM import");
+        volar_llvm_vaffle_import::import_module(&module, &[entry]).expect("LLVM import");
     volar_vaffle_target::lower_vaffle_to_ir(&vaffle)
+}
+
+/// Import the reference program via the LLVM frontend and lower to Volar IR.
+fn import_to_ir() -> (volar_ir::ir::IRBlocks<()>, volar_ir::ir::IRTypes) {
+    import_program_to_ir("reference.ll", "steel_view_call")
+}
+
+/// S6a: the storage-read proof program through the full compile pipeline.
+#[test]
+fn s6a_storage_read_reaches_a_step_circuit() {
+    let (blocks, mut types) = import_program_to_ir("steel_view_call.ll", "steel_storage_read");
+    eprintln!("S6a: lowered to IR — {} blocks", blocks.blocks.len());
+    let movfuscated = volar_ir_passes::movfuscate::movfuscate_ir(&blocks, &mut types);
+    let bit_ty = types
+        .0
+        .iter()
+        .position(|t| matches!(t, volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)))
+        .map(|i| volar_ir::ir::IRTypeId(i as u32))
+        .expect("Bit interned");
+    let circuit = volar_ir_passes::lower_to_circuit::lower_to_circuit_ir(
+        &movfuscated,
+        &bit_ty,
+        1,
+        volar_ir_passes::lower_to_circuit::LoweringMode::WithTerminationFlag,
+    );
+    let step = &circuit.blocks[0];
+    eprintln!("S6a: step block — {} params, {} stmts", step.params.len(), step.stmts.len());
+
+    // Differential: drive the step circuit from a non-zero input and check the
+    // return matches the native storage-read.
+    let widths: Vec<usize> = step
+        .params
+        .iter()
+        .map(|&t| types.value_bit_width(t).expect("data type"))
+        .collect();
+    let pc_width = widths.iter().take_while(|&&w| w == 1).count();
+    let n_params = step.params.len();
+    // steel_storage_read(key, value, n, path0..3) with key=3, value=9, n=2.
+    let inputs = [3u64, 9, 2, 11, 13, 17, 19];
+    let mut state: Vec<Vec<bool>> = widths.iter().map(|&w| vec![false; w]).collect();
+    for (k, &inp) in inputs.iter().enumerate() {
+        let slot = pc_width + k;
+        if slot < state.len() && state[slot].len() == 64 {
+            for b in 0..64 {
+                state[slot][b] = (inp >> b) & 1 == 1;
+            }
+        }
+    }
+    let mut storage = Default::default();
+    let mut steps = 0usize;
+    let ret_vals;
+    loop {
+        let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
+            step,
+            &types,
+            &circuit.oracles,
+            &state,
+            &mut storage,
+        );
+        let done = outputs[0].iter().any(|&b| b);
+        if done {
+            ret_vals = outputs[1 + n_params..].to_vec();
+            break;
+        }
+        state = outputs[1..1 + n_params].to_vec();
+        steps += 1;
+        assert!(steps <= 64, "step circuit did not return in 64 steps");
+    }
+    // The native reference: hash_pair(key, value) then hash_pair(node, path0),
+    // hash_pair(node, path1) (n=2).
+    let native = {
+        fn hp(l: u64, r: u64) -> u64 {
+            let mut x = l.wrapping_mul(0x9e3779b97f4a7c15) ^ r;
+            x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+            x ^ (x >> 29)
+        }
+        let mut node = hp(3, 9);
+        node = hp(node, 11);
+        node = hp(node, 13);
+        node
+    };
+    // Reassemble the return value (the first 64 bits of ret_vals).
+    let mut got = 0u64;
+    let mut bitidx = 0;
+    'outer: for slot in &ret_vals {
+        for &bit in slot {
+            if bitidx >= 64 {
+                break 'outer;
+            }
+            if bit {
+                got |= 1 << bitidx;
+            }
+            bitidx += 1;
+        }
+    }
+    eprintln!("S6a: step circuit returned after {steps} steps; circuit={got:#x} native={native:#x}");
+    assert_eq!(got, native, "S6a differential: the storage-read circuit must match native");
 }
 
 #[test]

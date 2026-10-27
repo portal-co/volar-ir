@@ -59,3 +59,8 @@ pub fn steel_storage_read(
     }
     node
 }
+
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
