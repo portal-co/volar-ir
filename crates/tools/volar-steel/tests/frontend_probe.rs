@@ -10,7 +10,7 @@ use inkwell::memory_buffer::MemoryBuffer;
 
 fn artifacts() -> PathBuf {
     // crates/tools/volar-steel -> volar-ir -> docs/steel
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../docs/steel")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("programs")
 }
 
 /// The reference program's expected output for a fixed input, computed

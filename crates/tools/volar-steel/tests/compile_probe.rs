@@ -10,7 +10,7 @@ use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 
 fn artifacts() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../docs/steel")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("programs")
 }
 
 /// Native spec of the reference program (data-dependent loop).
