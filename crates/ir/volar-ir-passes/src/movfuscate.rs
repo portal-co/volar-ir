@@ -2831,6 +2831,34 @@ pub fn movfuscate_ir<P: Clone>(blocks: &IRBlocks<P>, types: &mut IRTypes) -> IRB
     movfuscate_ir_impl(&mut working, types, &[], None).0
 }
 
+/// The entry block's (block 0's, after the internal CFG layout) param→state-
+/// slot mapping for the movfuscated step circuit: `entry_param_slots()[k] =
+/// (slot_start, slot_count)` is where entry-block param `k` lives in the step
+/// circuit's state segment (which starts right after the `pc_width` PC bits).
+///
+/// A driver initializing the step circuit's state from the program's entry
+/// args uses this to place each arg at its slot; after that the state is
+/// carried generically across steps (the step circuit's own next-state).
+/// `slot_count` is > 1 only for a `Block`-typed param (expanded to its PC
+/// bits). This is the same layout `movfuscate_ir` uses internally, so the
+/// mapping stays in lockstep with the produced circuit.
+pub fn movfuscate_entry_param_slots<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &mut IRTypes,
+) -> Vec<(usize, usize)> {
+    let mut working = blocks.clone();
+    let bit_type_id = types.intern(IRType::Primitive(Type::Bit));
+    crate::cfg_layout::layout_cfg_for_movfuscation_typed(&mut working, &types.0);
+    let n = working.blocks.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let pc_width = pc_bits_needed(n);
+    let (_state_slot_types, slot_of, _sig_fallback) =
+        compute_static_slot_classes(&working, &types.0, &bit_type_id, pc_width);
+    slot_of.into_iter().next().unwrap_or_default()
+}
+
 /// Owned counterpart to [`movfuscate_ir`].
 ///
 /// This is the preferred route for a compiler pipeline that no longer needs

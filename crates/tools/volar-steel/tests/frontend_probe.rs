@@ -26,11 +26,8 @@ fn reference_native(key: u64, value: u64, path: [u64; 4]) -> u64 {
 #[test]
 fn s1_wasm_frontend_imports_reference() {
     let wasm = std::fs::read(artifacts().join("reference.wasm")).expect("reference.wasm");
-    let result = volar_wasm_circuit_import::import_wasm_bytes(
-        &wasm,
-        "steel_view_call",
-        Default::default(),
-    );
+    let result =
+        volar_wasm_circuit_import::import_wasm_bytes(&wasm, "steel_view_call", Default::default());
     match &result {
         Ok(artifact) => {
             eprintln!(
@@ -88,7 +85,10 @@ fn s1_llvm_frontend_imports_reference() {
 #[test]
 fn s1_both_frontends_report() {
     let expected = reference_native(0xdead, 0xbeef, [1, 2, 3, 4]);
-    eprintln!("S1 reference native output: {reference_native:#x}", reference_native = reference_native(0xdead, 0xbeef, [1, 2, 3, 4]));
+    eprintln!(
+        "S1 reference native output: {reference_native:#x}",
+        reference_native = reference_native(0xdead, 0xbeef, [1, 2, 3, 4])
+    );
     s1_wasm_frontend_imports_reference();
     s1_llvm_frontend_imports_reference();
     let _ = expected;
