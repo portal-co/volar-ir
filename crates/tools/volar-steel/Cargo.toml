@@ -1,0 +1,15 @@
+[package]
+name = "volar-steel"
+version = "0.1.0"
+edition = "2021"
+description = "Steel-in-Volar: hosting a fork of the Steel EVM view-call coprocessor on the Volar pipeline (see docs/steel-in-volar-plan.md)"
+license.workspace = true
+
+[dependencies]
+vaffle.workspace = true
+volar-llvm-vaffle-import.workspace = true
+volar-wasm-circuit-import = { path = "../../frontends/volar-wasm-circuit-import" }
+inkwell.workspace = true
+
+[dev-dependencies]
+volar-ir.workspace = true

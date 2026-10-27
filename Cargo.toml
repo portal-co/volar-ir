@@ -34,6 +34,7 @@ members = [
     "crates/pass/volar-llvm-plugin-api",
     "crates/pass/volar-llvm-plugin",
     "crates/tools/volar-ir-schema-gen",
+    "crates/tools/volar-steel",
 ]
 resolver = "3"
 
