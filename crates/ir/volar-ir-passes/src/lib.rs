@@ -21,7 +21,9 @@ pub mod to_reversible;
 pub mod unroll_ir;
 
 pub use apply_gadgets::{GadgetApplication, apply_gadgets};
-pub use cfg_layout::{CfgLayoutReport, layout_cfg_for_movfuscation};
+pub use cfg_layout::{
+    CfgLayoutReport, layout_cfg_for_movfuscation, layout_cfg_for_movfuscation_typed,
+};
 pub use from_reversible::{
     CircuitTransformError, hardcode_circuit_inputs, remove_circuit_outputs, to_boolar_circuit,
 };

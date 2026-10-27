@@ -10,6 +10,10 @@ vaffle.workspace = true
 volar-llvm-vaffle-import.workspace = true
 volar-wasm-circuit-import = { path = "../../frontends/volar-wasm-circuit-import" }
 inkwell.workspace = true
+volar-vaffle-target.workspace = true
+volar-ir-passes.workspace = true
+volar-ir.workspace = true
+volar-ir-common.workspace = true
 
 [dev-dependencies]
-volar-ir.workspace = true
+volar-fuzz.workspace = true

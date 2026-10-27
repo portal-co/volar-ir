@@ -1,23 +1,35 @@
-//! S1 reference program: a minimal Steel-subset view call — the state-access
-//! Merkle proof for a single storage read. `key`/`value` form the leaf; the
-//! 4-deep `path` folds up to a root. A stand-in hash (multiply-xor) keeps S1
-//! about the *frontend*, not the in-circuit Keccak (deferred to S6).
+//! S2 reference program: a Steel-subset view call with DATA-DEPENDENT control
+//! flow. Compiled at -C opt-level=0 so the branches stay real `JumpCond`s.
+//! The `n` selects how many path elements fold into the accumulator.
+//! NOTE: no separate `#[panic_handler]` fn (its unwind routine linked in a
+//! `Dyn`-continuation that the step-circuit lowering doesn't support); the
+//! `loop {}` panic body is inlined instead.
 #![no_std]
-#![no_main]
+
+const C: u64 = 0x9e3779b97f4a7c15;
 
 #[no_mangle]
-pub fn steel_view_call(key: u64, value: u64, path0: u64, path1: u64, path2: u64, path3: u64) -> u64 {
+pub fn steel_view_call(
+    key: u64,
+    value: u64,
+    n: u64,
+    path0: u64,
+    path1: u64,
+    path2: u64,
+    path3: u64,
+) -> u64 {
     let mut acc = key ^ value;
-    let path = [path0, path1, path2, path3];
-    let mut i = 0usize;
-    while i < 4 {
-        acc = acc.wrapping_mul(0x9e3779b97f4a7c15) ^ path[i];
-        i += 1;
+    if n > 0 {
+        acc = acc.wrapping_mul(C) ^ path0;
+    }
+    if n > 1 {
+        acc = acc.wrapping_mul(C) ^ path1;
+    }
+    if n > 2 {
+        acc = acc.wrapping_mul(C) ^ path2;
+    }
+    if n > 3 {
+        acc = acc.wrapping_mul(C) ^ path3;
     }
     acc
-}
-
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {}
 }

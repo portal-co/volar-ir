@@ -2979,7 +2979,10 @@ fn movfuscate_ir_impl<P: Clone>(
 
     // Normalize control before allocating PC width. Unreachable blocks would
     // otherwise each emit an equality test which is provably never active.
-    crate::cfg_layout::layout_cfg_for_movfuscation(blocks);
+    // Use the typed variant so Block-typed `Const` continuation values (the
+    // calling convention's Dyn-return targets) are remapped alongside the
+    // terminator targets.
+    crate::cfg_layout::layout_cfg_for_movfuscation_typed(blocks, &types.0);
     let n = blocks.blocks.len();
     if n == 1 {
         let empty_init = MovfuscAccumInit {

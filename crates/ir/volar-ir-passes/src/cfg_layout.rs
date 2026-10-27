@@ -11,7 +11,8 @@
 
 use alloc::{collections::BTreeSet, vec, vec::Vec};
 
-use volar_ir::ir::{IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator};
+use volar_ir::ir::{IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator};
+use volar_ir_common::IrType as IRType;
 
 /// Measurements returned by [`layout_cfg_for_movfuscation`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,6 +53,67 @@ pub fn layout_cfg_for_movfuscation<P: Clone>(blocks: &mut IRBlocks<P>) -> CfgLay
     for old in order {
         let mut block = blocks.blocks[old].clone();
         block.terminator = remap_terminator(block.terminator, &old_to_new);
+        laid_out.push(block);
+    }
+    blocks.blocks = laid_out;
+    CfgLayoutReport {
+        input_blocks,
+        output_blocks: blocks.blocks.len(),
+        pruned_blocks: input_blocks - blocks.blocks.len(),
+    }
+}
+
+/// As [`layout_cfg_for_movfuscation`], but also remaps **Block-typed `Const`
+/// statements** — the calling convention's continuation values (e.g. the
+/// module trampoline's `Const(exit_block_idx)` written to the frame for a
+/// `Dyn` return to read). Without this, the continuation keeps the
+/// *pre-layout* block index while the terminators are remapped, so a `Dyn`
+/// jump resolves to the wrong (post-layout) block — the step circuit then
+/// never reaches the real exit continuation and fails to terminate.
+pub fn layout_cfg_for_movfuscation_typed<P: Clone>(
+    blocks: &mut IRBlocks<P>,
+    types: &[IRType],
+) -> CfgLayoutReport {
+    // Identify the Block-typed Const statements BEFORE the layout (the remap
+    // needs the pre-layout block index, which is the value being rewritten).
+    let is_block_const = |stmt: &IRStmt| -> bool {
+        matches!(
+            stmt,
+            IRStmt::Const(_, ty) if matches!(types.get(ty.0 as usize), Some(IRType::Block { .. }))
+        )
+    };
+    let input_blocks = blocks.blocks.len();
+    if input_blocks <= 1 {
+        return CfgLayoutReport {
+            input_blocks,
+            output_blocks: input_blocks,
+            pruned_blocks: 0,
+        };
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut order = Vec::new();
+    visit(0, blocks, &mut seen, &mut order);
+    let mut old_to_new = vec![None; input_blocks];
+    for (new, &old) in order.iter().enumerate() {
+        old_to_new[old] = Some(new as u32);
+    }
+
+    let mut laid_out = Vec::with_capacity(order.len());
+    for old in order {
+        let mut block = blocks.blocks[old].clone();
+        block.terminator = remap_terminator(block.terminator, &old_to_new);
+        // Remap Block-typed Const block-index values alongside the
+        // terminators.
+        for stmt in &mut block.stmts {
+            if is_block_const(&stmt.kind) {
+                if let IRStmt::Const(c, _) = &mut stmt.kind {
+                    if let Some(Some(new)) = old_to_new.get(c.lo as usize) {
+                        c.lo = *new as u128;
+                    }
+                }
+            }
+        }
         laid_out.push(block);
     }
     blocks.blocks = laid_out;
