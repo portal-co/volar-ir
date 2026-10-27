@@ -1,0 +1,4 @@
+# Foundry build artifacts + the local forge-std (installed per-machine).
+cache/
+out/
+lib/
