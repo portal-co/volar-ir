@@ -299,17 +299,10 @@ impl<'ctx> LlvmBackend<'ctx> {
 
     /// Map a `NativeType` (GF-field element) to the closest LLVM integer type.
     fn native_type_to_llvm(&self, t: NativeType) -> inkwell::types::IntType<'ctx> {
+        // The `Type::_n` cutover: only Bit is a primitive; a wider bit-vector
+        // is `Vec(n, Bit)` (handled by the vector path, not here).
         match t {
             NativeType::Bit => self.context.bool_type(),
-            NativeType::_8 => self.context.i8_type(),
-            NativeType::_16 => self.context.i16_type(),
-            NativeType::_32 => self.context.i32_type(),
-            NativeType::_64 => self.context.i64_type(),
-            NativeType::_128 => self.context.i128_type(),
-            NativeType::_256 => self
-                .context
-                .custom_width_int_type(NonZeroU32::new(256).unwrap())
-                .expect("256 is a valid LLVM integer width"),
             _ => self.context.i64_type(),
         }
     }
