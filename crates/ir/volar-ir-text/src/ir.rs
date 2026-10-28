@@ -143,14 +143,10 @@ fn canonical_field_name(
 }
 
 fn write_prim_type(ty: Type, w: &mut dyn fmt::Write) -> fmt::Result {
+    // The `Type::_n` cutover: only Bit is a primitive; a wider bit-vector is
+    // `Vec(n, Bit)` (printed by the Vec path, not here).
     w.write_str(match ty {
         Type::Bit => "bit",
-        Type::_8 => "u8",
-        Type::_16 => "u16",
-        Type::_32 => "u32",
-        Type::_64 => "u64",
-        Type::_128 => "u128",
-        Type::_256 => "u256",
         _ => "unknown",
     })
 }
