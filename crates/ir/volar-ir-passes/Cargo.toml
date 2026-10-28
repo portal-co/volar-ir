@@ -14,3 +14,6 @@ volar-provenance.workspace = true
 volar-ir-config.workspace = true
 volar-ir-opt.workspace = true
 volar-side.workspace = true
+
+[dev-dependencies]
+volar-fuzz.workspace = true

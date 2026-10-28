@@ -4692,6 +4692,153 @@ mod tests {
         (blocks, types)
     }
 
+    /// Minimal repro for volar-ir#5: a loop whose body conditionally writes a
+    /// storage cell that the *next* iteration (and the exit block) read back.
+    ///
+    /// - Block 0 (entry): jump to block 1 with flag=1.
+    /// - Block 1 (loop): params=[flag: Bit]. Read s0 from storage; new_s0 =
+    ///   s0 XOR flag; write new_s0. JumpCond(flag, block 1 with [0], exit).
+    ///   Iteration 1 (flag=1): s0 0 -> 1. Iteration 2 (flag=0): reads s0 --
+    ///   if the write propagated, reads 1; new_s0 = 1 XOR 0 = 1.
+    /// - Block 2 (exit): read s0, return it. Expects 1 iff the loop-carried
+    ///   storage write propagated.
+    fn storage_loop_carried_write() -> (IRBlocks, IRTypes) {
+        let types = IRTypes(std::vec![IRType::Primitive(Type::Bit)]);
+        let bit = IRTypeId(0);
+        let stor = StorageId(1);
+        let blocks = IRBlocks::new(std::vec![
+            // block 0 (entry): jump to block 1 with flag=1
+            IRBlock {
+                params: std::vec![],
+                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 1 }, bit.clone())]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(0)],
+                    ),
+                },
+            },
+            // block 1 (loop): params=[flag]
+            IRBlock {
+                params: std::vec![bit.clone()],
+                stmts: std::vec![
+                    // v1 = Const(0) -- the storage addr
+                    IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone()),
+                    // v2 = StorageRead(storage, Bit, v1) -- read s0
+                    IRStmt::StorageRead {
+                        storage: stor,
+                        ty: bit.clone(),
+                        addr: IRVarId(1),
+                    },
+                    // v3 = v2 XOR v0 (flag) -- new_s0
+                    IRStmt::Poly {
+                        ty: bit.clone(),
+                        coeffs: PolyCoeffs::from_iter([
+                            (std::vec![IRVarId(2)], 1u8),
+                            (std::vec![IRVarId(0)], 1u8),
+                        ]),
+                        constant: Constant { hi: 0, lo: 0 },
+                    },
+                    // v4 = StorageWrite(storage, v3, Bit, v1) -- write new_s0
+                    IRStmt::StorageWrite {
+                        storage: stor,
+                        src: IRVarId(3),
+                        ty: bit.clone(),
+                        addr: IRVarId(1),
+                    },
+                    // v5 = Const(0) -- the new flag (0)
+                    IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone()),
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::JumpCond {
+                    condition: IRVarId(0),
+                    then_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(5)],
+                    ),
+                    else_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(2)),
+                        std::vec![],
+                    ),
+                },
+            },
+            // block 2 (exit): read s0, return it
+            IRBlock {
+                params: std::vec![],
+                stmts: std::vec![
+                    IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone()),
+                    IRStmt::StorageRead {
+                        storage: stor,
+                        ty: bit.clone(),
+                        addr: IRVarId(0),
+                    },
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(1)]),
+                },
+            },
+        ]);
+        (blocks, types)
+    }
+
+    /// volar-ir#5 repro: drive the movfuscated step circuit and check the
+    /// loop-carried storage write propagates (the exit reads s0 == 1).
+    #[test]
+    fn test_storage_loop_carried_write_propagates() {
+        let (blocks, mut types) = storage_loop_carried_write();
+        let movfuscated = movfuscate_ir(&blocks, &mut types);
+        assert!(movfuscated.is_movfuscated());
+        let bit_ty = IRTypeId(
+            types
+                .0
+                .iter()
+                .position(|t| matches!(t, IRType::Primitive(Type::Bit)))
+                .expect("Bit interned") as u32,
+        );
+        let circuit = crate::lower_to_circuit::lower_to_circuit_ir(
+            &movfuscated,
+            &bit_ty,
+            1,
+            crate::lower_to_circuit::LoweringMode::WithTerminationFlag,
+        );
+        let step = &circuit.blocks[0];
+        let n_params = step.params.len();
+        let widths: std::vec::Vec<usize> = step
+            .params
+            .iter()
+            .map(|&t| types.value_bit_width(t).expect("data type"))
+            .collect();
+        let mut state: std::vec::Vec<std::vec::Vec<bool>> =
+            widths.iter().map(|&w| std::vec![false; w]).collect();
+        let mut storage = volar_fuzz::interpreter::ir::StorageMap::default();
+        let ret = loop {
+            let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
+                step,
+                &types,
+                &movfuscated.oracles,
+                &state,
+                &mut storage,
+            );
+            if outputs[0].iter().any(|&b| b) {
+                break outputs[1 + n_params..].to_vec();
+            }
+            state = outputs[1..1 + n_params].to_vec();
+        };
+        assert_eq!(
+            ret[0],
+            std::vec![true],
+            "the loop-carried storage write must propagate (exit reads s0 == 1)"
+        );
+    }
+
     #[test]
     fn test_storage_write_block_uses_even_lane() {
         let (blocks, mut types) = two_block_block_storage_write();
