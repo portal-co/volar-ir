@@ -608,15 +608,13 @@ fn stepper_min_at_o0() {
         let n_writes = b
             .stmts
             .iter()
-            .filter(|s| {
-                matches!(
-                    &s.kind,
-                    volar_ir::ir::IRStmt::StorageWrite { .. }
-                )
-            })
+            .filter(|s| matches!(&s.kind, volar_ir::ir::IRStmt::StorageWrite { .. }))
             .count();
         if n_writes > 0 && i < 60 {
-            eprintln!("  sm blk {i}: {n_writes} storage writes, term={:?}", b.terminator);
+            eprintln!(
+                "  sm blk {i}: {n_writes} storage writes, term={:?}",
+                b.terminator
+            );
         }
     }
     if std::env::var("SM_DUMP_ONLY").is_ok() {
@@ -624,7 +622,12 @@ fn stepper_min_at_o0() {
     }
     let entry_slots =
         volar_ir_passes::movfuscate::movfuscate_entry_param_slots(&blocks, &mut types);
-    let movfuscated = volar_ir_passes::movfuscate::movfuscate_ir(&blocks, &mut types);
+    // #5 instrumentation: watch the loop-header block (67)'s first few params
+    // (the loop-carried s0/s1/sp as block args), to confirm whether the
+    // block-arg path carries the update.
+    let watch: Vec<(usize, u32)> = (0..8u32).map(|v| (67usize, v)).collect();
+    let (movfuscated, watch_results) =
+        volar_ir_passes::movfuscate::movfuscate_ir_with_watch(&blocks, &mut types, &watch);
     let bit_ty = types
         .0
         .iter()
@@ -644,9 +647,10 @@ fn stepper_min_at_o0() {
     );
     let step = &circuit.blocks[0];
     eprintln!(
-        "stepper_min: step block — {} params, {} stmts",
+        "stepper_min: step block — {} params, {} stmts, watch={:?}",
         step.params.len(),
-        step.stmts.len()
+        step.stmts.len(),
+        watch_results
     );
     let widths: Vec<usize> = step
         .params
@@ -670,16 +674,20 @@ fn stepper_min_at_o0() {
             }
         }
     }
+    // #5 instrumentation: the watched combined vars (the loop-header block
+    // 67's params — the loop-carried s0/s1/sp as block args).
+    let watch_vars: Vec<u32> = watch_results.iter().map(|&(_, _, c)| c).collect();
     let mut storage = Default::default();
     let mut steps = 0usize;
     let ret_vals;
     loop {
-        let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
+        let (outputs, watched) = volar_fuzz::interpreter::ir::eval_ir_circuit_step_with_watch(
             step,
             &types,
             &circuit.oracles,
             &state,
             &mut storage,
+            &watch_vars,
         );
         if outputs[0].iter().any(|&b| b) {
             ret_vals = outputs[1 + n_params..].to_vec();
@@ -692,21 +700,18 @@ fn stepper_min_at_o0() {
                     pc |= 1 << j;
                 }
             }
-            // the nonzero storage cells (the frame: s0, s1, sp live here)
-            let mut cells = Vec::new();
-            for (k, v) in storage.iter() {
-                let mut val = 0u64;
-                for (b, &bit) in v.iter().take(64).enumerate() {
+            // the watched loop-header params (the block-arg s0/s1/sp)
+            let mut wv = Vec::new();
+            for &(var, ref val) in watched.iter() {
+                let mut v = 0u64;
+                for (b, &bit) in val.iter().take(64).enumerate() {
                     if bit {
-                        val |= 1 << b;
+                        v |= 1 << b;
                     }
                 }
-                if val != 0 {
-                    cells.push(format!("({},{},{})={val:#x}", k.0 .0, k.1 .0, k.2));
-                }
+                wv.push(format!("w{var}={v:#x}"));
             }
-            cells.sort();
-            eprintln!("  sm step {steps}: pc={pc} nonzero={cells:?}");
+            eprintln!("  sm step {steps}: pc={pc} watch={wv:?}");
         }
         state = outputs[1..1 + n_params].to_vec();
         steps += 1;
