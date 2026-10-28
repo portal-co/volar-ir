@@ -2831,6 +2831,21 @@ pub fn movfuscate_ir<P: Clone>(blocks: &IRBlocks<P>, types: &mut IRTypes) -> IRB
     movfuscate_ir_impl(&mut working, types, &[], None).0
 }
 
+/// `movfuscate_ir` with a `watch` list: `watch[i] = (block_idx, var_idx)`
+/// traces the block's own `var_idx` value; the returned `Vec<(usize, u32,
+/// u32)>` is `(block_idx, var_idx, combined_var)` for each watched value that
+/// resolved (the combined var is the block's value in the step circuit, for a
+/// driver to read the watched value from the step circuit's wires).
+pub fn movfuscate_ir_with_watch<P: Clone>(
+    blocks: &IRBlocks<P>,
+    types: &mut IRTypes,
+    watch: &[(usize, u32)],
+) -> (IRBlocks<P>, Vec<(usize, u32, u32)>) {
+    let mut working = blocks.clone();
+    let (r, _, _, w) = movfuscate_ir_impl(&mut working, types, watch, None);
+    (r, w)
+}
+
 /// The entry block's (block 0's, after the internal CFG layout) param→state-
 /// slot mapping for the movfuscated step circuit: `entry_param_slots()[k] =
 /// (slot_start, slot_count)` is where entry-block param `k` lives in the step
