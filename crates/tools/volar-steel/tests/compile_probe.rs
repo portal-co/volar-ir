@@ -618,6 +618,15 @@ fn stepper_min_at_o0() {
         }
     }
     if std::env::var("SM_DUMP_ONLY").is_ok() {
+        // #5 instrumentation: dump block 67's (loop header) params + first stmts.
+        if let Some(b67) = blocks.blocks.get(67) {
+            eprintln!("  sm blk 67 params ({}): {:?}", b67.params.len(), b67.params);
+            eprintln!("  sm blk 67 first stmts:");
+            for (i, st) in b67.stmts.iter().take(20).enumerate() {
+                let short = format!("{:?}", st.kind);
+                eprintln!("    s{i}: {}", &short[..short.len().min(120)]);
+            }
+        }
         // #5 instrumentation: dump block 23's statements (the loop-back block
         // that reads s0/s1/sp from storage and passes them as args to 67).
         if let Some(b23) = blocks.blocks.get(23) {
