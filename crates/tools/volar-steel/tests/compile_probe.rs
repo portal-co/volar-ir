@@ -602,6 +602,26 @@ fn frame_scalar_at_o1_works() {
 #[test]
 fn stepper_min_at_o0() {
     let (blocks, mut types) = import_program_to_ir("stepper_min_o0.ll", "step_min");
+    // #5 instrumentation: find the blocks with a StorageWrite (the s0/s1/sp
+    // writes) and dump their terminators, to pick a watch target.
+    for (i, b) in blocks.blocks.iter().enumerate() {
+        let n_writes = b
+            .stmts
+            .iter()
+            .filter(|s| {
+                matches!(
+                    &s.kind,
+                    volar_ir::ir::IRStmt::StorageWrite { .. }
+                )
+            })
+            .count();
+        if n_writes > 0 && i < 60 {
+            eprintln!("  sm blk {i}: {n_writes} storage writes, term={:?}", b.terminator);
+        }
+    }
+    if std::env::var("SM_DUMP_ONLY").is_ok() {
+        return;
+    }
     let entry_slots =
         volar_ir_passes::movfuscate::movfuscate_entry_param_slots(&blocks, &mut types);
     let movfuscated = volar_ir_passes::movfuscate::movfuscate_ir(&blocks, &mut types);
@@ -682,7 +702,7 @@ fn stepper_min_at_o0() {
                     }
                 }
                 if val != 0 {
-                    cells.push(format!("({},{},{})={val:#x}", k.0.0, k.1.0, k.2));
+                    cells.push(format!("({},{},{})={val:#x}", k.0 .0, k.1 .0, k.2));
                 }
             }
             cells.sort();
