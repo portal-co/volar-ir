@@ -161,11 +161,18 @@ fn array_read_dynamic_index_works() {
     let bit_ty = types
         .0
         .iter()
-        .position(|t| matches!(t, volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)))
+        .position(|t| {
+            matches!(
+                t,
+                volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)
+            )
+        })
         .map(|i| volar_ir::ir::IRTypeId(i as u32))
         .expect("Bit interned");
     let circuit = volar_ir_passes::lower_to_circuit::lower_to_circuit_ir(
-        &movfuscated, &bit_ty, 1,
+        &movfuscated,
+        &bit_ty,
+        1,
         volar_ir_passes::lower_to_circuit::LoweringMode::WithTerminationFlag,
     );
     let step = &circuit.blocks[0];
@@ -192,7 +199,11 @@ fn array_read_dynamic_index_works() {
     let ret_vals;
     loop {
         let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
-            step, &types, &circuit.oracles, &state, &mut storage,
+            step,
+            &types,
+            &circuit.oracles,
+            &state,
+            &mut storage,
         );
         if outputs[0].iter().any(|&b| b) {
             ret_vals = outputs[1 + n_params..].to_vec();
@@ -225,14 +236,28 @@ fn simple_loop_carried_scalar_works() {
     let (blocks, mut types) = import_program_to_ir("simple_loop.ll", "count_to");
     // DEBUG: dump the loop blocks in detail (params + terminator dest + args).
     for (i, b) in blocks.blocks.iter().enumerate() {
-        let widths: Vec<usize> = b.params.iter().map(|&t| types.value_bit_width(t).unwrap_or(999)).collect();
+        let widths: Vec<usize> = b
+            .params
+            .iter()
+            .map(|&t| types.value_bit_width(t).unwrap_or(999))
+            .collect();
         let term = match &b.terminator {
-            volar_ir::ir::IRTerminator::Jmp { target } =>
-                format!("Jmp {:?} args={:?}", target.dest, target.args.iter().map(|a| a.0).collect::<Vec<_>>()),
-            volar_ir::ir::IRTerminator::JumpCond { then_target, else_target, .. } =>
-                format!("JumpCond then={:?}({}) else={:?}({})",
-                    then_target.dest, then_target.args.len(),
-                    else_target.dest, else_target.args.len()),
+            volar_ir::ir::IRTerminator::Jmp { target } => format!(
+                "Jmp {:?} args={:?}",
+                target.dest,
+                target.args.iter().map(|a| a.0).collect::<Vec<_>>()
+            ),
+            volar_ir::ir::IRTerminator::JumpCond {
+                then_target,
+                else_target,
+                ..
+            } => format!(
+                "JumpCond then={:?}({}) else={:?}({})",
+                then_target.dest,
+                then_target.args.len(),
+                else_target.dest,
+                else_target.args.len()
+            ),
             other => format!("{:?}", core::mem::discriminant(other)),
         };
         eprintln!("  block {i}: params{widths:?} term={term}");
@@ -241,11 +266,18 @@ fn simple_loop_carried_scalar_works() {
     let bit_ty = types
         .0
         .iter()
-        .position(|t| matches!(t, volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)))
+        .position(|t| {
+            matches!(
+                t,
+                volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)
+            )
+        })
         .map(|i| volar_ir::ir::IRTypeId(i as u32))
         .expect("Bit interned");
     let circuit = volar_ir_passes::lower_to_circuit::lower_to_circuit_ir(
-        &movfuscated, &bit_ty, 1,
+        &movfuscated,
+        &bit_ty,
+        1,
         volar_ir_passes::lower_to_circuit::LoweringMode::WithTerminationFlag,
     );
     let step = &circuit.blocks[0];
@@ -271,7 +303,11 @@ fn simple_loop_carried_scalar_works() {
     let ret_vals;
     loop {
         let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
-            step, &types, &circuit.oracles, &state, &mut storage,
+            step,
+            &types,
+            &circuit.oracles,
+            &state,
+            &mut storage,
         );
         if outputs[0].iter().any(|&b| b) {
             ret_vals = outputs[1 + n_params..].to_vec();
@@ -329,11 +365,18 @@ fn loop_array_push_pop_works() {
     let bit_ty = types
         .0
         .iter()
-        .position(|t| matches!(t, volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)))
+        .position(|t| {
+            matches!(
+                t,
+                volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)
+            )
+        })
         .map(|i| volar_ir::ir::IRTypeId(i as u32))
         .expect("Bit interned");
     let circuit = volar_ir_passes::lower_to_circuit::lower_to_circuit_ir(
-        &movfuscated, &bit_ty, 1,
+        &movfuscated,
+        &bit_ty,
+        1,
         volar_ir_passes::lower_to_circuit::LoweringMode::WithTerminationFlag,
     );
     let step = &circuit.blocks[0];
@@ -359,7 +402,11 @@ fn loop_array_push_pop_works() {
     let ret_vals;
     loop {
         let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
-            step, &types, &circuit.oracles, &state, &mut storage,
+            step,
+            &types,
+            &circuit.oracles,
+            &state,
+            &mut storage,
         );
         if outputs[0].iter().any(|&b| b) {
             ret_vals = outputs[1 + n_params..].to_vec();
@@ -412,8 +459,12 @@ fn loop_array_push_pop_works() {
 #[test]
 fn s6b_dump_entry_slots() {
     let (blocks, mut types) = import_program_to_ir("evm_stepper.ll", "evm_step");
-    let entry_slots = volar_ir_passes::movfuscate::movfuscate_entry_param_slots(&blocks, &mut types);
-    eprintln!("S6b: entry block — {} params", blocks.blocks[0].params.len());
+    let entry_slots =
+        volar_ir_passes::movfuscate::movfuscate_entry_param_slots(&blocks, &mut types);
+    eprintln!(
+        "S6b: entry block — {} params",
+        blocks.blocks[0].params.len()
+    );
     eprintln!("S6b: entry_slots (param → (slot_start, slot_count)):");
     for (k, &(start, count)) in entry_slots.iter().enumerate() {
         eprintln!("  param {k}: slot {start} (count {count})");
@@ -421,10 +472,40 @@ fn s6b_dump_entry_slots() {
     // Also dump the entry block's terminator (how the args are threaded onward).
     let eb = &blocks.blocks[0];
     match &eb.terminator {
-        volar_ir::ir::IRTerminator::Jmp { target } =>
-            eprintln!("  entry term: Jmp {:?} nargs={} (block 0 has {} params)",
-                target.dest, target.args.len(), eb.params.len()),
+        volar_ir::ir::IRTerminator::Jmp { target } => eprintln!(
+            "  entry term: Jmp {:?} nargs={} (block 0 has {} params)",
+            target.dest,
+            target.args.len(),
+            eb.params.len()
+        ),
         other => eprintln!("  entry term: {:?}", core::mem::discriminant(other)),
+    }
+    // Dump the loop-relevant blocks (a JumpCond, or a Jmp back to an earlier block).
+    for (i, b) in blocks.blocks.iter().enumerate() {
+        let term = match &b.terminator {
+            volar_ir::ir::IRTerminator::Jmp { target } => {
+                format!("Jmp {:?} nargs={}", target.dest, target.args.len())
+            }
+            volar_ir::ir::IRTerminator::JumpCond {
+                then_target,
+                else_target,
+                ..
+            } => format!(
+                "JumpCond then={:?}({}) else={:?}({})",
+                then_target.dest,
+                then_target.args.len(),
+                else_target.dest,
+                else_target.args.len()
+            ),
+            other => format!("{:?}", core::mem::discriminant(other)),
+        };
+        let is_back_edge = matches!(&b.terminator,
+            volar_ir::ir::IRTerminator::Jmp { target }
+            if matches!(target.dest, volar_ir::ir::IRBlockTargetId::Block(volar_ir::ir::IRBlockId(j)) if (j as usize) <= i));
+        let is_cond = matches!(&b.terminator, volar_ir::ir::IRTerminator::JumpCond { .. });
+        if is_back_edge || is_cond {
+            eprintln!("  block {i}: {} params, term={term}", b.params.len());
+        }
     }
 }
 
@@ -449,7 +530,12 @@ fn s6b_evm_stepper_reaches_a_step_circuit() {
     let bit_ty = types
         .0
         .iter()
-        .position(|t| matches!(t, volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)))
+        .position(|t| {
+            matches!(
+                t,
+                volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)
+            )
+        })
         .map(|i| volar_ir::ir::IRTypeId(i as u32))
         .expect("Bit interned");
     let circuit = volar_ir_passes::lower_to_circuit::lower_to_circuit_ir(
@@ -459,7 +545,11 @@ fn s6b_evm_stepper_reaches_a_step_circuit() {
         volar_ir_passes::lower_to_circuit::LoweringMode::WithTerminationFlag,
     );
     let step = &circuit.blocks[0];
-    eprintln!("S6b: step block — {} params, {} stmts", step.params.len(), step.stmts.len());
+    eprintln!(
+        "S6b: step block — {} params, {} stmts",
+        step.params.len(),
+        step.stmts.len()
+    );
     // Differential: run PUSH1 5, PUSH1 3, ADD, PUSH1 2, MUL = (5+3)*2 = 16.
     let widths: Vec<usize> = step
         .params
@@ -470,8 +560,12 @@ fn s6b_evm_stepper_reaches_a_step_circuit() {
     let n_params = step.params.len();
     // The entry block's param→slot mapping (movfuscation exposes it so the
     // caller can initialize the state; the state is then carried generically).
-    let entry_slots = volar_ir_passes::movfuscate::movfuscate_entry_param_slots(&blocks, &mut types);
-    eprintln!("S6b: entry block — {} params, entry_slots={entry_slots:?}", blocks.blocks[0].params.len());
+    let entry_slots =
+        volar_ir_passes::movfuscate::movfuscate_entry_param_slots(&blocks, &mut types);
+    eprintln!(
+        "S6b: entry block — {} params, entry_slots={entry_slots:?}",
+        blocks.blocks[0].params.len()
+    );
     let inputs = [0x60u64, 5, 0x60, 3, 0x01, 0x60, 2, 0x02, 0, 0, 0, 0, 8];
     let mut state: Vec<Vec<bool>> = widths.iter().map(|&w| vec![false; w]).collect();
     for (k, &inp) in inputs.iter().enumerate() {
@@ -502,6 +596,31 @@ fn s6b_evm_stepper_reaches_a_step_circuit() {
             ret_vals = outputs[1 + n_params..].to_vec();
             break;
         }
+        if steps < 6 {
+            let mut pc = 0usize;
+            for j in 0..pc_width {
+                if outputs[1 + j][0] {
+                    pc |= 1 << j;
+                }
+            }
+            // dump the storage (the frame: i, sp, pc live here) — the nonzero u64 cells.
+            let mut cells = Vec::new();
+            for (k, v) in storage.iter() {
+                if v.len() == 64 {
+                    let mut val = 0u64;
+                    for (b, &bit) in v.iter().enumerate() {
+                        if bit {
+                            val |= 1 << b;
+                        }
+                    }
+                    if val != 0 {
+                        cells.push(format!("{:?}={val:#x}", k));
+                    }
+                }
+            }
+            cells.sort();
+            eprintln!("  s6b step {steps}: pc={pc} storage_cells({})={cells:?}", cells.len());
+        }
         state = outputs[1..1 + n_params].to_vec();
         steps += 1;
         assert!(steps <= 64, "step circuit did not return in 64 steps");
@@ -521,7 +640,10 @@ fn s6b_evm_stepper_reaches_a_step_circuit() {
     }
     let native = 16u64;
     eprintln!("S6b: step circuit returned after {steps} steps; circuit={got} native={native}");
-    assert_eq!(got, native, "S6b differential: the EVM stepper circuit must match native");
+    assert_eq!(
+        got, native,
+        "S6b differential: the EVM stepper circuit must match native"
+    );
 }
 
 #[test]
