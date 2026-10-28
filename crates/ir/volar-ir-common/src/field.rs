@@ -110,16 +110,11 @@ fn value_bit_width_of(ty: &IrType, types: &TypeTable) -> Option<usize> {
     }
 }
 
-/// Bit width of a primitive integer or `Bit`.
+/// Bit width of a primitive `Bit`. Wider bit-vectors are `IrType::Vec(n, Bit)`
+/// (a vector of n bits), not a primitive — see the `Type::_n` cutover.
 pub fn primitive_bit_width(ty: Type) -> Option<usize> {
     Some(match ty {
         Type::Bit => 1,
-        Type::_8 => 8,
-        Type::_16 => 16,
-        Type::_32 => 32,
-        Type::_64 => 64,
-        Type::_128 => 128,
-        Type::_256 => 256,
     })
 }
 
