@@ -129,3 +129,142 @@ impl Default for VirtualizeConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod cutover_repro_tests {
+    //! Repro for the adaptive-split "var not found" bug the `Type::_n`
+    //! cutover surfaced: when the source IR is ALL `Bit` (the fuzzer's
+    //! generator after the cutover), the adaptive split's handler emit has a
+    //! var-numbering issue.
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use volar_ir::ir::{
+        IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRVarId,
+    };
+    use volar_ir_common::{Constant, Node, PolyCoeffs, TypeId, TypeTable};
+
+    /// Build a minimal all-Bit IR: 2 params, a Poly (XOR) stmt, return both
+    /// params + the stmt.
+    fn all_bit_ir() -> (IRBlocks<()>, TypeTable) {
+        let bit = TypeId(0);
+        let types = TypeTable(vec![IRType::Primitive(volar_ir_common::Type::Bit)]);
+        let mk = |kind: IRStmt| Node::new(kind, (), None);
+        let mut coeffs = PolyCoeffs::new();
+        coeffs.insert(vec![IRVarId(0), IRVarId(1)], 1u8);
+        let block = IRBlock {
+            params: vec![bit, bit],
+            stmts: vec![mk(IRStmt::Poly {
+                ty: bit,
+                coeffs,
+                constant: Constant { hi: 0, lo: 0 },
+            })],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(
+                    IRBlockTargetId::Return,
+                    vec![IRVarId(0), IRVarId(1), IRVarId(2)],
+                ),
+            },
+        };
+        (IRBlocks::new(vec![block]), types)
+    }
+
+    #[test]
+    fn repro_adaptive_split_empty_block_var_not_found() {
+        // The shrunk failing case: an EMPTY block (no params, no stmts,
+        // Jmp(Return, [])). The virt pass's adaptive split emits a virtualized
+        // IR with a dangling var.
+        let types = TypeTable(vec![]);
+        let block: IRBlock<()> = IRBlock {
+            params: vec![],
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
+            },
+        };
+        let ir: IRBlocks<()> = IRBlocks::new(vec![block]);
+        let mut types = types;
+        let cfg = VirtualizeConfig {
+            dispatch: DispatchMode::Public,
+            adaptive_split: crate::AdaptiveSplitConfig {
+                enabled: true,
+                ..crate::AdaptiveSplitConfig::default()
+            },
+            ..VirtualizeConfig::default()
+        };
+        let virt = virtualize_ir::<()>(&ir, &mut types, &cfg);
+        // Check every var referenced in each block is defined.
+        for (bid, b) in virt.blocks.blocks.iter().enumerate() {
+            let n_defined = b.params.len() + b.stmts.len();
+            let check = |v: IRVarId, what: &str| {
+                assert!(
+                    (v.0 as usize) < n_defined,
+                    "block {bid}: {what} references undefined var {} (block has {n_defined} vars)",
+                    v.0
+                );
+            };
+            for s in &b.stmts {
+                match &s.kind {
+                    IRStmt::Poly { coeffs, .. } => {
+                        for (mono, _) in coeffs {
+                            for v in mono {
+                                check(*v, "Poly");
+                            }
+                        }
+                    }
+                    IRStmt::StorageRead { addr, .. } => check(*addr, "StorageRead addr"),
+                    IRStmt::StorageWrite { src, addr, .. } => {
+                        check(*src, "StorageWrite src");
+                        check(*addr, "StorageWrite addr");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repro_adaptive_split_all_bit_var_not_found() {
+        let (ir, mut types) = all_bit_ir();
+        let cfg = VirtualizeConfig {
+            dispatch: DispatchMode::Public,
+            adaptive_split: crate::AdaptiveSplitConfig {
+                enabled: true,
+                ..crate::AdaptiveSplitConfig::default()
+            },
+            ..VirtualizeConfig::default()
+        };
+        // This should not produce a virtualized IR with a dangling var.
+        let virt = virtualize_ir::<()>(&ir, &mut types, &cfg);
+        // Check every var referenced in each block is defined.
+        for (bid, b) in virt.blocks.blocks.iter().enumerate() {
+            let mut defined: alloc::collections::BTreeSet<u32> =
+                (0..b.params.len() as u32).collect();
+            for s in &b.stmts {
+                if let IRStmt::Poly { coeffs, .. } = &s.kind {
+                    for (mono, _) in coeffs {
+                        for v in monomial_iter(monomial_key(mono)) {
+                            assert!(
+                                defined.contains(&v.0),
+                                "block {bid}: Poly references undefined var {}",
+                                v.0
+                            );
+                        }
+                    }
+                }
+                // The stmt defines a new var.
+                defined.insert(b.params.len() as u32 + /* stmt idx */ {
+                    // Find the stmt's index.
+                    b.stmts.iter().position(|x| core::ptr::eq(x, s)).unwrap_or(0) as u32
+                });
+            }
+        }
+    }
+
+    fn monomial_key(m: &Vec<IRVarId>) -> &Vec<IRVarId> {
+        m
+    }
+    fn monomial_iter(m: &Vec<IRVarId>) -> impl Iterator<Item = IRVarId> + '_ {
+        m.iter().copied()
+    }
+}
