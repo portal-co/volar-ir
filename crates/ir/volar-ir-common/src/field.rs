@@ -124,9 +124,9 @@ pub fn primitive_bit_width(ty: Type) -> Option<usize> {
 /// extension field, including a vector whose element is one.
 pub fn mul_is_idempotent(ty: TypeId, types: &TypeTable) -> bool {
     match types.0.get(ty.0 as usize) {
-        Some(IrType::Block { .. }) | Some(IrType::Func { .. }) | Some(IrType::PrimeField { .. }) => {
-            false
-        }
+        Some(IrType::Block { .. })
+        | Some(IrType::Func { .. })
+        | Some(IrType::PrimeField { .. }) => false,
         Some(IrType::Primitive(_)) => true,
         Some(IrType::Vec(_, elem)) => mul_is_idempotent(*elem, types),
         Some(IrType::Tuple(parts)) => parts.iter().all(|p| mul_is_idempotent(*p, types)),
@@ -156,18 +156,14 @@ fn validate_ext_field(
     }
     let wrapped_desc = match types.0.get(wrapped.0 as usize) {
         Some(IrType::Primitive(Type::Bit)) => WrappedDesc::Bit,
-        Some(IrType::ExtField { .. }) => {
-            WrappedDesc::Field(alloc::boxed::Box::new(field_desc(wrapped, types).map_err(
-                |_| ExtFieldError::WrappedNotAField,
-            )?))
-        }
+        Some(IrType::ExtField { .. }) => WrappedDesc::Field(alloc::boxed::Box::new(
+            field_desc(wrapped, types).map_err(|_| ExtFieldError::WrappedNotAField)?,
+        )),
         _ => return Err(ExtFieldError::WrappedNotAField),
     };
     let coeff_width = wrapped_desc.width();
     if coeff_width == 0 || coeff_width > 64 {
-        return Err(ExtFieldError::CoefficientTooWide {
-            width: coeff_width,
-        });
+        return Err(ExtFieldError::CoefficientTooWide { width: coeff_width });
     }
     let expected = degree as usize + 1;
     if irreducible.len() != expected {
@@ -348,27 +344,25 @@ pub fn monomial_product<R: BitRing>(
     match types.0.get(out_ty.0 as usize) {
         Some(IrType::Primitive(Type::Bit)) => bit_product(factors, ops),
         Some(IrType::Primitive(prim)) => {
-            let width = primitive_bit_width(*prim).unwrap_or_else(|| {
-                panic!("monomial_product: {prim:?} has no GF(2) bit width")
-            });
+            let width = primitive_bit_width(*prim)
+                .unwrap_or_else(|| panic!("monomial_product: {prim:?} has no GF(2) bit width"));
             lane_product(width, factors, ops)
         }
         Some(IrType::Vec(n, elem)) => {
-            let lane_width = types.value_bit_width(*elem).unwrap_or_else(|| {
-                panic!("monomial_product: vector element has no bit width")
-            });
+            let lane_width = types
+                .value_bit_width(*elem)
+                .unwrap_or_else(|| panic!("monomial_product: vector element has no bit width"));
             let mut out = Vec::with_capacity(*n * lane_width);
             for lane in 0..*n {
-                let mut lane_factors: Vec<(TypeId, Vec<R::Bit>)> = Vec::with_capacity(factors.len());
+                let mut lane_factors: Vec<(TypeId, Vec<R::Bit>)> =
+                    Vec::with_capacity(factors.len());
                 let mut lane_refs: Vec<(TypeId, &[R::Bit])> = Vec::with_capacity(factors.len());
                 for &(factor_ty, bits) in factors {
                     if same_type(factor_ty, out_ty, types) {
                         let start = lane * lane_width;
                         let slice = slice_or_pad(bits, start, lane_width, ops);
                         lane_factors.push(((*elem), slice));
-                    } else if same_type(factor_ty, *elem, types)
-                        || is_bit(factor_ty, types)
-                    {
+                    } else if same_type(factor_ty, *elem, types) || is_bit(factor_ty, types) {
                         lane_refs.push((factor_ty, bits));
                     } else {
                         panic!("monomial_product: vector factor type does not match the lane");
@@ -453,7 +447,12 @@ fn lane_product<R: BitRing>(
     out
 }
 
-fn slice_or_pad<R: BitRing>(bits: &[R::Bit], start: usize, width: usize, ops: &mut R) -> Vec<R::Bit> {
+fn slice_or_pad<R: BitRing>(
+    bits: &[R::Bit],
+    start: usize,
+    width: usize,
+    ops: &mut R,
+) -> Vec<R::Bit> {
     let mut out = Vec::with_capacity(width);
     for offset in 0..width {
         out.push(
@@ -601,7 +600,11 @@ fn is_irreducible(field: &FieldDesc) -> bool {
 fn modulus_poly(field: &FieldDesc, ops: &mut BoolRing) -> Vec<Vec<bool>> {
     let mut coeffs = Vec::with_capacity(field.degree as usize + 1);
     for index in 0..=field.degree as usize {
-        coeffs.push(u64_elem(field.irreducible[index], field.wrapped.width(), ops));
+        coeffs.push(u64_elem(
+            field.irreducible[index],
+            field.wrapped.width(),
+            ops,
+        ));
     }
     coeffs
 }
@@ -791,9 +794,10 @@ fn field_inv<R: BitRing>(elem: &[R::Bit], field: &FieldDesc, ops: &mut R) -> Vec
 }
 
 fn poly_is_one(poly: &[Vec<bool>]) -> bool {
-    poly_degree(poly) == 0 && poly.first().is_some_and(|coeff| {
-        coeff.first().copied().unwrap_or(false) && coeff.iter().skip(1).all(|bit| !*bit)
-    })
+    poly_degree(poly) == 0
+        && poly.first().is_some_and(|coeff| {
+            coeff.first().copied().unwrap_or(false) && coeff.iter().skip(1).all(|bit| !*bit)
+        })
 }
 
 fn distinct_primes(mut n: u32) -> Vec<u32> {
@@ -1056,10 +1060,7 @@ pub fn lower_field_call<V: Clone + Ord>(
     types: &mut TypeTable,
     mut emit: impl FnMut(Stmt<V>) -> V,
 ) -> Result<Vec<V>, FieldCallError> {
-    let field_ty = symbol
-        .field
-        .intern(types)
-        .map_err(FieldCallError::Field)?;
+    let field_ty = symbol.field.intern(types).map_err(FieldCallError::Field)?;
     let width = types
         .value_bit_width(field_ty)
         .ok_or(FieldCallError::NarrowCarrier)?;
@@ -1125,9 +1126,7 @@ pub fn lower_field_call<V: Clone + Ord>(
             if args.len() != 2 {
                 return Err(FieldCallError::Arity);
             }
-            let index = args[1]
-                .constant
-                .ok_or(FieldCallError::IndexNotConstant)?;
+            let index = args[1].constant.ok_or(FieldCallError::IndexNotConstant)?;
             if index >= degree as u128 {
                 return Err(FieldCallError::IndexOutOfRange);
             }
@@ -1172,7 +1171,12 @@ fn pack_from_bits<V: Clone>(
         if bits.len() < end {
             return Err(FieldCallError::NarrowCarrier);
         }
-        parts.push(merge_bits(&bits[start..end], coeff_width, wrapped_ty, emit)?);
+        parts.push(merge_bits(
+            &bits[start..end],
+            coeff_width,
+            wrapped_ty,
+            emit,
+        )?);
     }
     Ok(emit(Stmt::Merge {
         parts,
@@ -1226,10 +1230,7 @@ fn pad_carrier<V>(
     emit: &mut impl FnMut(Stmt<V>) -> V,
 ) -> Vec<V> {
     while bits.len() < ret_bits {
-        bits.push(emit(Stmt::Const(
-            Constant { hi: 0, lo: 0 },
-            bit,
-        )));
+        bits.push(emit(Stmt::Const(Constant { hi: 0, lo: 0 }, bit)));
     }
     bits.truncate(ret_bits);
     bits
@@ -1240,13 +1241,18 @@ mod tests {
     use super::*;
 
     fn bits_of(value: u64, width: usize) -> Vec<bool> {
-        (0..width).map(|index| ((value >> index) & 1) == 1).collect()
+        (0..width)
+            .map(|index| ((value >> index) & 1) == 1)
+            .collect()
     }
 
     fn u64_of(bits: &[bool]) -> u64 {
-        bits.iter().enumerate().fold(0u64, |acc, (index, bit)| {
-            if *bit { acc | (1u64 << index) } else { acc }
-        })
+        bits.iter().enumerate().fold(
+            0u64,
+            |acc, (index, bit)| {
+                if *bit { acc | (1u64 << index) } else { acc }
+            },
+        )
     }
 
     #[test]
@@ -1256,10 +1262,7 @@ mod tests {
         let mut ops = BoolRing;
         let product = monomial_product(
             field,
-            &[
-                (field, &bits_of(0x57, 8)),
-                (field, &bits_of(0x13, 8)),
-            ],
+            &[(field, &bits_of(0x57, 8)), (field, &bits_of(0x13, 8))],
             &types,
             &mut ops,
         );

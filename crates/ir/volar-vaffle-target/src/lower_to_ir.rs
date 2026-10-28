@@ -1646,11 +1646,9 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         count: usize,
         sp: StorageId,
     ) -> IRVarId {
-        let ptr_ty = self.types.primitive(match self.pointer_bits {
-            32 => Type::_32,
-            64 => Type::_64,
-            _ => unreachable!("VAFFLE pointer width is validated by its ABI"),
-        });
+        // The `Type::_n` cutover: the pointer is `Vec(pointer_bits, Bit)`.
+        let bit_tid = self.types.primitive(Type::Bit);
+        let ptr_ty = self.types.intern(IrType::Vec(self.pointer_bits as usize, bit_tid));
         let zero_bits: Vec<IRVarId> = (0..self.pointer_bits).map(|_| em.bc_const(false)).collect();
         let old = em.emit_read(sp, ptr_ty, &zero_bits);
         let old_bits: Vec<IRVarId> = (0..self.pointer_bits)
@@ -2151,14 +2149,10 @@ pub(crate) fn compute_owner(blocks: &[Block], n_values: usize) -> Vec<usize> {
 /// Compute the bit-width of an IR type recursively.
 fn ir_type_bit_width(types: &IRTypes, tid: TypeId) -> usize {
     match &types.0[tid.0 as usize] {
+        // The `Type::_n` cutover: only Bit is a primitive; a wider bit-vector
+        // is `Vec(n, Bit)` (handled by the Vec arm below).
         IrType::Primitive(p) => match p {
             volar_ir_common::Type::Bit => 1,
-            volar_ir_common::Type::_8 => 8,
-            volar_ir_common::Type::_16 => 16,
-            volar_ir_common::Type::_32 => 32,
-            volar_ir_common::Type::_64 => 64,
-            volar_ir_common::Type::_128 => 128,
-            volar_ir_common::Type::_256 => 256,
             _ => 1, // unknown primitive — treat as 1 bit
         },
         IrType::Vec(n, inner) => *n * ir_type_bit_width(types, *inner),

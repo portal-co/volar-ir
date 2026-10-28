@@ -73,14 +73,10 @@ fn write_u64_list(values: &[u64], w: &mut dyn fmt::Write) -> fmt::Result {
 }
 
 fn write_native_type(nt: &NativeType, w: &mut dyn fmt::Write) -> fmt::Result {
+    // The `Type::_n` cutover: only Bit is a primitive; a wider bit-vector is
+    // `Vector(Native(Bit), n)` (printed by the vector path, not here).
     match nt {
         NativeType::Bit => w.write_str("bit"),
-        NativeType::_8 => w.write_str("u8"),
-        NativeType::_16 => w.write_str("u16"),
-        NativeType::_32 => w.write_str("u32"),
-        NativeType::_64 => w.write_str("u64"),
-        NativeType::_128 => w.write_str("u128"),
-        NativeType::_256 => w.write_str("u256"),
         // Catch-all for any future variants added under #[non_exhaustive]
         _ => w.write_str("native:unknown"),
     }

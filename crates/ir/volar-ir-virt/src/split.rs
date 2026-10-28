@@ -327,7 +327,7 @@ mod tests {
     use volar_ir_common::{Constant, Node, Stmt};
 
     fn u32_ty(types: &mut IRTypes) -> volar_ir::ir::IRTypeId {
-        types.intern(IRType::Primitive(PrimType::_32))
+        { let __b = types.primitive(PrimType::Bit); types.intern(IRType::Vec(32, __b)) }
     }
 
     #[test]

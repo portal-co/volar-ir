@@ -230,7 +230,7 @@ impl IrHashAlgorithm for XorFoldHash32 {
         _key_vars: &[(IRVarId, IRTypeId)],
         inputs: &[(IRVarId, IRTypeId)],
     ) -> IRVarId {
-        let u32_ty = emitter.intern_type(IRType::Primitive(PrimType::_32));
+        let u32_ty = { let __b = emitter.intern_type(IRType::Primitive(PrimType::Bit)); emitter.intern_type(IRType::Vec(32, __b)) };
         let mut h = emitter.emit(IRStmt::Const(
             Constant {
                 hi: 0,
@@ -266,7 +266,7 @@ impl IrHashAlgorithm for XorFoldHash32 {
     }
 
     fn output_type_id(&self, types: &mut IRTypes) -> IRTypeId {
-        types.intern(IRType::Primitive(PrimType::_32))
+        { let __b = types.primitive(PrimType::Bit); types.intern(IRType::Vec(32, __b)) }
     }
 
     fn hash_bytes_native(&self, _key_words: &[&[u8]], inputs: &[&[u8]]) -> Vec<u8> {
@@ -316,14 +316,16 @@ const SIP_C3: u64 = 0x7465_6462_7974_6573;
 
 impl IrHashAlgorithm for SipHash48 {
     fn key_schema(&self) -> Vec<IRType> {
+        // The `Type::_n` cutover: a 64-bit key word is `Vec(64, Bit)`; Bit is
+        // interned first (TypeId(0)) by every IRTypes table.
         vec![
-            IRType::Primitive(PrimType::_64),
-            IRType::Primitive(PrimType::_64),
+            IRType::Vec(64, IRTypeId(0)),
+            IRType::Vec(64, IRTypeId(0)),
         ]
     }
 
     fn output_type_id(&self, types: &mut IRTypes) -> IRTypeId {
-        types.intern(IRType::Primitive(PrimType::_64))
+        { let __b = types.primitive(PrimType::Bit); types.intern(IRType::Vec(64, __b)) }
     }
 
     fn emit_ir(
@@ -337,7 +339,7 @@ impl IrHashAlgorithm for SipHash48 {
             2,
             "SipHash48 requires exactly two 64-bit key words"
         );
-        let u64_ty = emitter.intern_type(IRType::Primitive(PrimType::_64));
+        let u64_ty = { let __b = emitter.intern_type(IRType::Primitive(PrimType::Bit)); emitter.intern_type(IRType::Vec(64, __b)) };
         let k0 = key_vars[0].0;
         let k1 = key_vars[1].0;
 
@@ -621,14 +623,13 @@ fn le_bytes_to_u64(bytes: &[u8]) -> u64 {
 pub fn constant_to_le_bytes(c: &Constant, ty: &IRType) -> Vec<u8> {
     match ty {
         IRType::Primitive(PrimType::Bit) => vec![(c.lo & 1) as u8],
-        IRType::Primitive(PrimType::_8) => vec![(c.lo & 0xFF) as u8],
-        IRType::Primitive(PrimType::_16) => (c.lo as u16).to_le_bytes().to_vec(),
-        IRType::Primitive(PrimType::_32) => (c.lo as u32).to_le_bytes().to_vec(),
-        IRType::Primitive(PrimType::_64) => (c.lo as u64).to_le_bytes().to_vec(),
-        IRType::Primitive(PrimType::_128) => c.lo.to_le_bytes().to_vec(),
-        IRType::Primitive(PrimType::_256) => {
+        // The `Type::_n` cutover: an n-bit bit-vector is `Vec(n, Bit)`;
+        // serialize the low n bits (LE bytes).
+        IRType::Vec(n, _) => {
+            let n_bytes = (*n).div_ceil(8);
             let mut b = c.lo.to_le_bytes().to_vec();
             b.extend_from_slice(&c.hi.to_le_bytes());
+            b.truncate(n_bytes);
             b
         }
         _ => (c.lo as u32).to_le_bytes().to_vec(),

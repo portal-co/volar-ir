@@ -108,13 +108,9 @@ pub fn intern_circuit_helper(
 
 /// Type id for an integer of `n` bits. Interns into `types`.
 pub fn width_type(types: &mut TypeTable, n: usize) -> TypeId {
+    // The `Type::_n` cutover: an n-bit value is `Vec(n, Bit)` (Bit for n=1).
     match n {
         1 => types.bit(),
-        8 => types.primitive(Type::_8),
-        16 => types.primitive(Type::_16),
-        32 => types.primitive(Type::_32),
-        64 => types.primitive(Type::_64),
-        128 => types.primitive(Type::_128),
         n => {
             let bit = types.bit();
             types.intern(IrType::Vec(n, bit))

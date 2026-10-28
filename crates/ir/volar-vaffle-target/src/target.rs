@@ -200,10 +200,13 @@ impl VaffleTarget {
     pub fn with_pointer_width(pointer_width: PointerWidth) -> Self {
         let mut types = TypeTable::new();
         types.intern(IrType::Primitive(Type::Bit)); // bit_tid always at index 0
-        let addr_tid = types.primitive(match pointer_width {
-            PointerWidth::Bits32 => Type::_32,
-            PointerWidth::Bits64 => Type::_64,
-        });
+        // The `Type::_n` cutover: the pointer is `Vec(pointer_bits, Bit)`.
+        let ptr_bits = match pointer_width {
+            PointerWidth::Bits32 => 32,
+            PointerWidth::Bits64 => 64,
+        };
+        let addr_tid = types.intern(IrType::Vec(ptr_bits, volar_ir_common::TypeId(0)));
+
         VaffleTarget {
             module: Module {
                 pointer_width,
@@ -746,10 +749,24 @@ impl VaffleTarget {
     pub(crate) fn lir_type_to_tid(&mut self, ty: &LirType) -> TypeId {
         match ty {
             LirType::Bool => self.bit_tid(),
-            LirType::I8 | LirType::U8 => self.intern_type(IrType::Primitive(Type::_8)),
-            LirType::I16 | LirType::U16 => self.intern_type(IrType::Primitive(Type::_16)),
-            LirType::I32 | LirType::U32 => self.intern_type(IrType::Primitive(Type::_32)),
-            LirType::I64 | LirType::U64 => self.intern_type(IrType::Primitive(Type::_64)),
+            // The `Type::_n` cutover: an n-bit value is `Vec(n, Bit)`.
+            // (Hoist `bit_tid` first — `intern_type` and `bit_tid` both borrow self.)
+            LirType::I8 | LirType::U8 => {
+                let b = self.bit_tid();
+                self.intern_type(IrType::Vec(8, b))
+            }
+            LirType::I16 | LirType::U16 => {
+                let b = self.bit_tid();
+                self.intern_type(IrType::Vec(16, b))
+            }
+            LirType::I32 | LirType::U32 => {
+                let b = self.bit_tid();
+                self.intern_type(IrType::Vec(32, b))
+            }
+            LirType::I64 | LirType::U64 => {
+                let b = self.bit_tid();
+                self.intern_type(IrType::Vec(64, b))
+            }
             LirType::Native(t) => self.intern_type(IrType::Primitive(*t)),
             LirType::Arr(elem, n) => {
                 let elem_tid = self.lir_type_to_tid(elem);

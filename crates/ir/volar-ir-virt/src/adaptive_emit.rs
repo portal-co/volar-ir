@@ -39,8 +39,8 @@ pub(super) fn virtualize_ir_adaptive<P: Clone + Default, H: IrHashAlgorithm>(
     split_plan: AdaptiveSplitPlan,
     blocks_in: usize,
 ) -> VirtOutput<IRBlocks<P>> {
-    let addr_ty = types.intern(IRType::Primitive(PrimType::_32));
     let bit_ty = types.intern(IRType::Primitive(PrimType::Bit));
+    let addr_ty = types.intern(IRType::Vec(32, bit_ty));
 
     let per_block_canon = build_outer_canon_keys(cse_blocks, &split_plan.block_plans);
     let dedup = DedupTable::build(per_block_canon);
