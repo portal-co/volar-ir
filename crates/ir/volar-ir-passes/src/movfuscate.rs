@@ -4862,8 +4862,14 @@ mod tests {
                 .collect(),
                 terminator: IRTerminator::JumpCond {
                     condition: IRVarId(1),
-                    then_target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![]),
-                    else_target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(2)), std::vec![]),
+                    then_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![]
+                    ),
+                    else_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(2)),
+                        std::vec![]
+                    ),
                 },
             },
             // block 2 (exit): read s0, return it
@@ -4935,6 +4941,159 @@ mod tests {
             ret[0],
             std::vec![true],
             "the loop-carried storage write must propagate across two storages"
+        );
+    }
+
+    /// Like `storage_loop_carried_write`, but the storage address is a
+    /// multi-bit COMPUTED value (a Poly over the loop counter, matching the
+    /// LLVM frontend's `dynamic_addr` = alloca base + bit index), not a
+    /// constant. Isolates whether a non-constant address is the #5 trigger.
+    fn storage_loop_computed_addr() -> (IRBlocks, IRTypes) {
+        // u8 type for the address; Bit for the value.
+        let types = IRTypes(std::vec![
+            IRType::Primitive(Type::Bit),
+            IRType::Primitive(Type::_8),
+        ]);
+        let bit = IRTypeId(0);
+        let u8t = IRTypeId(1);
+        let stor = StorageId(1);
+        let blocks = IRBlocks::new(std::vec![
+            // block 0 (entry): counter=2 (u8), jump to block 1 with [counter]
+            IRBlock {
+                params: std::vec![],
+                stmts: std::vec![IRStmt::Const(Constant { hi: 0, lo: 2 }, u8t.clone())]
+                    .into_iter()
+                    .map(|s| Node::new(s, (), None))
+                    .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(0)],
+                    ),
+                },
+            },
+            // block 1 (loop): params=[counter: u8]. The storage addr is a
+            // COMPUTED value: counter (a u8), not a constant.
+            IRBlock {
+                params: std::vec![u8t.clone()],
+                stmts: std::vec![
+                    // v1 = StorageRead(stor, Bit, addr=counter) -- read s0 at addr=counter
+                    IRStmt::StorageRead {
+                        storage: stor,
+                        ty: bit.clone(),
+                        addr: IRVarId(0),
+                    },
+                    // v2 = v1 XOR 1 (flip s0)
+                    IRStmt::Poly {
+                        ty: bit.clone(),
+                        coeffs: PolyCoeffs::from_iter([(std::vec![IRVarId(1)], 1u8)]),
+                        constant: Constant { hi: 0, lo: 1 },
+                    },
+                    // v3 = StorageWrite(stor, v2, Bit, addr=counter) -- write s0 at addr=counter
+                    IRStmt::StorageWrite {
+                        storage: stor,
+                        src: IRVarId(2),
+                        ty: bit.clone(),
+                        addr: IRVarId(0),
+                    },
+                    // v4 = counter - 1 (a u8 Poly)
+                    IRStmt::Poly {
+                        ty: u8t.clone(),
+                        coeffs: PolyCoeffs::from_iter([(std::vec![IRVarId(0)], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0xff }, // -1 mod 256
+                    },
+                    // v5 = (v4 != 0) -- the loop condition (a Bit)
+                    IRStmt::Poly {
+                        ty: bit.clone(),
+                        coeffs: PolyCoeffs::from_iter([(std::vec![IRVarId(4)], 1u8)]),
+                        constant: Constant { hi: 0, lo: 0 },
+                    },
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::JumpCond {
+                    condition: IRVarId(5),
+                    then_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(1)),
+                        std::vec![IRVarId(4)],
+                    ),
+                    else_target: IRBranchTarget::new(
+                        IRBlockTargetId::Block(IRBlockId(2)),
+                        std::vec![],
+                    ),
+                },
+            },
+            // block 2 (exit): read s0 at addr=2 (the first write), return it
+            IRBlock {
+                params: std::vec![],
+                stmts: std::vec![
+                    IRStmt::Const(Constant { hi: 0, lo: 2 }, u8t.clone()), // v0: addr 2
+                    IRStmt::StorageRead {
+                        storage: stor,
+                        ty: bit.clone(),
+                        addr: IRVarId(0),
+                    },
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(1)]),
+                },
+            },
+        ]);
+        (blocks, types)
+    }
+
+    /// volar-ir#5 repro (computed address): the loop writes s0 at addr=counter
+    /// (2, then 1), the exit reads s0 at addr=2. Expects 1 iff the computed-
+    /// address write propagated.
+    #[test]
+    fn test_storage_loop_computed_addr() {
+        let (blocks, mut types) = storage_loop_computed_addr();
+        let movfuscated = movfuscate_ir(&blocks, &mut types);
+        assert!(movfuscated.is_movfuscated());
+        let bit_ty = IRTypeId(
+            types
+                .0
+                .iter()
+                .position(|t| matches!(t, IRType::Primitive(Type::Bit)))
+                .expect("Bit interned") as u32,
+        );
+        let circuit = crate::lower_to_circuit::lower_to_circuit_ir(
+            &movfuscated,
+            &bit_ty,
+            1,
+            crate::lower_to_circuit::LoweringMode::WithTerminationFlag,
+        );
+        let step = &circuit.blocks[0];
+        let n_params = step.params.len();
+        let widths: std::vec::Vec<usize> = step
+            .params
+            .iter()
+            .map(|&t| types.value_bit_width(t).expect("data type"))
+            .collect();
+        let mut state: std::vec::Vec<std::vec::Vec<bool>> =
+            widths.iter().map(|&w| std::vec![false; w]).collect();
+        let mut storage = volar_fuzz::interpreter::ir::StorageMap::default();
+        let ret = loop {
+            let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
+                step,
+                &types,
+                &circuit.oracles,
+                &state,
+                &mut storage,
+            );
+            if outputs[0].iter().any(|&b| b) {
+                break outputs[1 + n_params..].to_vec();
+            }
+            state = outputs[1..1 + n_params].to_vec();
+        };
+        assert_eq!(
+            ret[0],
+            std::vec![true],
+            "the computed-address loop-carried write must propagate"
         );
     }
 

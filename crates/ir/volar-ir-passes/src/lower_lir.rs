@@ -571,13 +571,9 @@ pub fn lower_ir_with_handler<P, T, H>(
 /// Compute the bit-width of an IR type.  Recurses into `Vec` element types.
 fn ir_type_bits(ty: &IRType, types: &IRTypes) -> u32 {
     match ty {
+        // The `Type::_n` cutover: only Bit is a primitive; wider bit-vectors
+        // are `Vec(n, Bit)`.
         IRType::Primitive(Type::Bit) => 1,
-        IRType::Primitive(Type::_8) => 8,
-        IRType::Primitive(Type::_16) => 16,
-        IRType::Primitive(Type::_32) => 32,
-        IRType::Primitive(Type::_64) => 64,
-        IRType::Primitive(Type::_128) => 128,
-        IRType::Primitive(Type::_256) => 256,
         IRType::Vec(n, elem_tid) => {
             (*n as u32) * ir_type_bits(&types.0[elem_tid.0 as usize], types)
         }

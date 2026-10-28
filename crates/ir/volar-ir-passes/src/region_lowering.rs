@@ -895,7 +895,8 @@ mod tests {
     fn types() -> (TypeTable, IRTypeId, IRTypeId) {
         let mut t = TypeTable::new();
         let bit = t.intern(IRType::Primitive(Type::Bit));
-        let w8 = t.intern(IRType::Primitive(Type::_8));
+        // The `Type::_n` cutover: an 8-bit value is `Vec(8, Bit)`.
+        let w8 = t.intern(IRType::Vec(8, bit));
         (t, bit, w8)
     }
 
