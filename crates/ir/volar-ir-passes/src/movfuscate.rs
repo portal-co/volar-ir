@@ -4789,6 +4789,155 @@ mod tests {
         (blocks, types)
     }
 
+    /// Like `storage_loop_carried_write`, but the loop-carried value lives in
+    /// a SECOND storage (a per-alloca-like setup, matching the LLVM frontend's
+    /// one-storage-per-alloca frame model) — isolating whether the multi-
+    /// storage layout is the #5 trigger.
+    fn storage_loop_carried_write_two_storages() -> (IRBlocks, IRTypes) {
+        let types = IRTypes(std::vec![IRType::Primitive(Type::Bit)]);
+        let bit = IRTypeId(0);
+        let stor_flag = StorageId(1); // the flag's storage (one "alloca")
+        let stor_s0 = StorageId(2); // s0's storage (another "alloca")
+        let blocks = IRBlocks::new(std::vec![
+            // block 0 (entry): flag=1 into stor_flag, jump to block 1
+            IRBlock {
+                params: std::vec![],
+                stmts: std::vec![
+                    IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone()), // v0: addr 0
+                    IRStmt::Const(Constant { hi: 0, lo: 1 }, bit.clone()), // v1: 1
+                    IRStmt::StorageWrite {
+                        storage: stor_flag,
+                        src: IRVarId(1),
+                        ty: bit.clone(),
+                        addr: IRVarId(0),
+                    },
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![]),
+                },
+            },
+            // block 1 (loop): no params; read flag + s0, write s0, loop while flag
+            IRBlock {
+                params: std::vec![],
+                stmts: std::vec![
+                    IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone()), // v0: addr 0
+                    IRStmt::StorageRead {
+                        storage: stor_flag,
+                        ty: bit.clone(),
+                        addr: IRVarId(0),
+                    }, // v1: flag
+                    IRStmt::StorageRead {
+                        storage: stor_s0,
+                        ty: bit.clone(),
+                        addr: IRVarId(0),
+                    }, // v2: s0
+                    // v3 = v2 XOR v1 (s0 XOR flag)
+                    IRStmt::Poly {
+                        ty: bit.clone(),
+                        coeffs: PolyCoeffs::from_iter([
+                            (std::vec![IRVarId(2)], 1u8),
+                            (std::vec![IRVarId(1)], 1u8),
+                        ]),
+                        constant: Constant { hi: 0, lo: 0 },
+                    },
+                    IRStmt::StorageWrite {
+                        storage: stor_s0,
+                        src: IRVarId(3),
+                        ty: bit.clone(),
+                        addr: IRVarId(0),
+                    }, // v4: write s0
+                    IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone()), // v5: 0
+                    IRStmt::StorageWrite {
+                        storage: stor_flag,
+                        src: IRVarId(5),
+                        ty: bit.clone(),
+                        addr: IRVarId(0),
+                    }, // v6: flag = 0
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::JumpCond {
+                    condition: IRVarId(1),
+                    then_target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(1)), std::vec![]),
+                    else_target: IRBranchTarget::new(IRBlockTargetId::Block(IRBlockId(2)), std::vec![]),
+                },
+            },
+            // block 2 (exit): read s0, return it
+            IRBlock {
+                params: std::vec![],
+                stmts: std::vec![
+                    IRStmt::Const(Constant { hi: 0, lo: 0 }, bit.clone()),
+                    IRStmt::StorageRead {
+                        storage: stor_s0,
+                        ty: bit.clone(),
+                        addr: IRVarId(0),
+                    },
+                ]
+                .into_iter()
+                .map(|s| Node::new(s, (), None))
+                .collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, std::vec![IRVarId(1)]),
+                },
+            },
+        ]);
+        (blocks, types)
+    }
+
+    /// volar-ir#5 repro (multi-storage): the loop-carried value lives in a
+    /// second storage. The exit must read s0 == 1 (the write propagated).
+    #[test]
+    fn test_storage_loop_carried_write_two_storages() {
+        let (blocks, mut types) = storage_loop_carried_write_two_storages();
+        let movfuscated = movfuscate_ir(&blocks, &mut types);
+        assert!(movfuscated.is_movfuscated());
+        let bit_ty = IRTypeId(
+            types
+                .0
+                .iter()
+                .position(|t| matches!(t, IRType::Primitive(Type::Bit)))
+                .expect("Bit interned") as u32,
+        );
+        let circuit = crate::lower_to_circuit::lower_to_circuit_ir(
+            &movfuscated,
+            &bit_ty,
+            1,
+            crate::lower_to_circuit::LoweringMode::WithTerminationFlag,
+        );
+        let step = &circuit.blocks[0];
+        let n_params = step.params.len();
+        let widths: std::vec::Vec<usize> = step
+            .params
+            .iter()
+            .map(|&t| types.value_bit_width(t).expect("data type"))
+            .collect();
+        let mut state: std::vec::Vec<std::vec::Vec<bool>> =
+            widths.iter().map(|&w| std::vec![false; w]).collect();
+        let mut storage = volar_fuzz::interpreter::ir::StorageMap::default();
+        let ret = loop {
+            let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
+                step,
+                &types,
+                &circuit.oracles,
+                &state,
+                &mut storage,
+            );
+            if outputs[0].iter().any(|&b| b) {
+                break outputs[1 + n_params..].to_vec();
+            }
+            state = outputs[1..1 + n_params].to_vec();
+        };
+        assert_eq!(
+            ret[0],
+            std::vec![true],
+            "the loop-carried storage write must propagate across two storages"
+        );
+    }
+
     /// volar-ir#5 repro: drive the movfuscated step circuit and check the
     /// loop-carried storage write propagates (the exit reads s0 == 1).
     #[test]
