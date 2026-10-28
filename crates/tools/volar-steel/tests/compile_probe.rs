@@ -603,23 +603,31 @@ fn s6b_evm_stepper_reaches_a_step_circuit() {
                     pc |= 1 << j;
                 }
             }
-            // dump the storage (the frame: i, sp, pc live here) — the nonzero u64 cells.
-            let mut cells = Vec::new();
+            // dump ALL storage cells (grouped by lane) — the frame's i/sp/pc
+            // live here; we want to see whether they change across steps.
+            let mut by_lane: std::collections::BTreeMap<u32, Vec<String>> =
+                std::collections::BTreeMap::new();
             for (k, v) in storage.iter() {
-                if v.len() == 64 {
-                    let mut val = 0u64;
-                    for (b, &bit) in v.iter().enumerate() {
-                        if bit {
-                            val |= 1 << b;
-                        }
-                    }
-                    if val != 0 {
-                        cells.push(format!("{:?}={val:#x}", k));
+                let (sid, _tid, addr) = (k.0.0, k.1.0, k.2);
+                let mut val = 0u128;
+                for (b, &bit) in v.iter().take(128).enumerate() {
+                    if bit {
+                        val |= 1u128 << b;
                     }
                 }
+                by_lane
+                    .entry(sid)
+                    .or_default()
+                    .push(format!("@{addr}={val:#x}({}b)", v.len()));
             }
-            cells.sort();
-            eprintln!("  s6b step {steps}: pc={pc} storage_cells({})={cells:?}", cells.len());
+            let summary: Vec<String> = by_lane
+                .iter()
+                .map(|(sid, cells)| format!("lane{sid}:[{}]", cells.join(",")))
+                .collect();
+            eprintln!(
+                "  s6b step {steps}: pc={pc} lanes({})={summary:?}",
+                by_lane.len()
+            );
         }
         state = outputs[1..1 + n_params].to_vec();
         steps += 1;
