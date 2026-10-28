@@ -28,15 +28,14 @@ use crate::interpreter::ir::primitive_width;
 // Constants
 // ============================================================================
 
-/// Primitive types used in generated IR (chosen for u128-representability).
-pub const PRIM_TYPES: &[Type] = &[
-    Type::Bit,
-    Type::_8,
-    Type::_16,
-    Type::_32,
-    Type::_64,
-    Type::_128,
-];
+/// Primitive types used in generated IR. The `Type::_n` cutover: only Bit is
+/// a primitive; the wider bit-vectors are `Vec(n, Bit)` (generated via
+/// [`VEC_WIDTHS`] below, not as primitives).
+pub const PRIM_TYPES: &[Type] = &[Type::Bit];
+
+/// The bit-widths the generator uses for `Vec(n, Bit)` values (replacing the
+/// removed `Type::_n` primitives).
+pub const VEC_WIDTHS: &[usize] = &[8, 16, 32, 64, 128];
 
 // ============================================================================
 // Raw data types

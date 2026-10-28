@@ -587,14 +587,10 @@ pub fn bit_width(ty_id: TypeId, types: &IRTypes) -> usize {
 
 /// Bit width of a primitive `Type`.
 pub fn primitive_width(ty: Type) -> usize {
+    // The `Type::_n` cutover: only Bit is a primitive; a wider bit-vector is
+    // `Vec(n, Bit)` (its width comes from the Vec, not here).
     match ty {
         Type::Bit => 1,
-        Type::_8 => 8,
-        Type::_16 => 16,
-        Type::_32 => 32,
-        Type::_64 => 64,
-        Type::_128 => 128,
-        Type::_256 => 256,
         _ => panic!("primitive_width: unknown Type variant"),
     }
 }
@@ -919,7 +915,7 @@ mod tests {
     #[test]
     fn rol_8bit() {
         let mut types = TypeTable::new();
-        let u8_ty = types.primitive(Type::_8);
+        let u8_ty = { let b = types.primitive(Type::Bit); types.intern(IRType::Vec(8, b)) };
         let v0 = IRVarId(0);
         let stmt = Stmt::Rol {
             src: v0,
@@ -942,7 +938,7 @@ mod tests {
     fn merge_two_bits_into_byte() {
         let mut types = TypeTable::new();
         let bit = types.bit();
-        let u8_ty = types.primitive(Type::_8);
+        let u8_ty = { let b = types.primitive(Type::Bit); types.intern(IRType::Vec(8, b)) };
         // Params: 2 bits. Merge them + 6 zero-bits into a byte.
         // Actually just test Merge of bit-typed parts into a byte.
         let v0 = IRVarId(0);

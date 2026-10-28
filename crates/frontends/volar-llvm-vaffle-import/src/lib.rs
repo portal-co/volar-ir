@@ -580,11 +580,9 @@ impl<'ctx> Importer<'ctx> {
         let pointer_bits = pointer_width.bits();
         let mut types = TypeTable::new();
         let bit_tid = types.bit();
-        let byte_tid = types.primitive(Type::_8);
-        let addr_tid = types.primitive(match pointer_width {
-            PointerWidth::Bits32 => Type::_32,
-            PointerWidth::Bits64 => Type::_64,
-        });
+        // The `Type::_n` cutover: an n-bit value is `Vec(n, Bit)`.
+        let byte_tid = types.intern(IrType::Vec(8, bit_tid));
+        let addr_tid = types.intern(IrType::Vec(pointer_width.bits() as usize, bit_tid));
         Importer {
             pointer_width,
             pointer_bits,
@@ -791,16 +789,14 @@ impl<'ctx> Importer<'ctx> {
             .unwrap_or_else(|_| panic!("expected a basic type"));
         Ok(match ty {
             BasicTypeEnum::IntType(i) => {
-                let t = match i.get_bit_width() {
-                    1 => Type::Bit,
-                    8 => Type::_8,
-                    16 => Type::_16,
-                    32 => Type::_32,
-                    64 => Type::_64,
-                    128 => Type::_128,
-                    _ => Type::_64, // best-effort fallback; conservative
-                };
-                self.types.primitive(t)
+                let w = i.get_bit_width() as usize;
+                if w == 1 {
+                    self.types.bit()
+                } else {
+                    // The `Type::_n` cutover: an n-bit value is `Vec(n, Bit)`.
+                    let bit = self.types.bit();
+                    self.types.intern(IrType::Vec(w, bit))
+                }
             }
             // Pointer values use the module ABI width. Other unsupported
             // types retain the historical best-effort integer fallback.
@@ -812,7 +808,11 @@ impl<'ctx> Importer<'ctx> {
                 }
                 self.addr_tid
             }
-            _ => self.types.primitive(Type::_32),
+            // The `Type::_n` cutover: an n-bit value is `Vec(n, Bit)`.
+            _ => {
+                let bit = self.types.bit();
+                self.types.intern(IrType::Vec(32, bit))
+            }
         })
     }
 
@@ -2085,7 +2085,8 @@ impl<'ctx> Importer<'ctx> {
         // results [u64; 2] = (ct_lo, ct_hi), each u64 little-endian
         // byte-packed (matching the contract's byte-major, LSB-first-in-byte
         // bit layout).
-        let u64_tid = self.types.primitive(Type::_64);
+        // The `Type::_n` cutover: a 64-bit word is `Vec(64, Bit)`.
+        let u64_tid = self.types.intern(IrType::Vec(64, self.bit_tid));
         if !self
             .oracles
             .iter()
