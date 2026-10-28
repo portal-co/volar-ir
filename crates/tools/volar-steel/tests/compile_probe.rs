@@ -608,15 +608,26 @@ fn stepper_min_at_o0() {
     let bit_ty = types
         .0
         .iter()
-        .position(|t| matches!(t, volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)))
+        .position(|t| {
+            matches!(
+                t,
+                volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)
+            )
+        })
         .map(|i| volar_ir::ir::IRTypeId(i as u32))
         .expect("Bit interned");
     let circuit = volar_ir_passes::lower_to_circuit::lower_to_circuit_ir(
-        &movfuscated, &bit_ty, 1,
+        &movfuscated,
+        &bit_ty,
+        1,
         volar_ir_passes::lower_to_circuit::LoweringMode::WithTerminationFlag,
     );
     let step = &circuit.blocks[0];
-    eprintln!("stepper_min: step block — {} params, {} stmts", step.params.len(), step.stmts.len());
+    eprintln!(
+        "stepper_min: step block — {} params, {} stmts",
+        step.params.len(),
+        step.stmts.len()
+    );
     let widths: Vec<usize> = step
         .params
         .iter()
@@ -644,11 +655,38 @@ fn stepper_min_at_o0() {
     let ret_vals;
     loop {
         let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
-            step, &types, &circuit.oracles, &state, &mut storage,
+            step,
+            &types,
+            &circuit.oracles,
+            &state,
+            &mut storage,
         );
         if outputs[0].iter().any(|&b| b) {
             ret_vals = outputs[1 + n_params..].to_vec();
             break;
+        }
+        if steps < 12 {
+            let mut pc = 0usize;
+            for j in 0..pc_width {
+                if outputs[1 + j][0] {
+                    pc |= 1 << j;
+                }
+            }
+            // the nonzero storage cells (the frame: s0, s1, sp live here)
+            let mut cells = Vec::new();
+            for (k, v) in storage.iter() {
+                let mut val = 0u64;
+                for (b, &bit) in v.iter().take(64).enumerate() {
+                    if bit {
+                        val |= 1 << b;
+                    }
+                }
+                if val != 0 {
+                    cells.push(format!("({},{},{})={val:#x}", k.0.0, k.1.0, k.2));
+                }
+            }
+            cells.sort();
+            eprintln!("  sm step {steps}: pc={pc} nonzero={cells:?}");
         }
         state = outputs[1..1 + n_params].to_vec();
         steps += 1;
