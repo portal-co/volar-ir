@@ -598,10 +598,10 @@ fn frame_scalar_at_o1_works() {
     assert_eq!(got, 40, "the frame+register scalar loop must work");
 }
 
-/// #5 repro at -O0: the frame-carried scalars (spilled to the frame at -O0).
+/// #5 bisection: the minimal stepper (just PUSH1 + ADD) at -O0.
 #[test]
-fn frame_scalar_at_o0_works() {
-    let (blocks, mut types) = import_program_to_ir("frame_scalar_o0.ll", "sum_with_array");
+fn stepper_min_at_o0() {
+    let (blocks, mut types) = import_program_to_ir("stepper_min_o0.ll", "step_min");
     let entry_slots =
         volar_ir_passes::movfuscate::movfuscate_entry_param_slots(&blocks, &mut types);
     let movfuscated = volar_ir_passes::movfuscate::movfuscate_ir(&blocks, &mut types);
@@ -616,7 +616,91 @@ fn frame_scalar_at_o0_works() {
         volar_ir_passes::lower_to_circuit::LoweringMode::WithTerminationFlag,
     );
     let step = &circuit.blocks[0];
-    eprintln!("frame_scalar_o0: step block — {} params, {} stmts", step.params.len(), step.stmts.len());
+    eprintln!("stepper_min: step block — {} params, {} stmts", step.params.len(), step.stmts.len());
+    let widths: Vec<usize> = step
+        .params
+        .iter()
+        .map(|&t| types.value_bit_width(t).expect("data type"))
+        .collect();
+    let pc_width = widths.iter().take_while(|&&w| w == 1).count();
+    let n_params = step.params.len();
+    // step_min(code=[PUSH1,5,PUSH1,3,ADD], steps=5): 5+3 = 8.
+    let inputs = [0x60u64, 5, 0x60, 3, 0x01, 5];
+    let mut state: Vec<Vec<bool>> = widths.iter().map(|&w| vec![false; w]).collect();
+    for (k, &inp) in inputs.iter().enumerate() {
+        if k >= entry_slots.len() {
+            break;
+        }
+        let (slot_start, _c) = entry_slots[k];
+        let slot = pc_width + slot_start;
+        if slot < state.len() && state[slot].len() == 64 {
+            for b in 0..64 {
+                state[slot][b] = (inp >> b) & 1 == 1;
+            }
+        }
+    }
+    let mut storage = Default::default();
+    let mut steps = 0usize;
+    let ret_vals;
+    loop {
+        let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
+            step, &types, &circuit.oracles, &state, &mut storage,
+        );
+        if outputs[0].iter().any(|&b| b) {
+            ret_vals = outputs[1 + n_params..].to_vec();
+            break;
+        }
+        state = outputs[1..1 + n_params].to_vec();
+        steps += 1;
+        assert!(steps <= 64, "the minimal stepper did not terminate");
+    }
+    let mut got = 0u64;
+    let mut bitidx = 0;
+    'outer: for slot in &ret_vals {
+        for &bit in slot {
+            if bitidx >= 64 {
+                break 'outer;
+            }
+            if bit {
+                got |= 1 << bitidx;
+            }
+            bitidx += 1;
+        }
+    }
+    eprintln!("stepper_min: circuit={got} (expect 8), {steps} steps");
+    assert_eq!(got, 8, "the minimal stepper must match native");
+}
+
+/// #5 repro at -O0: the frame-carried scalars (spilled to the frame at -O0).
+#[test]
+fn frame_scalar_at_o0_works() {
+    let (blocks, mut types) = import_program_to_ir("frame_scalar_o0.ll", "sum_with_array");
+    let entry_slots =
+        volar_ir_passes::movfuscate::movfuscate_entry_param_slots(&blocks, &mut types);
+    let movfuscated = volar_ir_passes::movfuscate::movfuscate_ir(&blocks, &mut types);
+    let bit_ty = types
+        .0
+        .iter()
+        .position(|t| {
+            matches!(
+                t,
+                volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)
+            )
+        })
+        .map(|i| volar_ir::ir::IRTypeId(i as u32))
+        .expect("Bit interned");
+    let circuit = volar_ir_passes::lower_to_circuit::lower_to_circuit_ir(
+        &movfuscated,
+        &bit_ty,
+        1,
+        volar_ir_passes::lower_to_circuit::LoweringMode::WithTerminationFlag,
+    );
+    let step = &circuit.blocks[0];
+    eprintln!(
+        "frame_scalar_o0: step block — {} params, {} stmts",
+        step.params.len(),
+        step.stmts.len()
+    );
     let widths: Vec<usize> = step
         .params
         .iter()
@@ -644,7 +728,11 @@ fn frame_scalar_at_o0_works() {
     let ret_vals;
     loop {
         let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
-            step, &types, &circuit.oracles, &state, &mut storage,
+            step,
+            &types,
+            &circuit.oracles,
+            &state,
+            &mut storage,
         );
         if outputs[0].iter().any(|&b| b) {
             ret_vals = outputs[1 + n_params..].to_vec();
