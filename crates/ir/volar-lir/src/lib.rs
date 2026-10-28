@@ -168,14 +168,10 @@ impl LirType {
                 .checked_mul(*degree)
                 .expect("extension-field width overflow"),
             LirType::PrimeField { k, .. } => *k,
+            // The `Type::_n` cutover: the shared primitive Type is now Bit-only;
+            // a wider native bit-vector is `LirType::Vector(Native(Bit), n)`.
             LirType::Native(native) => match native {
                 NativeType::Bit => 1,
-                NativeType::_8 => 8,
-                NativeType::_16 => 16,
-                NativeType::_32 => 32,
-                NativeType::_64 => 64,
-                NativeType::_128 => 128,
-                NativeType::_256 => 256,
                 _ => panic!("bit_width not defined for native primitive {native:?}"),
             },
             LirType::Struct(_) => panic!("bit_width not defined for Struct"),
