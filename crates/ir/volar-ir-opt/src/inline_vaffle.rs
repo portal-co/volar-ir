@@ -432,10 +432,12 @@ fn inline_return_calls_in_function<P: Clone>(
 
 fn live_callee_ids<P: Clone>(body: &FuncBody<P>) -> impl Iterator<Item = FuncId> + '_ {
     let from_stmts = body.blocks.iter().flat_map(|b| {
-        b.stmts.iter().filter_map(|&vid| match &body.values[vid.0].kind {
-            Value::Call { func, .. } => Some(*func),
-            _ => None,
-        })
+        b.stmts
+            .iter()
+            .filter_map(|&vid| match &body.values[vid.0].kind {
+                Value::Call { func, .. } => Some(*func),
+                _ => None,
+            })
     });
     let from_terms = body.blocks.iter().filter_map(|b| match &b.terminator {
         Terminator::ReturnCall { func, .. } => Some(*func),
@@ -693,9 +695,7 @@ fn splice_return_call<P: Clone>(
         };
         match &body.blocks[block_id.0].terminator {
             Terminator::ReturnCall { args, .. } => args.clone(),
-            _ => panic!(
-                "inline_vaffle::splice_return_call: block terminator is not ReturnCall"
-            ),
+            _ => panic!("inline_vaffle::splice_return_call: block terminator is not ReturnCall"),
         }
     };
 
@@ -823,7 +823,9 @@ mod tests {
     };
     use volar_ir_common::{Constant, Node, Stmt, Type, TypeId, TypeTable};
 
-    use super::{InlineBudget, InlineEverythingError, inline_vaffle_everything, inline_vaffle_module};
+    use super::{
+        InlineBudget, InlineEverythingError, inline_vaffle_everything, inline_vaffle_module,
+    };
 
     fn empty_module() -> Module {
         Module {
@@ -1501,9 +1503,9 @@ mod tests {
     }
 
     fn has_live_return_call_to(body: &FuncBody, callee: FuncId) -> bool {
-        body.blocks.iter().any(|b| {
-            matches!(&b.terminator, Terminator::ReturnCall { func, .. } if *func == callee)
-        })
+        body.blocks.iter().any(
+            |b| matches!(&b.terminator, Terminator::ReturnCall { func, .. } if *func == callee),
+        )
     }
 
     /// LLVM import bit-blasts a single wide SigDecl result into one
@@ -1575,8 +1577,22 @@ mod tests {
                     (),
                     None,
                 ),
-                Node::new(Value::Output { value: ValueId(2), idx: 0 }, (), None),
-                Node::new(Value::Output { value: ValueId(2), idx: 1 }, (), None),
+                Node::new(
+                    Value::Output {
+                        value: ValueId(2),
+                        idx: 0,
+                    },
+                    (),
+                    None,
+                ),
+                Node::new(
+                    Value::Output {
+                        value: ValueId(2),
+                        idx: 1,
+                    },
+                    (),
+                    None,
+                ),
             ],
             entry: BlockId(0),
         };
@@ -1591,7 +1607,9 @@ mod tests {
         for vid in [ValueId(3), ValueId(4)] {
             match &caller.values[vid.0].kind {
                 Value::Param { .. } => {}
-                other => panic!("expected Output {vid:?} to become a continuation param, got {other:?}"),
+                other => {
+                    panic!("expected Output {vid:?} to become a continuation param, got {other:?}")
+                }
             }
         }
         let owned: BTreeSet<usize> = caller
@@ -1693,9 +1711,12 @@ mod tests {
             !has_live_call_to(caller, FuncId(1)),
             "no live Body-to-Body call should remain"
         );
-        assert!(!caller.blocks.iter().any(|b| {
-            matches!(&b.terminator, Terminator::ReturnCall { .. })
-        }));
+        assert!(
+            !caller
+                .blocks
+                .iter()
+                .any(|b| { matches!(&b.terminator, Terminator::ReturnCall { .. }) })
+        );
     }
 
     #[test]

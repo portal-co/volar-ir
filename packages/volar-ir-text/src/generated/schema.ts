@@ -33,12 +33,6 @@ export const ROOTS: Readonly<Record<PortableRootId, RootMetadata>> = {
 // and Node callers preserve the full portable integer domain.
 export type PrimitiveType =
   | "Bit"
-  | "_8"
-  | "_16"
-  | "_32"
-  | "_64"
-  | "_128"
-  | "_256"
 ;
 export interface Constant {
   readonly hi: bigint;

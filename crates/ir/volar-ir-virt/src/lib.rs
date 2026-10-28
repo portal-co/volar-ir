@@ -253,10 +253,12 @@ mod cutover_repro_tests {
                     }
                 }
                 // The stmt defines a new var.
-                defined.insert(b.params.len() as u32 + /* stmt idx */ {
+                defined.insert(
+                    b.params.len() as u32 + /* stmt idx */ {
                     // Find the stmt's index.
                     b.stmts.iter().position(|x| core::ptr::eq(x, s)).unwrap_or(0) as u32
-                });
+                },
+                );
             }
         }
     }

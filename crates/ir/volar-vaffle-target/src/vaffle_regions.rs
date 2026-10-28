@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 use vaffle::{FuncDecl, FuncId, Module};
 use volar_ir::ir::IRTypeId;
 use volar_ir::typed_gadget::{
-    typed_bit_width, TypedAnchor, TypedRegionEntry, TypedRegionError, TypedRegionTable,
+    TypedAnchor, TypedRegionEntry, TypedRegionError, TypedRegionTable, typed_bit_width,
 };
 use volar_ir_common::{PreInitSegment, StorageId};
 
@@ -63,13 +63,23 @@ pub fn validate_vaffle_regions(
     table.validate_structure()?;
     for entry in &table.entries {
         match &entry.anchor {
-            TypedAnchor::FuncInput { func, param, start, len } => {
+            TypedAnchor::FuncInput {
+                func,
+                param,
+                start,
+                len,
+            } => {
                 let width = func_param_width(table, module, *func, *param, entry)?;
                 check_range(entry, *start, *len, width)?;
             }
-            TypedAnchor::FuncOutput { func, result, start, len } => {
-                let width = func_result_width(module, *func, *result)
-                    .ok_or_else(|| carrier(entry))?;
+            TypedAnchor::FuncOutput {
+                func,
+                result,
+                start,
+                len,
+            } => {
+                let width =
+                    func_result_width(module, *func, *result).ok_or_else(|| carrier(entry))?;
                 check_range(entry, *start, *len, width)?;
             }
             TypedAnchor::Storage { storage, ty, .. } => {
@@ -219,7 +229,12 @@ pub fn translate_vaffle_regions(
     table.validate_structure()?;
     if entry_func.0 >= module.funcs.len() {
         return Err(VaffleRegionError::UnknownFunction {
-            anchor: TypedAnchor::FuncInput { func: entry_func.0 as u32, param: 0, start: 0, len: 0 },
+            anchor: TypedAnchor::FuncInput {
+                func: entry_func.0 as u32,
+                param: 0,
+                start: 0,
+                len: 0,
+            },
             func: entry_func.0 as u32,
         });
     }
@@ -295,10 +310,7 @@ mod tests {
         let body = FuncBody {
             sig: SigId(0),
             blocks: vec![Block {
-                params: vec![
-                    (ValueId(0), w8),
-                    (ValueId(1), w8),
-                ],
+                params: vec![(ValueId(0), w8), (ValueId(1), w8)],
                 stmts: vec![],
                 terminator: vaffle::Terminator::Return {
                     values: vec![ValueId(0)],
@@ -327,11 +339,21 @@ mod tests {
         let table = TypedRegionTable {
             entries: vec![
                 TypedRegionEntry {
-                    anchor: TypedAnchor::FuncInput { func: 0, param: 0, start: 1, len: 3 },
+                    anchor: TypedAnchor::FuncInput {
+                        func: 0,
+                        param: 0,
+                        start: 1,
+                        len: 3,
+                    },
                     regions: BTreeSet::from([volar_ir::region::RegionId(0)]),
                 },
                 TypedRegionEntry {
-                    anchor: TypedAnchor::FuncOutput { func: 0, result: 0, start: 0, len: 8 },
+                    anchor: TypedAnchor::FuncOutput {
+                        func: 0,
+                        result: 0,
+                        start: 0,
+                        len: 8,
+                    },
                     regions: BTreeSet::from([volar_ir::region::RegionId(1)]),
                 },
             ],
@@ -346,10 +368,15 @@ mod tests {
             entries: vec![table.entries[0].clone()],
             names: BTreeMap::new(),
         };
-        let lowered = translate_vaffle_regions(&inputs_only, &module, FuncId(0)).expect("translates");
+        let lowered =
+            translate_vaffle_regions(&inputs_only, &module, FuncId(0)).expect("translates");
         assert!(matches!(
             &lowered.entries[0].anchor,
-            TypedAnchor::Input { param: 0, start: 1, len: 3 }
+            TypedAnchor::Input {
+                param: 0,
+                start: 1,
+                len: 3
+            }
         ));
         assert_eq!(lowered.entries.len(), 1);
         assert!(lowered.validate_structure().is_ok());
@@ -366,7 +393,12 @@ mod tests {
         // Non-entry function anchor: unknown function 1.
         let table = TypedRegionTable {
             entries: vec![TypedRegionEntry {
-                anchor: TypedAnchor::FuncInput { func: 1, param: 0, start: 0, len: 1 },
+                anchor: TypedAnchor::FuncInput {
+                    func: 1,
+                    param: 0,
+                    start: 0,
+                    len: 1,
+                },
                 regions: BTreeSet::from([volar_ir::region::RegionId(0)]),
             }],
             names: BTreeMap::new(),
@@ -383,20 +415,31 @@ mod tests {
         // Out-of-range param bits (w8 = 8 bits).
         let table = TypedRegionTable {
             entries: vec![TypedRegionEntry {
-                anchor: TypedAnchor::FuncInput { func: 0, param: 0, start: 6, len: 4 },
+                anchor: TypedAnchor::FuncInput {
+                    func: 0,
+                    param: 0,
+                    start: 6,
+                    len: 4,
+                },
                 regions: BTreeSet::from([volar_ir::region::RegionId(0)]),
             }],
             names: BTreeMap::new(),
         };
         assert!(matches!(
             validate_vaffle_regions(&table, &module),
-            Err(VaffleRegionError::Region(TypedRegionError::RangeOutOfRange { width: 8, .. }))
+            Err(VaffleRegionError::Region(
+                TypedRegionError::RangeOutOfRange { width: 8, .. }
+            ))
         ));
 
         // Unsupported anchor level.
         let table = TypedRegionTable {
             entries: vec![TypedRegionEntry {
-                anchor: TypedAnchor::Input { param: 0, start: 0, len: 1 },
+                anchor: TypedAnchor::Input {
+                    param: 0,
+                    start: 0,
+                    len: 1,
+                },
                 regions: BTreeSet::from([volar_ir::region::RegionId(0)]),
             }],
             names: BTreeMap::new(),
