@@ -94,12 +94,10 @@ impl rkyv::Archive for BIrPreInitSegment {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).storage) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        let _: () = resolver.storage;
-        rkyv::Archive::resolve(&self.storage, (), field_out);
+        rkyv::Archive::resolve(&self.storage, resolver.storage, field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).lane) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        let _: () = resolver.lane;
-        rkyv::Archive::resolve(&self.lane, (), field_out);
+        rkyv::Archive::resolve(&self.lane, resolver.lane, field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).addr) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.addr, resolver.addr, field_out);
@@ -262,8 +260,7 @@ impl<P: Clone + rkyv::Archive> rkyv::Archive for BIrBlock<P> {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).params) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        let _: () = resolver.params;
-        rkyv::Archive::resolve(&self.params, (), field_out);
+        rkyv::Archive::resolve(&self.params, resolver.params, field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).stmts) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.stmts, resolver.stmts, field_out);

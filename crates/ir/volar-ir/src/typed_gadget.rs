@@ -45,14 +45,10 @@ use crate::region::{RegionId, RegionNames, RegionSelector};
 /// `Block`/`Func` types have width 0 (control-flow labels carry no bits).
 pub fn typed_bit_width(ty_id: IRTypeId, types: &IRTypes) -> Option<usize> {
     match &types.0[ty_id.0 as usize] {
+        // The `Type::_n` cutover: only Bit is a primitive; wider bit-vectors
+        // are `Vec(n, Bit)` (handled by the Vec arm below).
         IRType::Primitive(t) => match t {
             volar_ir_common::Type::Bit => Some(1),
-            volar_ir_common::Type::_8 => Some(8),
-            volar_ir_common::Type::_16 => Some(16),
-            volar_ir_common::Type::_32 => Some(32),
-            volar_ir_common::Type::_64 => Some(64),
-            volar_ir_common::Type::_128 => Some(128),
-            volar_ir_common::Type::_256 => Some(256),
             _ => None,
         },
         IRType::Vec(n, elem) => typed_bit_width(*elem, types).map(|w| n.saturating_mul(w)),

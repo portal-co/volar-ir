@@ -136,8 +136,7 @@ impl<P: Clone + rkyv::Archive> rkyv::Archive for BCircuit<P> {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).params) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
-        let _: () = resolver.params;
-        rkyv::Archive::resolve(&self.params, (), field_out);
+        rkyv::Archive::resolve(&self.params, resolver.params, field_out);
         let field_ptr = unsafe { ::core::ptr::addr_of_mut!((*out.ptr()).stmts) };
         let field_out = unsafe { rkyv::Place::from_field_unchecked(out, field_ptr) };
         rkyv::Archive::resolve(&self.stmts, resolver.stmts, field_out);
