@@ -184,11 +184,19 @@ mod cutover_repro_tests {
                 mk(IRStmt::Const(Constant { hi: 0, lo: 1 }, bit)),
                 mk(IRStmt::Const(Constant { hi: 0, lo: 0 }, bit)),
                 mk(IRStmt::Const(Constant { hi: 0, lo: 1 }, bit)),
+                mk(IRStmt::Const(Constant { hi: 0, lo: 0 }, bit)),
             ],
             terminator: IRTerminator::Jmp {
                 target: IRBranchTarget::new(
                     IRBlockTargetId::Return,
-                    vec![IRVarId(0), IRVarId(1), IRVarId(2), IRVarId(3), IRVarId(4)],
+                    vec![
+                        IRVarId(0),
+                        IRVarId(1),
+                        IRVarId(2),
+                        IRVarId(3),
+                        IRVarId(4),
+                        IRVarId(5),
+                    ],
                 ),
             },
         };
