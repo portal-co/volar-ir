@@ -509,6 +509,81 @@ fn s6b_dump_entry_slots() {
     }
 }
 
+/// #5 repro: a loop with a frame-carried array + a register-carried scalar.
+/// At -O1 the scalars are in registers (no frame); the array is the only
+/// alloca. Does the loop-carried scalar (in registers) + the frame's array
+/// work together?
+#[test]
+fn frame_scalar_at_o1_works() {
+    let (blocks, mut types) = import_program_to_ir("frame_scalar_o1.ll", "sum_with_array");
+    let entry_slots =
+        volar_ir_passes::movfuscate::movfuscate_entry_param_slots(&blocks, &mut types);
+    let movfuscated = volar_ir_passes::movfuscate::movfuscate_ir(&blocks, &mut types);
+    let bit_ty = types
+        .0
+        .iter()
+        .position(|t| matches!(t, volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)))
+        .map(|i| volar_ir::ir::IRTypeId(i as u32))
+        .expect("Bit interned");
+    let circuit = volar_ir_passes::lower_to_circuit::lower_to_circuit_ir(
+        &movfuscated, &bit_ty, 1,
+        volar_ir_passes::lower_to_circuit::LoweringMode::WithTerminationFlag,
+    );
+    let step = &circuit.blocks[0];
+    let widths: Vec<usize> = step
+        .params
+        .iter()
+        .map(|&t| types.value_bit_width(t).expect("data type"))
+        .collect();
+    let pc_width = widths.iter().take_while(|&&w| w == 1).count();
+    let n_params = step.params.len();
+    // sum_with_array(a0=10, a1=20, n=3): 10 + 20 + 10 = 40 (i=0,1,2 -> arr[0],arr[1],arr[0])
+    let inputs = [10u64, 20, 3];
+    let mut state: Vec<Vec<bool>> = widths.iter().map(|&w| vec![false; w]).collect();
+    for (k, &inp) in inputs.iter().enumerate() {
+        if k >= entry_slots.len() {
+            break;
+        }
+        let (slot_start, _c) = entry_slots[k];
+        let slot = pc_width + slot_start;
+        if slot < state.len() && state[slot].len() == 64 {
+            for b in 0..64 {
+                state[slot][b] = (inp >> b) & 1 == 1;
+            }
+        }
+    }
+    let mut storage = Default::default();
+    let mut steps = 0usize;
+    let ret_vals;
+    loop {
+        let outputs = volar_fuzz::interpreter::ir::eval_ir_circuit_step(
+            step, &types, &circuit.oracles, &state, &mut storage,
+        );
+        if outputs[0].iter().any(|&b| b) {
+            ret_vals = outputs[1 + n_params..].to_vec();
+            break;
+        }
+        state = outputs[1..1 + n_params].to_vec();
+        steps += 1;
+        assert!(steps <= 64, "the frame+register scalar loop did not terminate");
+    }
+    let mut got = 0u64;
+    let mut bitidx = 0;
+    'outer: for slot in &ret_vals {
+        for &bit in slot {
+            if bitidx >= 64 {
+                break 'outer;
+            }
+            if bit {
+                got |= 1 << bitidx;
+            }
+            bitidx += 1;
+        }
+    }
+    eprintln!("frame_scalar: circuit={got} (expect 40), {steps} steps");
+    assert_eq!(got, 40, "the frame+register scalar loop must work");
+}
+
 /// S6b: the bounded EVM stepper (a fixed opcode subset) through the pipeline.
 ///
 /// **Landed** (via the all-scalars sidestep): the EVM stepper compiles

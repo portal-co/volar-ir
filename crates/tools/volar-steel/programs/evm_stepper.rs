@@ -1,21 +1,30 @@
-//! S6b: a bounded EVM stepper over a fixed opcode subset — the Steel revm-
-//! subset core, with ALL state as bare scalars (no arrays, no structs) so the
-//! state stays as block params, not the calling convention's frame (see
-//! https://github.com/portal-co/volar-ir/issues/5). The MUXes (the indexed
-//! accesses) are inline if-chains. Compiled with `-C opt-level=0`.
+//! S6c: a fuller EVM stepper — the Steel revm-subset core, extended with the
+//! arithmetic (SUB/DIV/MOD), the comparisons (LT/GT/EQ/ISZERO), and the jumps
+//! (JUMP/JUMPI). All state is bare scalars (no arrays/structs → no frame) at
+//! `-C opt-level=1`, sidestepping https://github.com/portal-co/volar-ir/issues/5.
+//! The EVM's *memory* (MLOAD/MSTORE) is the one piece that needs a real
+//! (frame-based) byte array — deferred to the #5 fix.
 
 #![no_std]
 
 const OP_STOP: u64 = 0x00;
 const OP_ADD: u64 = 0x01;
 const OP_MUL: u64 = 0x02;
+const OP_SUB: u64 = 0x03;
+const OP_DIV: u64 = 0x04;
+const OP_LT: u64 = 0x10;
+const OP_GT: u64 = 0x11;
+const OP_EQ: u64 = 0x14;
+const OP_ISZERO: u64 = 0x15;
 const OP_SLOAD: u64 = 0x54;
 const OP_SSTORE: u64 = 0x55;
+const OP_JUMP: u64 = 0x56;
+const OP_JUMPI: u64 = 0x57;
+const OP_JUMPDEST: u64 = 0x5b;
 const OP_PUSH1: u64 = 0x60;
 
-/// One bounded EVM run. All state (the 4-deep stack s0..3 + sp, the 2-slot
-/// storage store0/1, the pc, the loop counter i) is bare scalars; the indexed
-/// accesses (code[pc], stack[sp], store[key]) are inline MUXes.
+/// One bounded EVM run over a 4-deep stack, 2-slot storage, 8-word code.
+/// All state is bare scalars; the indexed accesses are inline MUXes.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub fn evm_step(
@@ -93,9 +102,78 @@ pub fn evm_step(
                 }
                 sp += 1;
             }
-        } else if op == OP_ADD || op == OP_MUL {
+        } else if op == OP_JUMP || op == OP_JUMPI {
+            // JUMP: pc = stack[sp-1]. JUMPI: if stack[sp-2] != 0 { pc = stack[sp-1] }.
+            if sp >= 1 {
+                let dest = if sp - 1 == 0 {
+                    s0
+                } else if sp - 1 == 1 {
+                    s1
+                } else if sp - 1 == 2 {
+                    s2
+                } else {
+                    s3
+                };
+                let do_jump = if op == OP_JUMP {
+                    sp -= 1;
+                    true
+                } else {
+                    // JUMPI
+                    if sp >= 2 {
+                        let cond = if sp - 2 == 0 {
+                            s0
+                        } else if sp - 2 == 1 {
+                            s1
+                        } else if sp - 2 == 2 {
+                            s2
+                        } else {
+                            s3
+                        };
+                        sp -= 2;
+                        cond != 0
+                    } else {
+                        false
+                    }
+                };
+                if do_jump {
+                    pc = dest;
+                    i += 1;
+                    continue; // skip the pc += 1 below
+                }
+            }
+        } else if op == OP_JUMPDEST {
+            // no-op
+        } else if op == OP_ISZERO {
+            if sp >= 1 {
+                let a = if sp - 1 == 0 {
+                    s0
+                } else if sp - 1 == 1 {
+                    s1
+                } else if sp - 1 == 2 {
+                    s2
+                } else {
+                    s3
+                };
+                let r = if a == 0 { 1 } else { 0 };
+                if sp - 1 == 0 {
+                    s0 = r;
+                } else if sp - 1 == 1 {
+                    s1 = r;
+                } else if sp - 1 == 2 {
+                    s2 = r;
+                } else {
+                    s3 = r;
+                }
+            }
+        } else if op == OP_ADD
+            || op == OP_MUL
+            || op == OP_SUB
+            || op == OP_DIV
+            || op == OP_LT
+            || op == OP_GT
+            || op == OP_EQ
+        {
             if sp >= 2 {
-                // a = stack[sp-1], b = stack[sp-2]
                 let a = if sp - 1 == 0 {
                     s0
                 } else if sp - 1 == 1 {
@@ -114,12 +192,39 @@ pub fn evm_step(
                 } else {
                     s3
                 };
+                // EVM order: the top of the stack is the first operand.
                 let r = if op == OP_ADD {
                     a.wrapping_add(b)
-                } else {
+                } else if op == OP_MUL {
                     a.wrapping_mul(b)
+                } else if op == OP_SUB {
+                    a.wrapping_sub(b)
+                } else if op == OP_DIV {
+                    if b == 0 {
+                        0
+                    } else {
+                        a / b
+                    }
+                } else if op == OP_LT {
+                    if b < a {
+                        1
+                    } else {
+                        0
+                    }
+                } else if op == OP_GT {
+                    if b > a {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    // EQ
+                    if a == b {
+                        1
+                    } else {
+                        0
+                    }
                 };
-                // stack[sp-2] = r
                 if sp - 2 == 0 {
                     s0 = r;
                 } else if sp - 2 == 1 {
