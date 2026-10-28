@@ -511,18 +511,14 @@ fn s6b_dump_entry_slots() {
 
 /// S6b: the bounded EVM stepper (a fixed opcode subset) through the pipeline.
 ///
-/// **Partial**: the EVM stepper compiles through the full pipeline (LLVM →
-/// VAFFLE → IR → movfuscate → step circuit, 97 blocks → 2.4M stmts) and
-/// *terminates* (the step circuit runs), and the loop-carried state works
-/// (the simple_loop / loop_array isolation tests pass). The remaining issue
-/// is the *input mapping*: movfuscate allocates state slots by param
-/// *position* (grouped by type), and with the calling convention's frame
-/// pointer + the return block's Bit slots interleaved, the function args land
-/// at non-obvious slots (even-indexed args at slots 4, 6, 8, …). Resolving
-/// the mapping needs the position-aware slot layout (`slot_of[entry_block]`),
-/// which is currently private to the movfuscate. Tracked as the S6b follow-up.
+/// **Landed** (via the all-scalars sidestep): the EVM stepper compiles
+/// through the full pipeline (LLVM → VAFFLE → IR → movfuscate → step circuit)
+/// and matches native bit-exactly. The stepper keeps all state as bare scalars
+/// (no arrays/structs → no frame) at `-C opt-level=1` (registers, not allocas),
+/// sidestepping the frame-carried-scalar propagation bug
+/// (https://github.com/portal-co/volar-ir/issues/5) — the general (frame-based)
+/// stepper is the open follow-up.
 #[test]
-#[ignore = "S6b partial: the step circuit works; the input mapping (the args' state slots) is the remaining issue"]
 fn s6b_evm_stepper_reaches_a_step_circuit() {
     let (blocks, mut types) = import_program_to_ir("evm_stepper.ll", "evm_step");
     eprintln!("S6b: lowered to IR — {} blocks", blocks.blocks.len());
@@ -566,7 +562,8 @@ fn s6b_evm_stepper_reaches_a_step_circuit() {
         "S6b: entry block — {} params, entry_slots={entry_slots:?}",
         blocks.blocks[0].params.len()
     );
-    let inputs = [0x60u64, 5, 0x60, 3, 0x01, 0x60, 2, 0x02, 0, 0, 0, 0, 8];
+    // evm_step(code0..7, storage0..1, steps): [PUSH1 5, PUSH1 3, ADD, PUSH1 2, MUL], store=[0,0], steps=8.
+    let inputs = [0x60u64, 5, 0x60, 3, 0x01, 0x60, 2, 0x02, 0, 0, 8];
     let mut state: Vec<Vec<bool>> = widths.iter().map(|&w| vec![false; w]).collect();
     for (k, &inp) in inputs.iter().enumerate() {
         if k >= entry_slots.len() {
@@ -595,39 +592,6 @@ fn s6b_evm_stepper_reaches_a_step_circuit() {
         if done {
             ret_vals = outputs[1 + n_params..].to_vec();
             break;
-        }
-        if steps < 6 {
-            let mut pc = 0usize;
-            for j in 0..pc_width {
-                if outputs[1 + j][0] {
-                    pc |= 1 << j;
-                }
-            }
-            // dump ALL storage cells (grouped by lane) — the frame's i/sp/pc
-            // live here; we want to see whether they change across steps.
-            let mut by_lane: std::collections::BTreeMap<u32, Vec<String>> =
-                std::collections::BTreeMap::new();
-            for (k, v) in storage.iter() {
-                let (sid, _tid, addr) = (k.0.0, k.1.0, k.2);
-                let mut val = 0u128;
-                for (b, &bit) in v.iter().take(128).enumerate() {
-                    if bit {
-                        val |= 1u128 << b;
-                    }
-                }
-                by_lane
-                    .entry(sid)
-                    .or_default()
-                    .push(format!("@{addr}={val:#x}({}b)", v.len()));
-            }
-            let summary: Vec<String> = by_lane
-                .iter()
-                .map(|(sid, cells)| format!("lane{sid}:[{}]", cells.join(",")))
-                .collect();
-            eprintln!(
-                "  s6b step {steps}: pc={pc} lanes({})={summary:?}",
-                by_lane.len()
-            );
         }
         state = outputs[1..1 + n_params].to_vec();
         steps += 1;
