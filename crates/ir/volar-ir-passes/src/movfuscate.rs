@@ -86,14 +86,10 @@ pub fn pc_bits_needed(n: usize) -> usize {
 /// are stored as 32-bit integers at runtime).
 fn bit_width_for_eq(ir_types: &[IRType], ty: IRTypeId) -> usize {
     match &ir_types[ty.0 as usize] {
+        // The `Type::_n` cutover: only Bit is a primitive; a wider bit-vector
+        // is `Vec(n, Bit)` (handled by the Vec arm below).
         IRType::Primitive(p) => match p {
             Type::Bit => 1,
-            Type::_8 => 8,
-            Type::_16 => 16,
-            Type::_32 => 32,
-            Type::_64 => 64,
-            Type::_128 => 128,
-            Type::_256 => 256,
             _ => panic!("bit_width_for_eq: unsupported primitive type {:?}", p),
         },
         IRType::Vec(n, inner) => *n * bit_width_for_eq(ir_types, *inner),

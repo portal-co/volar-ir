@@ -600,12 +600,12 @@ fn lir_uint(bits: u32) -> LirType {
 fn ir_type_to_lir(ty: &IRType, types: &IRTypes) -> LirType {
     match ty {
         IRType::Primitive(Type::Bit) => LirType::Bool,
-        IRType::Primitive(Type::_8) => LirType::U8,
-        IRType::Primitive(Type::_16) => LirType::U16,
-        IRType::Primitive(Type::_32) => LirType::U32,
-        IRType::Primitive(Type::_64) => LirType::U64,
-        IRType::Primitive(Type::_128) => LirType::U128,
-        IRType::Primitive(Type::_256) => LirType::U256,
+        // The `Type::_n` cutover: an n-bit bit-vector is `Vec(n, Bit)`.
+        IRType::Vec(n, elem)
+            if matches!(types.0[elem.0 as usize], IRType::Primitive(Type::Bit)) =>
+        {
+            lir_uint(*n as u32)
+        }
         IRType::ExtField { .. } => lir_uint(ir_type_bits(ty, types)),
         IRType::PrimeField { .. } => {
             panic!(

@@ -554,14 +554,10 @@ fn native_wires(ty: TypeId, native: TypeId, types: &IRTypes) -> usize {
         return 1;
     }
     match types.0.get(ty.0 as usize) {
+        // The `Type::_n` cutover: only Bit is a primitive; a wider bit-vector
+        // is `Vec(n, Bit)` (handled by the Vec arm below).
         Some(IrType::Primitive(prim)) => match prim {
             Type::Bit => 1,
-            Type::_8 => 8,
-            Type::_16 => 16,
-            Type::_32 => 32,
-            Type::_64 => 64,
-            Type::_128 => 128,
-            Type::_256 => 256,
             _ => panic!("lower_to_native: primitive has no wire count"),
         },
         Some(IrType::PrimeField { k, .. }) => *k as usize,

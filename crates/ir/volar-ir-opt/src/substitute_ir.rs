@@ -171,7 +171,9 @@ fn apply_one(
     // ── 5. Determine call signature from declarations ─────────────────────────
     let (n_args, output_tys) = call_signature(sub, blocks, &tr);
     let n_results = output_tys.len();
-    let addr_ty = types.primitive(PrimType::_64);
+    // The `Type::_n` cutover: a 64-bit address is `Vec(64, Bit)`.
+    let bit_tid = types.primitive(PrimType::Bit);
+    let addr_ty = types.intern(IrType::Vec(64, bit_tid));
     let block_ty = types.intern(IrType::Block { params: vec![] });
 
     // ── 6. Rewrite all call sites ─────────────────────────────────────────────

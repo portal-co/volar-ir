@@ -165,14 +165,10 @@ pub fn constant_ror(c: Constant, width: usize, n: usize) -> Constant {
 
 /// Bit-width of a `Type` (always well-defined for non-field types).
 pub fn primitive_type_width(t: Type) -> usize {
+    // The `Type::_n` cutover: only Bit is a primitive; a wider bit-vector is
+    // `Vec(n, Bit)` (handled by the caller's Vec arm, not here).
     match t {
         Type::Bit => 1,
-        Type::_8 => 8,
-        Type::_16 => 16,
-        Type::_32 => 32,
-        Type::_64 => 64,
-        Type::_128 => 128,
-        Type::_256 => 256,
         _ => panic!("primitive_type_width: unknown Type variant"),
     }
 }

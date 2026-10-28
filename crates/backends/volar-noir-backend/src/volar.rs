@@ -131,11 +131,9 @@ pub fn noir_type(types: &IRTypes, id: TypeId) -> Result<String, EmitError> {
         ty: format!("unknown type id {}", id.0),
     })?;
     match ty {
+        // The `Type::_n` cutover: only Bit is a primitive; a wider bit-vector
+        // is `Vec(n, Bit)` (handled by the Vec arm below).
         IrType::Primitive(Type::Bit) => Ok(String::from("bool")),
-        IrType::Primitive(Type::_8) => Ok(String::from("u8")),
-        IrType::Primitive(Type::_16) => Ok(String::from("u16")),
-        IrType::Primitive(Type::_32) => Ok(String::from("u32")),
-        IrType::Primitive(Type::_64) => Ok(String::from("u64")),
         IrType::Primitive(other) => Err(EmitError::TypeUnsupported {
             ty: format!("{other:?}"),
         }),

@@ -1381,12 +1381,6 @@ fn lower_poly_bit<P: Clone>(
 pub fn ir_type_bits(ty: &IRType, types: &IRTypes) -> usize {
     match ty {
         IRType::Primitive(PrimType::Bit) => 1,
-        IRType::Primitive(PrimType::_8) => 8,
-        IRType::Primitive(PrimType::_16) => 16,
-        IRType::Primitive(PrimType::_32) => 32,
-        IRType::Primitive(PrimType::_64) => 64,
-        IRType::Primitive(PrimType::_128) => 128,
-        IRType::Primitive(PrimType::_256) => 256,
         IRType::PrimeField { k, .. } => *k as usize,
         IRType::Vec(n, elem_id) => n * ir_type_bits(&types.0[elem_id.0 as usize], types),
         IRType::Tuple(ids) => ids
@@ -1776,6 +1770,13 @@ mod tests {
         Constant { lo: 0, hi: 0 }
     }
 
+    /// The `Type::_n` cutover: intern `Vec(n, Bit)` (an n-bit vector) — the
+    /// replacement for the removed `PrimType::_n` primitives.
+    fn bits(types: &mut IRTypes, n: usize) -> IRTypeId {
+        let bit = types.bit();
+        types.intern(IRType::Vec(n, bit))
+    }
+
     /// Build a minimal single-block `IRBlocks` that takes `n_params` Bit params
     /// and immediately returns them, alongside an `IRTypes` table that only
     /// contains `Bit`.
@@ -1807,19 +1808,15 @@ mod tests {
     #[test]
     fn type_bits_primitives() {
         let mut types = TypeTable::new();
-        assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_8), &types), 8);
-        assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_16), &types), 16);
-        assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_32), &types), 32);
-        assert_eq!(ir_type_bits(&IRType::Primitive(PrimType::_64), &types), 64);
-        assert_eq!(
-            ir_type_bits(&IRType::Primitive(PrimType::_128), &types),
-            128
-        );
-        assert_eq!(
-            ir_type_bits(&IRType::Primitive(PrimType::_256), &types),
-            256
-        );
+        // The `Type::_n` cutover: an n-bit value is `Vec(n, Bit)`.
+        let bit = types.bit();
+        for n in [8usize, 16, 32, 64, 128, 256] {
+            let vec_ty = IRType::Vec(n, bit);
+            assert_eq!(ir_type_bits(&vec_ty, &types), n as u32);
+        }
         let aes8 = types.aes8();
+        let galois64 = types.galois64();
+        assert_eq!(ir_type_bits(&types.0[aes8.0 as usize], &types), 8);
         let galois64 = types.galois64();
         assert_eq!(ir_type_bits(&types.0[aes8.0 as usize], &types), 8);
         assert_eq!(ir_type_bits(&types.0[galois64.0 as usize], &types), 64);
@@ -1839,7 +1836,7 @@ mod tests {
     fn type_bits_tuple() {
         let mut types = TypeTable::new();
         let bit_id = types.bit();
-        let u8_id = types.primitive(PrimType::_8);
+        let u8_id = bits(&mut types, 8);
         // Tuple(Bit, _8) = 1 + 8 = 9
         let tuple = IRType::Tuple(std::vec![bit_id, u8_id]);
         assert_eq!(ir_type_bits(&tuple, &types), 9);
@@ -1870,7 +1867,7 @@ mod tests {
     #[test]
     fn u8_param_expands_to_eight_bits() {
         let mut types = TypeTable::new();
-        let u8_id = types.primitive(PrimType::_8);
+        let u8_id = bits(&mut types, 8);
 
         let block = IRBlock {
             params: std::vec![u8_id],
@@ -1893,7 +1890,7 @@ mod tests {
         let mut types = TypeTable::new();
         let bit = types.bit();
         let addr = types.intern(IRType::Vec(64, bit));
-        let word = types.primitive(PrimType::_64);
+        let word = bits(&mut types, 64);
         let mut block = IRBlock::<()> {
             params: std::vec![addr],
             stmts: std::vec![],
@@ -1970,7 +1967,7 @@ mod tests {
     #[test]
     fn const_u8_emits_eight_stmts() {
         let mut types = TypeTable::new();
-        let u8_id = types.primitive(PrimType::_8);
+        let u8_id = bits(&mut types, 8);
 
         let mut block = IRBlock::<()> {
             params: std::vec![],
@@ -2001,8 +1998,8 @@ mod tests {
     fn transmute_aliases_existing_bits() {
         let mut types = TypeTable::new();
         let bit_id = types.bit();
-        let u8_src = types.primitive(PrimType::_8);
-        let u8_dst = types.primitive(PrimType::_8);
+        let u8_src = bits(&mut types, 8);
+        let u8_dst = bits(&mut types, 8);
 
         // Block: param0 = _8, stmt0 = Const(1, _8), stmt1 = Transmute(stmt0).
         let c = Constant { lo: 1, hi: 0 };
@@ -2089,7 +2086,7 @@ mod tests {
     #[test]
     fn pure_constant_poly_uses_its_declared_width() {
         let mut types = TypeTable::new();
-        let byte = types.primitive(PrimType::_8);
+        let byte = bits(&mut types, 8);
         let block = IRBlock::<()> {
             params: std::vec![],
             stmts: std::vec![Node::new(
@@ -2133,7 +2130,7 @@ mod tests {
     fn poly_broadcasts_bit_selectors_across_wider_results() {
         let mut types = TypeTable::new();
         let bit = types.bit();
-        let byte = types.primitive(PrimType::_8);
+        let byte = bits(&mut types, 8);
         let mut coeffs = PolyCoeffs::new();
         coeffs.insert(std::vec![IRVarId(0), IRVarId(1)], 1);
         let block = IRBlock::<()> {
@@ -2167,7 +2164,7 @@ mod tests {
     fn repeated_wide_polys_reuse_their_boolar_gate_dag() {
         let mut types = TypeTable::new();
         let bit = types.bit();
-        let byte = types.primitive(PrimType::_8);
+        let byte = bits(&mut types, 8);
         let mut coeffs = PolyCoeffs::new();
         // Per output bit this is
         // selector XOR (selector AND value_bit) XOR value_bit.
@@ -2250,7 +2247,7 @@ mod tests {
 
         let mut types = TypeTable::new();
         let bit = types.bit();
-        let byte = types.primitive(PrimType::_8);
+        let byte = bits(&mut types, 8);
         let block = IRBlock::<()> {
             // guard, argument, fallback byte, and element address.
             params: std::vec![bit, bit, byte, bit],
@@ -2316,7 +2313,7 @@ mod tests {
     /// tests can inspect per-wire sides.
     fn xor_two_params_block() -> (IRBlocks<()>, IRTypes) {
         let mut types = TypeTable::new();
-        let byte_id = types.primitive(PrimType::_8);
+        let byte_id = bits(&mut types, 8);
         let mut coeffs = PolyCoeffs::new();
         coeffs.insert(std::vec![IRVarId(0)], 1);
         coeffs.insert(std::vec![IRVarId(1)], 1);
@@ -2399,7 +2396,7 @@ mod tests {
         // A pure-constant Poly introduction point inherits the side stamped
         // on its source IR stmt node.
         let mut types = TypeTable::new();
-        let u8_id = types.primitive(PrimType::_8);
+        let u8_id = bits(&mut types, 8);
         let const_side = SideId(7);
         let block = IRBlock::<()> {
             params: std::vec![],
