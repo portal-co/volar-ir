@@ -915,7 +915,7 @@ mod tests {
     #[test]
     fn rol_8bit() {
         let mut types = TypeTable::new();
-        let u8_ty = { let b = types.primitive(Type::Bit); types.intern(IRType::Vec(8, b)) };
+        let u8_ty = { let b = types.primitive(Type::Bit); types.intern(IrType::Vec(8, b)) };
         let v0 = IRVarId(0);
         let stmt = Stmt::Rol {
             src: v0,
@@ -938,7 +938,7 @@ mod tests {
     fn merge_two_bits_into_byte() {
         let mut types = TypeTable::new();
         let bit = types.bit();
-        let u8_ty = { let b = types.primitive(Type::Bit); types.intern(IRType::Vec(8, b)) };
+        let u8_ty = { let b = types.primitive(Type::Bit); types.intern(IrType::Vec(8, b)) };
         // Params: 2 bits. Merge them + 6 zero-bits into a byte.
         // Actually just test Merge of bit-typed parts into a byte.
         let v0 = IRVarId(0);

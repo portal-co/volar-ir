@@ -2558,9 +2558,7 @@ mod tests {
         let bit_tid = types.intern(volar_ir_common::IrType::Primitive(
             volar_ir_common::Type::Bit,
         ));
-        let addr_tid = types.intern(volar_ir_common::IrType::Primitive(
-            volar_ir_common::Type::_32,
-        ));
+        let addr_tid = types.intern(volar_ir_common::IrType::Vec(32, bit_tid));
 
         let sig0 = SigDecl {
             params: vec![bit_tid],

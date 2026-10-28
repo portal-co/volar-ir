@@ -925,8 +925,8 @@ mod tests {
     fn types() -> IRTypes {
         let mut t = TypeTable::new();
         let bit = t.intern(IRType::Primitive(volar_ir_common::Type::Bit));
-        let w8 = t.intern(IRType::Primitive(volar_ir_common::Type::_8));
-        let w32 = t.intern(IRType::Primitive(volar_ir_common::Type::_32));
+        let w8 = t.intern(IRType::Vec(8, volar_ir_common::TypeId(0)));
+        let w32 = t.intern(IRType::Vec(32, volar_ir_common::TypeId(0)));
         let _ = (bit, w8, w32);
         t
     }
@@ -1006,7 +1006,7 @@ mod tests {
     #[test]
     fn vcircuit_validation_bounds() {
         let mut types = types();
-        let w8 = ty_of(&mut types, IRType::Primitive(volar_ir_common::Type::_8));
+        let w8 = ty_of(&mut types, IRType::Vec(8, volar_ir_common::TypeId(0)));
         let host = const_circuit(&types, w8);
 
         let ok = TypedRegionTable {
@@ -1054,7 +1054,7 @@ mod tests {
     #[test]
     fn vcircuit_rejects_block_anchors() {
         let mut types = types();
-        let w8 = ty_of(&mut types, IRType::Primitive(volar_ir_common::Type::_8));
+        let w8 = ty_of(&mut types, IRType::Vec(8, volar_ir_common::TypeId(0)));
         let host = const_circuit(&types, w8);
         let table = TypedRegionTable {
             entries: vec![TypedRegionEntry {
@@ -1113,7 +1113,7 @@ mod tests {
     fn irblocks_storage_and_block_anchors() {
         use volar_ir_common::StorageId;
         let mut types = types();
-        let w8 = ty_of(&mut types, IRType::Primitive(volar_ir_common::Type::_8));
+        let w8 = ty_of(&mut types, IRType::Vec(8, volar_ir_common::TypeId(0)));
         let host = irblocks_with_storage(&types, w8);
 
         let ok = TypedRegionTable {
@@ -1163,7 +1163,7 @@ mod tests {
     #[test]
     fn irblocks_rejects_output_anchors() {
         let mut types = types();
-        let w8 = ty_of(&mut types, IRType::Primitive(volar_ir_common::Type::_8));
+        let w8 = ty_of(&mut types, IRType::Vec(8, volar_ir_common::TypeId(0)));
         let host = irblocks_with_storage(&types, w8);
         let table = TypedRegionTable {
             entries: vec![TypedRegionEntry {
@@ -1203,7 +1203,7 @@ mod tests {
     #[test]
     fn typed_gadget_validates() {
         let mut types = types();
-        let w8 = ty_of(&mut types, IRType::Primitive(volar_ir_common::Type::_8));
+        let w8 = ty_of(&mut types, IRType::Vec(8, volar_ir_common::TypeId(0)));
         let spec = TypedGadgetSpec {
             name: "pad8".to_string(),
             ports: vec![
@@ -1232,7 +1232,7 @@ mod tests {
     fn typed_gadget_rejects_impure_body_and_bad_shape() {
         use volar_ir_common::StorageId;
         let mut types = types();
-        let w8 = ty_of(&mut types, IRType::Primitive(volar_ir_common::Type::_8));
+        let w8 = ty_of(&mut types, IRType::Vec(8, volar_ir_common::TypeId(0)));
 
         // Impure: storage read in the body.
         let mut bad = VCircuit::new(vec![w8, w8]);
@@ -1286,7 +1286,7 @@ mod tests {
     fn select_expands_typed_bits_and_planes() {
         use volar_ir_common::StorageId;
         let mut types = types();
-        let w8 = ty_of(&mut types, IRType::Primitive(volar_ir_common::Type::_8));
+        let w8 = ty_of(&mut types, IRType::Vec(8, volar_ir_common::TypeId(0)));
         let table = TypedRegionTable {
             entries: vec![
                 input_entry(2, 1, 2, &[5]),

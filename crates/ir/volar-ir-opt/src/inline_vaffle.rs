@@ -872,7 +872,7 @@ mod tests {
     #[test]
     fn straight_line_callee_is_inlined() {
         let mut m = empty_module();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         // sig 0: caller () -> u64. sig 1: callee (u64) -> u64.
         m.sigs.push(SigDecl {
@@ -978,7 +978,7 @@ mod tests {
     #[test]
     fn branching_callee_reconverges_at_continuation() {
         let mut m = empty_module();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         m.sigs.push(SigDecl {
             params: vec![],
@@ -1105,7 +1105,7 @@ mod tests {
     #[test]
     fn self_recursive_callee_is_never_inlined() {
         let mut m = empty_module();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         m.sigs.push(SigDecl {
             params: vec![],
@@ -1203,7 +1203,7 @@ mod tests {
     #[test]
     fn mutually_recursive_pair_is_never_inlined() {
         let mut m = empty_module();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         m.sigs.push(SigDecl {
             params: vec![u64_ty],
@@ -1314,7 +1314,7 @@ mod tests {
     #[test]
     fn budget_exhaustion_stops_after_first_call_site() {
         let mut m = empty_module();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         m.sigs.push(SigDecl {
             params: vec![],
@@ -1424,7 +1424,7 @@ mod tests {
     #[test]
     fn multi_result_callee_rewires_both_outputs() {
         let mut m = empty_module();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         m.sigs.push(SigDecl {
             params: vec![],
@@ -1512,7 +1512,7 @@ mod tests {
     fn everything_keeps_bit_blasted_outputs() {
         let mut m = empty_module();
         let bit = m.types.bit();
-        let u32_ty = m.types.primitive(Type::_32);
+        let u32_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(32, __b)) };
 
         m.sigs.push(SigDecl {
             params: vec![],
@@ -1622,7 +1622,7 @@ mod tests {
     #[test]
     fn everything_inlines_call_and_dces_callee() {
         let mut m = empty_module();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         m.sigs.push(SigDecl {
             params: vec![],
@@ -1701,7 +1701,7 @@ mod tests {
     #[test]
     fn everything_splices_return_call() {
         let mut m = empty_module();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         m.sigs.push(SigDecl {
             params: vec![],
@@ -1769,7 +1769,7 @@ mod tests {
     #[test]
     fn everything_leaves_import_calls() {
         let mut m = empty_module();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         m.sigs.push(SigDecl {
             params: vec![],
@@ -1824,7 +1824,7 @@ mod tests {
     #[test]
     fn everything_fails_closed_on_recursion() {
         let mut m = empty_module();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         m.sigs.push(SigDecl {
             params: vec![],

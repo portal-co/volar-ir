@@ -1812,11 +1812,9 @@ mod tests {
         let bit = types.bit();
         for n in [8usize, 16, 32, 64, 128, 256] {
             let vec_ty = IRType::Vec(n, bit);
-            assert_eq!(ir_type_bits(&vec_ty, &types), n as u32);
+            assert_eq!(ir_type_bits(&vec_ty, &types), n);
         }
         let aes8 = types.aes8();
-        let galois64 = types.galois64();
-        assert_eq!(ir_type_bits(&types.0[aes8.0 as usize], &types), 8);
         let galois64 = types.galois64();
         assert_eq!(ir_type_bits(&types.0[aes8.0 as usize], &types), 8);
         assert_eq!(ir_type_bits(&types.0[galois64.0 as usize], &types), 64);

@@ -4945,10 +4945,11 @@ mod tests {
     /// LLVM frontend's `dynamic_addr` = alloca base + bit index), not a
     /// constant. Isolates whether a non-constant address is the #5 trigger.
     fn storage_loop_computed_addr() -> (IRBlocks, IRTypes) {
-        // u8 type for the address; Bit for the value.
+        // u8 type for the address; Bit for the value. (The `Type::_n` cutover:
+        // an 8-bit value is `Vec(8, Bit)`.)
         let types = IRTypes(std::vec![
             IRType::Primitive(Type::Bit),
-            IRType::Primitive(Type::_8),
+            IRType::Vec(8, IRTypeId(0)),
         ]);
         let bit = IRTypeId(0);
         let u8t = IRTypeId(1);

@@ -2103,8 +2103,8 @@ mod tests {
         }
 
         let mut types = IRTypes::new();
-        let wide = types.primitive(Type::_256);
-        let word = types.primitive(Type::_32);
+        let wide = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(256, __b)) };
+        let word = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(32, __b)) };
         let vector = types.push(IRType::Vec(4, word));
         let mut backend = WasmBackend::new().with_import_module("volar-host");
         lower_ir(&rng_program(wide, "wide"), &types, "run_wide", &mut backend);
@@ -2243,8 +2243,8 @@ mod tests {
     #[test]
     fn high_volar_merge_executes_through_wide_wasm_extension_and_shift() {
         let mut types = IRTypes::new();
-        let word = types.primitive(Type::_64);
-        let wide = types.primitive(Type::_128);
+        let word = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(64, __b)) };
+        let wide = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(128, __b)) };
         let mut block = IRBlock {
             params: alloc::vec![word, word],
             stmts: Vec::new(),
@@ -2281,11 +2281,11 @@ mod tests {
     fn high_volar_externals_use_flat_wasm_multivalue_results_and_direct_storage() {
         let mut types = IRTypes::new();
         let bit = types.bit();
-        let wide = types.primitive(Type::_256);
-        let word = types.primitive(Type::_32);
+        let wide = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(256, __b)) };
+        let word = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(32, __b)) };
         let lanes = types.push(IRType::Vec(4, word));
         let pair = types.push(IRType::Tuple(vec![wide, lanes]));
-        let address = types.primitive(Type::_64);
+        let address = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         let mut oracle_block = IRBlock {
             params: vec![wide],

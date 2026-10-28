@@ -885,9 +885,11 @@ fn test_movfuscate_propagates_multiple_oracle_declarations() {
     use volar_ir_common::{OracleDecl, TypeTable};
     let t128 = IRTypeId(0);
     let t8 = IRTypeId(1);
+    // The `Type::_n` cutover: an n-bit value is `Vec(n, Bit)`. Bit is at index 2.
     let types = TypeTable(vec![
-        IrType::Primitive(Type::_128),
-        IrType::Primitive(Type::_8),
+        IrType::Vec(128, volar_ir_common::TypeId(2)),
+        IrType::Vec(8, volar_ir_common::TypeId(2)),
+        IrType::Primitive(Type::Bit),
     ]);
 
     // Two distinct oracles at different declared indices -- if oracle
@@ -1329,9 +1331,10 @@ fn repro_prop_o_bit_const_payload() {
     use volar_ir::ir::IRBlockTargetId;
     use volar_ir::ir::{IRBlock, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRVarId};
     use volar_ir_common::TypeId;
+    // The `Type::_n` cutover: an n-bit value is `Vec(n, Bit)`. Bit is at index 2.
     let types = volar_ir_common::TypeTable(vec![
-        IrType::Primitive(Type::_64),
-        IrType::Primitive(Type::_8),
+        IrType::Vec(64, volar_ir_common::TypeId(2)),
+        IrType::Vec(8, volar_ir_common::TypeId(2)),
         IrType::Primitive(Type::Bit),
     ]);
     let mk = |kind: IRStmt<IRVarId>| Node::new(kind, (), None);

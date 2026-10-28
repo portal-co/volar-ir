@@ -905,8 +905,8 @@ mod tests {
 
     fn types_with_u64() -> (IRTypes, TypeId, TypeId) {
         let mut t = IRTypes::new();
-        let u64_ty = t.primitive(Type::_64);
-        let addr_ty = t.primitive(Type::_64);
+        let u64_ty = { let __b = t.primitive(Type::Bit); t.intern(volar_ir_common::IrType::Vec(64, __b)) };
+        let addr_ty = { let __b = t.primitive(Type::Bit); t.intern(volar_ir_common::IrType::Vec(64, __b)) };
         (t, u64_ty, addr_ty)
     }
 
@@ -945,7 +945,7 @@ mod tests {
         let cont_var = IRVarId(0);
         let repl_stmts = vec![
             // Read cont from spill[0] — slot address
-            Stmt::Const(Constant { hi: 0, lo: 0 }, types.primitive(Type::_64)),
+            Stmt::Const(Constant { hi: 0, lo: 0 }, u64_ty),
             // StorageRead continuation
             Stmt::StorageRead {
                 storage: StorageId::DEFAULT,
@@ -953,7 +953,7 @@ mod tests {
                 addr: IRVarId(0),
             },
             // Write a constant result to spill[1]
-            Stmt::Const(Constant { hi: 0, lo: 1 }, types.primitive(Type::_64)),
+            Stmt::Const(Constant { hi: 0, lo: 1 }, u64_ty),
             Stmt::Const(Constant { hi: 0, lo: 99 }, u64_ty),
             Stmt::StorageWrite {
                 storage: StorageId::DEFAULT,
@@ -1186,7 +1186,7 @@ mod tests {
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     fn make_trivial_oracle_repl(types: &mut IRTypes, u64_ty: TypeId) -> IRBlocks {
-        let addr_ty = types.primitive(Type::_64);
+        let addr_ty = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(64, __b)) };
         let block_ty = types.intern(IrType::Block { params: vec![] });
 
         // Reads cont from DEFAULT[0], writes const 0 to result slot, exits via Dyn.
@@ -1221,7 +1221,7 @@ mod tests {
     }
 
     fn make_trivial_rng_repl(types: &mut IRTypes, u64_ty: TypeId) -> IRBlocks {
-        let addr_ty = types.primitive(Type::_64);
+        let addr_ty = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(64, __b)) };
         let block_ty = types.intern(IrType::Block { params: vec![] });
 
         let stmts = vec![

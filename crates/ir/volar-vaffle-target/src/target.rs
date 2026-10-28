@@ -3881,7 +3881,7 @@ mod tests {
             assert!(
                 matches!(
                     extracted.module.types.0[ty.0 as usize],
-                    volar_ir_common::IrType::Primitive(volar_ir_common::Type::_32)
+                    volar_ir_common::IrType::Vec(32, _)
                 ),
                 "each operand and the result is a primitive 32-bit value"
             );

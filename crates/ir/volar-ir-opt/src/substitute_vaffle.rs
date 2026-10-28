@@ -691,7 +691,7 @@ mod tests {
     ///            (+ OracleOutput{call:v0,idx:0} as v1, then return v1)
     fn host_with_oracle_call() -> (Module, vaffle::SigId) {
         let mut m = empty_module_with_types();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
         m.oracles.push(OracleDecl {
             name: "hash".to_string(),
             params: vec![],
@@ -752,7 +752,7 @@ mod tests {
     /// Build a replacement module whose entry function returns a constant 42u64.
     fn replacement_const42() -> Module {
         let mut m = empty_module_with_types();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
         let sig_id = vaffle::SigId(0);
         m.sigs.push(SigDecl {
             params: vec![],
@@ -833,7 +833,7 @@ mod tests {
     #[test]
     fn rng_two_sites_both_replaced() {
         let mut m = empty_module_with_types();
-        let u64_ty = m.types.primitive(Type::_64);
+        let u64_ty = { let __b = m.types.primitive(Type::Bit); m.types.intern(volar_ir_common::IrType::Vec(64, __b)) };
         m.sigs.push(SigDecl {
             params: vec![],
             results: vec![u64_ty, u64_ty],

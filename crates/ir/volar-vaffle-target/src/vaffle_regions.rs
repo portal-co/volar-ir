@@ -286,7 +286,7 @@ mod tests {
     fn module_with_entry() -> (Module, TypeTable) {
         let mut types = TypeTable::new();
         let _bit = types.intern(IRType::Primitive(Type::Bit));
-        let w8 = types.intern(IRType::Primitive(Type::_8));
+        let w8 = types.intern(IRType::Vec(8, _bit));
         // Entry function: params [w8, w8], one block, terminator Return.
         let sig = SigDecl {
             params: vec![w8, w8],

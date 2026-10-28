@@ -1946,8 +1946,8 @@ mod tests {
         }
 
         let mut types = IRTypes::new();
-        let wide = types.primitive(Type::_256);
-        let word = types.primitive(Type::_32);
+        let wide = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(256, __b)) };
+        let word = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(32, __b)) };
         let vector = types.push(IRType::Vec(4, word));
         let context = Context::create();
         let mut backend = LlvmBackend::new(&context, "typed_high_ir");
@@ -1971,11 +1971,11 @@ mod tests {
     fn high_volar_externals_keep_native_arguments_results_and_action_storage() {
         let mut types = IRTypes::new();
         let bit = types.bit();
-        let wide = types.primitive(Type::_256);
-        let word = types.primitive(Type::_32);
+        let wide = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(256, __b)) };
+        let word = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(32, __b)) };
         let lanes = types.push(IRType::Vec(4, word));
         let pair = types.push(IRType::Tuple(vec![wide, lanes]));
-        let address = types.primitive(Type::_64);
+        let address = { let __b = types.primitive(Type::Bit); types.intern(volar_ir_common::IrType::Vec(64, __b)) };
 
         let mut oracle_block = IRBlock {
             params: vec![wide],
