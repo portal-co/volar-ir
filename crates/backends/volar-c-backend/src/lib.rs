@@ -2700,29 +2700,20 @@ fn signed_variant(ty: &LirType) -> &'static str {
 /// Map a [`NativeType`] to its unsigned C integer type string.
 fn native_type_to_c(t: volar_ir_common::Type) -> &'static str {
     use volar_ir_common::Type;
+    // The `Type::_n` cutover: only Bit is a primitive; a wider bit-vector is
+    // `Vector(Native(Bit), n)` (lowered elementwise, not via this function).
     match t {
         Type::Bit => "bool",
-        Type::_8 => "uint8_t",
-        Type::_16 => "uint16_t",
-        Type::_32 => "uint32_t",
-        Type::_64 => "uint64_t",
-        Type::_128 => "__uint128_t",
-        Type::_256 => "uint64_t", // no native 256-bit C integer; use u64 placeholder
-        _ => "uint64_t",          // future primitive types: conservative fallback
+        _ => "uint64_t", // future primitive types: conservative fallback
     }
 }
 
 /// Signed C integer for a native type (used in arithmetic-shift casts).
 fn native_type_signed(t: volar_ir_common::Type) -> &'static str {
     use volar_ir_common::Type;
+    // The `Type::_n` cutover: only Bit is a primitive.
     match t {
         Type::Bit => "int8_t",
-        Type::_8 => "int8_t",
-        Type::_16 => "int16_t",
-        Type::_32 => "int32_t",
-        Type::_64 => "int64_t",
-        Type::_128 => "__int128_t",
-        Type::_256 => "int64_t",
         _ => "int64_t",
     }
 }

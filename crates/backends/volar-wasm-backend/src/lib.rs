@@ -579,17 +579,10 @@ impl WasmBackend {
             | LirType::Vector(_, _) => {
                 panic!("WasmBackend: multi-word type passed where one Wasm value was required")
             }
+            // The `Type::_n` cutover: only Bit is a primitive; a wider native
+            // bit-vector is `Vector(Native(Bit), n)` (handled by the Vector arm).
             LirType::Native(t) => match t {
-                NativeType::Bit
-                | NativeType::_8
-                | NativeType::_16
-                | NativeType::_32 => ValType::I32,
-                NativeType::_64 => ValType::I64,
-                NativeType::_128 | NativeType::_256 => {
-                    panic!(
-                        "WasmBackend: multi-word native type passed where one Wasm value was required"
-                    )
-                }
+                NativeType::Bit => ValType::I32,
                 _ => ValType::I64,
             },
             LirType::Arr(_, _) | LirType::Struct(_) => {
@@ -624,10 +617,8 @@ impl WasmBackend {
                 }
                 values
             }
-            LirType::Native(NativeType::_128) => vec![ValType::I64, ValType::I64],
-            LirType::Native(NativeType::_256) => {
-                vec![ValType::I64, ValType::I64, ValType::I64, ValType::I64]
-            }
+            // The `Type::_n` cutover: only Bit is a primitive; a wider native
+            // bit-vector is `Vector(Native(Bit), n)` (handled by the Vector arm).
             _ => vec![Self::lir_to_val_ty(ty)],
         }
     }
@@ -651,7 +642,6 @@ impl WasmBackend {
                 | LirType::U128
                 | LirType::I256
                 | LirType::U256
-                | LirType::Native(NativeType::_128 | NativeType::_256)
         )
     }
 
