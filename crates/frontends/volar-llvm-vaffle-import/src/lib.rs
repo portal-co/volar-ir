@@ -650,6 +650,11 @@ struct Importer<'ctx> {
     /// Data stacks created for `alloca`, in allocation order. Dispatch
     /// muxes these separately from byte-addressed globals.
     alloca_data: Vec<StorageId>,
+    /// Each data stack's allocation span in bits, parallel to
+    /// `alloca_data`. An in-bounds access within one alloca never
+    /// addresses at or beyond this bound, so its address adder only needs
+    /// the bound's bit length (the trimmed-address optimization).
+    alloca_sizes: Vec<u64>,
     /// Stack-pointer globals paired with `alloca_data`. Excluded from
     /// global dispatch; each holds one pointer-width cell at address 0.
     sp_globals: Vec<StorageId>,
@@ -710,6 +715,7 @@ impl<'ctx> Importer<'ctx> {
             sig_of: HashMap::new(),
             storage_alloc: StorageAllocator::new(GLOBAL_STORAGE_BASE),
             alloca_data: Vec::new(),
+            alloca_sizes: Vec::new(),
             sp_globals: Vec::new(),
             pre_init: Vec::new(),
             bit_tid,
@@ -1802,6 +1808,7 @@ impl<'ctx> Importer<'ctx> {
                             ImportError::Unsupported("stack pointer bits missing (internal)".into())
                         })?;
                     let pointee_tid = self.llvm_type_id(instr.get_type())?;
+                    let addr_bound = self.stack_addr_bound(&stack_ptr);
                     Some(self.stack_load_dynamic(
                         fctx,
                         stack_ptr.storage,
@@ -1809,6 +1816,7 @@ impl<'ctx> Importer<'ctx> {
                         &stack_ptr.addr_bits,
                         pointee_tid,
                         n_bits,
+                        addr_bound,
                     ))
                 } else {
                     match self.resolve_global_ptr(fctx, ptr) {
@@ -1847,12 +1855,14 @@ impl<'ctx> Importer<'ctx> {
                         .ok_or_else(|| {
                             ImportError::Unsupported("stack pointer bits missing (internal)".into())
                         })?;
+                    let addr_bound = self.stack_addr_bound(&stack_ptr);
                     self.stack_store_dynamic(
                         fctx,
                         stack_ptr.storage,
                         ptr_bits0,
                         &stack_ptr.addr_bits,
                         &val,
+                        addr_bound,
                     );
                 } else {
                     let n_bytes = val.len().div_ceil(8);
@@ -2417,6 +2427,7 @@ impl<'ctx> Importer<'ctx> {
                     let storage = self.storage_alloc.alloc();
                     let sp = self.storage_alloc.alloc();
                     self.alloca_data.push(storage);
+                self.alloca_sizes.push(total_slots);
                     self.sp_globals.push(sp);
                     self.pre_init.push(PreInitSegment {
                         storage: sp,
@@ -3360,6 +3371,7 @@ impl<'ctx> Importer<'ctx> {
                     &ptr.addr_bits,
                     self.byte_tid,
                     n_bits,
+                    self.stack_addr_bound(ptr),
                 ))
             }
             IntrinsicPointer::Global {
@@ -3380,7 +3392,14 @@ impl<'ctx> Importer<'ctx> {
     ) -> IResult<()> {
         match ptr {
             IntrinsicPointer::Stack { ptr, ptr_bits0 } => {
-                self.stack_store_dynamic(fctx, ptr.storage, *ptr_bits0, &ptr.addr_bits, bytes);
+                self.stack_store_dynamic(
+                    fctx,
+                    ptr.storage,
+                    *ptr_bits0,
+                    &ptr.addr_bits,
+                    bytes,
+                    self.stack_addr_bound(ptr),
+                );
             }
             IntrinsicPointer::Global {
                 storage,
@@ -3431,6 +3450,38 @@ impl<'ctx> Importer<'ctx> {
         base: &Bits,
         delta: i64,
     ) -> Bits {
+        // Sub-storage arithmetic: a constant base (every pool-backed
+        // alloca) stays constant through the fold — Const bits out, no
+        // adder circuits — so every later access through the folded pointer
+        // hits `dynamic_addr`'s zero-adder constant fold. Without this the
+        // gep fold's `bc_add` demoted constant addresses to runtime adder
+        // outputs and every access paid a full pointer-width adder.
+        let mut base_val = 0u64;
+        let mut is_const = true;
+        for (b, &vid) in base.iter().enumerate() {
+            match &fctx.values[vid.0].kind {
+                Value::Op(Stmt::Const(c, _)) => {
+                    if c.lo & 1 != 0 {
+                        base_val |= 1u64 << b;
+                    }
+                }
+                _ => {
+                    is_const = false;
+                    break;
+                }
+            }
+        }
+        if is_const {
+            let sum = (base_val as i64).wrapping_add(delta);
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block,
+            };
+            return (0..self.pointer_bits)
+                .map(|b| c.bc_const(((sum as u64) >> b) & 1 != 0))
+                .collect();
+        }
         let mut c = Ctx {
             fctx,
             bit_tid: self.bit_tid,
@@ -3767,6 +3818,7 @@ impl<'ctx> Importer<'ctx> {
         block: BlockId,
         base_addr_bits: &Bits,
         i: u64,
+        addr_bound: u64,
     ) -> ValueId {
         // Constant-base fold: a pool-backed alloca's address bits are all
         // `Const` nodes, so `base + i` is a single constant with zero gate
@@ -3810,16 +3862,36 @@ impl<'ctx> Importer<'ctx> {
                 }),
             );
         }
+        // Trimmed-width runtime adder: an access within one alloca never
+        // addresses at or beyond its allocation bound, so the sum fits in
+        // the bound's bit length — the low bits carry the whole adder and
+        // the high bits reassemble as constants (the base's high wires are
+        // semantically zero there and are dropped; out-of-bounds programs
+        // already read undefined cells, so nothing sound is lost). A
+        // 32-bit scalar on a runtime stack drops its address adder from
+        // ~192 gate polys to ~15.
+        let bound = if addr_bound == 0 || addr_bound == u64::MAX {
+            0
+        } else {
+            addr_bound
+        };
+        let width = if bound > 0 {
+            ((u64::BITS - (bound - 1).leading_zeros()) as usize)
+                .min(base_addr_bits.len())
+        } else {
+            base_addr_bits.len()
+        };
         let sum = {
             let mut c = Ctx {
                 fctx,
                 bit_tid: self.bit_tid,
                 block,
             };
-            let i_bits: Vec<ValueId> = (0..base_addr_bits.len())
+            let low = &base_addr_bits[..width];
+            let i_bits: Vec<ValueId> = (0..width)
                 .map(|b| c.bc_const((i >> b) & 1 != 0))
                 .collect();
-            circuits::bc_add(&mut c, base_addr_bits, &i_bits, false)
+            circuits::bc_add(&mut c, low, &i_bits, false)
         };
         fctx.emit(
             block,
@@ -3828,6 +3900,18 @@ impl<'ctx> Importer<'ctx> {
                 ty: self.addr_tid,
             }),
         )
+    }
+
+    /// The trimmed-address bound for one tracked stack pointer: its
+    /// allocation span, except pool-backed pointers (a pool offset is
+    /// bounded by the whole pool, not the alloca) and seeded parameter
+    /// pointers (offset unknown) get no bound.
+    fn stack_addr_bound(&self, ptr: &StackPtr) -> u64 {
+        if Some(ptr.storage) == self.pool_storage || ptr.allocation_bits == u64::MAX {
+            0
+        } else {
+            ptr.allocation_bits
+        }
     }
 
     /// Read `n_bits` from `storage` at `base_addr_bits`, one bit per address.
@@ -3839,11 +3923,12 @@ impl<'ctx> Importer<'ctx> {
         base_addr_bits: &Bits,
         pointee_ty: TypeId,
         n_bits: usize,
+        addr_bound: u64,
     ) -> Bits {
         let cur = fctx.current;
         let mut bits = Vec::with_capacity(n_bits);
         for i in 0..n_bits as u64 {
-            let addr = self.dynamic_addr(fctx, cur, base_addr_bits, i);
+            let addr = self.dynamic_addr(fctx, cur, base_addr_bits, i, addr_bound);
             let bit = fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageRead {
@@ -3872,10 +3957,11 @@ impl<'ctx> Importer<'ctx> {
         ptr_bits0: ValueId,
         base_addr_bits: &Bits,
         val: &Bits,
+        addr_bound: u64,
     ) {
         let cur = fctx.current;
         for (i, &bit) in val.iter().enumerate() {
-            let addr = self.dynamic_addr(fctx, cur, base_addr_bits, i as u64);
+            let addr = self.dynamic_addr(fctx, cur, base_addr_bits, i as u64, addr_bound);
             fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageWrite {
@@ -4006,7 +4092,7 @@ impl<'ctx> Importer<'ctx> {
         let cur = fctx.current;
         let mut all_bits = Vec::with_capacity(n_bytes * 8);
         for byte_i in 0..n_bytes as u64 {
-            let addr = self.dynamic_addr(fctx, cur, base_offset_bits, byte_i);
+            let addr = self.dynamic_addr(fctx, cur, base_offset_bits, byte_i, 0);
             let byte_var = fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageRead {
@@ -4041,7 +4127,7 @@ impl<'ctx> Importer<'ctx> {
     ) {
         let cur = fctx.current;
         for byte_i in 0..n_bytes as u64 {
-            let addr = self.dynamic_addr(fctx, cur, base_offset_bits, byte_i);
+            let addr = self.dynamic_addr(fctx, cur, base_offset_bits, byte_i, 0);
             let base = (byte_i * 8) as usize;
             let zero = self.bc_const_at(fctx, cur, false);
             let bits: Vec<ValueId> = (0..8)
@@ -4282,8 +4368,15 @@ impl<'ctx> Importer<'ctx> {
         let zero = self.bc_const_at(fctx, cur, false);
         let mut result = vec![zero; n_bits];
         for (candidate_idx, &sid) in allocas.iter().enumerate() {
-            let loaded =
-                self.stack_load_dynamic(fctx, sid, ptr_bits[0], &offset_bits, pointee_ty, n_bits);
+            let loaded = self.stack_load_dynamic(
+                fctx,
+                sid,
+                ptr_bits[0],
+                &offset_bits,
+                pointee_ty,
+                n_bits,
+                self.alloca_sizes[candidate_idx],
+            );
             result = mux_bits(
                 self,
                 fctx,
@@ -4342,10 +4435,11 @@ impl<'ctx> Importer<'ctx> {
         let stack_matches = self.dispatch_id_matches(fctx, cur, ptr_bits, &allocas, not_tag);
         let bit_tid = self.bit_tid;
         for (candidate_idx, &sid) in allocas.iter().enumerate() {
+            let bound = self.alloca_sizes[candidate_idx];
             let old =
-                self.stack_load_dynamic(fctx, sid, ptr_bits[0], &offset_bits, bit_tid, n_bits);
+                self.stack_load_dynamic(fctx, sid, ptr_bits[0], &offset_bits, bit_tid, n_bits, bound);
             let new_val = mux_bits(self, fctx, cur, stack_matches[candidate_idx], val, &old);
-            self.stack_store_dynamic(fctx, sid, ptr_bits[0], &offset_bits, &new_val);
+            self.stack_store_dynamic(fctx, sid, ptr_bits[0], &offset_bits, &new_val, bound);
         }
 
         let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
