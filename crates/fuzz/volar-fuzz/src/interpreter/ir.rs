@@ -481,17 +481,24 @@ fn eval_ir_stmt(
                     terms.push((factors, *coeff));
                 }
                 let mut sink = volar_ir_common::BoolRing;
-                volar_ir_common::eval_prime_poly(*ty, &constant_bits, &terms, types, &mut sink)
+                let out =
+                    volar_ir_common::eval_prime_poly(*ty, &constant_bits, &terms, types, &mut sink);
+                eval_watch_log(stmt_id, &out);
+                out
             } else if volar_ir_common::mul_is_idempotent(*ty, types) {
                 let width = bit_width(*ty, types);
-                eval_poly(coeffs, constant, width, vars)
+                let out = eval_poly(coeffs, constant, width, vars);
+                eval_watch_log(stmt_id, &out);
+                out
             } else {
-                eval_typed_poly(*ty, coeffs, constant, types, |var| {
+                let out = eval_typed_poly(*ty, coeffs, constant, types, |var| {
                     let factor_ty = var_tys.get(&var.0).copied().unwrap_or_else(|| {
                         panic!("eval_ir: factor v{} has no type", var.0)
                     });
                     (factor_ty, get_ir(vars, var))
-                })
+                });
+                eval_watch_log(stmt_id, &out);
+                out
             }
         }
         Stmt::Rol { src, ty, n } => {
@@ -585,10 +592,22 @@ fn eval_ir_stmt(
             let w = bit_width(*ty, types);
             let addr_val = get_ir(vars, addr);
             let addr_u64 = bits_to_u64(&addr_val);
-            storage
-                .get(&(*store_id, *ty, addr_u64))
-                .cloned()
-                .unwrap_or_else(|| vec![false; w])
+            let hit = storage.get(&(*store_id, *ty, addr_u64)).cloned();
+            if std::env::var("VOLAR_EVAL_MEM_LOG").is_ok() {
+                let (tag, val) = match &hit {
+                    Some(v) => ("HIT ", bits_hex(v)),
+                    None => ("MISS", "".to_string()),
+                };
+                eprintln!(
+                    "[mem] RD  s={} ty={} addr={} {}{}",
+                    store_id.0,
+                    ty.0,
+                    addr_u64,
+                    tag,
+                    val
+                );
+            }
+            hit.unwrap_or_else(|| vec![false; w])
         }
         Stmt::StorageWrite {
             storage: store_id,
@@ -605,10 +624,61 @@ fn eval_ir_stmt(
             while val.len() < w {
                 val.push(false);
             }
+            if std::env::var("VOLAR_EVAL_MEM_LOG").is_ok() {
+                eprintln!(
+                    "[mem] WR  s={} ty={} addr={} {}",
+                    store_id.0,
+                    ty.0,
+                    addr_u64,
+                    bits_hex(&val)
+                );
+            }
             storage.insert((*store_id, *ty, addr_u64), val);
             vec![] // StorageWrite has no output
         }
         _ => panic!("eval_ir_stmt: unhandled Stmt variant — add evaluation for this variant"),
+    }
+}
+
+/// Hex render of a bit vector, LSB-first, for the gated memory-access log.
+fn bits_hex(bits: &[bool]) -> String {
+    let mut out = String::with_capacity(bits.len() / 4 + 3);
+    out.push_str("0x");
+    let mut acc = 0u64;
+    let mut n = 0;
+    for (i, &b) in bits.iter().enumerate() {
+        if b {
+            acc |= 1u64 << (i % 64);
+        }
+        n += 1;
+        if n == 64 {
+            out.push_str(&format!("{:016x}", acc));
+            acc = 0;
+            n = 0;
+        }
+    }
+    if n > 0 {
+        out.push_str(&format!("{:0width$x}", acc, width = (n + 3) / 4));
+    }
+    out
+}
+
+/// Watch list for the gated evaluator trace: `VOLAR_EVAL_WATCH=33719,33720`
+/// prints each watched var's value as it is evaluated.
+fn eval_watch_log(stmt_id: u32, val: &[bool]) {
+    use std::sync::OnceLock;
+    static WATCH: OnceLock<Option<std::collections::BTreeSet<u32>>> = OnceLock::new();
+    let watch = WATCH.get_or_init(|| {
+        std::env::var("VOLAR_EVAL_WATCH").ok().map(|s| {
+            s.split(',')
+                .filter_map(|t| t.trim().parse::<u32>().ok())
+                .collect::<std::collections::BTreeSet<u32>>()
+        })
+    });
+    if let Some(set) = watch {
+        if set.contains(&stmt_id) {
+            eprintln!("[watch] v{} = {}", stmt_id, bits_hex(val));
+        }
     }
 }
 
