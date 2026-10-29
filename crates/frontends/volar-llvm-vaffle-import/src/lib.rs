@@ -59,9 +59,10 @@ use inkwell::AddressSpace;
 use inkwell::IntPredicate;
 use inkwell::basic_block::BasicBlock as LlvmBlock;
 use inkwell::llvm_sys::core::{
-    LLVMGetConstOpcode, LLVMGetGEPSourceElementType, LLVMGetNumOperands, LLVMGetNumSuccessors,
-    LLVMGetOperand, LLVMGetSuccessor, LLVMGetSwitchCaseValue, LLVMGetTypeKind, LLVMIsAConstantExpr,
-    LLVMTypeOf,
+    LLVMGetConstOpcode, LLVMGetFirstUse, LLVMGetGEPSourceElementType, LLVMGetNextUse,
+    LLVMGetNumOperands, LLVMGetNumSuccessors, LLVMGetOperand, LLVMGetSuccessor,
+    LLVMGetSwitchCaseValue, LLVMGetTypeKind, LLVMGetUser, LLVMIsAConstantExpr,
+    LLVMIsAGlobalVariable, LLVMIsAInstruction, LLVMTypeOf,
 };
 use inkwell::llvm_sys::{LLVMOpcode, LLVMTypeKind};
 use inkwell::module::Module as LlvmModule;
@@ -341,24 +342,26 @@ pub fn import_module_with_config<'ctx>(
     // -- never just whichever globals happened to be referenced by earlier
     // functions' own direct loads/stores/GEPs.
     importer.register_all_globals(llvm_module)?;
-    let mut worklist: Vec<FunctionValue<'ctx>> = Vec::new();
+    let mut worklist: Vec<(FunctionValue<'ctx>, Vec<Prov>)> = Vec::new();
     for &name in entries {
         let f = llvm_module.get_function(name).ok_or_else(|| {
             ImportError::Unsupported(format!("entry function `{name}` does not exist"))
         })?;
-        importer.func_id(f)?;
-        worklist.push(f);
+        // Entry functions have no caller: their pointer parameters carry no
+        // static provenance (empty vector, never seeded).
+        importer.func_id(f, &[])?;
+        worklist.push((f, Vec::new()));
     }
-    let mut done: std::collections::HashSet<PointerValue<'ctx>> = Default::default();
+    let mut done: std::collections::HashSet<(PointerValue<'ctx>, Vec<Prov>)> = Default::default();
     let mut imported_count = 0usize;
-    while let Some(f) = worklist.pop() {
-        let key = f.as_global_value().as_pointer_value();
+    while let Some((f, prov)) = worklist.pop() {
+        let key = (f.as_global_value().as_pointer_value(), prov.clone());
         if done.contains(&key) {
             continue;
         }
         done.insert(key);
         let before = importer.total_values();
-        let called = importer.import_function(f)?;
+        let called = importer.import_function(f, &prov)?;
         worklist.extend(called);
         imported_count += 1;
         if std::env::var("VLVI_IMPORT_PROGRESS").is_ok() {
@@ -462,6 +465,35 @@ impl StackPtr {
 struct GlobalPointer {
     storage: StorageId,
     byte_offset: u64,
+}
+
+impl GlobalPtr {
+    fn storage(&self) -> StorageId {
+        match self {
+            GlobalPtr::Const(g) => g.storage,
+            GlobalPtr::Symbolic { storage, .. } => *storage,
+        }
+    }
+}
+
+/// Static provenance class of a pointer-typed call argument, driving
+/// call-site specialization (issue: `&mut`-parameter state access otherwise
+/// imports as per-bit runtime dispatch). A callee is re-imported per
+/// distinct provenance vector of its pointer arguments; a copy seeded with
+/// `Stack`/`Global` provenance resolves every access through those
+/// parameters statically against the named storage, while `Any` keeps the
+/// generic runtime-dispatch body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum Prov {
+    /// The argument names a specific alloca data stack (a tracked
+    /// `StackPtr`, possibly at a runtime offset within it).
+    Stack(StorageId),
+    /// The argument names a specific global-class storage (a tracked or
+    /// constant global; with pool packing that is the single pool storage,
+    /// at a possibly-runtime byte offset).
+    Global(StorageId),
+    /// No static provenance: the generic dispatching body.
+    Any,
 }
 
 /// Tracking for a pointer-typed LLVM value known (at import time) to be
@@ -595,8 +627,26 @@ struct Importer<'ctx> {
     funcs: Vec<FuncDecl>,
     sigs: Vec<SigDecl>,
     exports: std::collections::BTreeMap<String, FuncId>,
-    func_ids: HashMap<PointerValue<'ctx>, FuncId>,
+    /// Per (LLVM function, pointer-argument provenance) — the
+    /// specialization key. Two call sites whose pointer arguments name the
+    /// same storages share one imported copy; distinct storages produce
+    /// distinct copies in which parameter-provenance state access resolves
+    /// statically (see `Prov`).
+    func_ids: HashMap<(PointerValue<'ctx>, Vec<Prov>), FuncId>,
     storage_for_global: HashMap<PointerValue<'ctx>, StorageId>,
+    /// All module globals pack into ONE pool storage: a global has exactly
+    /// one possible location, so its identity is a constant byte offset
+    /// within the pool (`global_pool_offset`) rather than a distinct
+    /// `StorageId`. Non-escaping allocas carve from the same pool tail
+    /// (`pool_next_byte`); a runtime-dispatched pointer can then only name
+    /// this one global-class storage plus escaping per-alloca stacks.
+    pool_storage: Option<StorageId>,
+    global_pool_offset: HashMap<PointerValue<'ctx>, u64>,
+    pool_next_byte: u64,
+    /// The one SigId per LLVM function. Signature shape is
+    /// provenance-independent (param/result types don't change across
+    /// specialized copies); only the FuncId specializes.
+    sig_of: HashMap<PointerValue<'ctx>, SigId>,
     storage_alloc: StorageAllocator,
     /// Data stacks created for `alloca`, in allocation order. Dispatch
     /// muxes these separately from byte-addressed globals.
@@ -655,6 +705,10 @@ impl<'ctx> Importer<'ctx> {
             exports: Default::default(),
             func_ids: HashMap::new(),
             storage_for_global: HashMap::new(),
+            pool_storage: None,
+            global_pool_offset: HashMap::new(),
+            pool_next_byte: 0,
+            sig_of: HashMap::new(),
             storage_alloc: StorageAllocator::new(GLOBAL_STORAGE_BASE),
             alloca_data: Vec::new(),
             sp_globals: Vec::new(),
@@ -911,46 +965,57 @@ impl<'ctx> Importer<'ctx> {
         }
     }
 
-    fn func_id(&mut self, f: FunctionValue<'ctx>) -> IResult<FuncId> {
+    fn func_id(&mut self, f: FunctionValue<'ctx>, prov: &[Prov]) -> IResult<FuncId> {
         let key = f.as_global_value().as_pointer_value();
-        if let Some(&id) = self.func_ids.get(&key) {
+        // Intern the signature once per LLVM function: the param/result
+        // shape is provenance-independent, so every specialized copy of the
+        // function shares it.
+        let sig = match self.sig_of.get(&key) {
+            Some(&sig) => sig,
+            None => {
+                let params: Vec<TypeId> = f
+                    .get_params()
+                    .iter()
+                    .map(|p| self.llvm_type_id(p.get_type()))
+                    .collect::<IResult<_>>()?;
+                let results: Vec<TypeId> = match f.get_type().get_return_type() {
+                    Some(t) => match t {
+                        inkwell::types::BasicTypeEnum::StructType(_)
+                        | inkwell::types::BasicTypeEnum::ArrayType(_) => {
+                            // Aggregate returns flatten to ONE wide Bit-vector
+                            // result whose fields occupy declaration-order bit
+                            // ranges — matching the per-bit `Value::Output`s the
+                            // call site emits and the concatenated bits a `ret`
+                            // produces.
+                            let width = self.llvm_flatten_width(t)?;
+                            vec![self.types.intern(IrType::Vec(width, self.bit_tid))]
+                        }
+                        _ => vec![self.llvm_type_id(t)?],
+                    },
+                    None => vec![],
+                };
+                let sig = SigId(self.sigs.len());
+                self.sigs.push(SigDecl { params, results });
+                self.sig_of.insert(key, sig);
+                sig
+            }
+        };
+        // Reserve a placeholder per (function, provenance); `import_function`
+        // overwrites it once the body (or import declaration) is known.
+        // Reserving up front lets mutually/self-recursive call sites resolve
+        // a stable FuncId before the callee itself has been walked.
+        let fkey = (key, prov.to_vec());
+        if let Some(&id) = self.func_ids.get(&fkey) {
             return Ok(id);
         }
         let id = FuncId(self.funcs.len());
-        // Reserve a placeholder; `import_function` overwrites it once the
-        // body (or import declaration) is known. Reserving up front lets
-        // mutually/self-recursive call sites resolve a stable FuncId before
-        // the callee itself has been walked.
-        let params: Vec<TypeId> = f
-            .get_params()
-            .iter()
-            .map(|p| self.llvm_type_id(p.get_type()))
-            .collect::<IResult<_>>()?;
-        let results: Vec<TypeId> = match f.get_type().get_return_type() {
-            Some(t) => match t {
-                inkwell::types::BasicTypeEnum::StructType(_)
-                | inkwell::types::BasicTypeEnum::ArrayType(_) => {
-                    // Aggregate returns flatten to ONE wide Bit-vector
-                    // result whose fields occupy declaration-order bit
-                    // ranges — matching the per-bit `Value::Output`s the
-                    // call site emits and the concatenated bits a `ret`
-                    // produces.
-                    let width = self.llvm_flatten_width(t)?;
-                    vec![self.types.intern(IrType::Vec(width, self.bit_tid))]
-                }
-                _ => vec![self.llvm_type_id(t)?],
-            },
-            None => vec![],
-        };
-        let sig = SigId(self.sigs.len());
-        self.sigs.push(SigDecl { params, results });
         let name = f.get_name().to_string_lossy().into_owned();
         self.funcs.push(FuncDecl::Import {
             module: "llvm".into(),
             name: name.clone(),
             sig,
         });
-        self.func_ids.insert(key, id);
+        self.func_ids.insert(fkey, id);
         self.exports.entry(name).or_insert(id);
         Ok(id)
     }
@@ -1017,18 +1082,38 @@ impl<'ctx> Importer<'ctx> {
         Ok(id)
     }
 
-    /// Assign every global *variable* in the module its `StorageId` up
-    /// front (via `storage_for`, trivially resolved -- `strip_pointer`
-    /// succeeds immediately on a bare global). Registers the whole module's
-    /// globals, not just ones reachable from the entry points being
-    /// imported: a runtime-dispatched pointer's caller may pass any
-    /// address-taken global regardless of which function directly
-    /// references it syntactically, so the dispatch candidate set must be
-    /// conservative, not just "whatever's been seen so far."
+    /// Assign every global *variable* its identity up front, packed into
+    /// ONE pool storage. Unlike general allocas (any of whose per-site data
+    /// stacks a runtime-dispatched pointer may name, so dispatch must read
+    /// them all), a global has exactly one possible location: its identity
+    /// is the constant byte offset within the pool. `storage_for_global`
+    /// maps every global to the same pool `StorageId` and
+    /// `global_pool_offset` records its aligned byte offset, so the runtime
+    /// dispatch candidate set collapses to the single pool storage instead
+    /// of one candidate per global.
+    ///
+    /// The whole module's globals register before any body is walked (not
+    /// just ones reachable from the entry points being imported): the pool's
+    /// total extent must be fixed before any function body carves
+    /// non-escaping allocas from its tail, and a runtime-dispatched pointer's
+    /// caller may pass any global's address regardless of which function
+    /// directly references it syntactically.
     fn register_all_globals(&mut self, llvm_module: &LlvmModule<'ctx>) -> IResult<()> {
         let mut count = 0usize;
         for global in llvm_module.get_globals() {
-            self.storage_for(global.as_pointer_value())?;
+            let key = global.as_pointer_value();
+            if self.storage_for_global.contains_key(&key) {
+                continue;
+            }
+            let pool = self.pool_ensure();
+            let ty: BasicTypeEnum = global
+                .get_value_type()
+                .try_into()
+                .map_err(|_| ImportError::Unsupported("global of non-first-class type".into()))?;
+            let size = self.memory_byte_size(ty)?;
+            let base = self.pool_carve(self.pool_next_byte, size)?;
+            self.storage_for_global.insert(key, pool);
+            self.global_pool_offset.insert(key, base);
             count += 1;
         }
         if count > self.max_dispatch_candidates {
@@ -1039,6 +1124,44 @@ impl<'ctx> Importer<'ctx> {
             )));
         }
         Ok(())
+    }
+
+    /// The static pool storage, allocating it on first use. Globals register
+    /// from it eagerly in `register_all_globals`; a module with no globals
+    /// allocates it lazily when its first non-escaping alloca carves from
+    /// the tail (pool storages are neither per-alloca data stacks nor SP
+    /// globals, so the dispatch candidate enumeration picks them up
+    /// whenever they appear).
+    fn pool_ensure(&mut self) -> StorageId {
+        match self.pool_storage {
+            Some(p) => p,
+            None => {
+                let p = self.storage_alloc.alloc();
+                self.pool_storage = Some(p);
+                p
+            }
+        }
+    }
+
+    /// Carve `n_bytes` from the static pool's tail at 16-byte alignment,
+    /// returning the byte offset. Globals register from the pool head;
+    /// non-escaping allocas carve from the tail as function bodies are
+    /// walked. Fails closed when the pool outgrows the pointer-value
+    /// encoding's address field.
+    fn pool_carve(&mut self, base: u64, n_bytes: u64) -> IResult<u64> {
+        let base = base.next_multiple_of(16);
+        let end = base
+            .checked_add(n_bytes)
+            .ok_or_else(|| ImportError::Unsupported("static pool size overflow".into()))?;
+        if end >= (1u64 << self.global_addr_bits()) {
+            return Err(ImportError::Unsupported(
+                "static pool exhausted: globals plus non-escaping allocas \
+                 exceed the pointer-value address field"
+                    .into(),
+            ));
+        }
+        self.pool_next_byte = end;
+        Ok(base)
     }
 
     /// Like `storage_for`, but also folds in a constant-index `getelementptr`
@@ -1060,7 +1183,10 @@ impl<'ctx> Importer<'ctx> {
         let is_gep_const_expr = !unsafe { LLVMIsAConstantExpr(raw) }.is_null()
             && unsafe { LLVMGetConstOpcode(raw) } == LLVMOpcode::LLVMGetElementPtr;
         if !is_gep_const_expr {
-            return Ok((self.storage_for(ptr)?, 0));
+            let storage = self.storage_for(ptr)?;
+            // A bare global sits at its packed offset within the pool.
+            let off = self.global_pool_offset.get(&ptr).copied().unwrap_or(0);
+            return Ok((storage, off));
         }
         let base_raw = unsafe { LLVMGetOperand(raw, 0) };
         let base_ptr = unsafe { PointerValue::new(base_raw) };
@@ -1103,8 +1229,12 @@ impl<'ctx> Importer<'ctx> {
         }))
     }
 
-    fn import_function(&mut self, f: FunctionValue<'ctx>) -> IResult<Vec<FunctionValue<'ctx>>> {
-        let id = self.func_id(f)?;
+    fn import_function(
+        &mut self,
+        f: FunctionValue<'ctx>,
+        prov: &[Prov],
+    ) -> IResult<Vec<(FunctionValue<'ctx>, Vec<Prov>)>> {
+        let id = self.func_id(f, prov)?;
         if f.count_basic_blocks() == 0 {
             // Declaration only; already recorded as FuncDecl::Import above.
             return Ok(vec![]);
@@ -1147,6 +1277,60 @@ impl<'ctx> Importer<'ctx> {
                 next_bit_idx += 1;
             }
             fctx.cache.insert((*param).as_any_value_enum(), bits);
+        }
+
+        // Call-site specialization: seed pointer parameters with the
+        // caller-observed provenance so their accesses resolve statically
+        // instead of dispatching over every storage. The tagged pointer
+        // encoding puts the offset in the low `global_addr_bits` of the
+        // value bits, so the seeded tracking reuses the caller's runtime
+        // offset while fixing the storage identity. Parameters of the
+        // generic (`Any`) body keep the dispatching behavior; entry
+        // functions receive an empty provenance vector and are never
+        // seeded.
+        if prov.iter().any(|p| !matches!(p, Prov::Any)) {
+            let global_addr_bits = self.global_addr_bits();
+            let zero_bit = self.bc_const_at(&mut fctx, entry_block, false);
+            for (i, param) in f.get_params().iter().enumerate() {
+                let BasicValueEnum::PointerValue(pv) = param else {
+                    continue;
+                };
+                let bits = match fctx.cache.get(&param.as_any_value_enum()) {
+                    Some(b) if b.len() >= global_addr_bits => b.clone(),
+                    _ => continue,
+                };
+                match prov.get(i) {
+                    Some(Prov::Stack(storage)) => {
+                        let mut addr_bits = bits[..global_addr_bits].to_vec();
+                        addr_bits.resize(self.pointer_bits, zero_bit);
+                        fctx.stack_slot_of.insert(
+                            pv.as_any_value_enum(),
+                            StackPtr {
+                                storage: *storage,
+                                // The offset is runtime, so range-checking
+                                // against a compile-time extent is
+                                // meaningless: `const_offset: None` fails
+                                // memory intrinsics closed while ordinary
+                                // loads/stores/GEPs proceed on the fixed
+                                // storage.
+                                allocation_bits: u64::MAX,
+                                const_offset: None,
+                                addr_bits,
+                            },
+                        );
+                    }
+                    Some(Prov::Global(storage)) => {
+                        fctx.global_ptr_of.insert(
+                            pv.as_any_value_enum(),
+                            GlobalPtr::Symbolic {
+                                storage: *storage,
+                                offset_bits: bits[..global_addr_bits].to_vec(),
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // Reserve one bit-decomposed VAFFLE param per phi, per block (after
@@ -1331,7 +1515,7 @@ impl<'ctx> Importer<'ctx> {
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
         instr: InstructionValue<'ctx>,
-    ) -> IResult<Vec<FunctionValue<'ctx>>> {
+    ) -> IResult<Vec<(FunctionValue<'ctx>, Vec<Prov>)>> {
         let mut called = Vec::new();
         let opcode = instr.get_opcode();
         let cur = fctx.current;
@@ -1684,18 +1868,22 @@ impl<'ctx> Importer<'ctx> {
                             .ok_or_else(|| {
                                 ImportError::Unsupported("gep offset overflow".into())
                             })?;
-                        let addr = base_ptr
-                            .const_offset
-                            .and_then(|base_off| base_off.checked_add_signed(offset))
-                            .ok_or_else(|| {
-                                ImportError::Unsupported("gep offset out of range".into())
-                            })?;
+                        let addr = match base_ptr.const_offset {
+                            Some(base_off) => Some(base_off.checked_add_signed(offset).ok_or_else(
+                                || ImportError::Unsupported("gep offset out of range".into()),
+                            )?),
+                            // A runtime base (a specialized parameter's provenance
+                            // is `const_offset: None`) plus a constant delta stays
+                            // runtime: `addr_bits` below carries the folded offset;
+                            // there is simply no compile-time offset to extend.
+                            None => None,
+                        };
                         let addr_bits =
                             self.add_signed_delta(fctx, cur, &base_ptr.addr_bits, offset);
                         StackPtr {
                             storage: base_ptr.storage,
                             allocation_bits: base_ptr.allocation_bits,
-                            const_offset: Some(addr),
+                            const_offset: addr,
                             addr_bits,
                         }
                     } else {
@@ -1997,8 +2185,30 @@ impl<'ctx> Importer<'ctx> {
                     let is_tail_call = matches!(tail_end, Some(TailCallEnd::Unreachable))
                         || (matches!(tail_end, Some(TailCallEnd::Return))
                             && callee_fn.get_first_basic_block().is_some());
-                    let callee_id = self.func_id(callee_fn)?;
-                    called.push(callee_fn);
+                    // Call-site specialization: classify each pointer
+                    // argument's static provenance so the callee imports
+                    // (or reuses) a copy whose parameter accesses resolve
+                    // statically. `call_arg_bits` validated the operands
+                    // above; call operands are the arguments followed by
+                    // the callee itself.
+                    let prov: Vec<Prov> = callee_fn
+                        .get_params()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, pty)| {
+                            if !matches!(pty.get_type(), BasicTypeEnum::PointerType(_)) {
+                                return Prov::Any;
+                            }
+                            let arg_ref = unsafe { LLVMGetOperand(instr.as_value_ref(), i as u32) };
+                            if arg_ref.is_null() {
+                                return Prov::Any;
+                            }
+                            let arg = unsafe { BasicValueEnum::new(arg_ref) };
+                            self.arg_provenance(fctx, arg)
+                        })
+                        .collect();
+                    let callee_id = self.func_id(callee_fn, &prov)?;
+                    called.push((callee_fn, prov));
                     if is_tail_call {
                         fctx.terminators[cur.0] = Some(Terminator::ReturnCall {
                             func: callee_id,
@@ -2104,6 +2314,41 @@ impl<'ctx> Importer<'ctx> {
                 let total_slots = elem_bits
                     .checked_mul(count)
                     .ok_or_else(|| ImportError::Unsupported("alloca size overflow".into()))?;
+                // Pool packing: a NON-ESCAPING alloca has exactly one
+                // possible location — carve its bytes from the static pool
+                // (the single storage globals pack into) instead of
+                // allocating a per-site data stack. Every access through it
+                // resolves statically (same tracked-`StackPtr` machinery,
+                // different backing storage), and runtime dispatch never
+                // needs to read its cells. Escaping allocas keep per-site
+                // stacks: a runtime-dispatched pointer may name any of
+                // them, so dispatch must read them all.
+                if !self.alloca_escapes(instr) {
+                    let pool = self.pool_ensure();
+                    let n_bytes = total_slots.div_ceil(8);
+                    let base = self.pool_carve(self.pool_next_byte, n_bytes)?;
+                    let base_bit_off = base.checked_mul(8).ok_or_else(|| {
+                        ImportError::Unsupported("alloca pool offset overflow".into())
+                    })?;
+                    if base_bit_off >= (1u64 << self.global_addr_bits()) {
+                        return Err(ImportError::Unsupported(
+                            "alloca pool offset exceeds the pointer-value encoding".into(),
+                        ));
+                    }
+                    let addr_bits: Bits = (0..self.pointer_bits)
+                        .map(|b| self.bc_const_at(fctx, cur, (base_bit_off >> b) & 1 != 0))
+                        .collect();
+                    fctx.stack_slot_of.insert(
+                        instr.as_any_value_enum(),
+                        StackPtr {
+                            storage: pool,
+                            allocation_bits: total_slots,
+                            const_offset: Some(0),
+                            addr_bits: addr_bits.clone(),
+                        },
+                    );
+                    Some(self.encode_stack_ptr(fctx, cur, pool, &addr_bits)?)
+                } else {
                 // The tagged pointer encoding keeps the bit offset in the
                 // low `global_addr_bits` field. One site's allocation has to
                 // fit there; the calling-convention frame is a different storage.
@@ -2146,6 +2391,7 @@ impl<'ctx> Importer<'ctx> {
                     },
                 );
                 Some(self.encode_stack_ptr(fctx, cur, storage, &addr_bits)?)
+                }
             }
             other => {
                 return Err(ImportError::Unsupported(format!("{other:?}")));
@@ -3708,6 +3954,102 @@ impl<'ctx> Importer<'ctx> {
                     addr,
                 }),
             );
+        }
+    }
+
+    /// Conservative escape check for an `alloca`: does its address value
+    /// (transitively through GEP instructions) stay within this function's
+    /// loads and stores? Any other use — a call argument (other than the
+    /// `llvm.lifetime.*`/`llvm.dbg.*` markers, which take the address
+    /// without dereferencing or storing it), storing the pointer as a
+    /// value, phi/select/return, ptrtoint — escapes. Unknown user shapes
+    /// escape. Only non-escaping allocas may carve from the static pool:
+    /// their address values never flow anywhere a runtime-dispatched load
+    /// could dereference, so no dispatch ever needs to read their cells.
+    fn alloca_escapes(&self, alloc: InstructionValue<'ctx>) -> bool {
+        let mut work = vec![alloc.as_value_ref()];
+        let mut seen: std::collections::HashSet<usize> = Default::default();
+        while let Some(vref) = work.pop() {
+            if !seen.insert(vref as usize) {
+                continue;
+            }
+            let mut use_ref = unsafe { LLVMGetFirstUse(vref) };
+            while !use_ref.is_null() {
+                let user = unsafe { LLVMGetUser(use_ref) };
+                use_ref = unsafe { LLVMGetNextUse(use_ref) };
+                if unsafe { LLVMIsAInstruction(user) }.is_null() {
+                    // Allocas are not constants, so a constant-expression
+                    // user cannot occur; treat anything unexpected as an
+                    // escape.
+                    return true;
+                }
+                let opcode = unsafe { InstructionValue::new(user) }.get_opcode();
+                match opcode {
+                    InstructionOpcode::GetElementPtr => {
+                        if unsafe { LLVMGetOperand(user, 0) } == vref {
+                            work.push(user);
+                        } else {
+                            return true;
+                        }
+                    }
+                    InstructionOpcode::Load => {
+                        if unsafe { LLVMGetOperand(user, 0) } != vref {
+                            return true;
+                        }
+                    }
+                    InstructionOpcode::Store => {
+                        // Store operands are (value, pointer).
+                        if unsafe { LLVMGetOperand(user, 1) } != vref {
+                            return true;
+                        }
+                    }
+                    InstructionOpcode::Call => {
+                        // Call operands are the arguments followed by the
+                        // callee itself.
+                        let n = unsafe { LLVMGetNumOperands(user) };
+                        let callee_ref = unsafe { LLVMGetOperand(user, (n - 1) as u32) };
+                        let callee = unsafe { FunctionValue::new(callee_ref) };
+                        let name = callee
+                            .map(|f| f.get_name().to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        if name.starts_with("llvm.lifetime") || name.starts_with("llvm.dbg") {
+                            continue;
+                        }
+                        return true;
+                    }
+                    _ => return true,
+                }
+            }
+        }
+        false
+    }
+
+    /// Statically classify a pointer-typed call argument for call-site
+    /// specialization (see `Prov`). Tracked stack pointers and globals
+    /// name their storage; bare constant globals (and constant-expression
+    /// GEP chains rooted at one) name the pool; everything else — pointers
+    /// loaded at runtime, merged values, unseeded parameters of a generic
+    /// body — stays `Any`.
+    fn arg_provenance(&mut self, fctx: &FuncCtx<'ctx>, arg: BasicValueEnum<'ctx>) -> Prov {
+        let BasicValueEnum::PointerValue(pv) = arg else {
+            return Prov::Any;
+        };
+        if let Some(sp) = fctx.stack_slot_of.get(&pv.as_any_value_enum()) {
+            return Prov::Stack(sp.storage);
+        }
+        if let Some(gp) = fctx.global_ptr_of.get(&pv.as_any_value_enum()) {
+            return Prov::Global(gp.storage());
+        }
+        let raw = pv.as_value_ref();
+        let is_global = !unsafe { LLVMIsAGlobalVariable(raw) }.is_null();
+        let is_const_gep = !unsafe { LLVMIsAConstantExpr(raw) }.is_null()
+            && unsafe { LLVMGetConstOpcode(raw) } == LLVMOpcode::LLVMGetElementPtr;
+        if !is_global && !is_const_gep {
+            return Prov::Any;
+        }
+        match self.storage_for_with_offset(pv) {
+            Ok((storage, _)) => Prov::Global(storage),
+            Err(_) => Prov::Any,
         }
     }
 
