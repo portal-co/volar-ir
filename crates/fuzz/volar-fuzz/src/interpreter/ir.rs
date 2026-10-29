@@ -167,6 +167,57 @@ pub fn eval_ir_with_trace(
     }
 }
 
+/// Like [`eval_ir_with_trace`], but snapshots the storage map after every
+/// block hop so callers can diff the reference execution against the
+/// movfuscated circuit's per-step storage (modulo the lane remap).
+pub fn eval_ir_with_snapshots(
+    blocks: &IRBlocks<()>,
+    types: &IRTypes,
+    inputs: &[IrValue],
+) -> (Option<Vec<IrValue>>, Vec<(usize, StorageMap)>) {
+    let mut loop_count = 0usize;
+    let mut current_block: usize = 0;
+    let mut current_inputs: Vec<IrValue> = inputs.to_vec();
+    let mut storage: StorageMap = BTreeMap::new();
+    apply_pre_init(&mut storage, &blocks.pre_init, types);
+    let mut snaps: Vec<(usize, StorageMap)> = Vec::new();
+
+    loop {
+        snaps.push((current_block, storage.clone()));
+        if current_block == 0 {
+            loop_count += 1;
+            if loop_count > crate::interpreter::biir::MAX_ITERS {
+                return (None, snaps);
+            }
+        }
+
+        let block = &blocks.blocks[current_block];
+        let (result, _watch) = eval_ir_block(
+            block,
+            types,
+            &blocks.oracles,
+            &current_inputs,
+            &mut storage,
+            &[],
+        );
+        let result = match result {
+            Some(r) => r,
+            None => return (None, snaps),
+        };
+
+        match result {
+            IrBlockResult::Return(vals) => {
+                snaps.push((usize::MAX, storage.clone()));
+                return (Some(vals), snaps);
+            }
+            IrBlockResult::Jump { target, args } => {
+                current_block = target;
+                current_inputs = args;
+            }
+        }
+    }
+}
+
 /// Evaluate a single, already-unrolled circuit block (i.e. one satisfying
 /// `IRBlocks::is_circuit()` -- a single block ending in `Jmp(Return)`) with
 /// an externally-supplied, persistent [`StorageMap`], so callers can thread

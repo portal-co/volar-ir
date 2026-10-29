@@ -1383,3 +1383,197 @@ fn repro_prop_o_bit_const_payload() {
     let rhs = eval_biir(&boolar, &[]).expect("eval_biir");
     assert_eq!(lhs, rhs, "unroll+boolar changed semantics");
 }
+
+// Property S — `storage_to_mux_ir` preserves semantics.
+//
+// Policy (portal-co/volar-ir#5 follow-up): storage-to-MUX promotion is a
+// correctness-critical transform, so it carries its own fuzz coverage instead
+// of being an untested option bolted onto pipelines. Storages are natively
+// supported by most backends; this pass must therefore hold the exact
+// reference semantics wherever it IS applied.
+//
+// Generates random single-block circuit programs over a dedicated 8-cell
+// storage (3-bit addresses so every addressable value is in range — the
+// pass's caller contract), with cells pre-seeded via `pre_init`, then checks
+// the promoted register-file form evaluates identically for the same inputs.
+proptest! {
+    #[test]
+    fn prop_s_storage_to_mux_ir_preserves_semantics(
+        n_ops in 1usize..24,
+        program in proptest::collection::vec((any::<u8>(), any::<u8>(), any::<u8>()), 0..48),
+        data0 in any::<u8>(),
+        addr0 in any::<u8>(),
+        init in proptest::collection::vec(any::<u8>(), 8),
+    ) {
+        use volar_ir::ir::{
+            IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType,
+            IRTypeId, IRTypes, IRVarId,
+        };
+        use volar_ir_common::{Constant, Node, PolyCoeffs, StorageId};
+
+        const NUM_CELLS: usize = 8;
+        let types = IRTypes(vec![
+            IrType::Primitive(Type::Bit),
+            IrType::Vec(8, IRTypeId(0)), // cell/data ty
+            IrType::Vec(3, IRTypeId(0)), // address ty (3 bits => every addr in range)
+        ]);
+        let cell_ty = IRTypeId(1);
+        let addr_ty = IRTypeId(2);
+        let target = StorageId(999);
+
+        // Interpret raw triples as a program over vars:
+        //   var 0 = data param (8-bit), var 1 = addr param (3-bit);
+        //   kind = t0 % 4: 0 Xor(i,j), 1 Const(c), 2 Write(i as data, j as addr), 3 Read(j as addr)
+        // IR var ids are POSITIONAL over all stmts (a StorageWrite consumes an
+        // id even though it defines no value), so the builder tracks next_id
+        // explicitly and var_tys is keyed by that positional id.
+        let mut stmts: Vec<IRStmt> = Vec::new();
+        let mut var_tys: Vec<Option<IRTypeId>> =
+            vec![Some(cell_ty.clone()), Some(addr_ty.clone())];
+        let mut next_id = 2usize;
+        let pick = |k: u8, of: usize| -> usize { (k as usize) % of };
+        // Push a stmt; returns its positional var id and whether it is
+        // value-producing (var_tys gets the type, or None for void stmts).
+        let mut push_stmt = |stmts: &mut Vec<IRStmt>,
+                             var_tys: &mut Vec<Option<IRTypeId>>,
+                             next_id: &mut usize,
+                             s: IRStmt,
+                             produces: Option<IRTypeId>| {
+            stmts.push(s);
+            let id = *next_id;
+            *next_id += 1;
+            var_tys.push(produces);
+            id
+        };
+        for &(t0, t1, t2) in program.iter().take(n_ops) {
+            let n = var_tys.len();
+            match t0 % 4 {
+                0 => {
+                    // XOR of two existing CELL-typed vars (falls back to Const).
+                    let i = pick(t1, n);
+                    let j = pick(t2, n);
+                    if var_tys[i] != Some(cell_ty.clone()) || var_tys[j] != Some(cell_ty.clone()) {
+                        push_stmt(&mut stmts, &mut var_tys, &mut next_id,
+                            IRStmt::Const(Constant { hi: 0, lo: t1 as u128 }, cell_ty), Some(cell_ty));
+                    } else {
+                        let mut coeffs = PolyCoeffs::new();
+                        coeffs.insert(vec![IRVarId(i as u32), IRVarId(j as u32)], 1u8);
+                        push_stmt(&mut stmts, &mut var_tys, &mut next_id,
+                            IRStmt::Poly { ty: cell_ty, coeffs, constant: Constant { hi: 0, lo: 0 } }, Some(cell_ty));
+                    }
+                }
+                1 => {
+                    push_stmt(&mut stmts, &mut var_tys, &mut next_id,
+                        IRStmt::Const(Constant { hi: 0, lo: t1 as u128 }, cell_ty), Some(cell_ty));
+                }
+                2 => {
+                    // Write var i (must be cell-typed) at an in-range address:
+                    // var j if addr-typed, else a fresh Const truncated to 3 bits.
+                    let i = pick(t1, n);
+                    let j = pick(t2, n);
+                    if var_tys[i] != Some(cell_ty.clone()) {
+                        continue;
+                    }
+                    let addr_var = if var_tys[j] == Some(addr_ty.clone()) {
+                        IRVarId(j as u32)
+                    } else {
+                        let id = push_stmt(&mut stmts, &mut var_tys, &mut next_id,
+                            IRStmt::Const(Constant { hi: 0, lo: ((t2 % (NUM_CELLS as u8)) as u128) }, addr_ty),
+                            Some(addr_ty));
+                        IRVarId(id as u32)
+                    };
+                    push_stmt(&mut stmts, &mut var_tys, &mut next_id,
+                        IRStmt::StorageWrite { storage: target, src: IRVarId(i as u32), ty: cell_ty, addr: addr_var },
+                        None);
+                }
+                _ => {
+                    let j = pick(t2, n);
+                    let addr_var = if var_tys[j] == Some(addr_ty.clone()) {
+                        IRVarId(j as u32)
+                    } else {
+                        let id = push_stmt(&mut stmts, &mut var_tys, &mut next_id,
+                            IRStmt::Const(Constant { hi: 0, lo: ((t2 % (NUM_CELLS as u8)) as u128) }, addr_ty),
+                            Some(addr_ty));
+                        IRVarId(id as u32)
+                    };
+                    push_stmt(&mut stmts, &mut var_tys, &mut next_id,
+                        IRStmt::StorageRead { storage: target, ty: cell_ty, addr: addr_var },
+                        Some(cell_ty));
+                }
+            }
+        }
+        // Return up to 3 cell-typed vars (or a fresh Const if none).
+        let ret_vars: Vec<IRVarId> = var_tys
+            .iter()
+            .enumerate()
+            .filter(|&(_, ty)| *ty == Some(cell_ty.clone()))
+            .map(|(i, _)| IRVarId(i as u32))
+            .rev()
+            .take(3)
+            .collect();
+        let ret_vars = if ret_vars.is_empty() {
+            let id = push_stmt(&mut stmts, &mut var_tys, &mut next_id,
+                IRStmt::Const(Constant { hi: 0, lo: 7u128 }, cell_ty), Some(cell_ty));
+            vec![IRVarId(id as u32)]
+        } else {
+            ret_vars
+        };
+
+        let wrap = |stmts: Vec<IRStmt>| -> Vec<Node<IRStmt, ()>> {
+            stmts.into_iter().map(|s| Node::new(s, (), None)).collect()
+        };
+        let blocks: IRBlocks<()> = IRBlocks {
+            oracles: vec![],
+            actions: vec![],
+            rngs: vec![],
+            pre_init: vec![volar_ir_common::PreInitSegment {
+                storage: target,
+                ty: cell_ty,
+                offset: 0,
+                data: init.iter().map(|&c| Constant { hi: 0, lo: c as u128 }).collect(),
+            }],
+            blocks: vec![IRBlock {
+                params: vec![cell_ty.clone(), addr_ty.clone()],
+                stmts: wrap(stmts),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, ret_vars.clone()),
+                },
+            }],
+        };
+
+        let u8_to_bits = |v: u8, w: usize| -> IrValue { (0..w).map(|i| (v >> i) & 1 == 1).collect() };
+        let inputs = vec![u8_to_bits(data0, 8), u8_to_bits(addr0, 3)];
+
+        let (before, _) = crate::interpreter::ir::eval_ir_with_storage(&blocks, &types, &inputs);
+        let before = before.expect("reference circuit must evaluate");
+
+        let mut types2 = types.clone();
+        let cfg = volar_ir_passes::StorageToMuxConfig {
+            storage: target,
+            ty: cell_ty,
+            num_cells: NUM_CELLS,
+        };
+        let promoted = volar_ir_passes::storage_to_mux_ir(&blocks, &mut types2, &cfg)
+            .expect("random storage circuit must promote");
+
+        // Structural invariant: no target-storage ops remain.
+        prop_assert!(
+            !promoted.blocks[0].stmts.iter().any(|s| matches!(
+                &s.kind,
+                IRStmt::StorageRead { storage, .. } | IRStmt::StorageWrite { storage, .. }
+                    if *storage == target
+            )),
+            "promotion left target-storage ops behind"
+        );
+
+        let (after, _) = crate::interpreter::ir::eval_ir_with_storage(&promoted, &types2, &inputs);
+        let after = after.expect("promoted circuit must evaluate");
+        prop_assert_eq!(
+            before, after,
+            "storage_to_mux_ir changed semantics (program triples {:?}, init {:?}, inputs {:?})",
+            &program[..program.len().min(n_ops)],
+            init,
+            inputs
+        );
+    }
+}
