@@ -178,10 +178,21 @@ fn plan_cross_block<P: Clone>(
             break;
         }
         let mut members: Vec<(usize, core::ops::Range<usize>)> = Vec::new();
+        let mut member_blocks: Vec<usize> = Vec::new();
         for o in &occs {
+            // At most one member per block: the composite emitter invokes a
+            // block's first segment only, and overlapping windows within a
+            // single block must not stand in for cross-block reuse (a
+            // self-overlapping pair used to satisfy `min_reuse_count` and
+            // produced a region whose member ranges were half-ignored;
+            // see portal-co/volar-ir#6).
+            if member_blocks.contains(&o.block_id) {
+                continue;
+            }
             if overlaps(&used_ranges[o.block_id], &o.range) {
                 continue;
             }
+            member_blocks.push(o.block_id);
             members.push((o.block_id, o.range.clone()));
         }
         if members.len() < cfg.min_reuse_count {
@@ -355,6 +366,7 @@ mod tests {
         let blocks = IRBlocks::new(vec![mk_block(10, 20), mk_block(11, 21)]);
         let cfg = AdaptiveSplitConfig {
             enabled: true,
+            cross_block: true,
             min_sequence_len: 4,
             min_reuse_count: 2,
             ..AdaptiveSplitConfig::default()
@@ -367,6 +379,77 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, SegmentInvoke::SharedCore { .. }))
         );
+    }
+
+    #[test]
+    fn cross_block_requires_distinct_member_blocks() {
+        // A single block whose windows overlap must not satisfy
+        // `min_reuse_count` against itself: members are at most one per
+        // block, and a lone block cannot form a cross-block core.
+        let mut types = IRTypes(vec![IRType::Primitive(PrimType::Bit)]);
+        let ty = u32_ty(&mut types);
+        let mut stmts = Vec::new();
+        for k in 0..8u128 {
+            stmts.push(Stmt::Const(Constant { hi: 0, lo: k }, ty));
+        }
+        let block = IRBlock {
+            params: vec![ty],
+            stmts: stmts.into_iter().map(|s| Node::new(s, (), None)).collect(),
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(8)]),
+            },
+        };
+        let blocks = IRBlocks::new(vec![block]);
+        let cfg = AdaptiveSplitConfig {
+            enabled: true,
+            cross_block: true,
+            min_sequence_len: 4,
+            min_reuse_count: 2,
+            ..AdaptiveSplitConfig::default()
+        };
+        let plan = plan_adaptive_split(&blocks, &cfg);
+        assert!(plan.shared_cores.is_empty(), "a single block must not share with itself");
+        assert!(plan.block_plans[0].segments.is_empty());
+    }
+
+    #[test]
+    fn default_knobs_plan_no_segments() {
+        // `enabled` alone (the shape volar-fuzz's adaptive-split proptest
+        // uses) must not plan segments: segment emission is not implemented
+        // and `virtualize_ir` refuses such plans. The knobs that trigger
+        // planning default to off.
+        let mut types = IRTypes(vec![IRType::Primitive(PrimType::Bit)]);
+        let ty = u32_ty(&mut types);
+        let core = vec![
+            Stmt::Const(Constant { hi: 0, lo: 1 }, ty),
+            Stmt::Const(Constant { hi: 0, lo: 2 }, ty),
+            Stmt::Const(Constant { hi: 0, lo: 3 }, ty),
+            Stmt::Const(Constant { hi: 0, lo: 4 }, ty),
+        ];
+        let mk_block = |prefix: u128, suffix: u128| {
+            let mut stmts = vec![Stmt::Const(Constant { hi: 0, lo: prefix }, ty)];
+            stmts.extend(core.clone());
+            stmts.push(Stmt::Const(Constant { hi: 0, lo: suffix }, ty));
+            IRBlock {
+                params: vec![ty],
+                stmts: stmts.into_iter().map(|s| Node::new(s, (), None)).collect(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, vec![IRVarId(5)]),
+                },
+            }
+        };
+        let blocks = IRBlocks::new(vec![mk_block(10, 20), mk_block(11, 21)]);
+        let cfg = AdaptiveSplitConfig {
+            enabled: true,
+            ..AdaptiveSplitConfig::default()
+        };
+        let plan = plan_adaptive_split(&blocks, &cfg);
+        assert!(plan.shared_cores.is_empty());
+        assert!(plan.reroll_loops.is_empty());
+        assert!(plan.layout.regions.is_empty());
+        for p in &plan.block_plans {
+            assert!(p.segments.is_empty());
+        }
     }
 
     #[test]

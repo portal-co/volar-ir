@@ -39,6 +39,22 @@ pub(super) fn virtualize_ir_adaptive<P: Clone + Default, H: IrHashAlgorithm>(
     split_plan: AdaptiveSplitPlan,
     blocks_in: usize,
 ) -> VirtOutput<IRBlocks<P>> {
+    // Appended-region emission is not implemented: the sub-interpreter's
+    // micro-handler blocks are never emitted (the sub-dispatch's JumpTable
+    // targets bids that collide with the composite resume blocks),
+    // `sub_return` terminates the program instead of stepping, and the
+    // composite part/resume handlers do not remap canonical vars (the
+    // resume block clones the raw terminator, leaving dangling var refs).
+    // Refuse loudly rather than emit a miscompile; see
+    // portal-co/volar-ir#6 and the virt-adaptive-split ADR.
+    assert!(
+        split_plan.layout.regions.is_empty(),
+        "adaptive split: appended-region emission (SharedCore sub-interpreter / \
+         RerollLoop composite handlers) is not implemented; the segment \
+         planners produced regions that cannot be emitted correctly. Disable \
+         `cross_block`/`loop_reroll` in AdaptiveSplitConfig (they default to \
+         false). See portal-co/volar-ir#6."
+    );
     let bit_ty = types.intern(IRType::Primitive(PrimType::Bit));
     let addr_ty = types.intern(IRType::Vec(32, bit_ty));
 
