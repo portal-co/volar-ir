@@ -619,6 +619,14 @@ enum TailCallEnd {
     Unreachable,
 }
 
+/// The once-per-access byte base of a dynamic byte-cell access: either a
+/// constant byte offset (pool-backed, all-const bit address) or the base
+/// bits shifted right 3, computed once and shared across every byte.
+enum ByteBase {
+    Const(u64),
+    Runtime(Bits),
+}
+
 struct Importer<'ctx> {
     pointer_width: PointerWidth,
     pointer_bits: usize,
@@ -3933,22 +3941,19 @@ impl<'ctx> Importer<'ctx> {
     }
 
     /// Read `n_bits` from `storage` at `base_addr_bits`, one bit per address.
-    /// The byte-granular cell address of byte `byte_i` of a dynamic access
-    /// whose bit address is `base_addr_bits` — the same byte-cell convention
-    /// as the constant-offset `mem_load` path. Constant bases fold to one
-    /// `Const` node (pool-backed allocas: zero adder circuits); runtime
-    /// bases shift right 3 via Shuffles (plain values, no gates) and add
-    /// the byte index in an adder trimmed to the allocation bound in bytes.
-    fn dynamic_byte_addr(
+    /// The shifted byte base of a dynamic access, computed ONCE per
+    /// access: `Const(byte_base)` when the bit address folds, else the
+    /// 61-bit `byte_bits` (the base shifted right 3 via Shuffles).
+    /// Computing this per BYTE instead of per access multiplied the
+    /// shift cost by the byte count — the import profile showed
+    /// `op:Shuffle` at 50% of all values from exactly this redundancy.
+    fn byte_base_of(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
         block: BlockId,
         base_addr_bits: &Bits,
-        byte_i: u64,
-        addr_bound: u64,
-    ) -> ValueId {
+    ) -> ByteBase {
         let mut byte_base = 0u64;
-        let mut is_const = true;
         for (b, &vid) in base_addr_bits.iter().enumerate() {
             match &fctx.values[vid.0].kind {
                 Value::Op(Stmt::Const(c, _)) => {
@@ -3957,61 +3962,78 @@ impl<'ctx> Importer<'ctx> {
                     }
                 }
                 _ => {
-                    is_const = false;
-                    break;
+                    // Runtime base: shift right 3 once, sharing the result
+                    // across every byte of this access.
+                    let mut byte_bits: Bits =
+                        Vec::with_capacity(base_addr_bits.len().saturating_sub(3));
+                    for b in 3..base_addr_bits.len() {
+                        // Each `base_addr_bits[b]` is itself a 1-bit value,
+                        // so the Shuffle must extract BIT 0 of it.
+                        let bit = fctx.emit(
+                            block,
+                            Value::Op(Stmt::Shuffle {
+                                result_bits: vec![(0, base_addr_bits[b])],
+                                ty: self.bit_tid,
+                            }),
+                        );
+                        byte_bits.push(bit);
+                    }
+                    return ByteBase::Runtime(byte_bits);
                 }
             }
         }
-        if is_const {
-            // Carved pool offsets are 16-byte aligned, so the bit base
-            // divides by 8 exactly.
-            return fctx.emit(
-                block,
-                Value::Op(Stmt::Const(
-                    Constant {
-                        hi: 0,
-                        lo: ((byte_base >> 3) + byte_i) as u128,
-                    },
-                    self.addr_tid,
-                )),
-            );
+        ByteBase::Const(byte_base >> 3)
+    }
+
+    /// The byte-granular cell address of byte `byte_i` of a dynamic access
+    /// whose (once-computed) byte base is `base` — the same byte-cell
+    /// convention as the constant-offset `mem_load` path.
+    fn byte_addr(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        base: &ByteBase,
+        byte_i: u64,
+        addr_bound: u64,
+    ) -> ValueId {
+        match base {
+            ByteBase::Const(byte_base) => {
+                // Carved pool offsets are 16-byte aligned, so the bit base
+                // divides by 8 exactly.
+                return fctx.emit(
+                    block,
+                    Value::Op(Stmt::Const(
+                        Constant {
+                            hi: 0,
+                            lo: (byte_base + byte_i) as u128,
+                        },
+                        self.addr_tid,
+                    )),
+                );
+            }
+            ByteBase::Runtime(byte_bits) => {
+                // byte_i == 0 must NOT fall into dynamic_addr's `i == 0`
+                // shortcut: that returns the base unshifted, i.e. the raw
+                // BIT address where the byte-cell convention wants the
+                // divided one — the exact read-path miss this layer
+                // originally shipped with.
+                if byte_i == 0 {
+                    return fctx.emit(
+                        block,
+                        Value::Op(Stmt::Merge {
+                            parts: byte_bits.clone(),
+                            ty: self.addr_tid,
+                        }),
+                    );
+                }
+                let byte_bound = if addr_bound == 0 || addr_bound == u64::MAX {
+                    0
+                } else {
+                    (addr_bound + 7) / 8
+                };
+                self.dynamic_addr(fctx, block, byte_bits, byte_i, byte_bound)
+            }
         }
-        let mut byte_bits: Bits = Vec::with_capacity(base_addr_bits.len().saturating_sub(3));
-        for b in 3..base_addr_bits.len() {
-            // Each `base_addr_bits[b]` is itself a 1-bit value, so the
-            // Shuffle must extract BIT 0 of it. Passing `b` as the extract
-            // index reads past a 1-bit value and silently yields false —
-            // the exact read-path zero that this layer originally shipped
-            // with (writes fold to Const and never touch this path, which
-            // is why only reads missed).
-            let bit = fctx.emit(
-                block,
-                Value::Op(Stmt::Shuffle {
-                    result_bits: vec![(0, base_addr_bits[b])],
-                    ty: self.bit_tid,
-                }),
-            );
-            byte_bits.push(bit);
-        }
-        // byte_i == 0 must NOT fall into dynamic_addr's `i == 0` shortcut:
-        // that returns the base unshifted, i.e. the raw BIT address where
-        // the byte-cell convention wants the divided one — the exact
-        // read-path miss this layer originally shipped with.
-        if byte_i == 0 {
-            return fctx.emit(
-                block,
-                Value::Op(Stmt::Merge {
-                    parts: byte_bits,
-                    ty: self.addr_tid,
-                }),
-            );
-        }
-        let byte_bound = if addr_bound == 0 || addr_bound == u64::MAX {
-            0
-        } else {
-            (addr_bound + 7) / 8
-        };
-        self.dynamic_addr(fctx, block, &byte_bits, byte_i, byte_bound)
     }
 
     fn stack_load_dynamic(
@@ -4026,9 +4048,10 @@ impl<'ctx> Importer<'ctx> {
     ) -> Bits {
         let cur = fctx.current;
         let n_bytes = n_bits.div_ceil(8);
+        let byte_base = self.byte_base_of(fctx, cur, base_addr_bits);
         let mut bits = Vec::with_capacity(n_bits);
         for byte_i in 0..n_bytes as u64 {
-            let addr = self.dynamic_byte_addr(fctx, cur, base_addr_bits, byte_i, addr_bound);
+            let addr = self.byte_addr(fctx, cur, &byte_base, byte_i, addr_bound);
             let byte_var = fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageRead {
@@ -4074,8 +4097,9 @@ impl<'ctx> Importer<'ctx> {
     ) {
         let cur = fctx.current;
         let n_bytes = val.len().div_ceil(8);
+        let byte_base = self.byte_base_of(fctx, cur, base_addr_bits);
         for byte_i in 0..n_bytes {
-            let addr = self.dynamic_byte_addr(fctx, cur, base_addr_bits, byte_i as u64, addr_bound);
+            let addr = self.byte_addr(fctx, cur, &byte_base, byte_i as u64, addr_bound);
             let mut parts = Vec::with_capacity(8);
             for bit_j in 0..8usize {
                 let idx = byte_i * 8 + bit_j;
