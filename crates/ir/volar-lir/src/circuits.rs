@@ -228,8 +228,7 @@ pub fn bc_mul_low<B: BitCircuitBuilder>(
         let mut mid = bc_sub(b, &z1, &z0_ext);
         mid = bc_sub(b, &mid, &z2_ext);
         // acc += mid << m, truncated to `want` columns.
-        let mut mid_s: Vec<B::Bit> =
-            (0..want).map(|_| b.bc_const(false)).collect();
+        let mut mid_s: Vec<B::Bit> = (0..want).map(|_| b.bc_const(false)).collect();
         for (i, bit) in mid.iter().enumerate() {
             if m + i < want {
                 mid_s[m + i] = bit.clone();
@@ -241,8 +240,7 @@ pub fn bc_mul_low<B: BitCircuitBuilder>(
         // requested width, otherwise its in-range low bits are added.
         if 2 * m < want {
             let z2_low = bc_mul_low(b, a1, x1, want - 2 * m);
-            let mut z2_s: Vec<B::Bit> =
-                (0..want).map(|_| b.bc_const(false)).collect();
+            let mut z2_s: Vec<B::Bit> = (0..want).map(|_| b.bc_const(false)).collect();
             for (i, bit) in z2_low.iter().enumerate() {
                 if 2 * m + i < want {
                     z2_s[2 * m + i] = bit.clone();
@@ -1076,17 +1074,18 @@ mod mul_karatsuba_tests {
             let a = rand_value(&mut state, width);
             let x = rand_value(&mut state, width);
             let mut eb = EvalBuilder::default();
-            let a_bits: Vec<usize> =
-                (0..width).map(|i| eb.bc_const((a >> i) & 1 == 1)).collect();
-            let x_bits: Vec<usize> =
-                (0..width).map(|i| eb.bc_const((x >> i) & 1 == 1)).collect();
+            let a_bits: Vec<usize> = (0..width).map(|i| eb.bc_const((a >> i) & 1 == 1)).collect();
+            let x_bits: Vec<usize> = (0..width).map(|i| eb.bc_const((x >> i) & 1 == 1)).collect();
             let out = bc_mul_low(&mut eb, &a_bits, &x_bits, want);
             let mut got = 0u128;
             for (i, g) in out.iter().enumerate().take(128) {
                 got |= (eb.values[*g] as u128) << i;
             }
             let expect = (a as u128).wrapping_mul(x as u128) & mask_for(want);
-            assert_eq!(got, expect, "bc_mul_low width={width} want={want} a={a:#x} x={x:#x}");
+            assert_eq!(
+                got, expect,
+                "bc_mul_low width={width} want={want} a={a:#x} x={x:#x}"
+            );
         }
     }
 

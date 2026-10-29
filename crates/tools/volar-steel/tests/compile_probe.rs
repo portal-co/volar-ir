@@ -181,7 +181,8 @@ fn array_read_storage_dump() {
         .map(|&inp| (0..64).map(|b| (inp >> b) & 1 == 1).collect())
         .collect();
     let _ = widths;
-    let (out, storage) = volar_fuzz::interpreter::ir::eval_ir_with_storage(&blocks, &types, &inputs);
+    let (out, storage) =
+        volar_fuzz::interpreter::ir::eval_ir_with_storage(&blocks, &types, &inputs);
     let mut d = String::new();
     use core::fmt::Write as _;
     let _ = writeln!(
@@ -211,7 +212,13 @@ fn array_read_storage_dump() {
                 v |= 1 << i;
             }
         }
-        let _ = writeln!(d, "cell storage={:?} ty={:?} addr={addr} bits={} val={v:#x}", sid, tid, bits.len());
+        let _ = writeln!(
+            d,
+            "cell storage={:?} ty={:?} addr={addr} bits={} val={v:#x}",
+            sid,
+            tid,
+            bits.len()
+        );
     }
     // Dump the entry block's statements (truncated) to inspect the store
     // address chains.
