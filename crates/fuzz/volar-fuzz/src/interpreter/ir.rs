@@ -473,9 +473,10 @@ fn eval_ir_stmt(
                 for (mono, coeff) in coeffs.iter() {
                     let mut factors = Vec::with_capacity(mono.len());
                     for var in mono {
-                        let factor_ty = var_tys.get(&var.0).copied().unwrap_or_else(|| {
-                            panic!("eval_ir: factor v{} has no type", var.0)
-                        });
+                        let factor_ty = var_tys
+                            .get(&var.0)
+                            .copied()
+                            .unwrap_or_else(|| panic!("eval_ir: factor v{} has no type", var.0));
                         factors.push((factor_ty, get_ir(vars, var)));
                     }
                     terms.push((factors, *coeff));
@@ -492,9 +493,10 @@ fn eval_ir_stmt(
                 out
             } else {
                 let out = eval_typed_poly(*ty, coeffs, constant, types, |var| {
-                    let factor_ty = var_tys.get(&var.0).copied().unwrap_or_else(|| {
-                        panic!("eval_ir: factor v{} has no type", var.0)
-                    });
+                    let factor_ty = var_tys
+                        .get(&var.0)
+                        .copied()
+                        .unwrap_or_else(|| panic!("eval_ir: factor v{} has no type", var.0));
                     (factor_ty, get_ir(vars, var))
                 });
                 eval_watch_log(stmt_id, &out);
@@ -600,11 +602,7 @@ fn eval_ir_stmt(
                 };
                 eprintln!(
                     "[mem] RD  s={} ty={} addr={} {}{}",
-                    store_id.0,
-                    ty.0,
-                    addr_u64,
-                    tag,
-                    val
+                    store_id.0, ty.0, addr_u64, tag, val
                 );
             }
             hit.unwrap_or_else(|| vec![false; w])
@@ -696,9 +694,9 @@ pub fn bit_width(ty_id: TypeId, types: &IRTypes) -> usize {
         IrType::Tuple(elems) => elems.iter().map(|&e| bit_width(e, types)).sum(),
         IrType::Block { .. } => 32,
         IrType::Func { .. } => 32,
-        IrType::ExtField { wrapped, degree, .. } => {
-            *degree as usize * bit_width(*wrapped, types)
-        }
+        IrType::ExtField {
+            wrapped, degree, ..
+        } => *degree as usize * bit_width(*wrapped, types),
         IrType::PrimeField { k, .. } => *k as usize,
         _ => panic!(
             "bit_width: unhandled IrType variant — add bit-width calculation for this variant"
@@ -1036,7 +1034,10 @@ mod tests {
     #[test]
     fn rol_8bit() {
         let mut types = TypeTable::new();
-        let u8_ty = { let b = types.primitive(Type::Bit); types.intern(IrType::Vec(8, b)) };
+        let u8_ty = {
+            let b = types.primitive(Type::Bit);
+            types.intern(IrType::Vec(8, b))
+        };
         let v0 = IRVarId(0);
         let stmt = Stmt::Rol {
             src: v0,
@@ -1059,7 +1060,10 @@ mod tests {
     fn merge_two_bits_into_byte() {
         let mut types = TypeTable::new();
         let bit = types.bit();
-        let u8_ty = { let b = types.primitive(Type::Bit); types.intern(IrType::Vec(8, b)) };
+        let u8_ty = {
+            let b = types.primitive(Type::Bit);
+            types.intern(IrType::Vec(8, b))
+        };
         // Params: 2 bits. Merge them + 6 zero-bits into a byte.
         // Actually just test Merge of bit-typed parts into a byte.
         let v0 = IRVarId(0);
@@ -1123,7 +1127,10 @@ mod tests {
     fn field_product_matches_boolar(blocks: &IRBlocks<()>, types: &IRTypes, inputs: &[IrValue]) {
         let ir = eval_ir(blocks, types, inputs).expect("ir eval");
         let lowered = volar_ir_passes::lower_ir_to_boolar(blocks, types);
-        let flat: Vec<bool> = inputs.iter().flat_map(|value| value.iter().copied()).collect();
+        let flat: Vec<bool> = inputs
+            .iter()
+            .flat_map(|value| value.iter().copied())
+            .collect();
         let boolar = crate::interpreter::biir::eval_biir(&lowered, &flat).expect("boolar eval");
         let ir_flat: Vec<bool> = ir.into_iter().flatten().collect();
         assert_eq!(ir_flat, boolar);
