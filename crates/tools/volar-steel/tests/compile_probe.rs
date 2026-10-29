@@ -623,7 +623,11 @@ fn stepper_min_at_o0() {
     if std::env::var("SM_DUMP_ONLY").is_ok() {
         // #5 instrumentation: dump block 67's (loop header) params + first stmts.
         if let Some(b67) = blocks.blocks.get(67) {
-            eprintln!("  sm blk 67 params ({}): {:?}", b67.params.len(), b67.params);
+            eprintln!(
+                "  sm blk 67 params ({}): {:?}",
+                b67.params.len(),
+                b67.params
+            );
             eprintln!("  sm blk 67 first stmts:");
             for (i, st) in b67.stmts.iter().take(20).enumerate() {
                 let short = format!("{:?}", st.kind);
@@ -1243,7 +1247,12 @@ fn dump_vaffle_func<P: Clone + Default>(m: &vaffle::Module<P>, d: &mut String) {
     }
     for (bi, b) in body.blocks.iter().enumerate() {
         use core::fmt::Write;
-        let _ = writeln!(d, "--- block {}{} ---", bi, if bi == entry.0 { " (entry)" } else { "" });
+        let _ = writeln!(
+            d,
+            "--- block {}{} ---",
+            bi,
+            if bi == entry.0 { " (entry)" } else { "" }
+        );
         let _ = writeln!(
             d,
             "  params: {}",
@@ -1263,7 +1272,9 @@ fn dump_vaffle_func<P: Clone + Default>(m: &vaffle::Module<P>, d: &mut String) {
                         if *storage == SPILL { " <SPILL>" } else { "" }
                     )
                 }
-                Value::Op(volar_ir_common::Stmt::StorageWrite { storage, addr, src, .. }) => {
+                Value::Op(volar_ir_common::Stmt::StorageWrite {
+                    storage, addr, src, ..
+                }) => {
                     format!(
                         "StorageWrite st{} addr=v{} src=v{}{}",
                         storage.0,
@@ -1291,7 +1302,11 @@ fn dump_vaffle_func<P: Clone + Default>(m: &vaffle::Module<P>, d: &mut String) {
                 d,
                 "  v{} [b{}] = {}",
                 svid.0,
-                if own == usize::MAX { "?".to_string() } else { own.to_string() },
+                if own == usize::MAX {
+                    "?".to_string()
+                } else {
+                    own.to_string()
+                },
                 kind
             );
         }
@@ -1308,7 +1323,11 @@ fn dump_vaffle_func<P: Clone + Default>(m: &vaffle::Module<P>, d: &mut String) {
                         .join(", ")
                 );
             }
-            Terminator::IfNonzero { cond, then_target, else_target } => {
+            Terminator::IfNonzero {
+                cond,
+                then_target,
+                else_target,
+            } => {
                 let fmt_t = |t: &vaffle::Target| {
                     format!(
                         "b{} args=[{}]",
@@ -1385,7 +1404,10 @@ fn eval_pre_movfuscate(file: &str, entry: &str, args: &[u64], expect: u64) {
                 }
             }
             eprintln!("{file} pre-movf eval: got {got} (expect {expect})");
-            assert_eq!(got, expect, "{file}: pre-movfuscate CFG eval must match native");
+            assert_eq!(
+                got, expect,
+                "{file}: pre-movfuscate CFG eval must match native"
+            );
         }
         None => panic!("{file}: pre-movfuscate CFG eval did not terminate (frontend bug)"),
     }
@@ -1403,7 +1425,12 @@ fn simple_loop_pre_movfuscate_eval() {
 /// lower_to_ir) — not movfuscate. Native: PUSH1 5, PUSH1 3, ADD => 8.
 #[test]
 fn stepper_min_pre_movfuscate_eval() {
-    eval_pre_movfuscate("stepper_min_o0.ll", "step_min", &[0x60, 5, 0x60, 3, 0x01, 5], 8);
+    eval_pre_movfuscate(
+        "stepper_min_o0.ll",
+        "step_min",
+        &[0x60, 5, 0x60, 3, 0x01, 5],
+        8,
+    );
 }
 
 /// #5 bisect v1: PUSH1-only MUX writes (no ADD, no panic paths).
@@ -1450,8 +1477,7 @@ fn sm_storage_layout_compare() {
                 file,
             ))
             .expect("LLVM IR parses");
-        let vaffle =
-            volar_llvm_vaffle_import::import_module(&module, &[entry]).expect("import");
+        let vaffle = volar_llvm_vaffle_import::import_module(&module, &[entry]).expect("import");
         eprintln!("=== {file} ===");
         eprintln!("  pre_init segments: {}", vaffle.pre_init.len());
         for seg in vaffle.pre_init.iter().take(40) {
@@ -1472,8 +1498,14 @@ fn sm_storage_layout_compare() {
                             vaffle::Value::StackAlloc { storage, sp, .. } => {
                                 storages.insert(("alloc", storage.0, sp.0));
                             }
-                            vaffle::Value::Op(volar_ir_common::Stmt::StorageRead { storage, .. })
-                            | vaffle::Value::Op(volar_ir_common::Stmt::StorageWrite { storage, .. }) => {
+                            vaffle::Value::Op(volar_ir_common::Stmt::StorageRead {
+                                storage,
+                                ..
+                            })
+                            | vaffle::Value::Op(volar_ir_common::Stmt::StorageWrite {
+                                storage,
+                                ..
+                            }) => {
                                 storages.insert(("acc", storage.0, 0));
                             }
                             _ => {}
@@ -1553,8 +1585,7 @@ fn sm_types_preinit_diff() {
                 file,
             ))
             .expect("LLVM IR parses");
-        let vaffle =
-            volar_llvm_vaffle_import::import_module(&module, &[entry]).expect("import");
+        let vaffle = volar_llvm_vaffle_import::import_module(&module, &[entry]).expect("import");
         let (blocks, types) = volar_vaffle_target::lower_vaffle_to_ir(&vaffle);
         eprintln!("=== {tag} ({file}) ===");
         eprintln!("  types: {}", types.0.len());
@@ -1585,7 +1616,13 @@ fn sm_ir_hash_diff() {
         let mut d = String::new();
         for (i, b) in blocks.blocks.iter().enumerate() {
             use core::fmt::Write;
-            let _ = writeln!(d, "=== blk {} params={} stmts={}", i, b.params.len(), b.stmts.len());
+            let _ = writeln!(
+                d,
+                "=== blk {} params={} stmts={}",
+                i,
+                b.params.len(),
+                b.stmts.len()
+            );
             for (j, st) in b.stmts.iter().enumerate() {
                 let full = format!("{:?}", st.kind);
                 let mut h: u64 = 0xcbf29ce484222325;
@@ -1640,7 +1677,12 @@ fn sm_movf_storage_trace() {
     let bit_ty = types
         .0
         .iter()
-        .position(|t| matches!(t, volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)))
+        .position(|t| {
+            matches!(
+                t,
+                volar_ir_common::IrType::Primitive(volar_ir_common::Type::Bit)
+            )
+        })
         .map(|i| volar_ir::ir::IRTypeId(i as u32))
         .expect("Bit interned");
     let circuit = volar_ir_passes::lower_to_circuit::lower_to_circuit_ir(
@@ -1746,5 +1788,51 @@ fn sm_movf_storage_trace() {
         state = outputs[1..1 + n_params].to_vec();
         steps += 1;
         assert!(steps <= 1024, "circuit did not terminate in 1024 steps");
+    }
+}
+
+/// S6c: import the whole-program revm driver (unmodified revm-interpreter at
+/// -O0). Diagnostic first pass: report how far the import gets and the first
+/// (or counted) Unsupported gap. Gated on REVM_IMPORT to keep it out of the
+/// default suite until the pipeline accepts it.
+#[test]
+fn revm_import_probe() {
+    if std::env::var("REVM_IMPORT").is_err() {
+        return;
+    }
+    let ll = std::fs::read_to_string(artifacts().join("revm_driver_o0.ll")).expect("ll");
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            ll.as_bytes(),
+            "revm_driver_o0.ll",
+        ))
+        .expect("LLVM IR parses");
+    let n_defines = ll.matches("\ndefine ").count();
+    eprintln!("revm .ll: {n_defines} defines, {} bytes", ll.len());
+    let started = std::time::Instant::now();
+    let config = volar_llvm_vaffle_import::LlvmImportConfig::default()
+        .with_max_dispatch_candidates(1024)
+        .with_reachable_unreachable_zeros()
+        .with_circuit_helpers(volar_llvm_vaffle_import::CircuitHelperMode::Extract);
+    match volar_llvm_vaffle_import::import_module_with_config(&module, &["revm_run"], config) {
+        Ok(vaffle) => {
+            let mut n_blocks = 0usize;
+            let mut n_values = 0usize;
+            for f in &vaffle.funcs {
+                if let vaffle::FuncDecl::Body(b) = f {
+                    n_blocks += b.blocks.len();
+                    n_values += b.values.len();
+                }
+            }
+            eprintln!(
+                "revm import OK in {:?}: {} funcs, {n_blocks} blocks, {n_values} values",
+                started.elapsed(),
+                vaffle.funcs.len()
+            );
+        }
+        Err(e) => {
+            panic!("revm import failed after {:?}: {e:?}", started.elapsed());
+        }
     }
 }

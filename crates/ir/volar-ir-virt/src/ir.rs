@@ -236,7 +236,10 @@ fn virtualize_ir_impl<P: Clone + Default, H: IrHashAlgorithm>(
     let dedup = DedupTable::build(per_block_canon);
     let n_handlers = dedup.n_handlers();
 
-    let addr_ty = { let __b = types.primitive(PrimType::Bit); types.intern(IRType::Vec(32, __b)) };
+    let addr_ty = {
+        let __b = types.primitive(PrimType::Bit);
+        types.intern(IRType::Vec(32, __b))
+    };
     let bit_ty = types.intern(IRType::Primitive(PrimType::Bit));
 
     // Compute the bytecode layout *first* so we know which StorageIds

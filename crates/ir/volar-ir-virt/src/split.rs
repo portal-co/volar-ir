@@ -338,7 +338,10 @@ mod tests {
     use volar_ir_common::{Constant, Node, Stmt};
 
     fn u32_ty(types: &mut IRTypes) -> volar_ir::ir::IRTypeId {
-        { let __b = types.primitive(PrimType::Bit); types.intern(IRType::Vec(32, __b)) }
+        {
+            let __b = types.primitive(PrimType::Bit);
+            types.intern(IRType::Vec(32, __b))
+        }
     }
 
     #[test]
@@ -408,7 +411,10 @@ mod tests {
             ..AdaptiveSplitConfig::default()
         };
         let plan = plan_adaptive_split(&blocks, &cfg);
-        assert!(plan.shared_cores.is_empty(), "a single block must not share with itself");
+        assert!(
+            plan.shared_cores.is_empty(),
+            "a single block must not share with itself"
+        );
         assert!(plan.block_plans[0].segments.is_empty());
     }
 

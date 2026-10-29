@@ -54,9 +54,7 @@ use alloc::{
     vec::Vec,
 };
 
-use vaffle::{
-    Block, FuncBody, FuncDecl, FuncId, Module, SigDecl, Terminator, Value, ValueId,
-};
+use vaffle::{Block, FuncBody, FuncDecl, FuncId, Module, SigDecl, Terminator, Value, ValueId};
 use volar_ir::ir::{
     ActionDecl, IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt,
     IRTerminator, IRTypeId, IRTypes, IRVarId, OracleDecl,
@@ -1093,22 +1091,23 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     // references it directly (not via an explicit param/arg)
                     // needs to be able to reload it.
                     if cross_block_values.contains(&svid.0)
-                        && let Some(var) = val_map.get(svid.0) {
-                            self.spill_trace.push(alloc::format!(
-                                "SPILL(stmt) vaffle_bi={vaffle_bi} vid={} addr={} src_var={}",
-                                svid.0,
-                                own_layout.n_spill + svid.0 as u64,
-                                var.0
-                            ));
-                            frame_spill(
-                                &mut current_em,
-                                &current_frame_sp,
-                                &own_layout,
-                                own_layout.n_spill + svid.0 as u64,
-                                var,
-                                BIT_TID,
-                            );
-                        }
+                        && let Some(var) = val_map.get(svid.0)
+                    {
+                        self.spill_trace.push(alloc::format!(
+                            "SPILL(stmt) vaffle_bi={vaffle_bi} vid={} addr={} src_var={}",
+                            svid.0,
+                            own_layout.n_spill + svid.0 as u64,
+                            var.0
+                        ));
+                        frame_spill(
+                            &mut current_em,
+                            &current_frame_sp,
+                            &own_layout,
+                            own_layout.n_spill + svid.0 as u64,
+                            var,
+                            BIT_TID,
+                        );
+                    }
                 }
 
                 match at_call {
@@ -1308,16 +1307,17 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             // Cross-block spill of the call's own result (see
                             // the `before_call` loop's identical comment).
                             if cross_block_values.contains(&call_vid.0)
-                                && let Some(var) = val_map.get(call_vid.0) {
-                                    frame_spill(
-                                        &mut cont_em,
-                                        &cont_frame_sp,
-                                        &own_layout,
-                                        own_layout.n_spill + call_vid.0 as u64,
-                                        var,
-                                        BIT_TID,
-                                    );
-                                }
+                                && let Some(var) = val_map.get(call_vid.0)
+                            {
+                                frame_spill(
+                                    &mut cont_em,
+                                    &cont_frame_sp,
+                                    &own_layout,
+                                    own_layout.n_spill + call_vid.0 as u64,
+                                    var,
+                                    BIT_TID,
+                                );
+                            }
 
                             let n_spill_words = spill_words.len();
                             let mut reloaded_words = Vec::with_capacity(n_spill_words);
@@ -1648,7 +1648,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     ) -> IRVarId {
         // The `Type::_n` cutover: the pointer is `Vec(pointer_bits, Bit)`.
         let bit_tid = self.types.primitive(Type::Bit);
-        let ptr_ty = self.types.intern(IrType::Vec(self.pointer_bits as usize, bit_tid));
+        let ptr_ty = self.types.intern(IrType::Vec(self.pointer_bits, bit_tid));
         let zero_bits: Vec<IRVarId> = (0..self.pointer_bits).map(|_| em.bc_const(false)).collect();
         let old = em.emit_read(sp, ptr_ty, &zero_bits);
         let old_bits: Vec<IRVarId> = (0..self.pointer_bits)

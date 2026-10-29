@@ -77,8 +77,7 @@ use vaffle::{
 };
 use volar_ir_common::{
     ActionDecl, ActionExecutionPolicy, Constant, IrType, Node, OracleDecl, OracleExecutionPolicy,
-    PolyCoeffs, PreInitSegment, Stmt, StorageAllocator, StorageId, Type, TypeId, TypeTable,
-    aes_extern,
+    PolyCoeffs, PreInitSegment, Stmt, StorageAllocator, StorageId, TypeId, TypeTable, aes_extern,
 };
 use volar_lir::circuits::{self, BitCircuitBuilder};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
@@ -178,6 +177,19 @@ pub struct LlvmImportConfig {
     /// `(op, operand widths)` and call it. Address math and stack-pointer
     /// bumps stay inline in both modes.
     pub circuit_helpers: CircuitHelperMode,
+    /// Per-site and module-wide cap on runtime pointer-dispatch candidate
+    /// globals. `None` uses [`MAX_DISPATCH_CANDIDATES`] (the fail-closed
+    /// default). Whole real-world modules (e.g. unmodified revm at -O0,
+    /// S6c) carry hundreds of legitimate globals, so callers importing such
+    /// modules raise this deliberately and accept the wider dispatch
+    /// cascades at whichever sites actually need runtime dispatch.
+    pub max_dispatch_candidates: Option<usize>,
+    /// Lower reachable `unreachable` instructions to a zero return instead
+    /// of failing the import. Compiler-proven-dead arms in real-world
+    /// modules (e.g. `core::ptr::swap_nonoverlapping`'s len-0 paths in
+    /// revm's dependency closure at -O0) are runtime-unreachable by
+    /// construction; the knob is opt-in and the default stays fail-closed.
+    pub lower_reachable_unreachable_to_zeros: bool,
 }
 
 impl LlvmImportConfig {
@@ -225,6 +237,11 @@ impl LlvmImportConfig {
                 )));
             }
         }
+        if self.max_dispatch_candidates.is_some_and(|c| c == 0) {
+            return Err(ImportError::Unsupported(
+                "configured max_dispatch_candidates must be nonzero".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -232,6 +249,21 @@ impl LlvmImportConfig {
         self.circuit_helpers = mode;
         self
     }
+
+    /// Raise (or lower) the runtime pointer-dispatch candidate cap; see the
+    /// field docs.
+    pub fn with_max_dispatch_candidates(mut self, cap: usize) -> Self {
+        self.max_dispatch_candidates = Some(cap);
+        self
+    }
+
+    /// Opt in to zero-return lowering of reachable `unreachable`
+    /// instructions; see the field docs.
+    pub fn with_reachable_unreachable_zeros(mut self) -> Self {
+        self.lower_reachable_unreachable_to_zeros = true;
+        self
+    }
+
 }
 
 fn pointer_width_from_layout<'ctx>(
@@ -262,13 +294,14 @@ fn pointer_width_from_layout<'ctx>(
         }
     };
     if let Some(explicit) = config.pointer_width
-        && explicit != width {
-            return Err(ImportError::Unsupported(format!(
-                "configured pointer width {} does not match LLVM data layout width {}",
-                explicit.bits(),
-                width.bits()
-            )));
-        }
+        && explicit != width
+    {
+        return Err(ImportError::Unsupported(format!(
+            "configured pointer width {} does not match LLVM data layout width {}",
+            explicit.bits(),
+            width.bits()
+        )));
+    }
     Ok(width)
 }
 
@@ -292,7 +325,12 @@ pub fn import_module_with_config<'ctx>(
         pointer_width,
         config.externals.clone(),
         config.circuit_helpers,
+        config.max_dispatch_candidates,
+        config.lower_reachable_unreachable_to_zeros,
     );
+    importer.set_data_layout(inkwell::targets::TargetData::create(
+        &llvm_module.get_data_layout().as_str().to_string_lossy(),
+    ));
     importer.validate_configured_external_symbols(llvm_module)?;
     // Eagerly assign every module global its `StorageId` before walking any
     // function body, so `dispatch_read`/`dispatch_write` (runtime
@@ -310,6 +348,7 @@ pub fn import_module_with_config<'ctx>(
         worklist.push(f);
     }
     let mut done: std::collections::HashSet<PointerValue<'ctx>> = Default::default();
+    let mut imported_count = 0usize;
     while let Some(f) = worklist.pop() {
         let key = f.as_global_value().as_pointer_value();
         if done.contains(&key) {
@@ -318,6 +357,13 @@ pub fn import_module_with_config<'ctx>(
         done.insert(key);
         let called = importer.import_function(f)?;
         worklist.extend(called);
+        imported_count += 1;
+        if imported_count % 25 == 0 && std::env::var("VLVI_IMPORT_PROGRESS").is_ok() {
+            eprintln!(
+                "import progress: {imported_count} functions imported (worklist {})",
+                worklist.len()
+            );
+        }
     }
     Ok(importer.finish())
 }
@@ -569,6 +615,15 @@ struct Importer<'ctx> {
     addr_tid: TypeId,
     helper_mode: CircuitHelperMode,
     helper_cache: BTreeMap<HelperKey, FuncId>,
+    /// Effective per-site/module-wide dispatch candidate cap (resolved from
+    /// the config; see `LlvmImportConfig::max_dispatch_candidates`).
+    max_dispatch_candidates: usize,
+    /// The module's LLVM data layout (for struct field offsets and aggregate
+    /// sizes in GEP lowering). Set once at import entry, before any body is
+    /// walked.
+    data_layout: Option<inkwell::targets::TargetData>,
+    /// Zero-return lowering of reachable `unreachable` instructions.
+    lower_reachable_unreachable_to_zeros: bool,
 }
 
 impl<'ctx> Importer<'ctx> {
@@ -576,13 +631,15 @@ impl<'ctx> Importer<'ctx> {
         pointer_width: PointerWidth,
         externals: BTreeMap<String, LlvmExternalImportKind>,
         helper_mode: CircuitHelperMode,
+        max_dispatch_candidates: Option<usize>,
+        lower_reachable_unreachable_to_zeros: bool,
     ) -> Self {
         let pointer_bits = pointer_width.bits();
         let mut types = TypeTable::new();
         let bit_tid = types.bit();
         // The `Type::_n` cutover: an n-bit value is `Vec(n, Bit)`.
         let byte_tid = types.intern(IrType::Vec(8, bit_tid));
-        let addr_tid = types.intern(IrType::Vec(pointer_width.bits() as usize, bit_tid));
+        let addr_tid = types.intern(IrType::Vec(pointer_width.bits(), bit_tid));
         Importer {
             pointer_width,
             pointer_bits,
@@ -604,7 +661,17 @@ impl<'ctx> Importer<'ctx> {
             addr_tid,
             helper_mode,
             helper_cache: BTreeMap::new(),
+            max_dispatch_candidates: max_dispatch_candidates
+                .unwrap_or(MAX_DISPATCH_CANDIDATES),
+            data_layout: None,
+            lower_reachable_unreachable_to_zeros,
         }
+    }
+
+    /// Install the module's data layout before walking any function body
+    /// (struct GEP lowering needs field offsets).
+    fn set_data_layout(&mut self, layout: inkwell::targets::TargetData) {
+        self.data_layout = Some(layout);
     }
 
     /// Validate every configured mapping against the module before walking
@@ -651,6 +718,16 @@ impl<'ctx> Importer<'ctx> {
                 .memory_byte_size(array.get_element_type())?
                 .checked_mul(array.len() as u64)
                 .ok_or_else(|| ImportError::Unsupported("LLVM aggregate size overflow".into())),
+            BasicTypeEnum::StructType(struct_ty) => {
+                // Structs: ABI size from the module data layout (includes
+                // padding).
+                let layout = self.data_layout.as_ref().ok_or_else(|| {
+                    ImportError::Unsupported(
+                        "struct size query before the data layout was installed (internal)".into(),
+                    )
+                })?;
+                Ok(layout.get_abi_size(&struct_ty))
+            }
             _ => Err(ImportError::Unsupported(
                 "expected an integer, pointer, or array element type".into(),
             )),
@@ -673,19 +750,49 @@ impl<'ctx> Importer<'ctx> {
             .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
         let mut cur_ty = source_ty;
         for &idx in rest {
-            let BasicTypeEnum::ArrayType(array) = cur_ty else {
-                return Err(ImportError::Unsupported(
-                    "gep of non-array aggregate type not supported".into(),
-                ));
-            };
-            let elem_ty = array.get_element_type();
-            let step = idx
-                .checked_mul(self.memory_byte_size(elem_ty)? as i64)
-                .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
-            offset = offset
-                .checked_add(step)
-                .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
-            cur_ty = elem_ty;
+            match cur_ty {
+                BasicTypeEnum::ArrayType(array) => {
+                    let elem_ty = array.get_element_type();
+                    let step = idx
+                        .checked_mul(self.memory_byte_size(elem_ty)? as i64)
+                        .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
+                    offset = offset
+                        .checked_add(step)
+                        .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
+                    cur_ty = elem_ty;
+                }
+                BasicTypeEnum::StructType(struct_ty) => {
+                    // Struct field descent: ABI field offset from the module
+                    // data layout (padding included).
+                    let layout = self.data_layout.as_ref().ok_or_else(|| {
+                        ImportError::Unsupported(
+                            "struct gep before the data layout was installed (internal)".into(),
+                        )
+                    })?;
+                    let field = u32::try_from(idx).map_err(|_| {
+                        ImportError::Unsupported("gep struct field index out of range".into())
+                    })?;
+                    let field_offset = layout.offset_of_element(&struct_ty, field).ok_or_else(|| {
+                        ImportError::Unsupported(format!(
+                            "gep struct field index {idx} out of range"
+                        ))
+                    })?;
+                    offset = offset
+                        .checked_add(field_offset as i64)
+                        .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
+                    cur_ty = struct_ty.get_field_type_at_index(field)
+                        .ok_or_else(|| {
+                            ImportError::Unsupported(format!(
+                                "gep struct field index {idx} out of range"
+                            ))
+                        })?;
+                }
+                _ => {
+                    return Err(ImportError::Unsupported(
+                        "gep of non-array/struct aggregate type not supported".into(),
+                    ));
+                }
+            }
         }
         u64::try_from(offset)
             .map_err(|_| ImportError::Unsupported("gep offset out of range".into()))
@@ -737,6 +844,46 @@ impl<'ctx> Importer<'ctx> {
         }
     }
 
+    /// Flattened leaf-field widths of a first-class type, in declaration
+    /// order, recursing into nested structs/arrays; scalars (integers and
+    /// default-address-space pointers) are single-field. This is the
+    /// importer's own SSA-level value layout: supported code never loads or
+    /// stores aggregates as whole-memory values (struct field access goes
+    /// through tracked allocas via GEPs; struct *values* exist only as call
+    /// results and `insertvalue` chains), so only `extractvalue`'s and
+    /// `insertvalue`'s index decomposition has to agree with this layout.
+    fn aggregate_field_layout(
+        &self,
+        ty: inkwell::types::BasicTypeEnum<'ctx>,
+    ) -> IResult<Vec<usize>> {
+        Ok(match ty {
+            inkwell::types::BasicTypeEnum::ArrayType(a) => {
+                let mut out = Vec::new();
+                for _ in 0..a.len() {
+                    out.extend(self.aggregate_field_layout(a.get_element_type())?);
+                }
+                out
+            }
+            inkwell::types::BasicTypeEnum::StructType(s) => {
+                let mut out = Vec::new();
+                for field in s.get_field_types() {
+                    out.extend(self.aggregate_field_layout(field)?);
+                }
+                out
+            }
+            scalar => vec![self.llvm_bit_width(scalar).map_err(|_| {
+                ImportError::Unsupported(format!(
+                    "aggregate field type {scalar:?} is not an integer/pointer scalar"
+                ))
+            })?],
+        })
+    }
+
+    /// Total flattened bit width of a first-class type.
+    fn llvm_flatten_width(&self, ty: inkwell::types::BasicTypeEnum<'ctx>) -> IResult<usize> {
+        Ok(self.aggregate_field_layout(ty)?.iter().sum())
+    }
+
     fn ensure_default_address_space(&self, ptr: PointerValue<'ctx>) -> IResult<()> {
         if ptr.get_type().get_address_space() == AddressSpace::default() {
             Ok(())
@@ -763,7 +910,19 @@ impl<'ctx> Importer<'ctx> {
             .map(|p| self.llvm_type_id(p.get_type()))
             .collect::<IResult<_>>()?;
         let results: Vec<TypeId> = match f.get_type().get_return_type() {
-            Some(t) => vec![self.llvm_type_id(t)?],
+            Some(t) => match t {
+                inkwell::types::BasicTypeEnum::StructType(_)
+                | inkwell::types::BasicTypeEnum::ArrayType(_) => {
+                    // Aggregate returns flatten to ONE wide Bit-vector
+                    // result whose fields occupy declaration-order bit
+                    // ranges — matching the per-bit `Value::Output`s the
+                    // call site emits and the concatenated bits a `ret`
+                    // produces.
+                    let width = self.llvm_flatten_width(t)?;
+                    vec![self.types.intern(IrType::Vec(width, self.bit_tid))]
+                }
+                _ => vec![self.llvm_type_id(t)?],
+            },
             None => vec![],
         };
         let sig = SigId(self.sigs.len());
@@ -823,7 +982,14 @@ impl<'ctx> Importer<'ctx> {
     /// emits.
     fn storage_for(&mut self, ptr: PointerValue<'ctx>) -> IResult<StorageId> {
         self.ensure_default_address_space(ptr)?;
-        let raw = strip_pointer(ptr.as_value_ref(), "memory reference base")?;
+        use inkwell::values::AnyValue;
+        let raw = strip_pointer(ptr.as_value_ref(), "memory reference base").map_err(|e| {
+            ImportError::Unsupported(format!(
+                "{} (pointer: {})",
+                e,
+                ptr.print_to_string().to_string_lossy()
+            ))
+        })?;
         let global = global_from_pointer(raw, "memory reference base")?;
         let key = global.as_pointer_value();
         if let Some(&id) = self.storage_for_global.get(&key) {
@@ -848,10 +1014,11 @@ impl<'ctx> Importer<'ctx> {
             self.storage_for(global.as_pointer_value())?;
             count += 1;
         }
-        if count > MAX_DISPATCH_CANDIDATES {
+        if count > self.max_dispatch_candidates {
             return Err(ImportError::Unsupported(format!(
-                "module has {count} globals, exceeding the {MAX_DISPATCH_CANDIDATES}-candidate \
-                 limit for runtime pointer dispatch"
+                "module has {count} globals, exceeding the {}-candidate \
+                 limit for runtime pointer dispatch",
+                self.max_dispatch_candidates
             )));
         }
         Ok(())
@@ -995,6 +1162,20 @@ impl<'ctx> Importer<'ctx> {
 
         let reachable = reachable_blocks(f)?;
 
+        // The enclosing function's flattened return width (the same width as
+        // the single wide result `func_id` interns). Computed before Pass B
+        // so reachable-`unreachable` zero-return lowering can size its
+        // terminator.
+        let return_bits = match f.get_type().get_return_type() {
+            Some(ty) => match ty {
+                inkwell::types::BasicTypeEnum::StructType(_)
+                | inkwell::types::BasicTypeEnum::ArrayType(_) => self.llvm_flatten_width(ty)?,
+                _ => self.llvm_bit_width(ty)?,
+            },
+            None => 0,
+        };
+        fctx.return_bits = return_bits;
+
         // Pass B: translate every non-phi instruction, then the terminator,
         // but only for blocks reachable through the terminators this importer
         // supports. Pass A intentionally still assigned all block IDs and
@@ -1029,24 +1210,19 @@ impl<'ctx> Importer<'ctx> {
             _ => unreachable!("import_function called twice for the same FuncId"),
         };
 
-        // Unreachable LLVM blocks retain their Pass-A placeholder IDs so no
-        // reachable branch or phi needs remapping. They must nevertheless
-        // have a well-typed terminator when later VAFFLE lowerings inspect
-        // every block, rather than the old empty `Return` fallback (which is
-        // ill-typed for a non-void enclosing function).
-        let return_bits = match f.get_type().get_return_type() {
-            Some(ty) => self.llvm_bit_width(ty)?,
-            None => 0,
-        };
         let mut fallback_return_values: Vec<Vec<ValueId>> = blocks
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                if !reachable.contains(&blocks[i]) { {
+                if !reachable.contains(&blocks[i]) {
+                    {
                         (0..return_bits)
                             .map(|_| self.bc_const_at(&mut fctx, BlockId(i), false))
                             .collect()
-                    } } else { Default::default() }
+                    }
+                } else {
+                    Default::default()
+                }
             })
             .collect();
         // Symbolic memcpy loops append their own fully-terminated VAFFLE
@@ -1075,9 +1251,10 @@ impl<'ctx> Importer<'ctx> {
     /// guarantees their definitions dominate their uses.
     fn value_bits(&mut self, fctx: &mut FuncCtx<'ctx>, v: BasicValueEnum<'ctx>) -> IResult<Bits> {
         if let BasicValueEnum::IntValue(i) = v
-            && i.is_const() {
-                return self.int_const_bits(fctx, i);
-            }
+            && i.is_const()
+        {
+            return self.int_const_bits(fctx, i);
+        }
         // Like immediate integers, LLVM's singleton `null` is a constant
         // that must be materialized in each use block rather than cached
         // function-wide. Caching a block-local `Stmt::Const` for a sibling
@@ -1169,6 +1346,14 @@ impl<'ctx> Importer<'ctx> {
                 let (a, b) = (op!(0), op!(1));
                 Some(self.alu(fctx, cur, HelperOp::UDiv, &[a, b]))
             }
+            InstructionOpcode::URem => {
+                let (a, b) = (op!(0), op!(1));
+                Some(self.alu(fctx, cur, HelperOp::URem, &[a, b]))
+            }
+            InstructionOpcode::SRem => {
+                let (a, b) = (op!(0), op!(1));
+                Some(self.alu(fctx, cur, HelperOp::SRem, &[a, b]))
+            }
             InstructionOpcode::SDiv => {
                 let (a, b) = (op!(0), op!(1));
                 Some(self.alu(fctx, cur, HelperOp::SDiv, &[a, b]))
@@ -1232,6 +1417,98 @@ impl<'ctx> Importer<'ctx> {
                 ))
             }
             InstructionOpcode::ExtractValue => Some(self.extract_overflow_field(fctx, instr)?),
+            InstructionOpcode::InsertValue => {
+                // Aggregate construction: fields = the base aggregate's
+                // fields with the indexed component replaced. Poison/undef
+                // bases start fully untracked; every leaf field must be
+                // inserted before the aggregate itself is usable (fail
+                // closed on partially-initialized reads via the missing
+                // cache entry + untracked-field errors). Pure SSA
+                // re-arrangement: the aggregate's bits are other values'
+                // outputs; no new statements are emitted.
+                let layout_ty: inkwell::types::BasicTypeEnum<'ctx> = instr
+                    .get_type()
+                    .try_into()
+                    .map_err(|_| {
+                        ImportError::Unsupported(
+                            "insertvalue result must be a first-class type".into(),
+                        )
+                    })?;
+                let layout = self.aggregate_field_layout(layout_ty)?;
+                let inserted = op!(1);
+                let indices = instr.get_indices();
+                let [field] = indices.as_slice() else {
+                    return Err(ImportError::Unsupported(
+                        "insertvalue must target exactly one aggregate field".into(),
+                    ));
+                };
+                let field = *field as usize;
+                let width = *layout.get(field).ok_or_else(|| {
+                    ImportError::Unsupported(format!(
+                        "insertvalue field {field} is outside the aggregate layout"
+                    ))
+                })?;
+                let base = instr
+                    .get_operand(0)
+                    .and_then(|o| o.value())
+                    .ok_or_else(|| {
+                        ImportError::Unsupported("insertvalue base must be a value".into())
+                    })?;
+                let mut fields: Vec<Option<Bits>> = match fctx
+                    .aggregate_fields
+                    .get(&base.as_any_value_enum())
+                {
+                    Some(base_fields) => {
+                        if base_fields.len() != layout.len() {
+                            return Err(ImportError::Unsupported(
+                                "insertvalue base aggregate layout mismatch".into(),
+                            ));
+                        }
+                        base_fields.clone()
+                    }
+                    // Poison/undef base: an aggregate with every field still
+                    // untracked.
+                    None => vec![None; layout.len()],
+                };
+                if inserted.len() != width {
+                    return Err(ImportError::Unsupported(
+                        "insertvalue operand width does not match the aggregate field".into(),
+                    ));
+                }
+                fields[field] = Some(inserted);
+                if fields.iter().all(|f| f.is_some()) {
+                    // Record the (complete) field decomposition even for the
+                    // completing insertvalue, so later extractvalues and
+                    // further insertvalue chains can consume it.
+                    fctx.aggregate_fields
+                        .insert(instr.as_any_value_enum(), fields.clone());
+                    let bits: Bits = fields.iter().flatten().flat_map(|f| f.iter().copied()).collect();
+                    Some(bits)
+                } else {
+                    // Still partially uninitialized: no value is cached, so
+                    // any read of the aggregate itself fails closed.
+                    fctx.aggregate_fields
+                        .insert(instr.as_any_value_enum(), fields);
+                    None
+                }
+            }
+            InstructionOpcode::PtrToInt | InstructionOpcode::IntToPtr => {
+                // Pointers ARE integers in the tagged value encoding
+                // (docs/llvm-ptr-value-bits.md): the cast is an identity on
+                // the bit representation, width-adjusted for the result
+                // type. Model note: the encoding's global provenance tag
+                // (high bit) means a global-class pointer does not integer-
+                // compare to zero — null checks via `ptrtoint` on
+                // global-class pointers misreport; stack-class nulls
+                // (all-zero address, tag 0) compare correctly.
+                let mut src = op!(0);
+                let dst_n = int_result_width(instr)?;
+                while src.len() < dst_n {
+                    src.push(self.bc_const_at(fctx, cur, false));
+                }
+                src.truncate(dst_n);
+                Some(src)
+            }
             InstructionOpcode::Trunc => {
                 let src = op!(0);
                 let dst_n = int_result_width(instr)?;
@@ -1345,25 +1622,29 @@ impl<'ctx> Importer<'ctx> {
                 let base = load_store_pointer(instr, 0)?;
                 self.ensure_default_address_space(base)?;
                 if let Some(base_ptr) = fctx.stack_slot_of.get(&base.as_any_value_enum()).cloned() {
-                    // Offset GEP off a tracked stack pointer. A constant
-                    // index against a constant offset keeps `const_offset`
-                    // for range checks and adds that delta to the
-                    // StackAlloc-derived address. A symbolic index clears
-                    // the constant offset and multiplies at runtime.
-                    if instr.get_num_operands() != 2 {
-                        return Err(ImportError::Unsupported(
-                            "multi-index GEP into stack pointer not supported".into(),
-                        ));
-                    }
+                    // Offset GEP off a tracked stack pointer. Constant-index
+                    // GEPs (single or multi-index; arrays and structs, via
+                    // the module data layout) fold through
+                    // `gep_instr_constant_offset`. A symbolic index is
+                    // permitted only as a GEP's single index, stepping by
+                    // the source element type's width (scalars: bit width;
+                    // aggregates: whole byte size ×8 for the bit-addressed
+                    // stack).
                     let elem_ty = instr
                         .get_gep_source_element_type()
                         .map_err(|_| ImportError::Unsupported("malformed gep".into()))?;
-                    let elem_bits = self.llvm_bit_width(elem_ty).map_err(|_| {
-                        ImportError::Unsupported(
-                            "gep of non-integer/pointer element type into stack pointer not supported"
-                                .into(),
-                        )
-                    })? as i64;
+                    let step_bits: i64 = match elem_ty {
+                        BasicTypeEnum::StructType(_) | BasicTypeEnum::ArrayType(_) => {
+                            self.memory_byte_size(elem_ty)? as i64 * 8
+                        }
+                        _ => self.llvm_bit_width(elem_ty).map_err(|_| {
+                            ImportError::Unsupported(
+                                "gep of non-integer/pointer element type into stack pointer not supported"
+                                    .into(),
+                            )
+                        })? as i64,
+                    };
+                    let folded = self.gep_instr_constant_offset(instr)?;
                     let idx_val =
                         instr
                             .get_operand(1)
@@ -1377,10 +1658,39 @@ impl<'ctx> Importer<'ctx> {
                         ));
                     };
 
-                    let new_stack_ptr =
+                    let new_stack_ptr = if let Some(byte_offset) = folded {
+                        // All indices constant (any count): one byte offset
+                        // (data-layout aware) converted to bits.
+                        let offset = i64::try_from(byte_offset)
+                            .ok()
+                            .and_then(|bytes| bytes.checked_mul(8))
+                            .ok_or_else(|| {
+                                ImportError::Unsupported("gep offset overflow".into())
+                            })?;
+                        let addr = base_ptr
+                            .const_offset
+                            .and_then(|base_off| base_off.checked_add_signed(offset))
+                            .ok_or_else(|| {
+                                ImportError::Unsupported("gep offset out of range".into())
+                            })?;
+                        let addr_bits =
+                            self.add_signed_delta(fctx, cur, &base_ptr.addr_bits, offset);
+                        StackPtr {
+                            storage: base_ptr.storage,
+                            allocation_bits: base_ptr.allocation_bits,
+                            const_offset: Some(addr),
+                            addr_bits,
+                        }
+                    } else {
+                        // A symbolic index: single-index GEPs only.
+                        if instr.get_num_operands() != 2 {
+                            return Err(ImportError::Unsupported(
+                                "multi-index symbolic GEP into stack pointer not supported".into(),
+                            ));
+                        }
                         match (base_ptr.const_offset, idx_int.get_sign_extended_constant()) {
                             (Some(base_off), Some(idx)) => {
-                                let offset = idx.checked_mul(elem_bits).ok_or_else(|| {
+                                let offset = idx.checked_mul(step_bits).ok_or_else(|| {
                                     ImportError::Unsupported("gep offset overflow".into())
                                 })?;
                                 let addr =
@@ -1405,11 +1715,11 @@ impl<'ctx> Importer<'ctx> {
                                         bit_tid: self.bit_tid,
                                         block: cur,
                                     };
-                                    let elem_bits_const: Vec<ValueId> = (0..self.pointer_bits)
-                                        .map(|b| c.bc_const((elem_bits as u64 >> b) & 1 != 0))
+                                    let step_bits_const: Vec<ValueId> = (0..self.pointer_bits)
+                                        .map(|b| c.bc_const((step_bits as u64 >> b) & 1 != 0))
                                         .collect();
                                     let scaled =
-                                        circuits::bc_mul(&mut c, &idx_bits, &elem_bits_const);
+                                        circuits::bc_mul(&mut c, &idx_bits, &step_bits_const);
                                     circuits::bc_add(&mut c, &base_ptr.addr_bits, &scaled, false)
                                 };
                                 StackPtr {
@@ -1419,7 +1729,8 @@ impl<'ctx> Importer<'ctx> {
                                     addr_bits: new_addr_bits,
                                 }
                             }
-                        };
+                        }
+                    };
 
                     let base_bits = fctx
                         .cache
@@ -1431,7 +1742,7 @@ impl<'ctx> Importer<'ctx> {
                         Value::PtrOffset {
                             ptr: base_bits[0],
                             idx: new_stack_ptr.addr_bits[0],
-                            elem_bits: elem_bits as usize,
+                            elem_bits: step_bits as usize,
                         },
                     );
                     let tagged = self.encode_stack_ptr(
@@ -1555,15 +1866,24 @@ impl<'ctx> Importer<'ctx> {
                     let elem_ty = instr
                         .get_gep_source_element_type()
                         .map_err(|_| ImportError::Unsupported("malformed gep".into()))?;
+                    // Aggregates (struct/array element types) step by their
+                    // whole ABI byte size (module data layout); scalars keep
+                    // the existing bit-width/8 step. The GEP itself is pure
+                    // address arithmetic — the load/store through the
+                    // result dispatches on its own (scalar) type.
                     let elem_bytes = match elem_ty {
                         inkwell::types::BasicTypeEnum::IntType(_)
                         | inkwell::types::BasicTypeEnum::PointerType(_) => {
                             (self.llvm_bit_width(elem_ty)? as u64).div_ceil(8)
                         }
+                        inkwell::types::BasicTypeEnum::StructType(_)
+                        | inkwell::types::BasicTypeEnum::ArrayType(_) => {
+                            self.memory_byte_size(elem_ty)?
+                        }
                         _ => {
                             return Err(ImportError::Unsupported(
-                                "gep of non-integer/pointer element type into an unresolved pointer not \
-                                 supported"
+                                "gep of non-integer/pointer aggregate element type into an \
+                                 unresolved pointer not supported"
                                     .into(),
                             ));
                         }
@@ -1676,19 +1996,56 @@ impl<'ctx> Importer<'ctx> {
                                 args,
                             },
                         );
-                        match instr.get_type().try_into() {
-                            Ok(inkwell::types::BasicTypeEnum::IntType(_))
-                            | Ok(inkwell::types::BasicTypeEnum::PointerType(_)) => {
-                                let n = self.llvm_bit_width(instr.get_type())?;
-                                Some(
-                                    (0..n)
-                                        .map(|i| {
-                                            fctx.emit(cur, Value::Output { value: vid, idx: i })
-                                        })
-                                        .collect(),
-                                )
+                        let struct_bits: Option<Option<Bits>> = match instr.get_type().try_into() {
+                            Ok(inkwell::types::BasicTypeEnum::StructType(_))
+                            | Ok(inkwell::types::BasicTypeEnum::ArrayType(_)) => {
+                                // Struct/array returns flatten to per-bit
+                                // `Value::Output`s across the callee's single
+                                // wide result; leaf-field boundaries are
+                                // recorded so `extractvalue` can slice them.
+                                let layout_ty: inkwell::types::BasicTypeEnum<'ctx> = instr
+                                    .get_type()
+                                    .try_into()
+                                    .map_err(|_| {
+                                        ImportError::Unsupported(
+                                            "call result must be a first-class type".into(),
+                                        )
+                                    })?;
+                                let layout = self.aggregate_field_layout(layout_ty)?;
+                                let mut bits: Bits = Vec::with_capacity(layout.iter().sum());
+                                let mut fields: Vec<Option<Bits>> =
+                                    Vec::with_capacity(layout.len());
+                                for width in layout {
+                                    let mut field: Bits = Vec::with_capacity(width);
+                                    for _ in 0..width {
+                                        let idx = bits.len();
+                                        field.push(fctx.emit(cur, Value::Output { value: vid, idx }));
+                                    }
+                                    bits.extend_from_slice(&field);
+                                    fields.push(Some(field));
+                                }
+                                fctx.aggregate_fields
+                                    .insert(instr.as_any_value_enum(), fields);
+                                Some(Some(bits))
                             }
                             _ => None,
+                        };
+                        match struct_bits {
+                            Some(bits) => bits,
+                            None => match instr.get_type().try_into() {
+                                Ok(inkwell::types::BasicTypeEnum::IntType(_))
+                                | Ok(inkwell::types::BasicTypeEnum::PointerType(_)) => {
+                                    let n = self.llvm_bit_width(instr.get_type())?;
+                                    Some(
+                                        (0..n)
+                                            .map(|i| {
+                                                fctx.emit(cur, Value::Output { value: vid, idx: i })
+                                            })
+                                            .collect(),
+                                    )
+                                }
+                                _ => None,
+                            },
                         }
                     }
                 }
@@ -2477,7 +2834,7 @@ impl<'ctx> Importer<'ctx> {
         fctx: &mut FuncCtx<'ctx>,
         instr: InstructionValue<'ctx>,
         intrinsic: OverflowIntrinsic,
-    ) -> IResult<Vec<Bits>> {
+    ) -> IResult<Vec<Option<Bits>>> {
         let n_args = instr.get_num_operands().saturating_sub(1);
         if n_args != 2 {
             return Err(ImportError::Unsupported(format!(
@@ -2583,7 +2940,7 @@ impl<'ctx> Importer<'ctx> {
             }
         };
 
-        Ok(vec![result, vec![overflow]])
+        Ok(vec![Some(result), Some(vec![overflow])])
     }
 
     fn extract_overflow_field(
@@ -2606,9 +2963,9 @@ impl<'ctx> Importer<'ctx> {
                 "extractvalue must select exactly one aggregate field".into(),
             ));
         };
-        fields.get(*field as usize).cloned().ok_or_else(|| {
+        fields.get(*field as usize).cloned().flatten().ok_or_else(|| {
             ImportError::Unsupported(format!(
-                "extractvalue field {field} is outside the tracked aggregate"
+                "extractvalue field {field} is not an initialized tracked aggregate field"
             ))
         })
     }
@@ -2655,9 +3012,10 @@ impl<'ctx> Importer<'ctx> {
 
     fn validate_intrinsic_pointer(&self, ptr: &IntrinsicPointer, n_bytes: usize) -> IResult<()> {
         if let IntrinsicPointer::Stack { ptr, .. } = ptr
-            && ptr.const_offset.is_some() {
-                ptr.intrinsic_range(n_bytes)?;
-            }
+            && ptr.const_offset.is_some()
+        {
+            ptr.intrinsic_range(n_bytes)?;
+        }
         Ok(())
     }
 
@@ -2988,6 +3346,42 @@ impl<'ctx> Importer<'ctx> {
         if ptr.is_null() {
             return Ok(self.null_ptr_bits(fctx, block));
         }
+        // An `inttoptr (N to ptr)` constant (rustc's promoted ZST-slice and
+        // dangling-pointer constants — e.g. `&[]`'s `inttoptr (i64 1)`, seen
+        // in `Bytes::new()` at -O0): an integer-valued pointer naming no
+        // storage. Encode N into the ADDR field with the unmatched-global
+        // identity (tag = 1, ID = 0) — the same family as `null` — so loads
+        // through it read zero, writes are dropped, and equality against the
+        // same constant compares equal.
+        {
+            let raw = ptr.as_value_ref();
+            let is_inttoptr_const = !unsafe { LLVMIsAConstantExpr(raw) }.is_null()
+                && unsafe { LLVMGetConstOpcode(raw) } == LLVMOpcode::LLVMIntToPtr;
+            if is_inttoptr_const {
+                let operand = unsafe { LLVMGetOperand(raw, 0) };
+                let iv = unsafe { IntValue::new(operand) };
+                let n = iv.get_zero_extended_constant().ok_or_else(|| {
+                    ImportError::Unsupported(
+                        "non-constant inttoptr pointer value is unsupported".into(),
+                    )
+                })?;
+                let global_addr_bits = self.global_addr_bits();
+                if n >= (1u64 << global_addr_bits) {
+                    return Err(ImportError::Unsupported(
+                        "inttoptr pointer constant exceeds the pointer-value ADDR field".into(),
+                    ));
+                }
+                let mut bits = Vec::with_capacity(self.pointer_bits);
+                for b in 0..global_addr_bits {
+                    bits.push(self.bc_const_at(fctx, block, (n >> b) & 1 != 0));
+                }
+                for _ in 0..GLOBAL_ID_BITS {
+                    bits.push(self.bc_const_at(fctx, block, false));
+                }
+                bits.push(self.bc_const_at(fctx, block, true)); // tag = 1 (global)
+                return Ok(bits);
+            }
+        }
         if let Some(sp) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
             return self.encode_stack_ptr(fctx, block, sp.storage, &sp.addr_bits);
         }
@@ -3002,11 +3396,12 @@ impl<'ctx> Importer<'ctx> {
             ));
         }
         if let GlobalPtr::Const(g) = &gp
-            && g.byte_offset >= (1u64 << self.global_addr_bits()) {
-                return Err(ImportError::Unsupported(
-                    "global byte offset too large for the pointer-value encoding".into(),
-                ));
-            }
+            && g.byte_offset >= (1u64 << self.global_addr_bits())
+        {
+            return Err(ImportError::Unsupported(
+                "global byte offset too large for the pointer-value encoding".into(),
+            ));
+        }
         let offset_bits = self.global_ptr_offset_bits(fctx, block, &gp);
         let global_addr_bits = self.global_addr_bits();
         let mut bits = Vec::with_capacity(self.pointer_bits);
@@ -3312,11 +3707,12 @@ impl<'ctx> Importer<'ctx> {
             .map(StorageId)
             .filter(|id| !skip.contains(id))
             .collect();
-        if candidates.len() > MAX_DISPATCH_CANDIDATES {
+        if candidates.len() > self.max_dispatch_candidates {
             return Err(ImportError::Unsupported(format!(
-                "{} candidate globals exceeds the {MAX_DISPATCH_CANDIDATES}-candidate limit for \
+                "{} candidate globals exceeds the {}-candidate limit for \
                  runtime pointer dispatch",
-                candidates.len()
+                candidates.len(),
+                self.max_dispatch_candidates
             )));
         }
         Ok(candidates)
@@ -3548,7 +3944,17 @@ impl<'ctx> Importer<'ctx> {
             }
             InstructionOpcode::Switch => self.translate_switch(fctx, instr, bb)?,
             InstructionOpcode::Unreachable => {
-                return Err(ImportError::Unsupported("reachable unreachable".into()));
+                if !self.lower_reachable_unreachable_to_zeros {
+                    return Err(ImportError::Unsupported("reachable unreachable".into()));
+                }
+                // Opt-in lowering for compiler-proven-dead arms: return
+                // zeros sized to the enclosing function's return width.
+                // Runtime-unreachable by construction.
+                Terminator::Return {
+                    values: (0..fctx.return_bits)
+                        .map(|_| self.bc_const_at(fctx, fctx.current, false))
+                        .collect(),
+                }
             }
             other => {
                 return Err(ImportError::Unsupported(format!(
@@ -3988,7 +4394,7 @@ struct FuncCtx<'ctx> {
     /// arithmetic-overflow intrinsics. LLVM only lets the importer observe
     /// these through `extractvalue`, so they stay out of the general value
     /// cache and arbitrary aggregate handling remains unsupported.
-    aggregate_fields: HashMap<AnyValueEnum<'ctx>, Vec<Bits>>,
+    aggregate_fields: HashMap<AnyValueEnum<'ctx>, Vec<Option<Bits>>>,
     current: BlockId,
     /// Stack-pointer globals this function's `alloca` sites bump. Exit
     /// restores the values read from these cells at entry.
@@ -4002,6 +4408,9 @@ struct FuncCtx<'ctx> {
     /// `getelementptr` *instruction* off a global (directly, or chained off
     /// another tracked entry here). See `GlobalPointer`.
     global_ptr_of: HashMap<AnyValueEnum<'ctx>, GlobalPtr>,
+    /// The enclosing function's flattened return width (bits), for
+    /// zero-return lowering of reachable `unreachable` instructions.
+    return_bits: usize,
 }
 
 impl<'ctx> FuncCtx<'ctx> {
@@ -4019,6 +4428,7 @@ impl<'ctx> FuncCtx<'ctx> {
             sp_globals: Vec::new(),
             stack_slot_of: HashMap::new(),
             global_ptr_of: HashMap::new(),
+            return_bits: 0,
         }
     }
 

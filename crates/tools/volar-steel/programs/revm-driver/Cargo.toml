@@ -1,0 +1,27 @@
+[package]
+name = "revm-steel-driver"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace on purpose: this crate is compiled to a whole-program
+# LLVM module (`cargo rustc -- --emit=llvm-ir`) and imported by
+# volar-steel/tests/compile_probe.rs (S6c). It must not join volar-ir's
+# workspace or slow its builds.
+[workspace]
+
+[dependencies]
+revm-interpreter = { version = "=35.0.1", default-features = false }
+revm-context-interface = { version = "=17.0.1", default-features = false }
+
+# -O0 (the frontend-supported level): frame calling convention, allocas for
+# locals — the path proven end-to-end by portal-co/volar-ir#5's resolution.
+# debug-assertions/overflow-checks OFF: at -O0 they drag in core::fmt's
+# formatted-panic machinery (~800 extra globals of format strings, arg lists
+# and fmt shims) that the importer's global model would have to carry. The
+# remaining panics (unwrap/expect &str payloads) are str-only.
+[profile.dev]
+opt-level = 0
+panic = "abort"
+debug-assertions = false
+overflow-checks = false

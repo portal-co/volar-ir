@@ -17,7 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, SigDecl, SigId, Terminator, Value, ValueId};
-use volar_ir_common::{Constant, IrType, Node, PolyCoeffs, Stmt, Type, TypeId, TypeTable};
+use volar_ir_common::{Constant, IrType, Node, PolyCoeffs, Stmt, TypeId, TypeTable};
 use volar_lir::circuits::{self, BitCircuitBuilder};
 
 /// Whether a VAFFLE producer inlines circuit helpers or extracts them.

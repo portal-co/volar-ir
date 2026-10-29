@@ -146,11 +146,9 @@ fn ssa_value_vtid<P: Clone>(
         Value::Op(stmt) => crate::lower_to_ir::stmt_result_vtid(stmt),
         Value::Output { .. } => TypeId(0),
         Value::Call { func, .. } => {
-            let sig = func_sigs
-                .get(func.0)
-                .unwrap_or_else(|| {
-                    panic!("vaffle_ssa: Call references missing function {}", func.0)
-                });
+            let sig = func_sigs.get(func.0).unwrap_or_else(|| {
+                panic!("vaffle_ssa: Call references missing function {}", func.0)
+            });
             let results = &module.sigs[sig.0].results;
             if results.len() == 1 {
                 results[0]
@@ -1237,14 +1235,7 @@ mod tests {
         let (bit_tid, addr_tid, sp_step) = setup(&mut module);
         let func_sigs = module_func_sigs(&module.funcs);
 
-        let borrowed = ssa_ify_function(
-            &module,
-            &make_body(),
-            addr_tid,
-            bit_tid,
-            sp_step,
-            true,
-        );
+        let borrowed = ssa_ify_function(&module, &make_body(), addr_tid, bit_tid, sp_step, true);
         let owned = ssa_ify_function_owned(
             &module,
             make_body(),
