@@ -40,6 +40,11 @@ pub enum HelperOp {
     SDiv,
     URem,
     SRem,
+    /// Combined unsigned division + remainder producing `q || r` (2n bits).
+    /// The division loop yields both outputs for one body, so a DIV + MOD
+    /// pair on the same operands shares a single interned circuit.
+    UDivRem,
+    SDivRem,
     Shl,
     LShr,
     AShr,
@@ -68,7 +73,22 @@ pub fn helper_result_width(op: HelperOp, widths: &[usize]) -> usize {
         HelperOp::Eq | HelperOp::Ne | HelperOp::Ult | HelperOp::Ule | HelperOp::Slt | HelperOp::Sle => {
             1
         }
+        HelperOp::UDivRem | HelperOp::SDivRem => widths[0] * 2,
         _ => widths[0],
+    }
+}
+
+/// Map a standalone div/rem op to the shared combined helper that computes
+/// it, plus which half of the `q || r` result the caller wants (`true` =
+/// low half = quotient). The combined helper lets DIV and MOD call sites
+/// intern and reference ONE circuit body.
+pub fn divrem_split(op: HelperOp) -> Option<(HelperOp, bool)> {
+    match op {
+        HelperOp::UDiv => Some((HelperOp::UDivRem, true)),
+        HelperOp::URem => Some((HelperOp::UDivRem, false)),
+        HelperOp::SDiv => Some((HelperOp::SDivRem, true)),
+        HelperOp::SRem => Some((HelperOp::SDivRem, false)),
+        _ => None,
     }
 }
 
@@ -210,6 +230,14 @@ fn eval_op(b: &mut HelperBuilder, op: HelperOp, operands: &[Vec<ValueId>]) -> Ve
         HelperOp::SDiv => circuits::bc_sdiv(b, &operands[0], &operands[1]),
         HelperOp::URem => circuits::bc_urem(b, &operands[0], &operands[1]),
         HelperOp::SRem => circuits::bc_srem(b, &operands[0], &operands[1]),
+        HelperOp::UDivRem => {
+            let (q, r) = circuits::bc_udivrem(b, &operands[0], &operands[1]);
+            q.into_iter().chain(r).collect()
+        }
+        HelperOp::SDivRem => {
+            let (q, r) = circuits::bc_sdivrem(b, &operands[0], &operands[1]);
+            q.into_iter().chain(r).collect()
+        }
         HelperOp::Shl => circuits::bc_shl(b, &operands[0], &operands[1]),
         HelperOp::LShr => circuits::bc_lshr(b, &operands[0], &operands[1]),
         HelperOp::AShr => circuits::bc_ashr(b, &operands[0], &operands[1]),

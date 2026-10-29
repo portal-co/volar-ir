@@ -260,8 +260,22 @@ fn ext_bits<B: BitCircuitBuilder>(b: &mut B, v: &[B::Bit], w: usize) -> Vec<B::B
 }
 
 /// Restoring long-division: quotient of `a / x` (unsigned).
-pub fn bc_udiv<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> Vec<B::Bit> {
+/// Combined unsigned division and remainder: returns `(a / x, a % x)`.
+///
+/// ONE restoring-division loop computes both outputs — the running
+/// remainder after the final step IS `a % x`, which a standalone division
+/// previously discarded (forcing `bc_urem` to re-derive it as `a - q*x`,
+/// a whole extra multiply). `x == 0` is LLVM poison; the circuit's
+/// output for it is unspecified.
+pub fn bc_udivrem<B: BitCircuitBuilder>(
+    b: &mut B,
+    a: &[B::Bit],
+    x: &[B::Bit],
+) -> (Vec<B::Bit>, Vec<B::Bit>) {
     let n = a.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
     let mut r: Vec<B::Bit> = (0..n).map(|_| b.bc_const(false)).collect();
     let mut q: Vec<B::Bit> = (0..n).map(|_| b.bc_const(false)).collect();
     for i in (0..n).rev() {
@@ -294,24 +308,50 @@ pub fn bc_udiv<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> V
             .map(|(ri, di)| b.bc_select(no_borrow.clone(), di.clone(), ri.clone()))
             .collect();
     }
-    q
+    (q, r)
 }
 
-/// Signed division: sign-correct restoring division.
-pub fn bc_sdiv<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> Vec<B::Bit> {
+/// Unsigned division: the quotient half of [`bc_udivrem`].
+pub fn bc_udiv<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> Vec<B::Bit> {
+    bc_udivrem(b, a, x).0
+}
+
+/// Signed combined division and remainder: returns `(a / x, a % x)` with
+/// truncation toward zero; the remainder's sign follows the DIVIDEND
+/// (C/LLVM semantics), the quotient's sign the XOR of operand signs.
+pub fn bc_sdivrem<B: BitCircuitBuilder>(
+    b: &mut B,
+    a: &[B::Bit],
+    x: &[B::Bit],
+) -> (Vec<B::Bit>, Vec<B::Bit>) {
     let n = a.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
     let sign_a = a[n - 1].clone();
     let sign_x = x[n - 1].clone();
     let abs_a = bc_abs(b, a);
     let abs_x = bc_abs(b, x);
-    let abs_q = bc_udiv(b, &abs_a, &abs_x);
-    let signs_differ = b.bc_xor(sign_a, sign_x);
+    let (abs_q, abs_r) = bc_udivrem(b, &abs_a, &abs_x);
+    let signs_differ = b.bc_xor(sign_a.clone(), sign_x);
     let neg_q = bc_neg(b, &abs_q);
-    abs_q
+    let q: Vec<B::Bit> = abs_q
         .iter()
         .zip(neg_q.iter())
         .map(|(pq, nq)| b.bc_select(signs_differ.clone(), nq.clone(), pq.clone()))
-        .collect()
+        .collect();
+    let neg_r = bc_neg(b, &abs_r);
+    let r: Vec<B::Bit> = abs_r
+        .iter()
+        .zip(neg_r.iter())
+        .map(|(pr, nr)| b.bc_select(sign_a.clone(), nr.clone(), pr.clone()))
+        .collect();
+    (q, r)
+}
+
+/// Signed division: the quotient half of [`bc_sdivrem`].
+pub fn bc_sdiv<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> Vec<B::Bit> {
+    bc_sdivrem(b, a, x).0
 }
 
 fn barrel_stages(n: usize, shift_bits: usize) -> usize {
@@ -503,18 +543,16 @@ pub fn bc_select_vec<B: BitCircuitBuilder>(
 // Additional integer algorithms
 // ============================================================================
 
-/// Unsigned remainder: `a - udiv(a, x) * x`.
+/// Unsigned remainder: the remainder half of [`bc_udivrem`] — the
+/// division loop yields it directly, no multiply needed.
 pub fn bc_urem<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> Vec<B::Bit> {
-    let q = bc_udiv(b, a, x);
-    let qx = bc_mul(b, &q, x);
-    bc_sub(b, a, &qx)
+    bc_udivrem(b, a, x).1
 }
 
-/// Signed remainder: `a - sdiv(a, x) * x`.
+/// Signed remainder: the remainder half of [`bc_sdivrem`] — its sign
+/// follows the dividend (C/LLVM semantics).
 pub fn bc_srem<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> Vec<B::Bit> {
-    let q = bc_sdiv(b, a, x);
-    let qx = bc_mul(b, &q, x);
-    bc_sub(b, a, &qx)
+    bc_sdivrem(b, a, x).1
 }
 
 /// Left rotation: `(val << shift) | (val >> (n - shift))`.
@@ -1118,5 +1156,169 @@ mod mul_karatsuba_tests {
         // Truncated: fewer bits than the operands.
         check_mul(64, 33, 64);
         check_mul(128, 70, 32);
+    }
+}
+
+#[cfg(test)]
+mod divrem_tests {
+    use super::*;
+
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    fn rand_value(state: &mut u64, width: u32) -> u128 {
+        let lo = xorshift(state) as u128;
+        let hi = xorshift(state) as u128;
+        let raw = (hi << 64) | lo;
+        if width >= 128 {
+            raw
+        } else {
+            raw & ((1u128 << width) - 1)
+        }
+    }
+
+    struct EvalBuilder {
+        values: Vec<bool>,
+    }
+
+    impl Default for EvalBuilder {
+        fn default() -> Self {
+            Self { values: Vec::new() }
+        }
+    }
+
+    impl BitCircuitBuilder for EvalBuilder {
+        type Bit = usize;
+
+        fn bc_const(&mut self, val: bool) -> usize {
+            self.values.push(val);
+            self.values.len() - 1
+        }
+
+        fn bc_poly(&mut self, coeffs: PolyCoeffs<usize>, constant: u128) -> usize {
+            let mut acc = constant & 1 == 1;
+            for (vars, _coeff) in coeffs.iter() {
+                let mut prod = true;
+                for v in vars {
+                    prod &= self.values[*v];
+                }
+                acc ^= prod;
+            }
+            self.values.push(acc);
+            self.values.len() - 1
+        }
+    }
+
+    fn bits_of(eb: &EvalBuilder, out: &[usize]) -> u128 {
+        let mut got = 0u128;
+        for (i, g) in out.iter().enumerate().take(128) {
+            got |= (eb.values[*g] as u128) << i;
+        }
+        got
+    }
+
+    fn sign_extend(raw: u128, width: u32) -> i128 {
+        if width >= 128 {
+            return raw as i128;
+        }
+        let mask = (1u128 << width) - 1;
+        let v = raw & mask;
+        if v >> (width - 1) & 1 == 1 {
+            ((v | !mask) as i128) as i128
+        } else {
+            v as i128
+        }
+    }
+
+    fn check_divrem(width: u32, trials: u32) {
+        let mut state = 0xfeed_c0ff_ee42_beefu64;
+        for _ in 0..trials {
+            let a = rand_value(&mut state, width);
+            let x = rand_value(&mut state, width);
+            let mut eb = EvalBuilder::default();
+            let a_bits: Vec<usize> = (0..width).map(|i| eb.bc_const((a >> i) & 1 == 1)).collect();
+            let x_bits: Vec<usize> = (0..width).map(|i| eb.bc_const((x >> i) & 1 == 1)).collect();
+            let (q, r) = bc_udivrem(&mut eb, &a_bits, &x_bits);
+            let got_q = bits_of(&eb, &q);
+            let got_r = bits_of(&eb, &r);
+            // x == 0 is LLVM poison: skip the semantic check.
+            if x != 0 {
+                assert_eq!(got_q, a / x, "udiv width={width} a={a:#x} x={x:#x}");
+                assert_eq!(got_r, a % x, "urem width={width} a={a:#x} x={x:#x}");
+            }
+            // Wrappers agree with the combined loop.
+            let (qw, rw) = (bc_udiv(&mut eb, &a_bits, &x_bits), bc_urem(&mut eb, &a_bits, &x_bits));
+            assert_eq!(bits_of(&eb, &qw), got_q, "bc_udiv wrapper width={width}");
+            assert_eq!(bits_of(&eb, &rw), got_r, "bc_urem wrapper width={width}");
+
+            // Signed: truncation toward zero, remainder follows dividend.
+            let (sq, sr) = bc_sdivrem(&mut eb, &a_bits, &x_bits);
+            let got_sq = bits_of(&eb, &sq);
+            let got_sr = bits_of(&eb, &sr);
+            if x != 0 {
+                let sa = sign_extend(a, width);
+                let sx = sign_extend(x, width);
+                // Avoid the MIN / -1 overflow corner by construction: widths
+                // here are far below 128 bits, so i128 never overflows.
+                assert_eq!(
+                    got_sq,
+                    (sa.wrapping_div(sx)) as u128 & mask_for(width),
+                    "sdiv width={width} a={sa} x={sx}"
+                );
+                assert_eq!(
+                    got_sr,
+                    (sa.wrapping_rem(sx)) as u128 & mask_for(width),
+                    "srem width={width} a={sa} x={sx}"
+                );
+            }
+        }
+    }
+
+    fn mask_for(bits: u32) -> u128 {
+        if bits >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
+        }
+    }
+
+    #[test]
+    fn divrem_matches_native() {
+        check_divrem(1, 32); // degenerate width
+        check_divrem(4, 64);
+        check_divrem(8, 128);
+        check_divrem(17, 96); // odd width
+        check_divrem(24, 96);
+        check_divrem(33, 64); // two split levels
+        check_divrem(64, 64);
+        check_divrem(128, 32);
+    }
+
+    #[test]
+    fn divrem_edges() {
+        let cases = [
+            (0u128, 1u128),  // 0 / x
+            (7, 1),          // x == 1: r must be 0
+            (13, 13),        // a == x: q == 1, r == 0
+            (5, 13),         // a < x: q == 0, r == a
+            (u128::MAX, u128::MAX),
+            (u128::MAX, 1),
+            (1 << 63, 1 << 31),
+        ];
+        for &(a, x) in &cases {
+            let width = 128u32;
+            let mut eb = EvalBuilder::default();
+            let a_bits: Vec<usize> = (0..width).map(|i| eb.bc_const((a >> i) & 1 == 1)).collect();
+            let x_bits: Vec<usize> = (0..width).map(|i| eb.bc_const((x >> i) & 1 == 1)).collect();
+            let (q, r) = bc_udivrem(&mut eb, &a_bits, &x_bits);
+            assert_eq!(bits_of(&eb, &q), a / x, "udiv a={a:#x} x={x:#x}");
+            assert_eq!(bits_of(&eb, &r), a % x, "urem a={a:#x} x={x:#x}");
+        }
     }
 }

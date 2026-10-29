@@ -83,7 +83,7 @@ use volar_ir_common::{
 use volar_lir::circuits::{self, BitCircuitBuilder};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
 use volar_vaffle_target::circuit_helpers::{
-    HelperKey, HelperOp, helper_result_width, intern_circuit_helper, width_type,
+    HelperKey, HelperOp, divrem_split, helper_result_width, intern_circuit_helper, width_type,
 };
 
 /// A structural-import failure.
@@ -3584,6 +3584,19 @@ impl<'ctx> Importer<'ctx> {
         op: HelperOp,
         operands: &[Bits],
     ) -> Bits {
+        // DIV/REM pair sharing: route all four division ops through the
+        // combined div/rem helpers so a DIV + MOD pair on the same operand
+        // widths interns and references ONE circuit body (and a lone REM
+        // no longer pays an extra multiply to re-derive its result).
+        if let Some((shared, want_quotient)) = divrem_split(op) {
+            let n = operands[0].len();
+            let full = self.alu(fctx, block, shared, operands);
+            return full
+                .into_iter()
+                .skip(if want_quotient { 0 } else { n })
+                .take(n)
+                .collect();
+        }
         if self.helper_mode != CircuitHelperMode::Extract {
             return self.alu_inline(fctx, block, op, operands);
         }
@@ -3656,6 +3669,14 @@ impl<'ctx> Importer<'ctx> {
             HelperOp::SDiv => circuits::bc_sdiv(&mut c, &operands[0], &operands[1]),
             HelperOp::URem => circuits::bc_urem(&mut c, &operands[0], &operands[1]),
             HelperOp::SRem => circuits::bc_srem(&mut c, &operands[0], &operands[1]),
+            HelperOp::UDivRem => {
+                let (q, r) = circuits::bc_udivrem(&mut c, &operands[0], &operands[1]);
+                q.into_iter().chain(r).collect()
+            }
+            HelperOp::SDivRem => {
+                let (q, r) = circuits::bc_sdivrem(&mut c, &operands[0], &operands[1]);
+                q.into_iter().chain(r).collect()
+            }
             HelperOp::Shl => circuits::bc_shl(&mut c, &operands[0], &operands[1]),
             HelperOp::LShr => circuits::bc_lshr(&mut c, &operands[0], &operands[1]),
             HelperOp::AShr => circuits::bc_ashr(&mut c, &operands[0], &operands[1]),

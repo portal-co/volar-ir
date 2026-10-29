@@ -1702,9 +1702,18 @@ impl LirTarget for VaffleTarget {
             "division is not defined for extension or prime fields"
         );
         let ty = lhs.ty.clone();
-        let bits = self
-            .extract_bits(HelperOp::UDiv, &[lhs.bits.clone(), rhs.bits.clone()])
-            .unwrap_or_else(|| bc_udiv(self, &lhs.bits, &rhs.bits));
+        // Route through the combined div/rem helper so DIV + MOD share one
+        // interned body; the quotient is the low half of `q || r`.
+        let n = lhs.bits.len();
+        if let Some(full) =
+            self.extract_bits(HelperOp::UDivRem, &[lhs.bits.clone(), rhs.bits.clone()])
+        {
+            return VaffleValue {
+                bits: full.into_iter().take(n).collect(),
+                ty,
+            };
+        }
+        let bits = bc_udiv(self, &lhs.bits, &rhs.bits);
         VaffleValue { bits, ty }
     }
     fn sdiv(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
@@ -1713,9 +1722,16 @@ impl LirTarget for VaffleTarget {
             "division is not defined for extension or prime fields"
         );
         let ty = lhs.ty.clone();
-        let bits = self
-            .extract_bits(HelperOp::SDiv, &[lhs.bits.clone(), rhs.bits.clone()])
-            .unwrap_or_else(|| bc_sdiv(self, &lhs.bits, &rhs.bits));
+        let n = lhs.bits.len();
+        if let Some(full) =
+            self.extract_bits(HelperOp::SDivRem, &[lhs.bits.clone(), rhs.bits.clone()])
+        {
+            return VaffleValue {
+                bits: full.into_iter().take(n).collect(),
+                ty,
+            };
+        }
+        let bits = bc_sdiv(self, &lhs.bits, &rhs.bits);
         VaffleValue { bits, ty }
     }
     fn and(&mut self, lhs: VaffleValue, rhs: VaffleValue) -> VaffleValue {
