@@ -2427,7 +2427,7 @@ impl<'ctx> Importer<'ctx> {
                     let storage = self.storage_alloc.alloc();
                     let sp = self.storage_alloc.alloc();
                     self.alloca_data.push(storage);
-                self.alloca_sizes.push(total_slots);
+                    self.alloca_sizes.push(total_slots);
                     self.sp_globals.push(sp);
                     self.pre_init.push(PreInitSegment {
                         storage: sp,
@@ -3876,8 +3876,7 @@ impl<'ctx> Importer<'ctx> {
             addr_bound
         };
         let width = if bound > 0 {
-            ((u64::BITS - (bound - 1).leading_zeros()) as usize)
-                .min(base_addr_bits.len())
+            ((u64::BITS - (bound - 1).leading_zeros()) as usize).min(base_addr_bits.len())
         } else {
             base_addr_bits.len()
         };
@@ -3888,9 +3887,7 @@ impl<'ctx> Importer<'ctx> {
                 block,
             };
             let low = &base_addr_bits[..width];
-            let i_bits: Vec<ValueId> = (0..width)
-                .map(|b| c.bc_const((i >> b) & 1 != 0))
-                .collect();
+            let i_bits: Vec<ValueId> = (0..width).map(|b| c.bc_const((i >> b) & 1 != 0)).collect();
             circuits::bc_add(&mut c, low, &i_bits, false)
         };
         fctx.emit(
@@ -4436,8 +4433,15 @@ impl<'ctx> Importer<'ctx> {
         let bit_tid = self.bit_tid;
         for (candidate_idx, &sid) in allocas.iter().enumerate() {
             let bound = self.alloca_sizes[candidate_idx];
-            let old =
-                self.stack_load_dynamic(fctx, sid, ptr_bits[0], &offset_bits, bit_tid, n_bits, bound);
+            let old = self.stack_load_dynamic(
+                fctx,
+                sid,
+                ptr_bits[0],
+                &offset_bits,
+                bit_tid,
+                n_bits,
+                bound,
+            );
             let new_val = mux_bits(self, fctx, cur, stack_matches[candidate_idx], val, &old);
             self.stack_store_dynamic(fctx, sid, ptr_bits[0], &offset_bits, &new_val, bound);
         }
