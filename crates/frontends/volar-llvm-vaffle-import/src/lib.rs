@@ -82,7 +82,7 @@ use volar_ir_common::{
 use volar_lir::circuits::{self, BitCircuitBuilder};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
 use volar_vaffle_target::circuit_helpers::{
-    CircuitHelperMode, HelperKey, HelperOp, helper_result_width, intern_circuit_helper, width_type,
+    HelperKey, HelperOp, helper_result_width, intern_circuit_helper, width_type,
 };
 
 /// A structural-import failure.
@@ -169,6 +169,8 @@ pub enum LlvmExternalImportKind {
 
 /// Optional ABI and explicit external-declaration constraints for structural
 /// LLVM import.
+pub use volar_vaffle_target::circuit_helpers::CircuitHelperMode;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LlvmImportConfig {
     pub pointer_width: Option<PointerWidth>,
@@ -355,15 +357,19 @@ pub fn import_module_with_config<'ctx>(
             continue;
         }
         done.insert(key);
+        let before = importer.total_values();
         let called = importer.import_function(f)?;
         worklist.extend(called);
         imported_count += 1;
-        if imported_count % 25 == 0 && std::env::var("VLVI_IMPORT_PROGRESS").is_ok() {
+        if std::env::var("VLVI_IMPORT_PROGRESS").is_ok() {
             eprintln!(
-                "import progress: {imported_count} functions imported (worklist {})",
-                worklist.len()
+                "import: #{imported_count} {} (worklist {}, values {})",
+                f.get_name().to_string_lossy(),
+                worklist.len(),
+                importer.total_values() - before
             );
         }
+        let _ = before;
     }
     Ok(importer.finish())
 }
@@ -672,6 +678,17 @@ impl<'ctx> Importer<'ctx> {
     /// (struct GEP lowering needs field offsets).
     fn set_data_layout(&mut self, layout: inkwell::targets::TargetData) {
         self.data_layout = Some(layout);
+    }
+
+    /// Total VAFFLE values emitted so far (diagnostics).
+    fn total_values(&self) -> usize {
+        self.funcs
+            .iter()
+            .map(|f| match f {
+                FuncDecl::Body(b) => b.values.len(),
+                _ => 0,
+            })
+            .sum()
     }
 
     /// Validate every configured mapping against the module before walking
