@@ -155,6 +155,81 @@ fn s6a_storage_read_reaches_a_step_circuit() {
 
 /// Isolation: does a runtime-indexed local-array read work through the pipeline?
 #[test]
+/// IR-level twin of `array_read_dynamic_index_works`: distinguishes an
+/// importer-side byte-cell bug (pre-movfuscate eval wrong) from a
+/// circuit-lowering bug (pre-movfuscate right, circuit wrong).
+#[test]
+fn array_read_dynamic_index_pre_movfuscate_eval() {
+    // arr = [10, 20, 30, 40], idx = 2 -> 30.
+    eval_pre_movfuscate("array_read.ll", "read_idx", &[10, 20, 30, 40, 2], 30);
+}
+
+/// Storage-cell dump for the dynamic array read: shows where each
+/// element's bytes actually landed in the pool storage after the IR eval.
+#[test]
+fn array_read_storage_dump() {
+    let (blocks, types) = import_program_to_ir("array_read.ll", "read_idx");
+    let entry_block = &blocks.blocks[0];
+    let widths: Vec<usize> = entry_block
+        .params
+        .iter()
+        .map(|&t| types.value_bit_width(t).expect("param width"))
+        .collect();
+    let args = [10u64, 20, 30, 40, 2];
+    let inputs: Vec<Vec<bool>> = args
+        .iter()
+        .map(|&inp| (0..64).map(|b| (inp >> b) & 1 == 1).collect())
+        .collect();
+    let _ = widths;
+    let (out, storage) = volar_fuzz::interpreter::ir::eval_ir_with_storage(&blocks, &types, &inputs);
+    let mut d = String::new();
+    use core::fmt::Write as _;
+    let _ = writeln!(
+        d,
+        "ret: {:?}",
+        out.map(|r| {
+            let mut got = 0u64;
+            let mut bitidx = 0;
+            'outer: for slot in &r {
+                for &bit in slot {
+                    if bitidx >= 64 {
+                        break 'outer;
+                    }
+                    if bit {
+                        got |= 1 << bitidx;
+                    }
+                    bitidx += 1;
+                }
+            }
+            got
+        })
+    );
+    for ((sid, tid, addr), bits) in storage.iter() {
+        let mut v = 0u64;
+        for (i, &b) in bits.iter().enumerate().take(64) {
+            if b {
+                v |= 1 << i;
+            }
+        }
+        let _ = writeln!(d, "cell storage={:?} ty={:?} addr={addr} bits={} val={v:#x}", sid, tid, bits.len());
+    }
+    // Dump the entry block's statements (truncated) to inspect the store
+    // address chains.
+    for (bi, b) in blocks.blocks.iter().enumerate() {
+        let _ = writeln!(d, "== block {bi}");
+        for (vi, s) in b.stmts.iter().enumerate() {
+            let debug = format!("{:?}", s.kind);
+            let debug = if debug.len() > 140 {
+                format!("{}...", &debug[..140])
+            } else {
+                debug
+            };
+            let _ = writeln!(d, "  v{vi}: {debug}");
+        }
+    }
+    panic!("DUMP\n{d}");
+}
+
 fn array_read_dynamic_index_works() {
     let (blocks, mut types) = import_program_to_ir("array_read.ll", "read_idx");
     let movfuscated = volar_ir_passes::movfuscate::movfuscate_ir(&blocks, &mut types);

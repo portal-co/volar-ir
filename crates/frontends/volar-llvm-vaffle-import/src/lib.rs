@@ -1431,6 +1431,54 @@ impl<'ctx> Importer<'ctx> {
         // `finish_blocks` does not truncate them when zipping its vectors.
         fallback_return_values.resize_with(fctx.stmts.len(), Vec::new);
         self.install_sp_reverts(&mut fctx);
+        // Per-function statement histogram (VLVI_IMPORT_STATS=1): what the
+        // emitted values are made of — dispatch/stack traffic vs arithmetic
+        // vs call plumbing — for profiling aggregate-traffic hotspots.
+        if std::env::var("VLVI_IMPORT_STATS").is_ok() {
+            let mut hist: BTreeMap<&'static str, usize> = Default::default();
+            for v in fctx.values.iter() {
+                let k = match &v.kind {
+                    Value::Op(s) => match s {
+                        Stmt::StorageRead { .. } => "op:StorageRead",
+                        Stmt::StorageWrite { .. } => "op:StorageWrite",
+                        Stmt::Poly { coeffs, .. } => {
+                            let max_vars = coeffs
+                                .iter()
+                                .map(|(vars, _)| vars.len())
+                                .max()
+                                .unwrap_or(0);
+                            match (coeffs.len(), max_vars) {
+                                (1, 1) => "poly:xor1var",
+                                (1, 2) => "poly:and2var",
+                                _ => "poly:other",
+                            }
+                        }
+                        Stmt::Const(..) => "op:Const",
+                        Stmt::Merge { .. } => "op:Merge",
+                        Stmt::Shuffle { .. } => "op:Shuffle",
+                        Stmt::Splat { .. } => "op:Splat",
+                        Stmt::Transmute { .. } => "op:Transmute",
+                        _ => "op:other",
+                    },
+                    Value::Param { .. } => "param",
+                    Value::Call { .. } => "call",
+                    Value::Output { .. } => "output",
+                    Value::StackAlloc { .. } => "stack_alloc",
+                    Value::PtrLoad { .. } => "ptr_load",
+                    Value::PtrStore { .. } => "ptr_store",
+                    Value::PtrOffset { .. } => "ptr_offset",
+                    _ => "other",
+                };
+                *hist.entry(k).or_insert(0) += 1;
+            }
+            eprintln!(
+                "stats: hist {}",
+                hist.iter()
+                    .map(|(k, n)| format!("{k}={n}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
         let values = core::mem::take(&mut fctx.values);
         let body = FuncBody {
             sig,
