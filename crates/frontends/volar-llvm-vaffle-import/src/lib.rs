@@ -3537,6 +3537,7 @@ impl<'ctx> Importer<'ctx> {
             return self.alu_inline(fctx, block, op, operands);
         }
         let widths: Vec<usize> = operands.iter().map(|bits| bits.len()).collect();
+        let before_helpers = self.total_values();
         let func = intern_circuit_helper(
             &mut self.types,
             &mut self.sigs,
@@ -3545,6 +3546,12 @@ impl<'ctx> Importer<'ctx> {
             op,
             &widths,
         );
+        if std::env::var("VLVI_IMPORT_STATS").is_ok() {
+            let body = self.total_values() - before_helpers;
+            if body > 50000 {
+                eprintln!("stats: helper {op:?} widths={widths:?} body={body}");
+            }
+        }
         let result_width = helper_result_width(op, &widths);
         let args: Vec<ValueId> = operands
             .iter()
