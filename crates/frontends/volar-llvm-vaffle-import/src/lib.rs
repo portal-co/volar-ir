@@ -266,7 +266,6 @@ impl LlvmImportConfig {
         self.lower_reachable_unreachable_to_zeros = true;
         self
     }
-
 }
 
 fn pointer_width_from_layout<'ctx>(
@@ -721,8 +720,7 @@ impl<'ctx> Importer<'ctx> {
             addr_tid,
             helper_mode,
             helper_cache: BTreeMap::new(),
-            max_dispatch_candidates: max_dispatch_candidates
-                .unwrap_or(MAX_DISPATCH_CANDIDATES),
+            max_dispatch_candidates: max_dispatch_candidates.unwrap_or(MAX_DISPATCH_CANDIDATES),
             data_layout: None,
             lower_reachable_unreachable_to_zeros,
         }
@@ -843,20 +841,20 @@ impl<'ctx> Importer<'ctx> {
                     let field = u32::try_from(idx).map_err(|_| {
                         ImportError::Unsupported("gep struct field index out of range".into())
                     })?;
-                    let field_offset = layout.offset_of_element(&struct_ty, field).ok_or_else(|| {
-                        ImportError::Unsupported(format!(
-                            "gep struct field index {idx} out of range"
-                        ))
-                    })?;
-                    offset = offset
-                        .checked_add(field_offset as i64)
-                        .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
-                    cur_ty = struct_ty.get_field_type_at_index(field)
-                        .ok_or_else(|| {
+                    let field_offset =
+                        layout.offset_of_element(&struct_ty, field).ok_or_else(|| {
                             ImportError::Unsupported(format!(
                                 "gep struct field index {idx} out of range"
                             ))
                         })?;
+                    offset = offset
+                        .checked_add(field_offset as i64)
+                        .ok_or_else(|| ImportError::Unsupported("gep offset overflow".into()))?;
+                    cur_ty = struct_ty.get_field_type_at_index(field).ok_or_else(|| {
+                        ImportError::Unsupported(format!(
+                            "gep struct field index {idx} out of range"
+                        ))
+                    })?;
                 }
                 _ => {
                     return Err(ImportError::Unsupported(
@@ -952,7 +950,18 @@ impl<'ctx> Importer<'ctx> {
 
     /// Total flattened bit width of a first-class type.
     fn llvm_flatten_width(&self, ty: inkwell::types::BasicTypeEnum<'ctx>) -> IResult<usize> {
-        Ok(self.aggregate_field_layout(ty)?.iter().sum())
+        let width: usize = self.aggregate_field_layout(ty)?.iter().sum();
+        // Profile alarm (VLVI_IMPORT_STATS=1): a monstrous flattened width
+        // means a call site emits one per-bit `Output` per result bit — the
+        // fn#64-shaped 17M-Output hotspots. Logged at this single choke
+        // point so cached (already-interned) signatures are covered too.
+        if std::env::var("VLVI_IMPORT_STATS").is_ok() && width > 65536 {
+            eprintln!(
+                "stats: flatten width {width} for {}",
+                ty.print_to_string().to_string_lossy()
+            );
+        }
+        Ok(width)
     }
 
     fn ensure_default_address_space(&self, ptr: PointerValue<'ctx>) -> IResult<()> {
@@ -1442,11 +1451,8 @@ impl<'ctx> Importer<'ctx> {
                         Stmt::StorageRead { .. } => "op:StorageRead",
                         Stmt::StorageWrite { .. } => "op:StorageWrite",
                         Stmt::Poly { coeffs, .. } => {
-                            let max_vars = coeffs
-                                .iter()
-                                .map(|(vars, _)| vars.len())
-                                .max()
-                                .unwrap_or(0);
+                            let max_vars =
+                                coeffs.iter().map(|(vars, _)| vars.len()).max().unwrap_or(0);
                             match (coeffs.len(), max_vars) {
                                 (1, 1) => "poly:xor1var",
                                 (1, 2) => "poly:and2var",
@@ -1675,10 +1681,8 @@ impl<'ctx> Importer<'ctx> {
                 // cache entry + untracked-field errors). Pure SSA
                 // re-arrangement: the aggregate's bits are other values'
                 // outputs; no new statements are emitted.
-                let layout_ty: inkwell::types::BasicTypeEnum<'ctx> = instr
-                    .get_type()
-                    .try_into()
-                    .map_err(|_| {
+                let layout_ty: inkwell::types::BasicTypeEnum<'ctx> =
+                    instr.get_type().try_into().map_err(|_| {
                         ImportError::Unsupported(
                             "insertvalue result must be a first-class type".into(),
                         )
@@ -1703,22 +1707,20 @@ impl<'ctx> Importer<'ctx> {
                     .ok_or_else(|| {
                         ImportError::Unsupported("insertvalue base must be a value".into())
                     })?;
-                let mut fields: Vec<Option<Bits>> = match fctx
-                    .aggregate_fields
-                    .get(&base.as_any_value_enum())
-                {
-                    Some(base_fields) => {
-                        if base_fields.len() != layout.len() {
-                            return Err(ImportError::Unsupported(
-                                "insertvalue base aggregate layout mismatch".into(),
-                            ));
+                let mut fields: Vec<Option<Bits>> =
+                    match fctx.aggregate_fields.get(&base.as_any_value_enum()) {
+                        Some(base_fields) => {
+                            if base_fields.len() != layout.len() {
+                                return Err(ImportError::Unsupported(
+                                    "insertvalue base aggregate layout mismatch".into(),
+                                ));
+                            }
+                            base_fields.clone()
                         }
-                        base_fields.clone()
-                    }
-                    // Poison/undef base: an aggregate with every field still
-                    // untracked.
-                    None => vec![None; layout.len()],
-                };
+                        // Poison/undef base: an aggregate with every field still
+                        // untracked.
+                        None => vec![None; layout.len()],
+                    };
                 if inserted.len() != width {
                     return Err(ImportError::Unsupported(
                         "insertvalue operand width does not match the aggregate field".into(),
@@ -1731,7 +1733,11 @@ impl<'ctx> Importer<'ctx> {
                     // further insertvalue chains can consume it.
                     fctx.aggregate_fields
                         .insert(instr.as_any_value_enum(), fields.clone());
-                    let bits: Bits = fields.iter().flatten().flat_map(|f| f.iter().copied()).collect();
+                    let bits: Bits = fields
+                        .iter()
+                        .flatten()
+                        .flat_map(|f| f.iter().copied())
+                        .collect();
                     Some(bits)
                 } else {
                     // Still partially uninitialized: no value is cached, so
@@ -1917,9 +1923,11 @@ impl<'ctx> Importer<'ctx> {
                                 ImportError::Unsupported("gep offset overflow".into())
                             })?;
                         let addr = match base_ptr.const_offset {
-                            Some(base_off) => Some(base_off.checked_add_signed(offset).ok_or_else(
-                                || ImportError::Unsupported("gep offset out of range".into()),
-                            )?),
+                            Some(base_off) => {
+                                Some(base_off.checked_add_signed(offset).ok_or_else(|| {
+                                    ImportError::Unsupported("gep offset out of range".into())
+                                })?)
+                            }
                             // A runtime base (a specialized parameter's provenance
                             // is `const_offset: None`) plus a constant delta stays
                             // runtime: `addr_bits` below carries the folded offset;
@@ -2278,10 +2286,8 @@ impl<'ctx> Importer<'ctx> {
                                 // `Value::Output`s across the callee's single
                                 // wide result; leaf-field boundaries are
                                 // recorded so `extractvalue` can slice them.
-                                let layout_ty: inkwell::types::BasicTypeEnum<'ctx> = instr
-                                    .get_type()
-                                    .try_into()
-                                    .map_err(|_| {
+                                let layout_ty: inkwell::types::BasicTypeEnum<'ctx> =
+                                    instr.get_type().try_into().map_err(|_| {
                                         ImportError::Unsupported(
                                             "call result must be a first-class type".into(),
                                         )
@@ -2294,7 +2300,9 @@ impl<'ctx> Importer<'ctx> {
                                     let mut field: Bits = Vec::with_capacity(width);
                                     for _ in 0..width {
                                         let idx = bits.len();
-                                        field.push(fctx.emit(cur, Value::Output { value: vid, idx }));
+                                        field.push(
+                                            fctx.emit(cur, Value::Output { value: vid, idx }),
+                                        );
                                     }
                                     bits.extend_from_slice(&field);
                                     fields.push(Some(field));
@@ -2397,48 +2405,48 @@ impl<'ctx> Importer<'ctx> {
                     );
                     Some(self.encode_stack_ptr(fctx, cur, pool, &addr_bits)?)
                 } else {
-                // The tagged pointer encoding keeps the bit offset in the
-                // low `global_addr_bits` field. One site's allocation has to
-                // fit there; the calling-convention frame is a different storage.
-                if total_slots >= (1u64 << self.global_addr_bits()) {
-                    return Err(ImportError::Unsupported(
-                        "alloca stack region too large for the pointer-value encoding".into(),
-                    ));
-                }
+                    // The tagged pointer encoding keeps the bit offset in the
+                    // low `global_addr_bits` field. One site's allocation has to
+                    // fit there; the calling-convention frame is a different storage.
+                    if total_slots >= (1u64 << self.global_addr_bits()) {
+                        return Err(ImportError::Unsupported(
+                            "alloca stack region too large for the pointer-value encoding".into(),
+                        ));
+                    }
 
-                let storage = self.storage_alloc.alloc();
-                let sp = self.storage_alloc.alloc();
-                self.alloca_data.push(storage);
-                self.sp_globals.push(sp);
-                self.pre_init.push(PreInitSegment {
-                    storage: sp,
-                    ty: self.addr_tid,
-                    offset: 0,
-                    data: vec![Constant { hi: 0, lo: 0 }],
-                });
-                fctx.sp_globals.push(sp);
+                    let storage = self.storage_alloc.alloc();
+                    let sp = self.storage_alloc.alloc();
+                    self.alloca_data.push(storage);
+                    self.sp_globals.push(sp);
+                    self.pre_init.push(PreInitSegment {
+                        storage: sp,
+                        ty: self.addr_tid,
+                        offset: 0,
+                        data: vec![Constant { hi: 0, lo: 0 }],
+                    });
+                    fctx.sp_globals.push(sp);
 
-                let elem_tid = self.llvm_type_id(scalar_ty)?;
-                let alloc_vid = fctx.emit(
-                    cur,
-                    Value::StackAlloc {
-                        elem_ty: elem_tid,
-                        count: count as usize,
-                        storage,
-                        sp,
-                    },
-                );
-                let addr_bits = self.explode_pointer(fctx, cur, alloc_vid);
-                fctx.stack_slot_of.insert(
-                    instr.as_any_value_enum(),
-                    StackPtr {
-                        storage,
-                        allocation_bits: total_slots,
-                        const_offset: Some(0),
-                        addr_bits: addr_bits.clone(),
-                    },
-                );
-                Some(self.encode_stack_ptr(fctx, cur, storage, &addr_bits)?)
+                    let elem_tid = self.llvm_type_id(scalar_ty)?;
+                    let alloc_vid = fctx.emit(
+                        cur,
+                        Value::StackAlloc {
+                            elem_ty: elem_tid,
+                            count: count as usize,
+                            storage,
+                            sp,
+                        },
+                    );
+                    let addr_bits = self.explode_pointer(fctx, cur, alloc_vid);
+                    fctx.stack_slot_of.insert(
+                        instr.as_any_value_enum(),
+                        StackPtr {
+                            storage,
+                            allocation_bits: total_slots,
+                            const_offset: Some(0),
+                            addr_bits: addr_bits.clone(),
+                        },
+                    );
+                    Some(self.encode_stack_ptr(fctx, cur, storage, &addr_bits)?)
                 }
             }
             other => {
@@ -3274,11 +3282,15 @@ impl<'ctx> Importer<'ctx> {
                 "extractvalue must select exactly one aggregate field".into(),
             ));
         };
-        fields.get(*field as usize).cloned().flatten().ok_or_else(|| {
-            ImportError::Unsupported(format!(
-                "extractvalue field {field} is not an initialized tracked aggregate field"
-            ))
-        })
+        fields
+            .get(*field as usize)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| {
+                ImportError::Unsupported(format!(
+                    "extractvalue field {field} is not an initialized tracked aggregate field"
+                ))
+            })
     }
 
     fn intrinsic_pointer(
@@ -3749,6 +3761,48 @@ impl<'ctx> Importer<'ctx> {
         base_addr_bits: &Bits,
         i: u64,
     ) -> ValueId {
+        // Constant-base fold: a pool-backed alloca's address bits are all
+        // `Const` nodes, so `base + i` is a single constant with zero gate
+        // circuits — the profile's dominant cost (a full pointer-width
+        // adder per accessed bit, ~192 polys on a 55k-access function)
+        // disappears entirely for the common local-variable case.
+        let mut base = 0u64;
+        let mut is_const = true;
+        for (b, &vid) in base_addr_bits.iter().enumerate() {
+            match &fctx.values[vid.0].kind {
+                Value::Op(Stmt::Const(c, _)) => {
+                    if c.lo & 1 != 0 {
+                        base |= 1u64 << b;
+                    }
+                }
+                _ => {
+                    is_const = false;
+                    break;
+                }
+            }
+        }
+        if is_const {
+            return fctx.emit(
+                block,
+                Value::Op(Stmt::Const(
+                    Constant {
+                        hi: 0,
+                        lo: (base + i) as u128,
+                    },
+                    self.addr_tid,
+                )),
+            );
+        }
+        // `i == 0` needs no adder: the address is the base itself.
+        if i == 0 {
+            return fctx.emit(
+                block,
+                Value::Op(Stmt::Merge {
+                    parts: base_addr_bits.to_vec(),
+                    ty: self.addr_tid,
+                }),
+            );
+        }
         let sum = {
             let mut c = Ctx {
                 fctx,
