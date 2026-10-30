@@ -340,7 +340,8 @@ pub fn import_module_with_config<'ctx>(
     // so the loop terminates. Attempts that make no progress return the
     // original error.
     let mut tainted: std::collections::HashSet<StorageId> = Default::default();
-    loop {
+    const MAX_WORD_FREEZE_PASSES: usize = 4;
+    for pass in 0..MAX_WORD_FREEZE_PASSES {
         match import_module_with_config_attempt(llvm_module, entries, config.clone(), &tainted) {
             Ok((module, _)) => return Ok(module),
             Err((e, new_taints)) => {
@@ -349,9 +350,15 @@ pub fn import_module_with_config<'ctx>(
                 if !grew || !e.is_word_violation() {
                     return Err(e);
                 }
+                if pass + 1 == MAX_WORD_FREEZE_PASSES {
+                    return Err(ImportError::Unsupported(format!(
+                        "word-cell freeze did not converge in {MAX_WORD_FREEZE_PASSES} passes"
+                    )));
+                }
             }
         }
     }
+    unreachable!("fixpoint loop always returns")
 }
 
 fn import_module_with_config_attempt<'ctx>(
@@ -388,6 +395,7 @@ fn import_module_with_config_attempt<'ctx>(
     // -- never just whichever globals happened to be referenced by earlier
     // functions' own direct loads/stores/GEPs.
     importer.register_all_globals(llvm_module)?;
+    importer.collect_fnptr_candidates(llvm_module);
     let mut worklist: Vec<(FunctionValue<'ctx>, Vec<Prov>)> = Vec::new();
     for &name in entries {
         let f = llvm_module.get_function(name).ok_or_else(|| {
@@ -406,6 +414,9 @@ fn import_module_with_config_attempt<'ctx>(
             continue;
         }
         done.insert(key);
+        if std::env::var("VLVI_IMPORT_NEXT").is_ok() {
+            eprintln!("next: {}", f.get_name().to_string_lossy());
+        }
         let before = importer.total_values();
         let called = importer.import_function(f, &prov)?;
         worklist.extend(called);
@@ -736,6 +747,14 @@ struct Importer<'ctx> {
     /// behind Rc<RefCell> so the taint set survives `finish(self)`'s
     /// consumption of the Importer on the success path.
     tainted_word: std::rc::Rc<std::cell::RefCell<HashSet<StorageId>>>,
+    /// Function-pointer constants STORED somewhere in the module (the
+    /// members of fn-pointer tables). The indirect-call dispatch compares
+    /// the loaded callee bits against each candidate's encoding and routes
+    /// through a dense positional `Terminator::Table`.
+    fnptr_candidates: Vec<PointerValue<'ctx>>,
+    /// Stable per-function identity indexes for function-pointer constant
+    /// encodings (ADDR field), allocated on first sight of each function.
+    fn_symbols: HashMap<usize, u64>,
     /// Oracle declarations registered by circuit-extern lowering (today:
     /// `aes128_encrypt_block`, see [`translate_aes_extern`]), carried into
     /// the finished module so the vaffle→IR and IR→boolar lowerings can
@@ -805,6 +824,8 @@ impl<'ctx> Importer<'ctx> {
             word_tid,
             storage_word: HashMap::new(),
             tainted_word: std::rc::Rc::new(std::cell::RefCell::new(HashSet::new())),
+            fnptr_candidates: Vec::new(),
+            fn_symbols: HashMap::new(),
             oracles: Vec::new(),
             actions: Vec::new(),
             externals,
@@ -1487,9 +1508,23 @@ impl<'ctx> Importer<'ctx> {
             }
             let vb = BlockId(i);
             fctx.current = vb;
+            if std::env::var("VLVI_INSTR_TRACE").is_ok() {
+                eprintln!("[trace] bb{i} start values={}", fctx.values.len());
+            }
             let mut inst = bb.get_first_instruction();
+            let mut trace_i = 0u32;
             while let Some(instr) = inst {
                 let next = instr.get_next_instruction();
+                if std::env::var("VLVI_INSTR_TRACE").is_ok() {
+                    trace_i += 1;
+                    if trace_i % 1 == 0 {
+                        eprintln!(
+                            "[trace] bb{i} instr{trace_i} opcode={:?} values={}",
+                            instr.get_opcode(),
+                            fctx.values.len()
+                        );
+                    }
+                }
                 if instr.get_opcode() != InstructionOpcode::Phi {
                     if instr.is_terminator() {
                         self.translate_terminator(&mut fctx, instr, *bb)?;
@@ -1838,7 +1873,7 @@ impl<'ctx> Importer<'ctx> {
                     None
                 }
             }
-            InstructionOpcode::PtrToInt | InstructionOpcode::IntToPtr => {
+            InstructionOpcode::PtrToInt => {
                 // Pointers ARE integers in the tagged value encoding
                 // (docs/llvm-ptr-value-bits.md): the cast is an identity on
                 // the bit representation, width-adjusted for the result
@@ -1849,6 +1884,20 @@ impl<'ctx> Importer<'ctx> {
                 // (all-zero address, tag 0) compare correctly.
                 let mut src = op!(0);
                 let dst_n = int_result_width(instr)?;
+                while src.len() < dst_n {
+                    src.push(self.bc_const_at(fctx, cur, false));
+                }
+                src.truncate(dst_n);
+                Some(src)
+            }
+            InstructionOpcode::IntToPtr => {
+                // Same identity, but the RESULT is pointer-typed: the
+                // destination width is the tagged pointer encoding's width
+                // (an IntToPtr instruction appeared with the fn-pointer
+                // identity encodings; the constant form was already
+                // handled in `ptr_value_bits`).
+                let mut src = op!(0);
+                let dst_n = self.pointer_bits;
                 while src.len() < dst_n {
                     src.push(self.bc_const_at(fctx, cur, false));
                 }
@@ -2292,9 +2341,15 @@ impl<'ctx> Importer<'ctx> {
             InstructionOpcode::Call => {
                 let call = CallSiteValue::try_from(instr)
                     .map_err(|_| ImportError::Unsupported("malformed call instruction".into()))?;
-                let callee_fn = call
-                    .get_called_fn_value()
-                    .ok_or_else(|| ImportError::Unsupported("indirect call".into()))?;
+                let callee_fn = match call.get_called_fn_value() {
+                    Some(f) => f,
+                    // INDIRECT CALL: the callee is a loaded function
+                    // pointer (e.g. revm's InstructionTable dispatch).
+                    // Dispatch over the module's stored fn-pointer
+                    // constants via an equality cascade + a dense
+                    // positional `Terminator::Table`.
+                    None => return self.translate_indirect_call(fctx, instr),
+                };
                 let callee_name = callee_fn.get_name().to_string_lossy();
                 if is_ignored_llvm_intrinsic(&callee_name) {
                     // Debug, lifetime, and alias-analysis intrinsics carry
@@ -3848,6 +3903,39 @@ impl<'ctx> Importer<'ctx> {
         if ptr.is_null() {
             return Ok(self.null_ptr_bits(fctx, block));
         }
+        // A function-value pointer constant: an opaque per-function
+        // identity — the same family as `inttoptr(N)` (tag = 1, ID = 0,
+        // ADDR = the function's stable symbol index, allocated on first
+        // sight). Loads through it read zero, writes drop, and equality
+        // distinguishes functions — the invariant the indirect-call
+        // dispatch (`translate_indirect_call`) compares on. Function
+        // pointers must NOT reach `resolve_global_ptr`: the const-chain
+        // evaluator rejects them as memory-reference bases.
+        {
+            let raw = ptr.as_value_ref();
+            if !unsafe { inkwell::llvm_sys::core::LLVMIsAFunction(raw) }.is_null() {
+                let next = self.fn_symbols.len() as u64 + 1; // 0 reserved
+                let idx = *self
+                    .fn_symbols
+                    .entry(raw as usize)
+                    .or_insert(next);
+                let global_addr_bits = self.global_addr_bits();
+                if idx >= (1u64 << global_addr_bits) {
+                    return Err(ImportError::Unsupported(
+                        "function-pointer identity exceeds the pointer-value ADDR field".into(),
+                    ));
+                }
+                let mut bits = Vec::with_capacity(self.pointer_bits);
+                for b in 0..global_addr_bits {
+                    bits.push(self.bc_const_at(fctx, block, (idx >> b) & 1 != 0));
+                }
+                for _ in 0..GLOBAL_ID_BITS {
+                    bits.push(self.bc_const_at(fctx, block, false));
+                }
+                bits.push(self.bc_const_at(fctx, block, true)); // tag = 1
+                return Ok(bits);
+            }
+        }
         // An `inttoptr (N to ptr)` constant (rustc's promoted ZST-slice and
         // dangling-pointer constants — e.g. `&[]`'s `inttoptr (i64 1)`, seen
         // in `Bytes::new()` at -O0): an integer-valued pointer naming no
@@ -4446,10 +4534,106 @@ impl<'ctx> Importer<'ctx> {
     /// unmodeled) fail closed to byte cells, keeping word-frozen storages
     /// coherent for the dispatch path (which calls the same
     /// stack_load/store_dynamic this flag switches).
+    /// Recursively collect function-pointer constants out of a constant
+    /// tree (aggregate initializers, constant expressions).
+    fn collect_const_fns(
+        &mut self,
+        raw: inkwell::llvm_sys::prelude::LLVMValueRef,
+        depth: usize,
+        seen: &mut HashSet<usize>,
+    ) {
+        use inkwell::llvm_sys::core::{
+            LLVMIsAConstantArray, LLVMIsAConstantExpr, LLVMIsAConstantStruct,
+            LLVMIsAConstantVector, LLVMIsAFunction,
+        };
+        if depth > 6 || !seen.insert(raw as usize) {
+            return;
+        }
+        if unsafe { LLVMIsAFunction(raw) }.is_null() {
+            // Not a function: recurse through aggregates and expressions.
+            let is_expr = !unsafe { LLVMIsAConstantExpr(raw) }.is_null();
+            let is_agg = !unsafe { LLVMIsAConstantArray(raw) }.is_null()
+                || !unsafe { LLVMIsAConstantStruct(raw) }.is_null()
+                || !unsafe { LLVMIsAConstantVector(raw) }.is_null();
+            if is_expr || is_agg {
+                let n = unsafe { LLVMGetNumOperands(raw) };
+                for i in 0..n {
+                    let op = unsafe { LLVMGetOperand(raw, i as u32) };
+                    if !op.is_null() {
+                        self.collect_const_fns(op, depth + 1, seen);
+                    }
+                }
+            }
+            return;
+        }
+        let pv = unsafe { PointerValue::new(raw) };
+        if !pv
+            .as_value_ref()
+            .is_null()
+            && !self
+                .fnptr_candidates
+                .iter()
+                .any(|c| c.as_value_ref() == raw)
+        {
+            self.fnptr_candidates.push(pv);
+        }
+    }
+
+    /// Collect the module's function-pointer constants that are STORED
+    /// somewhere (the members of fn-pointer tables like revm's
+    /// `InstructionTable`). Walks each function value's uses; a Store whose
+    /// value operand is the function pointer makes it a dispatch candidate.
+    fn collect_fnptr_candidates(&mut self, llvm_module: &LlvmModule<'ctx>) {
+        // Global-constant initializers: revm's `instruction_table()` at -O0
+        // lowers to ONE `llvm.memcpy` from a global constant array of fn
+        // pointers — the candidates live in initializers, not stores.
+        for g in llvm_module.get_globals() {
+            if let Some(init) = g.get_initializer() {
+                let mut seen: HashSet<usize> = Default::default();
+                self.collect_const_fns(init.as_value_ref(), 0, &mut seen);
+            }
+        }
+        for f in llvm_module.get_functions() {
+            let fptr = f.as_global_value().as_pointer_value();
+            let vref = fptr.as_value_ref();
+            let mut use_ref = unsafe { LLVMGetFirstUse(vref) };
+            let mut is_candidate = false;
+            while !use_ref.is_null() {
+                let user = unsafe { LLVMGetUser(use_ref) };
+                use_ref = unsafe { LLVMGetNextUse(use_ref) };
+                if unsafe { LLVMIsAInstruction(user) }.is_null() {
+                    continue;
+                }
+                let opcode = unsafe { InstructionValue::new(user) }.get_opcode();
+                if opcode == InstructionOpcode::Store
+                    && unsafe { LLVMGetOperand(user, 0) } == vref
+                {
+                    is_candidate = true;
+                    break;
+                }
+            }
+            if is_candidate
+                && !self
+                    .fnptr_candidates
+                    .iter()
+                    .any(|c| c.as_value_ref() == vref)
+            {
+                self.fnptr_candidates.push(fptr);
+            }
+        }
+    }
+
     /// The effective cell granularity for a storage: word-celled iff it
     /// froze as word-aligned AND no interprocedural evidence (a specialized
     /// callee's unaligned access) has tainted it this fixpoint.
     fn storage_is_word(&self, storage: StorageId) -> bool {
+        // VLVI_DISABLE_WORD_CELLS=1: byte cells everywhere. The word-freeze
+        // fixpoint re-imports per taint, and its RSS ratchets across
+        // passes; dispatch-heavy inputs (indirect calls) run byte-celled
+        // until that cost is tuned.
+        if std::env::var("VLVI_DISABLE_WORD_CELLS").is_ok() {
+            return false;
+        }
         self.storage_word.get(&storage).copied().unwrap_or(false)
             && !self.tainted_word.borrow().contains(&storage)
     }
@@ -4888,6 +5072,198 @@ impl<'ctx> Importer<'ctx> {
         };
         fctx.terminators[cur.0] = Some(term);
         Ok(())
+    }
+
+    /// Indirect call: the callee operand's bits are a runtime select over
+    /// the module's stored function-pointer encodings. Build an
+    /// equality-selector cascade (the same GF(2) shape as
+    /// `translate_switch`) mapping those bits to a dense case index, split
+    /// the current block on a positional `Terminator::Table` with one call
+    /// block per candidate, and resume translation in a shared
+    /// continuation block. Void callees only (revm's instruction
+    /// functions are all void); non-void fails closed.
+    fn translate_indirect_call(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        instr: InstructionValue<'ctx>,
+    ) -> IResult<Vec<(FunctionValue<'ctx>, Vec<Prov>)>> {
+        // Non-void indirect calls would need per-candidate output
+        // selection; revm's table callees are all void.
+        if instr
+            .get_type()
+            .try_into()
+            .map(|t: BasicTypeEnum| {
+                matches!(
+                    t,
+                    BasicTypeEnum::IntType(_) | BasicTypeEnum::PointerType(_)
+                )
+            })
+            .unwrap_or(false)
+        {
+            return Err(ImportError::Unsupported(
+                "non-void indirect call is unsupported".into(),
+            ));
+        }
+        if self.fnptr_candidates.is_empty() {
+            return Err(ImportError::Unsupported(
+                "indirect call with no stored function-pointer candidates".into(),
+            ));
+        }
+        if std::env::var("VLVI_IMPORT_NEXT").is_ok() {
+            eprintln!(
+                "[indirect] enter site ({} candidates, values so far {})",
+                self.fnptr_candidates.len(),
+                fctx.values.len()
+            );
+        }
+        let cur = fctx.current;
+        let n_ops = instr.get_num_operands();
+        // Call operands are [arguments..., callee]. The callee's runtime
+        // bits come from the load's cache (a dispatch over the table
+        // storage returns exactly the encodings stored, so the selector's
+        // equality keys below are consistent by construction).
+        let callee_ref = unsafe { LLVMGetOperand(instr.as_value_ref(), (n_ops - 1) as u32) };
+        let callee_val = unsafe { BasicValueEnum::new(callee_ref) };
+        let callee_bits = self.value_bits(fctx, callee_val)?;
+        // Argument conversions land in the pre-split block.
+        let args = self.call_arg_bits(fctx, instr)?;
+        // Provenance per pointer argument (mirrors the direct-call arm,
+        // driven by operand types instead of a known signature).
+        let prov: Vec<Prov> = (0..(n_ops - 1) as u32)
+            .map(|i| {
+                let arg_ref = unsafe { LLVMGetOperand(instr.as_value_ref(), i) };
+                if arg_ref.is_null() {
+                    return Prov::Any;
+                }
+                let arg = unsafe { BasicValueEnum::new(arg_ref) };
+                if !matches!(arg.get_type(), BasicTypeEnum::PointerType(_)) {
+                    Prov::Any
+                } else {
+                    self.arg_provenance(fctx, arg)
+                }
+            })
+            .collect();
+        let mut candidate_encodings: Vec<(FunctionValue<'ctx>, Vec<ValueId>)> = Vec::new();
+        // Snapshot: the encoding emission below needs &mut self. Narrow by
+        // function type: a site only dispatches to callees with its exact
+        // signature (revm's table site keeps its 256; a closure-pointer
+        // site keeps a handful instead of importing every table member).
+        // LLVM types are uniqued per context: signature identity is raw
+        // pointer equality of the function types (wasm32's opaque `ptr`
+        // carries no signature — it lives on the call site and the
+        // function global).
+        let site_fn_ty =
+            unsafe { inkwell::llvm_sys::core::LLVMGetCalledFunctionType(instr.as_value_ref()) };
+        let candidates: Vec<PointerValue<'ctx>> = self
+            .fnptr_candidates
+            .clone()
+            .into_iter()
+            .filter(|cand| {
+                let cand_ty =
+                    unsafe { inkwell::llvm_sys::core::LLVMGlobalGetValueType(cand.as_value_ref()) };
+                !cand_ty.is_null() && !site_fn_ty.is_null() && cand_ty == site_fn_ty
+            })
+            .collect();
+        // Selector cascade: default = candidates.len() (out of bounds ->
+        // default target); the last matching candidate wins, mirroring
+        // `translate_switch`'s reverse iteration.
+        let n = candidates.len();
+        let sel_width = bits_for_max_value(n);
+        let mut selector: Vec<ValueId> = {
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block: cur,
+            };
+            (0..sel_width)
+                .map(|b| c.bc_const((n >> b) & 1 != 0))
+                .collect()
+        };
+        for (case_i, cand) in candidates.iter().enumerate() {
+            let cand_bits = self.ptr_value_bits(fctx, cur, *cand)?;
+            let callee_fn = unsafe { FunctionValue::new(cand.as_value_ref()) };
+            let Some(callee_fn) = callee_fn else {
+                return Err(ImportError::Unsupported(
+                    "fn-pointer candidate is not a function".into(),
+                ));
+            };
+            candidate_encodings.push((callee_fn, cand_bits));
+        }
+        for (case_i, (_, cand_bits)) in candidate_encodings.iter().enumerate().rev() {
+            let matched = {
+                let mut c = Ctx {
+                    fctx,
+                    bit_tid: self.bit_tid,
+                    block: cur,
+                };
+                circuits::bc_eq(&mut c, &callee_bits, cand_bits)
+            };
+            let case_idx_bits: Vec<ValueId> = {
+                let mut c = Ctx {
+                    fctx,
+                    bit_tid: self.bit_tid,
+                    block: cur,
+                };
+                (0..sel_width)
+                    .map(|b| c.bc_const((case_i >> b) & 1 != 0))
+                    .collect()
+            };
+            selector = {
+                let mut c = Ctx {
+                    fctx,
+                    bit_tid: self.bit_tid,
+                    block: cur,
+                };
+                circuits::bc_select_vec(&mut c, matched, &case_idx_bits, &selector)
+            };
+        }
+        let selector_val = self.compose_address(fctx, cur, &selector);
+        // Split: one call block per candidate, all resuming at the
+        // continuation block; translation continues there.
+        let cont = fctx.append_block();
+        let mut targets: Vec<Target> = Vec::with_capacity(n);
+        let mut called: Vec<(FunctionValue<'ctx>, Vec<Prov>)> = Vec::with_capacity(n);
+        for (callee_fn, _) in &candidate_encodings {
+            let case_b = fctx.append_block();
+            let callee_id = self.func_id(*callee_fn, &prov)?;
+            called.push((*callee_fn, prov.clone()));
+            fctx.emit(
+                case_b,
+                Value::Call {
+                    func: callee_id,
+                    args: args.clone(),
+                },
+            );
+            fctx.terminators[case_b.0] = Some(Terminator::Jump(Target {
+                block: cont,
+                args: vec![],
+                reentry: None,
+            }));
+            targets.push(Target {
+                block: case_b,
+                args: vec![],
+                reentry: None,
+            });
+        }
+        let n_cases = targets.len();
+        fctx.terminators[cur.0] = Some(Terminator::Table {
+            index: selector_val,
+            targets,
+            default_target: Target {
+                block: cont,
+                args: vec![],
+                reentry: None,
+            },
+        });
+        fctx.current = cont;
+        if std::env::var("VLVI_IMPORT_NEXT").is_ok() {
+            eprintln!(
+                "[indirect] exit site ({} cases, values now {})",
+                n_cases,
+                fctx.values.len()
+            );
+        }
+        Ok(called)
     }
 
     /// LLVM `switch`: sparse `(key, dest)` pairs plus a default. VAFFLE
