@@ -16,7 +16,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, SigDecl, SigId, Terminator, Value, ValueId};
+use vaffle::{
+    Block, BlockId, FuncBody, FuncDecl, FuncId, SigDecl, SigId, Terminator, Value, ValueId,
+};
 use volar_ir_common::{Constant, IrType, Node, PolyCoeffs, Stmt, TypeId, TypeTable};
 use volar_lir::circuits::{self, BitCircuitBuilder};
 
@@ -70,9 +72,12 @@ pub struct HelperKey {
 /// Bit width of a helper's single result.
 pub fn helper_result_width(op: HelperOp, widths: &[usize]) -> usize {
     match op {
-        HelperOp::Eq | HelperOp::Ne | HelperOp::Ult | HelperOp::Ule | HelperOp::Slt | HelperOp::Sle => {
-            1
-        }
+        HelperOp::Eq
+        | HelperOp::Ne
+        | HelperOp::Ult
+        | HelperOp::Ule
+        | HelperOp::Slt
+        | HelperOp::Sle => 1,
         HelperOp::UDivRem | HelperOp::SDivRem => widths[0] * 2,
         _ => widths[0],
     }
@@ -112,7 +117,11 @@ pub fn intern_circuit_helper(
     if let Some(&id) = cache.get(&key) {
         return id;
     }
-    let param_tys: Vec<TypeId> = widths.iter().copied().map(|w| width_type(types, w)).collect();
+    let param_tys: Vec<TypeId> = widths
+        .iter()
+        .copied()
+        .map(|w| width_type(types, w))
+        .collect();
     let result_ty = width_type(types, helper_result_width(op, widths));
     let sig_id = SigId(sigs.len());
     sigs.push(SigDecl {
