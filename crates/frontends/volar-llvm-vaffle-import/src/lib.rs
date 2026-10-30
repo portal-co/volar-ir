@@ -104,6 +104,15 @@ impl core::fmt::Display for ImportError {
 
 impl std::error::Error for ImportError {}
 
+impl ImportError {
+    /// The word-cell freeze fixpoint's retry marker: the attempt found an
+    /// unaligned access on a word-frozen storage and tainted it.
+    pub fn is_word_violation(&self) -> bool {
+        matches!(self, ImportError::Unsupported(m)
+            if m.starts_with("unaligned access through a word-cell storage"))
+    }
+}
+
 impl From<ConstChainError> for ImportError {
     fn from(e: ConstChainError) -> Self {
         ImportError::ConstChain(e)
@@ -322,7 +331,42 @@ pub fn import_module_with_config<'ctx>(
     config: LlvmImportConfig,
 ) -> IResult<Module> {
     config.validate()?;
-    let pointer_width = pointer_width_from_layout(llvm_module, config.clone())?;
+    // Word-cell freeze fixpoint: a storage is word-celled only if EVERY
+    // access to it (any function, tracked or dispatch) is word-aligned.
+    // The alloca's own function is proven by the scan; specialized callees
+    // are checked at their access arms, which taints the storage and fails
+    // the attempt. The whole import reruns with the grown taint set (fresh
+    // Importer, deterministic); each pass freezes a monotone-smaller set,
+    // so the loop terminates. Attempts that make no progress return the
+    // original error.
+    let mut tainted: std::collections::HashSet<StorageId> = Default::default();
+    loop {
+        match import_module_with_config_attempt(llvm_module, entries, config.clone(), &tainted) {
+            Ok((module, _)) => return Ok(module),
+            Err((e, new_taints)) => {
+                let grew = new_taints.len() > tainted.len();
+                tainted = new_taints;
+                if !grew || !e.is_word_violation() {
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
+fn import_module_with_config_attempt<'ctx>(
+    llvm_module: &LlvmModule<'ctx>,
+    entries: &[&str],
+    config: LlvmImportConfig,
+    tainted: &std::collections::HashSet<StorageId>,
+) -> Result<
+    (Module, std::collections::HashSet<StorageId>),
+    (ImportError, std::collections::HashSet<StorageId>),
+> {
+    let pointer_width = match pointer_width_from_layout(llvm_module, config.clone()) {
+        Ok(w) => w,
+        Err(e) => return Err((e, Default::default())),
+    };
     let mut importer = Importer::new(
         pointer_width,
         config.externals.clone(),
@@ -333,7 +377,10 @@ pub fn import_module_with_config<'ctx>(
     importer.set_data_layout(inkwell::targets::TargetData::create(
         &llvm_module.get_data_layout().as_str().to_string_lossy(),
     ));
-    importer.validate_configured_external_symbols(llvm_module)?;
+    importer.tainted_word = std::rc::Rc::new(std::cell::RefCell::new(tainted.clone()));
+    let tainted_out = importer.tainted_word.clone();
+    let result: IResult<Module> = (|| {
+        importer.validate_configured_external_symbols(llvm_module)?;
     // Eagerly assign every module global its `StorageId` before walking any
     // function body, so `dispatch_read`/`dispatch_write` (runtime
     // storage-identity dispatch for a pointer whose provenance isn't
@@ -374,6 +421,11 @@ pub fn import_module_with_config<'ctx>(
         let _ = before;
     }
     Ok(importer.finish())
+    })();
+    match result {
+        Ok(module) => Ok((module, tainted_out.borrow().clone())),
+        Err(e) => Err((e, tainted_out.borrow().clone())),
+    }
 }
 
 /// Structural import followed by [`volar_ir_opt::inline_vaffle::inline_vaffle_everything`].
@@ -669,6 +721,21 @@ struct Importer<'ctx> {
     pre_init: Vec<PreInitSegment>,
     bit_tid: TypeId,
     byte_tid: TypeId,
+    /// Target word size in bytes (pointer width / 8): wasm32 -> 4,
+    /// 64-bit targets -> 8. Drives word-cell addressing.
+    word_bytes: u64,
+    /// Cell type for one target word.
+    word_tid: TypeId,
+    /// Per-storage word-cell flag (frozen at the alloca): true iff every
+    /// LLVM access to the storage carries `align >= word_bytes`, so no
+    /// access ever straddles a word boundary and every access sits at
+    /// lane 0. Storages not in the map are byte-celled.
+    storage_word: HashMap<StorageId, bool>,
+    /// Tainted (byte-frozen by interprocedural evidence) storages for the
+    /// current fixpoint attempt; consulted with `storage_word`. Shared
+    /// behind Rc<RefCell> so the taint set survives `finish(self)`'s
+    /// consumption of the Importer on the success path.
+    tainted_word: std::rc::Rc<std::cell::RefCell<HashSet<StorageId>>>,
     /// Oracle declarations registered by circuit-extern lowering (today:
     /// `aes128_encrypt_block`, see [`translate_aes_extern`]), carried into
     /// the finished module so the vaffle→IR and IR→boolar lowerings can
@@ -708,6 +775,12 @@ impl<'ctx> Importer<'ctx> {
         // The `Type::_n` cutover: an n-bit value is `Vec(n, Bit)`.
         let byte_tid = types.intern(IrType::Vec(8, bit_tid));
         let addr_tid = types.intern(IrType::Vec(pointer_width.bits(), bit_tid));
+        // The target word size for word-cell addressing: the pointer
+        // width's byte size — 4 for wasm32, 8 for 64-bit targets (a
+        // memory64 layout parses as a 64-bit pointer width here, since
+        // `pointer_width` comes from the module's target info).
+        let word_bytes = ((pointer_bits / 8).max(1)) as u64;
+        let word_tid = types.intern(IrType::Vec((word_bytes * 8) as usize, bit_tid));
         Importer {
             pointer_width,
             pointer_bits,
@@ -728,6 +801,10 @@ impl<'ctx> Importer<'ctx> {
             pre_init: Vec::new(),
             bit_tid,
             byte_tid,
+            word_bytes,
+            word_tid,
+            storage_word: HashMap::new(),
+            tainted_word: std::rc::Rc::new(std::cell::RefCell::new(HashSet::new())),
             oracles: Vec::new(),
             actions: Vec::new(),
             externals,
@@ -1808,6 +1885,20 @@ impl<'ctx> Importer<'ctx> {
                 let n_bits = self.llvm_bit_width(instr.get_type())?;
                 let n_bytes = n_bits.div_ceil(8);
                 if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
+                    // Word-frozen storage invariant: every access is
+                    // word-aligned. The alloca's own function was scanned;
+                    // this check closes the interprocedural hole (a
+                    // specialized callee receiving the storage and doing
+                    // an unaligned access) with a loud error instead of
+                    // silent cell-key corruption.
+                    if self.storage_is_word(stack_ptr.storage)
+                        && (instr.get_alignment().unwrap_or(1) as u64) < self.word_bytes
+                    {
+                        self.tainted_word.borrow_mut().insert(stack_ptr.storage);
+                        return Err(ImportError::Unsupported(
+                            "unaligned access through a word-cell storage".into(),
+                        ));
+                    }
                     let ptr_bits0 = fctx
                         .cache
                         .get(&ptr.as_any_value_enum())
@@ -1856,6 +1947,15 @@ impl<'ctx> Importer<'ctx> {
                 let ptr = load_store_pointer(instr, 1)?;
                 self.ensure_default_address_space(ptr)?;
                 if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
+                    // Mirrors the Load arm's word-frozen invariant check.
+                    if self.storage_is_word(stack_ptr.storage)
+                        && (instr.get_alignment().unwrap_or(1) as u64) < self.word_bytes
+                    {
+                        self.tainted_word.borrow_mut().insert(stack_ptr.storage);
+                        return Err(ImportError::Unsupported(
+                            "unaligned access through a word-cell storage".into(),
+                        ));
+                    }
                     let ptr_bits0 = fctx
                         .cache
                         .get(&ptr.as_any_value_enum())
@@ -2428,6 +2528,15 @@ impl<'ctx> Importer<'ctx> {
                     let sp = self.storage_alloc.alloc();
                     self.alloca_data.push(storage);
                     self.alloca_sizes.push(total_slots);
+                    // Freeze the cell granularity for this storage: word
+                    // cells only when every access is provably word-aligned
+                    // (see `alloca_word_aligned`). Dispatch coherence holds
+                    // because the dispatch path routes candidates through
+                    // the same stack_load/store_dynamic this flag switches.
+                    self.storage_word.insert(
+                        storage,
+                        self.alloca_word_aligned(instr, self.word_bytes),
+                    );
                     self.sp_globals.push(sp);
                     self.pre_init.push(PreInitSegment {
                         storage: sp,
@@ -4029,28 +4138,38 @@ impl<'ctx> Importer<'ctx> {
         addr_bound: u64,
     ) -> Bits {
         let cur = fctx.current;
-        let n_bytes = n_bits.div_ceil(8);
+        // Cell granularity: word-frozen storages (every access provably
+        // word-aligned, so lane 0 always) read whole target-word cells —
+        // one address computation per W bytes instead of per byte; byte
+        // cells everywhere else (and for dispatch candidates whose
+        // storage never froze). Coherent because dispatch routes
+        // candidates through this same function.
+        let word = self.storage_is_word(storage);
+        let cell_bytes = if word { self.word_bytes as usize } else { 1 };
+        let cell_ty = if word { self.word_tid } else { self.byte_tid };
+        let cell_bits = cell_bytes * 8;
+        let n_cells = n_bits.div_ceil(cell_bits);
         let byte_base = self.byte_base_of(fctx, cur, base_addr_bits);
         let mut bits = Vec::with_capacity(n_bits);
-        for byte_i in 0..n_bytes as u64 {
-            let addr = self.byte_addr(fctx, cur, &byte_base, byte_i, addr_bound);
-            let byte_var = fctx.emit(
+        for cell_i in 0..n_cells as u64 {
+            let addr = self.byte_addr(fctx, cur, &byte_base, cell_i * cell_bytes as u64, addr_bound);
+            let cell_var = fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageRead {
                     storage,
-                    ty: self.byte_tid,
+                    ty: cell_ty,
                     addr,
                 }),
             );
-            for bit_j in 0..8u8 {
-                let bit_idx = (byte_i as usize) * 8 + bit_j as usize;
+            for bit_j in 0..cell_bits as u8 {
+                let bit_idx = (cell_i as usize) * cell_bits + bit_j as usize;
                 if bit_idx >= n_bits {
                     break;
                 }
                 let bit = fctx.emit(
                     cur,
                     Value::Op(Stmt::Shuffle {
-                        result_bits: vec![(bit_j, byte_var)],
+                        result_bits: vec![(bit_j, cell_var)],
                         ty: self.bit_tid,
                     }),
                 );
@@ -4078,28 +4197,54 @@ impl<'ctx> Importer<'ctx> {
         addr_bound: u64,
     ) {
         let cur = fctx.current;
-        let n_bytes = val.len().div_ceil(8);
+        let word = self.storage_is_word(storage);
+        let cell_bytes = if word { self.word_bytes as usize } else { 1 };
+        let cell_ty = if word { self.word_tid } else { self.byte_tid };
+        let cell_bits = cell_bytes * 8;
+        let n_cells = val.len().div_ceil(cell_bits);
         let byte_base = self.byte_base_of(fctx, cur, base_addr_bits);
-        for byte_i in 0..n_bytes {
-            let addr = self.byte_addr(fctx, cur, &byte_base, byte_i as u64, addr_bound);
-            let mut parts = Vec::with_capacity(8);
-            for bit_j in 0..8usize {
-                let idx = byte_i * 8 + bit_j;
-                parts.push(val.get(idx).copied().unwrap_or(ptr_bits0));
+        for cell_i in 0..n_cells {
+            let addr = self.byte_addr(fctx, cur, &byte_base, cell_i as u64 * cell_bytes as u64, addr_bound);
+            let lo = cell_i * cell_bits;
+            let have = (lo + cell_bits).min(val.len()) - lo;
+            let mut parts: Vec<ValueId> = val[lo..lo + have].to_vec();
+            if have < cell_bits {
+                // Partial tail cell: word-frozen storages can see
+                // sub-word accesses when an element is over-aligned
+                // (e.g. an align-8 i32). Read-modify-write keeps the
+                // old cell's high bits instead of clobbering them.
+                let old = fctx.emit(
+                    cur,
+                    Value::Op(Stmt::StorageRead {
+                        storage,
+                        ty: cell_ty,
+                        addr,
+                    }),
+                );
+                for j in have..cell_bits {
+                    let old_bit = fctx.emit(
+                        cur,
+                        Value::Op(Stmt::Shuffle {
+                            result_bits: vec![(j as u8, old)],
+                            ty: self.bit_tid,
+                        }),
+                    );
+                    parts.push(old_bit);
+                }
             }
-            let byte_val = fctx.emit(
+            let cell_val = fctx.emit(
                 cur,
                 Value::Op(Stmt::Merge {
                     parts,
-                    ty: self.byte_tid,
+                    ty: cell_ty,
                 }),
             );
             fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageWrite {
                     storage,
-                    src: byte_val,
-                    ty: self.byte_tid,
+                    src: cell_val,
+                    ty: cell_ty,
                     addr,
                 }),
             );
@@ -4293,6 +4438,84 @@ impl<'ctx> Importer<'ctx> {
     /// escape. Only non-escaping allocas may carve from the static pool:
     /// their address values never flow anywhere a runtime-dispatched load
     /// could dereference, so no dispatch ever needs to read their cells.
+    /// True when EVERY load/store that transitively uses this alloca
+    /// (through gep/bitcast chains) carries LLVM `align >= w_bytes` — such
+    /// accesses never straddle a word boundary and always sit at lane 0,
+    /// which is exactly the precondition for word-cell addressing. Opaque
+    /// users (calls other than lifetime/dbg intrinsics, phis, anything
+    /// unmodeled) fail closed to byte cells, keeping word-frozen storages
+    /// coherent for the dispatch path (which calls the same
+    /// stack_load/store_dynamic this flag switches).
+    /// The effective cell granularity for a storage: word-celled iff it
+    /// froze as word-aligned AND no interprocedural evidence (a specialized
+    /// callee's unaligned access) has tainted it this fixpoint.
+    fn storage_is_word(&self, storage: StorageId) -> bool {
+        self.storage_word.get(&storage).copied().unwrap_or(false)
+            && !self.tainted_word.borrow().contains(&storage)
+    }
+
+    fn alloca_word_aligned(&self, alloc: InstructionValue<'ctx>, w_bytes: u64) -> bool {
+        let mut work = vec![alloc.as_value_ref()];
+        let mut seen: std::collections::HashSet<usize> = Default::default();
+        while let Some(vref) = work.pop() {
+            if !seen.insert(vref as usize) {
+                continue;
+            }
+            let mut use_ref = unsafe { LLVMGetFirstUse(vref) };
+            while !use_ref.is_null() {
+                let user = unsafe { LLVMGetUser(use_ref) };
+                use_ref = unsafe { LLVMGetNextUse(use_ref) };
+                if unsafe { LLVMIsAInstruction(user) }.is_null() {
+                    return false;
+                }
+                let instr = unsafe { InstructionValue::new(user) };
+                match instr.get_opcode() {
+                    InstructionOpcode::GetElementPtr
+                    | InstructionOpcode::BitCast
+                    | InstructionOpcode::AddrSpaceCast => {
+                        if unsafe { LLVMGetOperand(user, 0) } == vref {
+                            // Pointer-value flow: follow it.
+                            work.push(user);
+                        } else {
+                            return false;
+                        }
+                    }
+                    InstructionOpcode::Load => {
+                        if unsafe { LLVMGetOperand(user, 0) } != vref {
+                            return false;
+                        }
+                        if (instr.get_alignment().unwrap_or(1) as u64) < w_bytes {
+                            return false;
+                        }
+                    }
+                    InstructionOpcode::Store => {
+                        // Store operands are (value, pointer). A store of
+                        // the pointer VALUE (vref as operand 0) is value
+                        // flow, not a memory access through it.
+                        if unsafe { LLVMGetOperand(user, 1) } == vref {
+                            if (instr.get_alignment().unwrap_or(1) as u64) < w_bytes {
+                                return false;
+                            }
+                        }
+                    }
+                    InstructionOpcode::Phi
+                    | InstructionOpcode::Select
+                    | InstructionOpcode::Call
+                    | InstructionOpcode::Return => {
+                        // Pure pointer-value flow (a call argument, a phi
+                        // arm, ...). The callee's actual accesses are
+                        // separate LLVM instructions: any function that
+                        // receives this storage checks its own accesses'
+                        // alignment at the Load/Store arms (fail-closed
+                        // there), so pointer flow needs no scan verdict.
+                    }
+                    _ => return false,
+                }
+            }
+        }
+        true
+    }
+
     fn alloca_escapes(&self, alloc: InstructionValue<'ctx>) -> bool {
         let mut work = vec![alloc.as_value_ref()];
         let mut seen: std::collections::HashSet<usize> = Default::default();
