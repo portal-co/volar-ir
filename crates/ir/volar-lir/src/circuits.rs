@@ -131,6 +131,67 @@ pub fn bc_add<B: BitCircuitBuilder>(
     out
 }
 
+/// Addition of a compile-time constant: `a + c`, truncated to
+/// `a.len()` bits (the caller trims; see `volar-llvm-vaffle-import`'s
+/// `dynamic_addr`).
+///
+/// Generic constant-adder sharing: against a constant operand the ripple
+/// folds to TWO nodes per bit — the sum `a_i ^ c_i ^ cin` is one Poly
+/// (the constant bit is absorbed into the polynomial), and the carry is
+/// one node (`a_i & cin` under `c_i = 0`, `a_i | cin` under `c_i = 1`,
+/// each a single polynomial). The generic `bc_add` against `bc_const`
+/// operands instead pays three nodes per bit (two chained XORs plus a
+/// carry3) because the constant XORs are never folded. Every constant
+/// adder in the pipeline (byte-cell address fanouts, gep deltas, dispatch
+/// offsets) goes through here.
+pub fn bc_add_const<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], c: u64) -> Vec<B::Bit> {
+    let n = a.len();
+    let mut carry = b.bc_const(false);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let ci = i < 64 && (c >> i) & 1 == 1;
+        // sum = a_i ^ ci ^ carry, as ONE poly node per bit.
+        // sum = a_i ^ ci ^ carry: one poly, LINEAR in a_i and carry (the
+        // constant bit absorbs into the poly's constant term — no product
+        // term: a three-input XOR has no quadratic monomials). ci=1 ->
+        // XNOR(a_i, carry); ci=0 -> XOR.
+        let sum = if ci {
+            b.bc_poly(
+                PolyCoeffs::from_iter([
+                    (vec![a[i].clone()], 1u8),
+                    (vec![carry.clone()], 1u8),
+                ]),
+                1,
+            )
+        } else {
+            b.bc_poly(
+                PolyCoeffs::from_iter([
+                    (vec![a[i].clone()], 1u8),
+                    (vec![carry.clone()], 1u8),
+                ]),
+                0,
+            )
+        };
+        // carry' = maj(a_i, ci, carry) = ci ? a_i | carry : a_i & carry.
+        let new_carry = if ci {
+            // a | carry = a ^ carry ^ (a & carry): one poly node.
+            b.bc_poly(
+                PolyCoeffs::from_iter([
+                    (vec![a[i].clone()], 1u8),
+                    (vec![carry.clone()], 1u8),
+                    (vec![a[i].clone(), carry.clone()], 1u8),
+                ]),
+                0,
+            )
+        } else {
+            b.bc_and(a[i].clone(), carry)
+        };
+        out.push(sum);
+        carry = new_carry;
+    }
+    out
+}
+
 /// Two's-complement subtraction: `a - x = a + ~x + 1`.
 pub fn bc_sub<B: BitCircuitBuilder>(b: &mut B, a: &[B::Bit], x: &[B::Bit]) -> Vec<B::Bit> {
     let not_x: Vec<B::Bit> = x.iter().map(|xi| b.bc_not(xi.clone())).collect();
@@ -1253,7 +1314,10 @@ mod divrem_tests {
                 assert_eq!(got_r, a % x, "urem width={width} a={a:#x} x={x:#x}");
             }
             // Wrappers agree with the combined loop.
-            let (qw, rw) = (bc_udiv(&mut eb, &a_bits, &x_bits), bc_urem(&mut eb, &a_bits, &x_bits));
+            let (qw, rw) = (
+                bc_udiv(&mut eb, &a_bits, &x_bits),
+                bc_urem(&mut eb, &a_bits, &x_bits),
+            );
             assert_eq!(bits_of(&eb, &qw), got_q, "bc_udiv wrapper width={width}");
             assert_eq!(bits_of(&eb, &rw), got_r, "bc_urem wrapper width={width}");
 
@@ -1288,6 +1352,38 @@ mod divrem_tests {
         }
     }
 
+    fn check_add_const(width: u32, trials: u32) {
+        let mut state = 0xabcd_1234_5678_f00du64;
+        for _ in 0..trials {
+            let a = rand_value(&mut state, width);
+            let c = (rand_value(&mut state, width) & 0xffff_ffff) as u64;
+            let mut eb = EvalBuilder::default();
+            let a_bits: Vec<usize> = (0..width).map(|i| eb.bc_const((a >> i) & 1 == 1)).collect();
+            let out = bc_add_const(&mut eb, &a_bits, c);
+            let mut got = 0u128;
+            for (i, g) in out.iter().enumerate().take(128) {
+                got |= (eb.values[*g] as u128) << i;
+            }
+            let mask = mask_for(width);
+            assert_eq!(
+                got,
+                a.wrapping_add(c as u128) & mask,
+                "bc_add_const width={width} a={a:#x} c={c:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_const_matches_native() {
+        check_add_const(1, 32);
+        check_add_const(4, 64);
+        check_add_const(12, 96);
+        check_add_const(17, 64);
+        check_add_const(32, 64);
+        check_add_const(64, 64);
+        check_add_const(128, 32);
+    }
+
     #[test]
     fn divrem_matches_native() {
         check_divrem(1, 32); // degenerate width
@@ -1303,10 +1399,10 @@ mod divrem_tests {
     #[test]
     fn divrem_edges() {
         let cases = [
-            (0u128, 1u128),  // 0 / x
-            (7, 1),          // x == 1: r must be 0
-            (13, 13),        // a == x: q == 1, r == 0
-            (5, 13),         // a < x: q == 0, r == a
+            (0u128, 1u128), // 0 / x
+            (7, 1),         // x == 1: r must be 0
+            (13, 13),       // a == x: q == 1, r == 0
+            (5, 13),        // a < x: q == 0, r == a
             (u128::MAX, u128::MAX),
             (u128::MAX, 1),
             (1 << 63, 1 << 31),

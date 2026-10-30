@@ -3022,10 +3022,7 @@ impl<'ctx> Importer<'ctx> {
                 bit_tid: self.bit_tid,
                 block: body,
             };
-            let one: Bits = (0..index_bits.len())
-                .map(|bit| c.bc_const(bit == 0))
-                .collect();
-            circuits::bc_add(&mut c, &index_bits, &one, false)
+            circuits::bc_add_const(&mut c, &index_bits, 1)
         };
         fctx.terminators[body.0] = Some(Terminator::Jump(Target {
             block: header,
@@ -3495,10 +3492,7 @@ impl<'ctx> Importer<'ctx> {
             bit_tid: self.bit_tid,
             block,
         };
-        let delta_bits: Vec<ValueId> = (0..self.pointer_bits)
-            .map(|b| c.bc_const(((delta as u64) >> b) & 1 != 0))
-            .collect();
-        circuits::bc_add(&mut c, base, &delta_bits, false)
+        circuits::bc_add_const(&mut c, base, delta as u64)
     }
 
     /// Tagged pointer value for one alloca site: low `global_addr_bits` of
@@ -3916,8 +3910,7 @@ impl<'ctx> Importer<'ctx> {
                 block,
             };
             let low = &base_addr_bits[..width];
-            let i_bits: Vec<ValueId> = (0..width).map(|b| c.bc_const((i >> b) & 1 != 0)).collect();
-            circuits::bc_add(&mut c, low, &i_bits, false)
+            circuits::bc_add_const(&mut c, low, i)
         };
         fctx.emit(
             block,
@@ -4000,7 +3993,7 @@ impl<'ctx> Importer<'ctx> {
             ByteBase::Const(byte_base) => {
                 // Carved pool offsets are 16-byte aligned, so the bit base
                 // divides by 8 exactly.
-                return fctx.emit(
+                fctx.emit(
                     block,
                     Value::Op(Stmt::Const(
                         Constant {
@@ -4009,7 +4002,7 @@ impl<'ctx> Importer<'ctx> {
                         },
                         self.addr_tid,
                     )),
-                );
+                )
             }
             ByteBase::Runtime(byte_bits) => {
                 // byte_i == 0 must NOT fall into dynamic_addr's `i == 0`
@@ -4029,7 +4022,7 @@ impl<'ctx> Importer<'ctx> {
                 let byte_bound = if addr_bound == 0 || addr_bound == u64::MAX {
                     0
                 } else {
-                    (addr_bound + 7) / 8
+                    addr_bound.div_ceil(8)
                 };
                 self.dynamic_addr(fctx, block, byte_bits, byte_i, byte_bound)
             }
