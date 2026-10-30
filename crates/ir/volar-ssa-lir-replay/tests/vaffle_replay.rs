@@ -11,7 +11,7 @@ use vaffle::{
     Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target as VTarget,
     Terminator, Value, ValueId,
 };
-use volar_ir_common::{Constant, Node, Stmt, Type, TypeTable};
+use volar_ir_common::{Constant, IrType, Node, Stmt, TypeTable};
 use volar_ssa_lir_replay::lower_vaffle_module;
 
 fn node(kind: Value) -> Node<Value, ()> {
@@ -34,7 +34,8 @@ fn target(block: BlockId, args: Vec<ValueId>) -> VTarget<ValueId> {
 
 fn build_sibling_module() -> Module<()> {
     let mut types = TypeTable::new();
-    let u8_ty = types.primitive(Type::_8);
+    let bit = types.bit();
+    let u8_ty = types.intern(IrType::Vec(8, bit));
 
     let sigs = vec![
         SigDecl {
@@ -133,7 +134,8 @@ fn sibling_call_c_backend() {
 
 fn build_switch_module() -> Module<()> {
     let mut types = TypeTable::new();
-    let u8_ty = types.primitive(Type::_8);
+    let bit = types.bit();
+    let u8_ty = types.intern(IrType::Vec(8, bit));
 
     let sigs = vec![SigDecl {
         params: vec![u8_ty],
@@ -231,7 +233,8 @@ fn table_switch_c_backend() {
 
 fn build_dyn_jump_module() -> Module<()> {
     let mut types = TypeTable::new();
-    let u8_ty = types.primitive(Type::_8);
+    let bit = types.bit();
+    let u8_ty = types.intern(IrType::Vec(8, bit));
 
     let sigs = vec![SigDecl {
         params: vec![],

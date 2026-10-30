@@ -362,7 +362,11 @@ entry:
         .collect();
     assert_eq!(stack_alloc_widths.len(), 2);
     assert!(stack_alloc_widths.iter().all(|&ty| {
-        out.types.0[ty.0 as usize] == volar_ir_common::IrType::Primitive(volar_ir_common::Type::_64)
+        // Post-`Type::_n` cutover: a 64-bit element is `Vec(64, Bit)`.
+        matches!(
+            out.types.0[ty.0 as usize],
+            volar_ir_common::IrType::Vec(64, _)
+        )
     }));
     let (data, _) = stack_sites(body);
     let stack_reads = body

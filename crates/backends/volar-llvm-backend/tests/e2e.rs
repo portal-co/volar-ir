@@ -409,11 +409,17 @@ fn node<T>(kind: T) -> Node<T, ()> {
 }
 
 fn u8_types() -> IRTypes {
-    IRTypes(vec![CommonIrType::Primitive(Type::_8)])
+    // Post-`Type::_n` cutover: a u8 is `Vec(8, Bit)`. IRTypes is built
+    // directly (not via TypeTable interning), so index it explicitly:
+    // Bit at 0, the u8 at 1, its element TypeId pointing at 0.
+    IRTypes(vec![
+        CommonIrType::Primitive(Type::Bit),
+        CommonIrType::Vec(8, volar_ir_common::TypeId(0)),
+    ])
 }
 
 fn u8_tid() -> IRTypeId {
-    IRTypeId(0)
+    IRTypeId(1)
 }
 
 /// `IRTerminator::JumpTable` dispatching a single `u8` param to one of three
