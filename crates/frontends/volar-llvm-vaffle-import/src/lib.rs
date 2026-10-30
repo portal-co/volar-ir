@@ -1994,12 +1994,12 @@ impl<'ctx> Importer<'ctx> {
                                         bit_tid: self.bit_tid,
                                         block: cur,
                                     };
-                                    let step_bits_const: Vec<ValueId> = (0..self.pointer_bits)
-                                        .map(|b| c.bc_const((step_bits as u64 >> b) & 1 != 0))
-                                        .collect();
-                                    let scaled =
-                                        circuits::bc_mul(&mut c, &idx_bits, &step_bits_const);
-                                    circuits::bc_add(&mut c, &base_ptr.addr_bits, &scaled, false)
+                                    circuits::bc_add_scaled_const(
+                                        &mut c,
+                                        &base_ptr.addr_bits,
+                                        &idx_bits,
+                                        step_bits as u64,
+                                    )
                                 };
                                 StackPtr {
                                     storage: base_ptr.storage,
@@ -2085,20 +2085,11 @@ impl<'ctx> Importer<'ctx> {
                                                 bit_tid: self.bit_tid,
                                                 block: cur,
                                             };
-                                            let elem_bytes_const: Vec<ValueId> = (0..self
-                                                .pointer_bits)
-                                                .map(|b| c.bc_const((elem_bytes >> b) & 1 != 0))
-                                                .collect();
-                                            let scaled = circuits::bc_mul(
-                                                &mut c,
-                                                &idx_bits,
-                                                &elem_bytes_const,
-                                            );
-                                            circuits::bc_add(
+                                            circuits::bc_add_scaled_const(
                                                 &mut c,
                                                 &base_offset_bits,
-                                                &scaled,
-                                                false,
+                                                &idx_bits,
+                                                elem_bytes as u64,
                                             )
                                         };
                                         Some(GlobalPtr::Symbolic {
@@ -2188,11 +2179,12 @@ impl<'ctx> Importer<'ctx> {
                             bit_tid: self.bit_tid,
                             block: cur,
                         };
-                        let elem_bytes_const: Vec<ValueId> = (0..self.pointer_bits)
-                            .map(|b| c.bc_const((elem_bytes >> b) & 1 != 0))
-                            .collect();
-                        let scaled = circuits::bc_mul(&mut c, &idx_bits, &elem_bytes_const);
-                        circuits::bc_add(&mut c, &base_bits, &scaled, false)
+                        circuits::bc_add_scaled_const(
+                            &mut c,
+                            &base_bits,
+                            &idx_bits,
+                            elem_bytes as u64,
+                        )
                     };
                     Some(new_bits)
                 }
@@ -3054,16 +3046,13 @@ impl<'ctx> Importer<'ctx> {
         while index.len() < self.pointer_bits {
             index.push(self.bc_const_at(fctx, block, false));
         }
-        let stack_scale: Bits = (0..self.pointer_bits)
-            .map(|bit| self.bc_const_at(fctx, block, bit == 3))
-            .collect();
         let stack_offset = {
             let mut c = Ctx {
                 fctx,
                 bit_tid: self.bit_tid,
                 block,
             };
-            circuits::bc_mul(&mut c, &index, &stack_scale)
+            circuits::bc_shl_const(&mut c, &index, 3)
         };
         let tag = base[self.pointer_bits - 1];
         let offset = {

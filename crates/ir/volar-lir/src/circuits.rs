@@ -131,6 +131,67 @@ pub fn bc_add<B: BitCircuitBuilder>(
     out
 }
 
+/// Constant left shift: `x << s`, truncated to `x.len()` bits.
+///
+/// Pure rewiring — `s` zero constants followed by `x`'s own wires — so it
+/// costs NO gate nodes. The symbolic-gep scaling chain (`idx * step` for
+/// power-of-two element sizes) is this, not a multiplier.
+pub fn bc_shl_const<B: BitCircuitBuilder>(b: &mut B, x: &[B::Bit], s: usize) -> Vec<B::Bit> {
+    let n = x.len();
+    if s >= n {
+        return (0..n).map(|_| b.bc_const(false)).collect();
+    }
+    let mut out: Vec<B::Bit> = (0..s).map(|_| b.bc_const(false)).collect();
+    out.extend_from_slice(&x[..n - s]);
+    out
+}
+
+/// `base + x * factor` for a compile-time `factor` — the symbolic-gep
+/// scaling chain (`base + idx * step`).
+///
+/// A power-of-two factor is a constant shift (see [`bc_shl_const`], zero
+/// gate nodes), and the sum's low `shift` bits are `base`'s own wires —
+/// the shifted operand is zero there and no carry can enter — so the
+/// adder shrinks from `3n` to `3(n - shift)` nodes. Other factors keep
+/// the full multiplier. Truncated to `base.len()` bits.
+pub fn bc_add_scaled_const<B: BitCircuitBuilder>(
+    b: &mut B,
+    base: &[B::Bit],
+    x: &[B::Bit],
+    factor: u64,
+) -> Vec<B::Bit> {
+    let n = base.len();
+    let xn = x.len().min(n);
+    if factor == 0 {
+        return base[..n].to_vec();
+    }
+    if factor == 1 {
+        let mut x2 = x[..xn].to_vec();
+        x2.resize(n, b.bc_const(false));
+        return bc_add(b, base, &x2, false);
+    }
+    if factor.is_power_of_two() {
+        let sh = (factor.trailing_zeros() as usize).min(n);
+        let mut sum: Vec<B::Bit> = base[..sh].to_vec();
+        if n > sh {
+            let hi_base = base[sh..n].to_vec();
+            // scaled bit sh+j = x_j (for j < xn): the high add consumes
+            // x's low min(xn, n-sh) bits, zero-padded.
+            let mut hi_x: Vec<B::Bit> = x[..xn.min(n - sh)].to_vec();
+            hi_x.resize(n - sh, b.bc_const(false));
+            sum.extend(bc_add(b, &hi_base, &hi_x, false));
+        }
+        return sum;
+    }
+    let factor_bits: Vec<B::Bit> = (0..n)
+        .map(|i| b.bc_const(i < 64 && (factor >> i) & 1 != 0))
+        .collect();
+    let xt: Vec<B::Bit> = x[..xn].to_vec();
+    let mut scaled = bc_mul(b, &xt, &factor_bits);
+    scaled.resize(n, b.bc_const(false));
+    bc_add(b, base, &scaled, false)
+}
+
 /// Addition of a compile-time constant: `a + c`, truncated to
 /// `a.len()` bits (the caller trims; see `volar-llvm-vaffle-import`'s
 /// `dynamic_addr`).
@@ -1371,6 +1432,57 @@ mod divrem_tests {
                 "bc_add_const width={width} a={a:#x} c={c:#x}"
             );
         }
+    }
+
+    fn check_shl_scaled(width: u32, trials: u32) {
+        let mut state = 0x5ca1_ab1e_5ca1_ab1eu64;
+        let factors = [0u64, 1, 2, 4, 8, 64, 3, 12, 100, 1 << 40];
+        for _ in 0..trials {
+            let base = rand_value(&mut state, width);
+            let x = rand_value(&mut state, width);
+            for &f in &factors {
+                let mut eb = EvalBuilder::default();
+                let base_bits: Vec<usize> =
+                    (0..width).map(|i| eb.bc_const((base >> i) & 1 == 1)).collect();
+                let x_bits: Vec<usize> =
+                    (0..width).map(|i| eb.bc_const((x >> i) & 1 == 1)).collect();
+                let out = bc_add_scaled_const(&mut eb, &base_bits, &x_bits, f);
+                let mut got = 0u128;
+                for (i, g) in out.iter().enumerate().take(128) {
+                    got |= (eb.values[*g] as u128) << i;
+                }
+                let mask = mask_for(width);
+                assert_eq!(
+                    got,
+                    base.wrapping_add(x.wrapping_mul(f as u128)) & mask,
+                    "bc_add_scaled_const width={width} base={base:#x} x={x:#x} f={f}"
+                );
+            }
+            // shl_const alone: factor is a power of two, base 0.
+            let s = (rand_value(&mut state, 8) % (width as u128 + 4)) as usize;
+            let mut eb = EvalBuilder::default();
+            let x_bits: Vec<usize> = (0..width).map(|i| eb.bc_const((x >> i) & 1 == 1)).collect();
+            let out = bc_shl_const(&mut eb, &x_bits, s);
+            let mut got = 0u128;
+            for (i, g) in out.iter().enumerate().take(128) {
+                got |= (eb.values[*g] as u128) << i;
+            }
+            assert_eq!(
+                got,
+                (x << s.min(127)) & mask_for(width),
+                "bc_shl_const width={width} x={x:#x} s={s}"
+            );
+        }
+    }
+
+    #[test]
+    fn shl_scaled_matches_native() {
+        check_shl_scaled(4, 48);
+        check_shl_scaled(12, 48);
+        check_shl_scaled(17, 48);
+        check_shl_scaled(33, 32);
+        check_shl_scaled(64, 32);
+        check_shl_scaled(128, 16);
     }
 
     #[test]
