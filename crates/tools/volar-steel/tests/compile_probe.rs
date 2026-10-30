@@ -1961,7 +1961,65 @@ fn revm_wasm32_import_probe() {
             );
         }
         Err(e) => {
-            panic!("revm wasm32 import failed after {:?}: {e:?}", started.elapsed());
+            panic!(
+                "revm wasm32 import failed after {:?}: {e:?}",
+                started.elapsed()
+            );
+        }
+    }
+}
+
+/// S6c-unmodified: the driver's `revm_run_unmodified` entry — revm's own
+/// `run_plain` loop over its real `InstructionTable` function-pointer
+/// dispatch (741 defines: every monomorphized instruction), the shape the
+/// static-dispatch driver was built to avoid. Gated on REVM_UNMODIFIED;
+/// run behind the RSS kill-switch.
+#[test]
+fn revm_unmodified_import_probe() {
+    if std::env::var("REVM_UNMODIFIED").is_err() {
+        return;
+    }
+    let ll = std::fs::read_to_string(artifacts().join("revm_driver_unmodified_wasm32_o0.ll"))
+        .expect("ll");
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            ll.as_bytes(),
+            "revm_driver_unmodified_wasm32_o0.ll",
+        ))
+        .expect("LLVM IR parses");
+    let n_defines = ll.matches("\ndefine ").count();
+    eprintln!("revm unmodified .ll: {n_defines} defines, {} bytes", ll.len());
+    let started = std::time::Instant::now();
+    let config = volar_llvm_vaffle_import::LlvmImportConfig::default()
+        .with_max_dispatch_candidates(1024)
+        .with_reachable_unreachable_zeros()
+        .with_circuit_helpers(volar_llvm_vaffle_import::CircuitHelperMode::Extract);
+    match volar_llvm_vaffle_import::import_module_with_config(
+        &module,
+        &["revm_run_unmodified"],
+        config,
+    ) {
+        Ok(vaffle) => {
+            let mut n_blocks = 0usize;
+            let mut n_values = 0usize;
+            for f in &vaffle.funcs {
+                if let vaffle::FuncDecl::Body(b) = f {
+                    n_blocks += b.blocks.len();
+                    n_values += b.values.len();
+                }
+            }
+            eprintln!(
+                "revm unmodified import OK in {:?}: {} funcs, {n_blocks} blocks, {n_values} values",
+                started.elapsed(),
+                vaffle.funcs.len()
+            );
+        }
+        Err(e) => {
+            panic!(
+                "revm unmodified import failed after {:?}: {e:?}",
+                started.elapsed()
+            );
         }
     }
 }

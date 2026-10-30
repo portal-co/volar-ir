@@ -176,6 +176,69 @@ pub extern "C" fn revm_run(a: u64, b: u64) -> u64 {
     }
 }
 
+/// The UNMODIFIED revm execution path: revm's own `run_plain` loop over
+/// its real `InstructionTable` function-pointer dispatch — no driver-side
+/// mirror. This is the import-stress shape the static-dispatch driver was
+/// built to avoid (indirect calls through a table); the S6c levers (pool
+/// packing, specialization, word cells, adder scaling) are what make it
+/// tractable to attempt at all. Gated entry for the REVM_UNMODIFIED probe.
+#[no_mangle]
+pub extern "C" fn revm_run_unmodified(a: u64, b: u64) -> u64 {
+    use revm_context_interface::host::DummyHost;
+    use revm_interpreter::instructions::instruction_table;
+    use revm_interpreter::{
+        InputsImpl, Interpreter, SharedMemory,
+        interpreter::{ext_bytecode::ExtBytecode, EthInterpreter},
+        interpreter_action::InterpreterAction,
+        bytecode::Bytecode,
+        primitives::{hardfork::SpecId, Bytes},
+    };
+
+    // PUSH32 a; PUSH32 b; ADD; PUSH1 0; MSTORE; PUSH1 32; PUSH1 0; RETURN
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    code.push(0x7f);
+    code.extend_from_slice(&a.to_be_bytes());
+    code.push(0x7f);
+    code.extend_from_slice(&b.to_be_bytes());
+    code.push(0x01); // ADD
+    code.push(0x60); // PUSH1
+    code.push(0x00); //   0 (memory offset)
+    code.push(0x52); // MSTORE
+    code.push(0x60); // PUSH1
+    code.push(0x20); //   32 (length)
+    code.push(0x60); // PUSH1
+    code.push(0x00); //   0 (offset)
+    code.push(0xf3); // RETURN
+
+    let memory = SharedMemory::new();
+    let bytecode = ExtBytecode::new(Bytecode::new_raw(Bytes::from(code)));
+    let input = InputsImpl::default();
+    let mut interpreter = Interpreter::<EthInterpreter>::new(
+        memory,
+        bytecode,
+        input,
+        false,
+        SpecId::default(),
+        u64::MAX,
+    );
+    let mut host = DummyHost::default();
+    let table = instruction_table::<EthInterpreter, DummyHost>();
+    let action = interpreter.run_plain(&table, &mut host);
+
+    match action {
+        InterpreterAction::Return(result) => {
+            let out = &result.output;
+            let mut low: u64 = 0;
+            let base = out.len().saturating_sub(8);
+            for &byte in &out[base..] {
+                low = (low << 8) | byte as u64;
+            }
+            low
+        }
+        _ => 0,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn main() -> u64 {
     0
