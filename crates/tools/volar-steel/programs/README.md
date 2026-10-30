@@ -43,3 +43,19 @@ Driven by `volar-steel/tests/frontend_probe.rs`:
   Steel stepper grows pointer/memory-heavy (S6), the LLVM frontend's
   `alloca`/`memcpy` support (the `docs/llvm-*.md` series) is the load-bearing
   piece.
+
+## The wasm32 pattern (S6c-wasm)
+
+`revm_driver_wasm32_o0.ll` is the same revm driver compiled for
+`wasm32-unknown-unknown`, stopping at LLVM IR:
+
+    cd revm-driver && cargo rustc --target wasm32-unknown-unknown -- \
+      --emit=llvm-ir -C opt-level=0
+
+copy the emitted
+`target/wasm32-unknown-unknown/debug/deps/revm_steel_driver-*.ll` here as
+`revm_driver_wasm32_o0.ll`. This is the preferred input pattern: WASM
+inputs carry no raw inline assembly for the importer to fail on, the
+32-bit pointer width halves every address circuit, and the word-cell
+layer addresses 4-byte words. Imported by `revm_wasm32_import_probe`
+(gated on `REVM_WASM32`).

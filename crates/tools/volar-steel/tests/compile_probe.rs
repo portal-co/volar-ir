@@ -1918,3 +1918,50 @@ fn revm_import_probe() {
         }
     }
 }
+
+/// S6c-wasm: the same revm driver compiled for wasm32-unknown-unknown,
+/// stopping at LLVM IR — the pattern: WASM inputs carry no raw inline
+/// assembly for the importer to fail on, and the 32-bit pointer width
+/// halves every address circuit (the word-cell layer uses 4-byte words).
+/// Gated on REVM_WASM32.
+#[test]
+fn revm_wasm32_import_probe() {
+    if std::env::var("REVM_WASM32").is_err() {
+        return;
+    }
+    let ll = std::fs::read_to_string(artifacts().join("revm_driver_wasm32_o0.ll")).expect("ll");
+    let context = Context::create();
+    let module = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            ll.as_bytes(),
+            "revm_driver_wasm32_o0.ll",
+        ))
+        .expect("LLVM IR parses");
+    let n_defines = ll.matches("\ndefine ").count();
+    eprintln!("revm wasm32 .ll: {n_defines} defines, {} bytes", ll.len());
+    let started = std::time::Instant::now();
+    let config = volar_llvm_vaffle_import::LlvmImportConfig::default()
+        .with_max_dispatch_candidates(1024)
+        .with_reachable_unreachable_zeros()
+        .with_circuit_helpers(volar_llvm_vaffle_import::CircuitHelperMode::Extract);
+    match volar_llvm_vaffle_import::import_module_with_config(&module, &["revm_run"], config) {
+        Ok(vaffle) => {
+            let mut n_blocks = 0usize;
+            let mut n_values = 0usize;
+            for f in &vaffle.funcs {
+                if let vaffle::FuncDecl::Body(b) = f {
+                    n_blocks += b.blocks.len();
+                    n_values += b.values.len();
+                }
+            }
+            eprintln!(
+                "revm wasm32 import OK in {:?}: {} funcs, {n_blocks} blocks, {n_values} values",
+                started.elapsed(),
+                vaffle.funcs.len()
+            );
+        }
+        Err(e) => {
+            panic!("revm wasm32 import failed after {:?}: {e:?}", started.elapsed());
+        }
+    }
+}
