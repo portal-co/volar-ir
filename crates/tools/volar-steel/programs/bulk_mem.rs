@@ -16,14 +16,10 @@ pub extern "C" fn bulk_sum(sel: u32) -> u32 {
         // sizes checked by construction in this test program. An
         // intrinsic copy (no bounds-assert panic path).
         unsafe {
-            b.as_mut_ptr()
-                .copy_from_nonoverlapping(a.as_ptr(), 300);
+            b.as_mut_ptr().copy_from_nonoverlapping(a.as_ptr(), 300);
         }
     }
     // Shift-only spot checksum: non-power-of-two multiplies would dwarf
     // the bulk traffic being measured.
-    ((b[0] as u32) << 16)
-        | ((b[1] as u32) << 8)
-        | ((b[299] as u32) << 4)
-        | (a[1] as u32)
+    ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | ((b[299] as u32) << 4) | (a[1] as u32)
 }

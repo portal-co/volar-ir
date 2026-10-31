@@ -1993,7 +1993,10 @@ fn revm_unmodified_import_probe() {
         ))
         .expect("LLVM IR parses");
     let n_defines = ll.matches("\ndefine ").count();
-    eprintln!("revm unmodified .ll: {n_defines} defines, {} bytes", ll.len());
+    eprintln!(
+        "revm unmodified .ll: {n_defines} defines, {} bytes",
+        ll.len()
+    );
     let started = std::time::Instant::now();
     let config = volar_llvm_vaffle_import::LlvmImportConfig::default()
         .with_max_dispatch_candidates(1024)
@@ -2052,14 +2055,9 @@ fn import_vaffle_with_config(
             file,
         ))
         .expect("LLVM IR parses");
-    let vaffle =
-        volar_llvm_vaffle_import::import_module_with_config(&module, &[entry], config)
-            .expect("LLVM import");
-    let entry_fid = vaffle
-        .exports
-        .get(entry)
-        .copied()
-        .expect("entry export");
+    let vaffle = volar_llvm_vaffle_import::import_module_with_config(&module, &[entry], config)
+        .expect("LLVM import");
+    let entry_fid = vaffle.exports.get(entry).copied().expect("entry export");
     // The unmodified-revm work also imports plain `Import` decls for
     // externals; bulk_sum is a real body (and the import step inlines
     // specializations as separate decls).
@@ -2097,10 +2095,7 @@ fn native_bulk_sum(sel: u32) -> u32 {
         a[299] = 5;
         b.copy_from_slice(&a);
     }
-    ((b[0] as u32) << 16)
-        | ((b[1] as u32) << 8)
-        | ((b[299] as u32) << 4)
-        | (a[1] as u32)
+    ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | ((b[299] as u32) << 4) | (a[1] as u32)
 }
 
 /// S6d: constant-length bulk memset/memcpy lower as runtime loops in
@@ -2123,12 +2118,11 @@ fn bulk_memory_loop_matches_unroll() {
             entry,
             volar_llvm_vaffle_import::LlvmImportConfig::default(),
         );
-    let (loop_mod, loop_fid, loop_values, loop_ir, loop_types) =
-        import_vaffle_with_config(
-            file,
-            entry,
-            volar_llvm_vaffle_import::LlvmImportConfig::default().with_bulk_memory_loop(),
-        );
+    let (loop_mod, loop_fid, loop_values, loop_ir, loop_types) = import_vaffle_with_config(
+        file,
+        entry,
+        volar_llvm_vaffle_import::LlvmImportConfig::default().with_bulk_memory_loop(),
+    );
 
     // The importer's own metric: the entry body's values shrink several
     // times (the 300-byte fills/copy collapse to loop scaffolding).
@@ -2140,25 +2134,14 @@ fn bulk_memory_loop_matches_unroll() {
     for sel in [0u32, 1] {
         // VAFFLE flattens the u32 param to 32 one-bit entry params; the
         // lowered IR keeps one 32-bit value.
-        let vaffle_inputs: Vec<Vec<bool>> = (0..32)
-            .map(|b| vec![(sel >> b) & 1 == 1])
-            .collect();
-        let lowered_inputs: Vec<Vec<bool>> = vec![(0..32)
-            .map(|b| (sel >> b) & 1 == 1)
-            .collect()];
+        let vaffle_inputs: Vec<Vec<bool>> = (0..32).map(|b| vec![(sel >> b) & 1 == 1]).collect();
+        let lowered_inputs: Vec<Vec<bool>> = vec![(0..32).map(|b| (sel >> b) & 1 == 1).collect()];
         let unroll_out =
-            volar_fuzz::interpreter::vaffle::eval_vaffle(
-                &unroll_mod,
-                unroll_fid,
-                &vaffle_inputs,
-            )
-            .expect("unroll eval");
-        let loop_out = volar_fuzz::interpreter::vaffle::eval_vaffle(
-            &loop_mod,
-            loop_fid,
-            &vaffle_inputs,
-        )
-        .expect("loop eval");
+            volar_fuzz::interpreter::vaffle::eval_vaffle(&unroll_mod, unroll_fid, &vaffle_inputs)
+                .expect("unroll eval");
+        let loop_out =
+            volar_fuzz::interpreter::vaffle::eval_vaffle(&loop_mod, loop_fid, &vaffle_inputs)
+                .expect("loop eval");
         let want = native_bulk_sum(sel) as u64;
         let got_unroll = decode_bits(&unroll_out);
         let got_loop = decode_bits(&loop_out);
@@ -2182,7 +2165,11 @@ fn bulk_memory_loop_matches_unroll() {
         )
         .0
         .expect("lowered loop eval");
-        assert_eq!(decode_bits(&lowered_unroll), want, "lowered unroll sel={sel}");
+        assert_eq!(
+            decode_bits(&lowered_unroll),
+            want,
+            "lowered unroll sel={sel}"
+        );
         assert_eq!(decode_bits(&lowered_loop), want, "lowered loop sel={sel}");
     }
 }
