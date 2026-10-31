@@ -2092,13 +2092,61 @@ fn collect_terminator_uses<S: UseSink>(term: &Terminator, out: &mut S) {
 /// fallback instead of the real value -- exactly the bug this function's
 /// result (`lower_function`'s spill/reload of every value in this set) is
 /// built to fix.
-pub(crate) fn compute_cross_block_values<P: Clone>(body: &FuncBody<P>) -> BTreeSet<usize> {
+pub fn compute_cross_block_values<P: Clone>(body: &FuncBody<P>) -> BTreeSet<usize> {
     let owner = compute_owner(&body.blocks, body.values.len());
+
+    // Skip UNREACHABLE blocks, matching vaffle_ssa's own spill pass (which
+    // intentionally leaves dead blocks untouched): the importer wires
+    // shared entry-block constants into lowered-unreachable terminators,
+    // and a dead block's use of a dominating value can never execute.
+    let mut succs: alloc::vec::Vec<alloc::collections::BTreeSet<usize>> =
+        alloc::vec![Default::default(); body.blocks.len()];
+    for (bi, block) in body.blocks.iter().enumerate() {
+        match &block.terminator {
+            Terminator::Jump(t) => {
+                succs[bi].insert(t.block.0 as usize);
+            }
+            Terminator::IfNonzero {
+                then_target,
+                else_target,
+                ..
+            } => {
+                succs[bi].insert(then_target.block.0 as usize);
+                succs[bi].insert(else_target.block.0 as usize);
+            }
+            Terminator::Table {
+                targets,
+                default_target,
+                ..
+            } => {
+                for t in targets {
+                    succs[bi].insert(t.block.0 as usize);
+                }
+                succs[bi].insert(default_target.block.0 as usize);
+            }
+            _ => {}
+        }
+    }
+    let mut reachable = vec![false; body.blocks.len()];
+    reachable[body.entry.0 as usize] = true;
+    let mut stack = vec![body.entry.0 as usize];
+    while let Some(&bi) = stack.last() {
+        stack.pop();
+        for &s in &succs[bi] {
+            if !reachable[s] {
+                reachable[s] = true;
+                stack.push(s);
+            }
+        }
+    }
 
     let mut cross: BTreeSet<usize> = BTreeSet::new();
     let mut marks = vec![0usize; body.values.len()];
     let mut uses = Vec::new();
     for (bi, block) in body.blocks.iter().enumerate() {
+        if !reachable[bi] {
+            continue;
+        }
         collect_unique_uses(
             &body.values,
             &block.stmts,
@@ -2114,6 +2162,46 @@ pub(crate) fn compute_cross_block_values<P: Clone>(body: &FuncBody<P>) -> BTreeS
         }
     }
     cross
+}
+
+/// Diagnostic companion: WHERE each cross-block value is used (block index
+/// plus whether the use sits in a statement or the terminator). Paired with
+/// [`compute_cross_block_values`] for postcondition reports.
+pub fn cross_block_use_sites<P: Clone>(
+    body: &FuncBody<P>,
+    cross: &BTreeSet<usize>,
+) -> alloc::vec::Vec<(usize, usize, &'static str)> {
+    let owner = compute_owner(&body.blocks, body.values.len());
+    let mut sites = alloc::vec::Vec::new();
+    let mut marks = vec![0usize; body.values.len()];
+    let mut uses = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        collect_unique_uses(
+            &body.values,
+            &block.stmts,
+            &block.terminator,
+            &mut marks,
+            bi + 1,
+            &mut uses,
+        );
+        for &u in &uses {
+            if cross.contains(&u) && owner[u] != bi {
+                let mut in_term = false;
+                block
+                    .terminator
+                    .clone()
+                    .map(&mut (), |_: &mut (), v: ValueId| {
+                        if v.0 == u {
+                            in_term = true;
+                        }
+                        Ok::<_, core::convert::Infallible>(v)
+                    })
+                    .unwrap();
+                sites.push((u, bi, if in_term { "term" } else { "stmt" }));
+            }
+        }
+    }
+    sites
 }
 
 /// Map every VAFFLE `ValueId.0` to the index of the block that owns its

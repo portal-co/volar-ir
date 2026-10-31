@@ -1963,6 +1963,100 @@ fn revm_wasm32_import_probe() {
                 started.elapsed(),
                 vaffle.funcs.len()
             );
+            // SSA bisect: which functions trip vaffle_ssa's
+            // postcondition? Release mode leaves the debug_assert off, so
+            // each function's SSA output is inspected directly with the
+            // crate's own cross-block computation.
+            if std::env::var_os("REVM_SSA_BISECT").is_some() {
+                for (fi, f) in vaffle.funcs.iter().enumerate() {
+                    let body = match f {
+                        vaffle::FuncDecl::Body(b) => vaffle::FuncBody {
+                            sig: b.sig,
+                            blocks: b.blocks.clone(),
+                            values: b.values.clone(),
+                            entry: b.entry,
+                        },
+                        _ => continue,
+                    };
+                    let sub = vaffle::Module {
+                        pointer_width: vaffle.pointer_width,
+                        types: vaffle.types.clone(),
+                        oracles: vaffle.oracles.clone(),
+                        actions: vaffle.actions.clone(),
+                        funcs: vec![vaffle::FuncDecl::Body(body)],
+                        sigs: vaffle.sigs.clone(),
+                        exports: Default::default(),
+                        pre_init: vaffle.pre_init.clone(),
+                    };
+                    let ssa_mod = volar_vaffle_target::vaffle_ssa::ssa_ify_module(&sub);
+                    for f2 in &ssa_mod.funcs {
+                        if let vaffle::FuncDecl::Body(b) = f2 {
+                            let cross =
+                                volar_vaffle_target::lower_to_ir::compute_cross_block_values(b);
+                            if cross.is_empty() {
+                                continue;
+                            }
+                            eprintln!("SSA SHAPE: func {fi} has {} cross-block values", cross.len());
+                            for &v in cross.iter().take(4) {
+                                let def = format!("{:?}", b.values[v].kind);
+                                let owner = b
+                                    .blocks
+                                    .iter()
+                                    .position(|blk| {
+                                        blk.params.iter().any(|&(vid, _)| vid.0 == v)
+                                            || blk.stmts.iter().any(|&sid| sid.0 == v)
+                                    })
+                                    .unwrap_or(usize::MAX);
+                                eprintln!(
+                                    "SSA SHAPE: v{v} owner=b{owner} def={}",
+                                    def.chars().take(110).collect::<String>()
+                                );
+                                for (bi, blk) in b.blocks.iter().enumerate() {
+                                    if bi == owner {
+                                        continue;
+                                    }
+                                    for &sid in &blk.stmts {
+                                        let d = format!("{:?}", b.values[sid.0].kind);
+                                        if d.contains(&format!("IRVarId({v})")) {
+                                            eprintln!(
+                                                "SSA SHAPE: v{v} used in b{bi} stmt {sid:?}: {}",
+                                                d.chars().take(140).collect::<String>()
+                                            );
+                                        }
+                                    }
+                                    let t = format!("{:?}", blk.terminator);
+                                    if t.contains(&format!("IRVarId({v})")) {
+                                        eprintln!(
+                                            "SSA SHAPE: v{v} used in b{bi} TERM: {}",
+                                            t.chars().take(140).collect::<String>()
+                                        );
+                                    }
+                                }
+                                if owner == usize::MAX {
+                                    eprintln!("SSA SHAPE: v{v} owner NOT FOUND (undefined use)");
+                                }
+                            }
+                        }
+                    }
+                }
+                eprintln!("SSA BISECT done");
+            }
+
+            // Next pipeline stage: VAFFLE -> volar IR. Gated so the
+            // import-only measurement stays isolable.
+            if std::env::var_os("REVM_UNMOD_LOWER").is_some() {
+                let lowered_at = std::time::Instant::now();
+                let (blocks, types) =
+                    volar_vaffle_target::lower_vaffle_to_ir_owned(vaffle);
+                let n_stmts: usize =
+                    blocks.blocks.iter().map(|b| b.stmts.len()).sum();
+                eprintln!(
+                    "revm wasm32 lower OK in {:?}: {} blocks, {n_stmts} stmts, {} types",
+                    lowered_at.elapsed(),
+                    blocks.blocks.len(),
+                    types.0.len()
+                );
+            }
         }
         Err(e) => {
             panic!(
@@ -2023,6 +2117,21 @@ fn revm_unmodified_import_probe() {
                 started.elapsed(),
                 vaffle.funcs.len()
             );
+            // Next pipeline stage: VAFFLE -> volar IR, consuming the
+            // module (transferring ~1B values by clone would double RSS).
+            if std::env::var_os("REVM_UNMOD_LOWER").is_some() {
+                let lowered_at = std::time::Instant::now();
+                let (blocks, types) =
+                    volar_vaffle_target::lower_vaffle_to_ir_owned(vaffle);
+                let n_stmts: usize =
+                    blocks.blocks.iter().map(|b| b.stmts.len()).sum();
+                eprintln!(
+                    "revm unmodified lower OK in {:?}: {} blocks, {n_stmts} stmts, {} types",
+                    lowered_at.elapsed(),
+                    blocks.blocks.len(),
+                    types.0.len()
+                );
+            }
         }
         Err(e) => {
             panic!(

@@ -583,10 +583,34 @@ fn ssa_ify_function_owned<P: Clone>(
         values,
         entry: body.entry,
     };
-    debug_assert!(
-        compute_cross_block_values(&out).is_empty(),
-        "vaffle_ssa: postcondition violated -- cross-block values remain after spilling"
-    );
+    let remaining = compute_cross_block_values(&out);
+    if !remaining.is_empty() {
+        // no_std-safe diagnostic: owner + every use site per offender.
+        let mut diag = alloc::string::String::new();
+        for &v in remaining.iter().take(3) {
+            let mut owner = usize::MAX;
+            for (bi, blk) in out.blocks.iter().enumerate() {
+                if blk.params.iter().any(|&(vid, _)| vid.0 == v)
+                    || blk.stmts.iter().any(|&sid| sid.0 == v)
+                {
+                    owner = bi;
+                    break;
+                }
+            }
+            diag.push_str(&alloc::format!(" v{v}@b{owner}; uses:"));
+            let one = BTreeSet::from([v]);
+            for (u, bi, kind) in crate::lower_to_ir::cross_block_use_sites(&out, &one) {
+                if u == v {
+                    diag.push_str(&alloc::format!(" b{bi}{kind}"));
+                }
+            }
+        }
+        debug_assert!(
+            remaining.is_empty(),
+            "vaffle_ssa: postcondition violated -- cross-block values remain after spilling: {remaining:?} diag:{diag}"
+        );
+    }
+    let _ = remaining;
     out
 }
 

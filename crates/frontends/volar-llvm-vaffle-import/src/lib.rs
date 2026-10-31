@@ -483,7 +483,34 @@ fn import_module_with_config_attempt<'ctx>(
         }
         let _ = before;
     }
-    Ok(importer.finish())
+    let mut module = importer.finish();
+    // vaffle_ssa's SP seeding needs at least one real value per non-entry
+    // body (provenance to clone); trivial trap/stub functions at -O0
+    // otherwise assemble with zero values. A single unused Const in the
+    // entry block satisfies that invariant harmlessly.
+    let bit_tid = module.types.bit();
+    for f in module.funcs.iter_mut() {
+        if let FuncDecl::Body(body) = f {
+            if body.values.is_empty() {
+                let vid = ValueId(body.values.len());
+                body.values.push(Node::new(
+                    Value::Op(Stmt::Const(
+                        Constant {
+                            hi: 0,
+                            lo: 0,
+                        },
+                        bit_tid,
+                    )),
+                    (),
+                    None,
+                ));
+                if let Some(entry) = body.blocks.get_mut(body.entry.0 as usize) {
+                    entry.stmts.push(vid);
+                }
+            }
+        }
+    }
+    Ok(module)
     })();
     match result {
         Ok(module) => Ok((module, tainted_out.borrow().clone())),
