@@ -474,11 +474,15 @@ pub(crate) fn ssa_ify_function_owned<P: Clone>(
                 let owner_term = alloc::format!("{:?}", blocks[owner_bi].terminator);
                 let owner_np = blocks[owner_bi].params.len();
                 let src = alloc::format!("{:?}", values[u % values.len()].kind);
-                let b5_params = blocks[5].params.len();
-                let b5_term = alloc::format!("{:?}", blocks[5].terminator);
-                let b5_first = blocks[5]
-                    .stmts
-                    .first()
+                // Bounds-checked: this diagnostic runs on arbitrary
+                // modules (tiny test fixtures included).
+                let b5 = blocks.get(5);
+                let b5_params = b5.map(|x| x.params.len()).unwrap_or(0);
+                let b5_term = b5
+                    .map(|x| alloc::format!("{:?}", x.terminator))
+                    .unwrap_or_default();
+                let b5_first = b5
+                    .and_then(|x| x.stmts.first())
                     .map(|s| alloc::format!("{:?}", values[s.0].kind))
                     .unwrap_or_default();
                 let mut merge_vid = 0usize;

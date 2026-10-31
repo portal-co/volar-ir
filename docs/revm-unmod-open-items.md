@@ -143,15 +143,21 @@ Guarded by the 12GB RSS kill-switch; it never fired.
   a GEP'd pointer param), the bulk differential, cascade revm import +
   lowering clean (1172 blocks / 4.27M stmts), works with
   VLVI_JUMP_THREAD=1, volar-fuzz 91/91.
-- **OPEN (Table path only)**: lowering a Table-dispatched revm module
-  still trips vaffle_ssa's dominance assert on one join shape — my
-  import-time chain accepts a cont's bits at a 64-pred join that
-  vaffle_ssa's post-SSA idom rejects; the shared D/R router makes the
-  vaffle CFG a web (every site's traversal can CFG-reach every
-  continuation), which a linear parent chain cannot fully express.
-  Next step: make dispatch cont bits flow through the router as block
-  params (or invalidate cache entries whose def cont is reachable via
-  a different site's traversal) instead of trusting the parent chain.
+- **Site-token routing (this round)**: dispatch sites mint a token;
+  conts inherit it; cache entries record it; lookups accept only
+  tokens in the using block's ancestor lineage — cross-site cache
+  leaks through the shared D/R web are refused and re-derived (the
+  f41/f110/f136 web-leak shapes now re-run soundly). The linear
+  parent-chain dominance check is gone; the walk-entry resets the
+  active token. The old LLVM-idom seeding was removed as dead code.
+- **OPEN (Table path only)**: one join shape remains — a token-0
+  (program-lowering) composition at a 64-pred join that vaffle_ssa's
+  post-SP idom rejects while the import-time LLVM-dominance model
+  accepts it. The disagreement is between the import-time CFG model
+  and vaffle_ssa's post-SP CFG; next step is a pre/post-SP pred-set
+  comparison on the failing function (the DOM PROBE in the revm
+  probe, VLVI_DOM_TRACE=1, shows the surviving cross-block Merges:
+  f122-style token-0 program compositions).
 
 ## Open items
 

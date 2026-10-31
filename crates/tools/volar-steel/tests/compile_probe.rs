@@ -1963,6 +1963,49 @@ fn revm_wasm32_import_probe() {
                 started.elapsed(),
                 vaffle.funcs.len()
             );
+            if std::env::var_os("VLVI_DOM_TRACE").is_some() {
+                for (fi, f) in vaffle.funcs.iter().enumerate() {
+                    if let vaffle::FuncDecl::Body(b) = f {
+                        let mut def_block = vec![usize::MAX; b.values.len()];
+                        for (bi, blk) in b.blocks.iter().enumerate() {
+                            for &sid in &blk.stmts {
+                                def_block[sid.0] = bi;
+                            }
+                            for &(vid, _) in &blk.params {
+                                if vid.0 < def_block.len() {
+                                    def_block[vid.0] = bi;
+                                }
+                            }
+                        }
+                        let mut shown = 0usize;
+                        'outer: for (bi, blk) in b.blocks.iter().enumerate() {
+                            for &sid in &blk.stmts {
+                                if shown >= 3 {
+                                    break 'outer;
+                                }
+                                if let vaffle::Value::Op(
+                                    volar_ir_common::Stmt::Merge { parts, .. },
+                                ) = &b.values[sid.0].kind
+                                {
+                                    let foreign: Vec<usize> = parts
+                                        .iter()
+                                        .filter_map(|&p| def_block.get(p.0).copied())
+                                        .filter(|&d| d != bi && d != usize::MAX && d != 0)
+                                        .collect();
+                                    if !foreign.is_empty() {
+                                        eprintln!(
+                                            "DOM PROBE f{fi} b{bi} merge v{}: {} foreign, defs={foreign:?}",
+                                            sid.0,
+                                            foreign.len()
+                                        );
+                                        shown += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // SSA bisect: which functions trip vaffle_ssa's
             // postcondition? Release mode leaves the debug_assert off, so
             // each function's SSA output is inspected directly with the
@@ -2243,6 +2286,7 @@ fn dispatch_table_read_write_reuse() {
         .get("dispatch_probe")
         .copied()
         .expect("entry export");
+    let _ = fid;
     for (v, w) in [
         (5u32, 9u32),
         (0, 1),

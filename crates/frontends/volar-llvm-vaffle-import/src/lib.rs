@@ -1956,11 +1956,6 @@ impl<'ctx> Importer<'ctx> {
         let mut called = Vec::new();
 
         let reachable = reachable_blocks(f)?;
-        let idom = llvm_immediate_dominators(&blocks, &reachable)?;
-        // The vaffle block where each LLVM block's lowering ENDED — the
-        // entry parent for the idom tree (an idom's full lowering dominates
-        // everything its subtree lowers).
-        let mut llvm_exit: Vec<Option<BlockId>> = vec![None; blocks.len()];
 
         // The enclosing function's flattened return width (the same width as
         // the single wide result `func_id` interns). Computed before Pass B
@@ -1986,13 +1981,8 @@ impl<'ctx> Importer<'ctx> {
             }
             let vb = BlockId(i);
             fctx.current = vb;
-            // Dominance seed: the immediate dominator's END block dominates
-            // this block's whole lowering.
-            if let Some(Some(di)) = idom.get(i) {
-                if let Some(exit_vb) = llvm_exit[*di] {
-                    fctx.block_parent[vb.0] = Some(exit_vb);
-                }
-            }
+            // A fresh program block: no dispatch site's chain is active.
+            fctx.active_token = 0;
             if std::env::var("VLVI_INSTR_TRACE").is_ok() {
                 eprintln!("[trace] bb{i} start values={}", fctx.values.len());
             }
@@ -2039,7 +2029,6 @@ impl<'ctx> Importer<'ctx> {
                 }
                 inst = next;
             }
-            llvm_exit[i] = Some(fctx.current);
         }
 
         // Reuse the `SigId` `func_id` already allocated for this function
@@ -2244,10 +2233,12 @@ impl<'ctx> Importer<'ctx> {
     fn cache_get_dominant(&self, fctx: &FuncCtx<'ctx>, v: &AnyValueEnum<'ctx>) -> Option<Bits> {
         let bits = fctx.cache.get(v)?.clone();
         let def = fctx.cache_block.get(v).copied()?;
+        let entry_token = fctx.cache_token.get(v).copied().unwrap_or(0);
         if def == fctx.current
             || def.0 == 0
-            || fctx.block_dominates(def, fctx.current)
+            || entry_token == 0
             || self.bits_are_function_global(fctx, &bits)
+            || fctx.token_in_lineage(entry_token, fctx.current)
         {
             Some(bits)
         } else {
@@ -2323,6 +2314,7 @@ impl<'ctx> Importer<'ctx> {
 
     fn cache_put(&self, fctx: &mut FuncCtx<'ctx>, v: AnyValueEnum<'ctx>, bits: Bits) {
         fctx.cache_block.insert(v, fctx.current);
+        fctx.cache_token.insert(v, fctx.active_token);
         fctx.cache.insert(v, bits);
     }
 
@@ -6106,6 +6098,8 @@ impl<'ctx> Importer<'ctx> {
         for &sid in candidates {
             entries.push((sid, false));
         }
+        fctx.next_site_token += 1;
+        fctx.active_token = fctx.next_site_token;
         let key = (fnv64(&entries), n_bits, false);
         let usable = match fctx.shared_dispatch.get(&key) {
             Some(c) => c.entries == entries && c.next_tag < (1u32 << c.tag_width),
@@ -6251,6 +6245,8 @@ impl<'ctx> Importer<'ctx> {
         for &sid in candidates {
             entries.push((sid, false));
         }
+        fctx.next_site_token += 1;
+        fctx.active_token = fctx.next_site_token;
         let key = (fnv64(&entries), n_bits, true);
         let usable = match fctx.shared_dispatch.get(&key) {
             Some(c) => c.entries == entries && c.next_tag < (1u32 << c.tag_width),
@@ -7357,6 +7353,21 @@ impl<'ctx> Importer<'ctx> {
         if bits.len() == 1 {
             return bits[0];
         }
+        if std::env::var_os("VLVI_DOM_TRACE").is_some() {
+            let foreign = bits.iter().any(|&b| {
+                fctx.value_block
+                    .get(b.0)
+                    .copied()
+                    .map(|db| db != block)
+                    .unwrap_or(false)
+            });
+            if foreign {
+                eprintln!(
+                    "compose_address: FOREIGN parts into block {block:?} ({} parts)",
+                    bits.len()
+                );
+            }
+        }
         let vec_ty = self.types.intern(IrType::Vec(bits.len(), self.bit_tid));
         fctx.emit(
             block,
@@ -7509,132 +7520,6 @@ fn reachable_blocks<'ctx>(f: FunctionValue<'ctx>) -> IResult<HashSet<LlvmBlock<'
     }
 
     Ok(reachable)
-}
-
-/// Immediate dominators (by block index) over the same supported-terminator
-/// CFG `reachable_blocks` walks. Entry is index 0. Unreachable or
-/// unsupported-terminator blocks get `None` (they never walk).
-fn llvm_immediate_dominators<'ctx>(
-    blocks: &[LlvmBlock<'ctx>],
-    reachable: &HashSet<LlvmBlock<'ctx>>,
-) -> IResult<Vec<Option<usize>>> {
-    let successors = |i: usize| -> IResult<Vec<usize>> {
-        let bb = &blocks[i];
-        let terminator = bb
-            .get_terminator()
-            .ok_or_else(|| ImportError::Unsupported("reachable block has no terminator".into()))?;
-        if !matches!(
-            terminator.get_opcode(),
-            InstructionOpcode::Br | InstructionOpcode::Switch
-        ) {
-            return Ok(Vec::new());
-        }
-        let n = unsafe { LLVMGetNumSuccessors(terminator.as_value_ref()) };
-        let mut out = Vec::with_capacity(n as usize);
-        for k in 0..n {
-            let successor =
-                unsafe { LlvmBlock::new(LLVMGetSuccessor(terminator.as_value_ref(), k)) }
-                    .ok_or_else(|| {
-                        ImportError::Unsupported("terminator successor is not a basic block".into())
-                    })?;
-            if let Some(j) = blocks.iter().position(|b| *b == successor) {
-                out.push(j);
-            }
-        }
-        Ok(out)
-    };
-
-    // RPO from the entry (index 0). Iterative DFS: each stack slot is
-    // (block, next-successor index); a block enters postorder when its
-    // successors are exhausted.
-    let mut postorder: Vec<usize> = Vec::new();
-    let mut seen = vec![false; blocks.len()];
-    let mut pending: Vec<(usize, usize)> = vec![(0, 0)];
-    seen[0] = true;
-    while let Some(top) = pending.last().copied() {
-        let (b, mut si) = top;
-        let succs = if reachable.contains(&blocks[b]) {
-            successors(b)?
-        } else {
-            Vec::new()
-        };
-        let mut advanced = false;
-        while (si as usize) < succs.len() {
-            let s = succs[si as usize];
-            si += 1;
-            if !seen[s] {
-                seen[s] = true;
-                *pending.last_mut().expect("nonempty") = (b, si);
-                pending.push((s, 0));
-                advanced = true;
-                break;
-            }
-        }
-        if !advanced {
-            postorder.push(b);
-            pending.pop();
-        }
-    }
-    let mut rpo = postorder;
-    rpo.reverse();
-
-    // Cooper-Harvey-Kennedy.
-    let mut idom: Vec<Option<usize>> = vec![None; blocks.len()];
-    idom[0] = Some(0);
-    let rpo_pos: HashMap<usize, usize> =
-        rpo.iter().enumerate().map(|(p, &b)| (b, p)).collect();
-    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); blocks.len()];
-    for b in rpo.iter().copied() {
-        for s in successors(b)? {
-            preds[s].push(b);
-        }
-    }
-    let intersect = |mut a: usize, mut b: usize, idom: &Vec<Option<usize>>| -> usize {
-        while a != b {
-            while rpo_pos[&a] > rpo_pos[&b] {
-                a = idom[a].expect("dominator of a processed block");
-            }
-            while rpo_pos[&b] > rpo_pos[&a] {
-                b = idom[b].expect("dominator of a processed block");
-            }
-            if a == b {
-                break;
-            }
-        }
-        a
-    };
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in rpo.iter().skip(1) {
-            let mut new_idom: Option<usize> = None;
-            for &p in &preds[b] {
-                if reachable.contains(&blocks[p]) && idom[p].is_some() {
-                    new_idom = Some(match new_idom {
-                        None => p,
-                        Some(d) => intersect(d, p, &idom),
-                    });
-                }
-            }
-            if let Some(d) = new_idom {
-                if idom[b] != Some(d) {
-                    idom[b] = Some(d);
-                    changed = true;
-                }
-            }
-        }
-    }
-    if std::env::var_os("VLVI_DOM_TRACE").is_some() {
-        let in_rpo10 = rpo.iter().position(|&b| b == 10).is_some();
-        eprintln!(
-            "idom: blocks={} rpo={} reachable={} idom[10]={:?} 10-in-rpo={in_rpo10}",
-            blocks.len(),
-            rpo.len(),
-            reachable.len(),
-            idom[10]
-        );
-    }
-    Ok(idom)
 }
 
 fn call_value_operand<'ctx>(
@@ -7814,6 +7699,8 @@ fn load_store_pointer<'ctx>(
 
 struct FuncCtx<'ctx> {
     values: Vec<Node<Value, ()>>,
+    /// Defining vaffle block per value (debug/diagnostic sidecar).
+    value_block: Vec<BlockId>,
     block_of: HashMap<LlvmBlock<'ctx>, BlockId>,
     phi_order: Vec<Vec<PhiValue<'ctx>>>,
     params: Vec<Vec<(ValueId, TypeId)>>,
@@ -7823,13 +7710,25 @@ struct FuncCtx<'ctx> {
     /// Extension parent per block: `Some(pred)` for blocks appended as a
     /// linear continuation of the current block (dispatch conts, loop
     /// chains), `None` for everything else (joins, pre-created successor
-    /// blocks). `block_dominates` walks this chain — sound because a
-    /// continuation is reachable only through the block it extends.
+    /// blocks).
     block_parent: Vec<Option<BlockId>>,
+    /// Per-block dispatch-site token: the site whose traversal created the
+    /// block (0 = program lowering / no site). The shared D/R router makes
+    /// the vaffle CFG a web — every site's traversal can CFG-reach every
+    /// continuation — so linear parents cannot express dominance across
+    /// sites. Cache entries record the token active at creation and are
+    /// served only into blocks whose ancestor lineage includes it.
+    block_token: Vec<u64>,
+    /// The token active for emissions right now (see `dispatch_read_table`).
+    active_token: u64,
+    next_site_token: u64,
     /// The vaffle block where each cached bits vector was defined. The
     /// dominance guard (see `cache_get_dominant`) refuses cross-block
     /// hits unless the bits are function-global.
     cache_block: HashMap<AnyValueEnum<'ctx>, BlockId>,
+    /// The dispatch-site token active when the bits were cached (see
+    /// `block_token`); 0 = program lowering.
+    cache_token: HashMap<AnyValueEnum<'ctx>, u64>,
     /// Fields of the fixed `{ integer, i1 }` values returned by LLVM's
     /// arithmetic-overflow intrinsics. LLVM only lets the importer observe
     /// these through `extractvalue`, so they stay out of the general value
@@ -7881,6 +7780,7 @@ impl<'ctx> FuncCtx<'ctx> {
     fn new(_bit_tid: TypeId, n_blocks: usize) -> Self {
         FuncCtx {
             values: Vec::new(),
+            value_block: Vec::new(),
             block_of: HashMap::new(),
             phi_order: vec![Vec::new(); n_blocks],
             params: vec![Vec::new(); n_blocks],
@@ -7888,7 +7788,11 @@ impl<'ctx> FuncCtx<'ctx> {
             terminators: vec![None; n_blocks],
             cache: HashMap::new(),
             cache_block: HashMap::new(),
+            cache_token: HashMap::new(),
             block_parent: vec![None; n_blocks],
+            block_token: vec![0; n_blocks],
+            active_token: 0,
+            next_site_token: 0,
             aggregate_fields: HashMap::new(),
             current: BlockId(0),
             sp_globals: Vec::new(),
@@ -7914,21 +7818,47 @@ impl<'ctx> FuncCtx<'ctx> {
         self.stmts.push(Vec::new());
         self.terminators.push(None);
         self.block_parent.push(None);
+        self.block_token.push(0);
         block
     }
 
     /// Append a block that is a LINEAR continuation of the current block
     /// (a dispatch cont, a loop chain link): it is reachable only through
-    /// the block it extends, so that block dominates it.
+    /// the block it extends, so that block dominates it. The block inherits
+    /// the active site token (its cache bits stay scoped to this chain).
     fn extend_block(&mut self) -> BlockId {
         let block = self.append_block();
         self.block_parent[block.0] = Some(self.current);
+        let n = self.block_token.len();
+        self.block_token[n - 1] = self.active_token;
         block
     }
 
     /// Walk the extension-parent chain from `cur` looking for `def`.
     /// Conservative: `None`-parented blocks (joins, pre-created
     /// successors) terminate the walk as non-dominating.
+    /// Does `token` appear anywhere in `cur`'s extension-parent lineage?
+    /// Walking the chain collects every site token whose traversal produced
+    /// a block dominating `cur` within its own site chain; tokens from
+    /// other sites' chains (reachable only through the shared D/R web)
+    /// never appear, so their cache bits are refused and re-derived.
+    fn token_in_lineage(&self, token: u64, cur: BlockId) -> bool {
+        if token == 0 {
+            return true;
+        }
+        let mut c = cur;
+        for _ in 0..256 {
+            if self.block_token.get(c.0).copied().unwrap_or(0) == token {
+                return true;
+            }
+            match self.block_parent.get(c.0).copied().flatten() {
+                Some(parent) => c = parent,
+                None => return false,
+            }
+        }
+        false
+    }
+
     fn block_dominates(&self, def: BlockId, cur: BlockId) -> bool {
         let mut cur = cur;
         for _ in 0..256 {
@@ -7952,6 +7882,7 @@ impl<'ctx> FuncCtx<'ctx> {
     fn emit(&mut self, block: BlockId, v: Value) -> ValueId {
         let id = ValueId(self.values.len());
         self.values.push(Node::new(v, (), None));
+        self.value_block.push(block);
         self.stmts[block.0].push(id);
         id
     }
