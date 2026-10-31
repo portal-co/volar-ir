@@ -2150,6 +2150,50 @@ fn revm_wasm32_import_probe() {
                         }
                     }
                 }
+                // FACT (vaffle level): import names + the entry's first
+                // call target kind. Imports lower as terminal sinks, so an
+                // early import call orphans everything downstream of it.
+                {
+                    let mut import_names: std::collections::BTreeMap<String, usize> =
+                        Default::default();
+                    let mut body_count = 0usize;
+                    for f in vaffle.funcs.iter() {
+                        match f {
+                            vaffle::FuncDecl::Body(_) => body_count += 1,
+                            vaffle::FuncDecl::Import { module: m, name, .. } => {
+                                *import_names
+                                    .entry(format!("{m}::{name}"))
+                                    .or_insert(0usize) += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    eprintln!(
+                        "FACT vaffle: bodies={body_count} imports={} names={:?}",
+                        import_names.len(),
+                        import_names.iter().take(14).collect::<Vec<_>>()
+                    );
+                    if let Some(vaffle::FuncDecl::Body(entry_body)) = vaffle.funcs.first() {
+                        'outer: for blk in &entry_body.blocks {
+                            for svid in &blk.stmts {
+                                if let vaffle::Value::Call { func, .. } =
+                                    &entry_body.values[svid.0].kind
+                                {
+                                    let kind = match &vaffle.funcs[func.0] {
+                                        vaffle::FuncDecl::Body(_) => "Body",
+                                        vaffle::FuncDecl::Import { .. } => "Import",
+                                        _ => "?",
+                                    };
+                                    eprintln!(
+                                        "FACT entry first call: callee=FuncId({}) kind={kind}",
+                                        func.0
+                                    );
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+                }
                 let lowered_at = std::time::Instant::now();
                 let (blocks, types) =
                     volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
@@ -2161,6 +2205,136 @@ fn revm_wasm32_import_probe() {
                     blocks.blocks.len(),
                     types.0.len()
                 );
+                // Movfuscation stage: convert the lowered control flow into
+                // data-controlled iterations (mov-only execution). The
+                // dispatch values become loop iterations, which compress
+                // better in cryptographic protocols.
+                if std::env::var_os("REVM_MOVFUSCATE").is_some() {
+                    let m_at = std::time::Instant::now();
+                    let pre_b = blocks.blocks.len();
+                    let pre_s = n_stmts;
+                    // Equivalence evidence: op-kind histograms pre/post. A
+                    // faithful movfuscation preserves every operation as a
+                    // guarded iteration; an elision loses them.
+                    let hist =
+                        |b: &volar_ir::ir::IRBlocks<()>| -> std::collections::BTreeMap<String, usize> {
+                            let mut h: std::collections::BTreeMap<String, usize> = Default::default();
+                            for blk in b.blocks.iter() {
+                                for st in blk.stmts.iter() {
+                                    let key = match &st.kind {
+                                        volar_ir::ir::IRStmt::Const(..) => "Const",
+                                        volar_ir::ir::IRStmt::Poly { .. } => "Poly",
+                                        volar_ir::ir::IRStmt::StorageRead { .. } => "StorageRead",
+                                        volar_ir::ir::IRStmt::StorageWrite { .. } => "StorageWrite",
+                                        _ => "other",
+                                    };
+                                    *h.entry(key.to_string()).or_insert(0) += 1;
+                                }
+                            }
+                            h
+                        };
+                    let pre_hist = hist(&blocks);
+                    eprintln!("movfuscate pre-hist: {pre_hist:?}");
+                    // Replica of cfg_layout's reachability walk: static
+                    // edges only (Block targets); reports what the layout's
+                    // DFS sees before any Dyn visit-all kicks in. FACT lines
+                    // expose the connectedness evidence: block 2's real
+                    // terminator, sink-shaped block count, Dyn-terminated
+                    // block count, and the first unreachable blocks.
+                    {
+                        let n = pre_b;
+                        let mut seen = vec![false; n];
+                        let mut dyn_seen = false;
+                        let mut stack = vec![0usize];
+                        seen[0] = true;
+                        while let Some(bi) = stack.pop() {
+                            let term = &blocks.blocks[bi].terminator;
+                            let mut succ: Vec<usize> = Vec::new();
+                            let mut push_target = |t: &volar_ir::ir::IRBranchTarget| match &t.dest {
+                                volar_ir::ir::IRBlockTargetId::Block(id) => {
+                                    succ.push(id.0 as usize);
+                                }
+                                volar_ir::ir::IRBlockTargetId::Dyn(_) => dyn_seen = true,
+                                _ => {}
+                            };
+                            match term {
+                                volar_ir::ir::IRTerminator::Jmp { target } => push_target(target),
+                                volar_ir::ir::IRTerminator::JumpCond { then_target, else_target, .. } => {
+                                    push_target(then_target);
+                                    push_target(else_target);
+                                }
+                                volar_ir::ir::IRTerminator::JumpTable { cases, .. } => {
+                                    for t in cases.values() {
+                                        push_target(t);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            for succ_b in succ {
+                                if !seen[succ_b] {
+                                    seen[succ_b] = true;
+                                    stack.push(succ_b);
+                                }
+                            }
+                        }
+                        let reachable = seen.iter().filter(|&&x| x).count();
+                        eprintln!(
+                            "layout replica: reachable={reachable}/{n} static_dyn_seen={dyn_seen}"
+                        );
+                        let sinks = blocks
+                            .blocks
+                            .iter()
+                            .filter(|b| {
+                                b.stmts.is_empty()
+                                    && matches!(
+                                        &b.terminator,
+                                        volar_ir::ir::IRTerminator::Jmp { target }
+                                            if matches!(target.dest, volar_ir::ir::IRBlockTargetId::Return)
+                                    )
+                            })
+                            .count();
+                        let dyn_terms = blocks
+                            .blocks
+                            .iter()
+                            .filter(|b| {
+                                matches!(
+                                    &b.terminator,
+                                    volar_ir::ir::IRTerminator::Jmp { target }
+                                        if matches!(target.dest, volar_ir::ir::IRBlockTargetId::Dyn(_))
+                                )
+                            })
+                            .count();
+                        eprintln!("FACT sinks={sinks} dyn_terms={dyn_terms}");
+
+                        let _ = &seen;
+                    }
+                    let mut types = types;
+                    let mov_src = blocks.clone();
+                    let mov_b = volar_ir_passes::movfuscate::movfuscate_ir_owned(
+                        blocks,
+                        &mut types,
+                    );
+                    let post_s: usize =
+                        mov_b.blocks.iter().map(|b| b.stmts.len()).sum();
+                    let post_hist = hist(&mov_b);
+                    eprintln!("movfuscate post-hist: {post_hist:?}");
+                    let stats = volar_ir_passes::movfuscate::LAST_LAYOUT_STATS
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let total = volar_ir_passes::movfuscate::MOV_TOTAL_STMTS
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    eprintln!(
+                        "movfuscate internals: post-layout n={} min_block_stmts={} total_stmts={total}",
+                        (stats >> 32) as usize,
+                        (stats & 0xffff_ffff) as usize
+                    );
+                    eprintln!(
+                        "revm wasm32 movfuscate OK in {:?}: {} blocks/{pre_s} stmts -> {} blocks/{post_s} stmts, {} types",
+                        m_at.elapsed(),
+                        pre_b,
+                        mov_b.blocks.len(),
+                        types.0.len()
+                    );
+                }
             }
         }
         Err(e) => {
@@ -2676,4 +2850,343 @@ fn bulk_memory_loop_matches_unroll() {
         let want = native_bulk_sum(sel) as u64;
         assert_eq!(decode_bits(&inc_out), want, "incremental sel={sel}");
     }
+}
+
+// ============================================================================
+// Incremental-lowering call-edge differential: a multi-function module
+// (forward callee reference, chained calls, a call inside a conditional
+// branch) must lower to a statically CONNECTED IR module through BOTH
+// `lower_vaffle_to_ir` (whole-module) and `lower_vaffle_to_ir_incremental`
+// (persistent single-module driver), and all three evaluations (VAFFLE
+// reference, whole-module IR, incremental IR) must agree.
+//
+// This is the regression guard for the call-terminator bug: incremental
+// lowering used to emit call-site `Jmp`s to ghost abort ids that were never
+// emitted, orphaning every callee entry (reachable=3/N) — invisible to
+// block/stmt-count differentials, only visible to evaluation.
+// ============================================================================
+
+fn bits_to_u64(v: &[std::vec::Vec<bool>]) -> u64 {
+    let mut x = 0u64;
+    for (i, b) in v.iter().flatten().enumerate() {
+        if *b {
+            x |= 1 << i;
+        }
+    }
+    x
+}
+
+#[test]
+fn incremental_multifunction_call_eval_matches_whole() {
+    use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target as VTarget, Terminator, Value, ValueId};
+    use volar_ir_common::{IrType, Node, Stmt, TypeTable};
+
+    let mut types = TypeTable::new();
+    let bit = types.bit();
+    let u8_ty = types.intern(IrType::Vec(8, bit));
+    let sigs = vec![
+        SigDecl { params: vec![u8_ty, u8_ty], results: vec![u8_ty] }, // 0: main
+        SigDecl { params: vec![u8_ty], results: vec![u8_ty] },        // 1: helper
+    ];
+    let n = |kind: Value| Node::new(kind, (), None);
+    let tgt = |block: BlockId, args: Vec<ValueId>| VTarget { block, args, reentry: None };
+
+    // helper(x) = rol8(x, 3)
+    let helper = FuncBody {
+        sig: SigId(1),
+        entry: BlockId(0),
+        blocks: vec![Block {
+            params: vec![(ValueId(0), u8_ty)],
+            stmts: vec![ValueId(1)],
+            terminator: Terminator::Return { values: vec![ValueId(1)] },
+        }],
+        values: vec![
+            n(Value::Param { block: BlockId(0), ty: u8_ty, idx: 0 }),
+            n(Value::Op(Stmt::Rol { src: ValueId(0), ty: u8_ty, n: 3 })),
+        ],
+    };
+
+    // main(a, b):
+    //   t0 = helper(a); t1 = helper(b); t2 = helper(t0)   [chained call]
+    //   t3 = if t1 != 0 { helper(t2) } else { t1 }        [call in a branch]
+    //   return shuffle(even bits <- t0, odd bits <- t3)
+    //
+    // Call results are consumed via the producer convention: one
+    // `Value::Output` projection per result bit, merged into the wide value
+    // (`val_map` records only bit 0 under the call's own ValueId).
+    let u8v = |base: ValueId| -> Value {
+        // The eight `Output` projections sit at base-8 .. base-1.
+        Value::Op(Stmt::Merge {
+            parts: (0..8).map(|j| ValueId(base.0 - 8 + j)).collect(),
+            ty: u8_ty,
+        })
+    };
+    // Value id plan (main):
+    //   0..2 params; 2 = c0; 3..10 = Output{c0,j}; 11 = t0;
+    //   12 = c1; 13..20 = Output{c1,j}; 21 = t1;
+    //   22 = c2; 23..30 = Output{c2,j}; 31 = t2;
+    //   b1: 32..34 params; 35 = c3; 36..43 = Output{c3,j}; 44 = t3;
+    //   b2: 45..47 params; b3: 48..50 params; 51 = shuffle.
+    let (c0, t0) = (ValueId(2), ValueId(11));
+    let (c1, t1) = (ValueId(12), ValueId(21));
+    let (c2, t2) = (ValueId(22), ValueId(31));
+    let (c3, t3) = (ValueId(35), ValueId(44));
+    let m = ValueId(51);
+    let mut main_values: Vec<Node<Value, ()>> = vec![
+        n(Value::Param { block: BlockId(0), ty: u8_ty, idx: 0 }),
+        n(Value::Param { block: BlockId(0), ty: u8_ty, idx: 1 }),
+        n(Value::Call { func: FuncId(1), args: vec![ValueId(0)] }),
+    ];
+    for j in 0..8u8 {
+        main_values.push(n(Value::Output { value: c0, idx: j as usize }));
+    }
+    main_values.push(n(u8v(t0)));
+    main_values.push(n(Value::Call { func: FuncId(1), args: vec![t0] }));
+    for j in 0..8u8 {
+        main_values.push(n(Value::Output { value: c1, idx: j as usize }));
+    }
+    main_values.push(n(u8v(t1)));
+    main_values.push(n(Value::Call { func: FuncId(1), args: vec![t0] }));
+    for j in 0..8u8 {
+        main_values.push(n(Value::Output { value: c2, idx: j as usize }));
+    }
+    main_values.push(n(u8v(t2)));
+    // b1's param values (32..34), then its call/outputs/merge (35..44),
+    // then b2's params (45..47), b3's params (48..50).
+    for vid in 32..35u32 {
+        main_values.push(n(Value::Param {
+            block: BlockId(0),
+            ty: u8_ty,
+            idx: (vid - 32) as usize,
+        }));
+    }
+    main_values.push(n(Value::Call { func: FuncId(1), args: vec![ValueId(34)] }));
+    for j in 0..8u8 {
+        main_values.push(n(Value::Output { value: c3, idx: j as usize }));
+    }
+    main_values.push(n(u8v(t3)));
+    for vid in 45..51u32 {
+        main_values.push(n(Value::Param {
+            block: BlockId(0),
+            ty: u8_ty,
+            idx: (vid - 45) as usize,
+        }));
+    }
+    let mut rb = Vec::new();
+    for i in 0..8u8 {
+        rb.push((i, ValueId(48))); // even result bits <- r0
+        rb.push((i, ValueId(50))); // odd result bits <- r2
+    }
+    main_values.push(n(Value::Op(Stmt::Shuffle { result_bits: rb, ty: u8_ty })));
+
+    let mut b0_stmts = vec![c0];
+    for j in 0..8u8 {
+        b0_stmts.push(ValueId(3 + j as usize));
+    }
+    b0_stmts.push(t0);
+    b0_stmts.push(c1);
+    for j in 0..8u8 {
+        b0_stmts.push(ValueId(13 + j as usize));
+    }
+    b0_stmts.push(t1);
+    b0_stmts.push(c2);
+    for j in 0..8u8 {
+        b0_stmts.push(ValueId(23 + j as usize));
+    }
+    b0_stmts.push(t2);
+    let mut b1_stmts = vec![c3];
+    for j in 0..8u8 {
+        b1_stmts.push(ValueId(36 + j as usize));
+    }
+    b1_stmts.push(t3);
+
+    let main = FuncBody {
+        sig: SigId(0),
+        entry: BlockId(0),
+        blocks: vec![
+            Block {
+                params: vec![(ValueId(0), u8_ty), (ValueId(1), u8_ty)],
+                stmts: b0_stmts,
+                terminator: Terminator::IfNonzero {
+                    cond: t1,
+                    then_target: tgt(BlockId(1), vec![t0, t1, t2]),
+                    else_target: tgt(BlockId(2), vec![t0, t1, t2]),
+                },
+            },
+            Block {
+                params: vec![(ValueId(32), u8_ty), (ValueId(33), u8_ty), (ValueId(34), u8_ty)],
+                stmts: b1_stmts,
+                terminator: Terminator::Jump(tgt(
+                    BlockId(3),
+                    vec![ValueId(32), ValueId(33), t3],
+                )),
+            },
+            Block {
+                params: vec![(ValueId(45), u8_ty), (ValueId(46), u8_ty), (ValueId(47), u8_ty)],
+                stmts: vec![],
+                terminator: Terminator::Jump(tgt(
+                    BlockId(3),
+                    vec![ValueId(45), ValueId(46), ValueId(47)],
+                )),
+            },
+            Block {
+                params: vec![(ValueId(48), u8_ty), (ValueId(49), u8_ty), (ValueId(50), u8_ty)],
+                stmts: vec![m],
+                terminator: Terminator::Return { values: vec![m] },
+            },
+        ],
+        values: main_values,
+    };
+
+    fn build(
+        types: TypeTable,
+        main: FuncBody<()>,
+        helper: FuncBody<()>,
+        sigs: Vec<SigDecl>,
+    ) -> Module<()> {
+        Module {
+            pointer_width: vaffle::PointerWidth::Bits64,
+            types,
+            oracles: vec![],
+            actions: vec![],
+            funcs: vec![FuncDecl::Body(main), FuncDecl::Body(helper)],
+            sigs,
+            exports: Default::default(),
+            pre_init: vec![],
+        }
+    }
+    fn build_types() -> TypeTable {
+        let mut types = volar_ir_common::TypeTable::new();
+        let bit = types.bit();
+        let _ = types.intern(volar_ir_common::IrType::Vec(8, bit));
+        types
+    }
+    fn build_sigs() -> Vec<SigDecl> {
+        let mut types = build_types();
+        let bit = types.bit();
+        let u8_ty = types.intern(volar_ir_common::IrType::Vec(8, bit));
+        vec![
+            SigDecl { params: vec![u8_ty, u8_ty], results: vec![u8_ty] },
+            SigDecl { params: vec![u8_ty], results: vec![u8_ty] },
+        ]
+    }
+
+    // VAFFLE reference.
+    for a in [0x01u64, 0x5A, 0xFF] {
+        for b in [0x00u64, 0x81, 0xFF] {
+            let to_bits = |v: u64| (0..8).map(|i| (v >> i) & 1 == 1).collect::<Vec<bool>>();
+            let vaffle_out = volar_fuzz::interpreter::vaffle::eval_vaffle(
+                &build(build_types(), main.clone(), helper.clone(), build_sigs()),
+                FuncId(0),
+                &[to_bits(a), to_bits(b)],
+            )
+            .expect("vaffle eval");
+            // The VAFFLE interpreter is the ground truth; the two lowerings
+            // must agree with it (and each other).
+            let want = bits_to_u64(&vaffle_out);
+
+            // Whole-module lowering: connected + correct.
+            let (whole, whole_types) =
+                volar_vaffle_target::lower_vaffle_to_ir(&build(
+                    build_types(),
+                    main.clone(),
+                    helper.clone(),
+                    build_sigs(),
+                ));
+            if a == 0x01 && b == 0x00 {
+                for (bi, blk) in whole.blocks.iter().enumerate() {
+                    eprintln!(
+                        "IR b{bi}: params={:?} stmts={} term={:?}",
+                        blk.params,
+                        blk.stmts.len(),
+                        blk.terminator
+                    );
+                }
+            }
+            let reachable = count_reachable_from_entry(&whole);
+            assert_eq!(reachable, whole.blocks.len(), "whole module not fully reachable");
+            let whole_out = volar_fuzz::interpreter::ir::eval_ir_with_storage(
+                &whole,
+                &whole_types,
+                &[{
+                    let mut w = to_bits(a);
+                    w.extend(to_bits(b));
+                    w
+                }],
+            )
+            .0
+            .expect("whole IR eval");
+
+            // Incremental lowering: connected + correct + same block count.
+            let (inc, inc_types) = volar_vaffle_target::lower_vaffle_to_ir_incremental(build(
+                build_types(),
+                main.clone(),
+                helper.clone(),
+                build_sigs(),
+            ));
+            assert_eq!(inc.blocks.len(), whole.blocks.len(), "block count divergence");
+            let reachable = count_reachable_from_entry(&inc);
+            assert_eq!(reachable, inc.blocks.len(), "incremental module not fully reachable");
+            let inc_out = volar_fuzz::interpreter::ir::eval_ir_with_storage(
+                &inc,
+                &inc_types,
+                &[{
+                    let mut w = to_bits(a);
+                    w.extend(to_bits(b));
+                    w
+                }],
+            )
+            .0
+            .expect("incremental IR eval");
+            assert_eq!(bits_to_u64(&inc_out), want, "incremental IR a={a:#x} b={b:#x}");
+        }
+    }
+}
+
+/// DFS from the module entry over static edges; `Dyn` targets visit ALL
+/// blocks (the movfuscation layout's own convention). Returns the count of
+/// distinct blocks reached — a lowered module with proper call terminators
+/// must reach every block.
+fn count_reachable_from_entry(blocks: &volar_ir::ir::IRBlocks) -> usize {
+    use volar_ir::ir::{IRBlockTargetId, IRTerminator};
+    let n = blocks.blocks.len();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = vec![0usize];
+    while let Some(b) = stack.pop() {
+        if b >= n || !seen.insert(b) {
+            continue;
+        }
+        let mut push_all = |stack: &mut Vec<usize>| {
+            for i in 0..n {
+                stack.push(i);
+            }
+        };
+        match &blocks.blocks[b].terminator {
+            IRTerminator::Jmp { target } => match target.dest {
+                IRBlockTargetId::Block(id) => stack.push(id.0 as usize),
+                IRBlockTargetId::Dyn(_) => push_all(&mut stack),
+                _ => {}
+            },
+            IRTerminator::JumpCond { then_target, else_target, .. } => {
+                for t in [then_target, else_target] {
+                    match t.dest {
+                        IRBlockTargetId::Block(id) => stack.push(id.0 as usize),
+                        IRBlockTargetId::Dyn(_) => push_all(&mut stack),
+                        _ => {}
+                    }
+                }
+            }
+            IRTerminator::JumpTable { cases, .. } => {
+                for t in cases.values() {
+                    match t.dest {
+                        IRBlockTargetId::Block(id) => stack.push(id.0 as usize),
+                        IRBlockTargetId::Dyn(_) => push_all(&mut stack),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    seen.len()
 }

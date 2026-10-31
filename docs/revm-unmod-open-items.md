@@ -196,3 +196,57 @@ Guarded by the 12GB RSS kill-switch; it never fired.
    debug-assertion panic machinery at -O0 trips a lowering/eval
    param-threading off-by-one (35 args into 34 params). Not a bulk
    issue; document or fix the glint shape separately.
+
+## Incremental-lowering redesign (2026-10-31, call terminators)
+
+**Root cause of the movfuscation elision has TWO layers.**
+
+Layer 1 (FIXED, this change): `lower_vaffle_to_ir_incremental` lowered
+each function in a throwaway sub-module where every other function was
+an empty-name Import placeholder, so every `Value::Call`'s static jump
+targeted a GHOST abort id that was never emitted (empty-name
+placeholders reserve no sink slot), and continuation `Const`s carried
+un-rebased local block ids. Real callee entries were orphaned
+(reachable=3/5092, no `Dyn` ever reached) — invisible to
+block/stmt-count differentials, only visible to evaluation. Redesigned
+as a persistent single-module driver: one `LowerCtx` owning the module
+mutably, functions appended in sequence with dynamically assigned
+(final) block ids; a throwaway per-function SSA pre-pass records frame
+sizes up front (callee sizes exact before callees lower); a persistent
+function->entry map gives direct edges to already-lowered callees and
+records pending edges for the rest, resolved at the end (real entry,
+zero-return args truncated; deduped on-demand abort sinks for
+declaration-only imports).
+
+Layer 1b (FIXED, same change): cross-call spill collapsed WIDE values
+to one bit — `pack_bits` treats each var as a single bit position, and
+the call arm packed `val_map.required(key)` wires directly, so any
+multi-bit value spilled across a call reloaded as bit 0 (+ the reload
+wrote 1-bit wires back into `val_map`). The call arm now explodes each
+spilled key to its full bit width and re-merges on reload.
+
+Validated by `incremental_multifunction_call_eval_matches_whole`
+(volar-steel): a multi-function module (forward callee, chained calls,
+a call inside a branch) is FULLY statically reachable through both
+lowerings, block counts match whole-module lowering, and VAFFLE
+reference == whole-module IR == incremental IR on all vectors.
+Suites: vaffle-target 75/75, fuzz 91/91, lir 7/7, replay 4/4,
+ir-passes 177/177.
+
+Layer 2 (OPEN — the remaining revm elision): the import pipeline's
+`inline_vaffle_everything` leaves NO Body-to-Body calls, and the revm
+wasm32 module retains **73 `llvm::`-mangled Import declarations that
+are real internal Rust functions** (`ruint overflowing_add`,
+`slice starts_with/chunks_exact`, `from_raw_parts`, `drop_glue`
+variants, `OnceLock get_or_init`, `Into::into`, ...). Classic
+declare/define aliasing: call sites reference the `declare`d symbol
+while the worklist walked the `define`d one, so those callees became
+unresolved imports. The entry function's FIRST call targets one of
+them, and import calls lower as terminal abort sinks, orphaning
+everything downstream (probe facts: reachable=3/5092, 232 proper Dyn
+returns, 89 sink call sites, bodies=219 imports=73). Fix shape: in
+`volar-llvm-vaffle-import`, resolve declare/define aliasing when
+interning call targets (reuse the define's FuncId, or lower the
+define's body under the declare's id). Until then movfuscation of the
+revm module legitimately compresses only the reachable prefix
+(3.47M -> 8.5k stmts), NOT a lowering bug.

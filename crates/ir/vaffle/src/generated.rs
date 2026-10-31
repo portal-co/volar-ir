@@ -540,7 +540,7 @@ where
 }
 
 /// One VAFFLE function body with blocks, values, and an entry block.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FuncBody<P: Clone = ()> {
     pub sig: crate::SigId,
     pub blocks: alloc::vec::Vec<crate::Block>,

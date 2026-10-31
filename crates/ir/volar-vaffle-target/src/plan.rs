@@ -169,7 +169,7 @@ pub fn lower_vaffle_to_ir_planned_with_trace<P: Clone>(
     options: &LowerPlanOptions,
     mut sub_observer: Option<&mut dyn SubElementObserver<FuncId, Emit, VaffleIrTraceEvent>>,
 ) -> (IRBlocks<P>, IRTypes) {
-    let ssa_module = crate::vaffle_ssa::ssa_ify_module(module);
+    let mut ssa_module = crate::vaffle_ssa::ssa_ify_module(module);
 
     // Discovery only -- decides which functions are real-lowered vs.
     // placeholder-reserved below; does NOT drive resolution order.
@@ -185,20 +185,21 @@ pub fn lower_vaffle_to_ir_planned_with_trace<P: Clone>(
     .expect("VAFFLE call-graph discovery cannot fail: describe() is Infallible and never errors");
     let requested: BTreeSet<usize> = plan.nodes.iter().map(|n| n.node.0).collect();
 
-    let mut ctx = LowerCtx::new(&ssa_module);
+    let mut ctx = LowerCtx::new(&mut ssa_module);
     ctx.plan_functions();
     ctx.emit_entry_and_exit();
 
     let mut counter = SubElementCounter::new();
-    for (func_idx, func_decl) in ssa_module.funcs.iter().enumerate() {
-        let body = match func_decl {
-            FuncDecl::Body(b) => b,
-            _ => continue,
+    for func_idx in 0..ctx.func_count() {
+        // The context mutably borrows the module; take each body out, lower
+        // (or reserve) from the owned local, and put it back.
+        let Some(body) = ctx.take_body(func_idx) else {
+            continue;
         };
         if requested.contains(&func_idx) {
             let blocks_before = ctx.blocks_len();
             let extra_before = ctx.extra_blocks_len();
-            ctx.lower_function(func_idx, body);
+            ctx.lower_function(func_idx, &body);
             if let Some(obs) = sub_observer.as_deref_mut() {
                 let emitted = ctx.stmt_count_since(blocks_before, extra_before);
                 for _ in 0..emitted {
@@ -209,6 +210,7 @@ pub fn lower_vaffle_to_ir_planned_with_trace<P: Clone>(
         } else {
             ctx.reserve_placeholder_blocks(body.blocks.len());
         }
+        ctx.restore_body(func_idx, body);
     }
 
     ctx.append_extra_blocks();

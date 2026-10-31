@@ -84,8 +84,8 @@ use volar_lir::circuits::{
 /// expanded by call-site splitting).  The first function in the module is
 /// treated as the entry point.
 pub fn lower_vaffle_to_ir<P: Clone>(module: &Module<P>) -> (IRBlocks<P>, IRTypes) {
-    let ssa_module = crate::vaffle_ssa::ssa_ify_module(module);
-    let mut ctx = LowerCtx::new(&ssa_module);
+    let mut ssa_module = crate::vaffle_ssa::ssa_ify_module(module);
+    let mut ctx = LowerCtx::new(&mut ssa_module);
     ctx.lower_all();
     ctx.finish()
 }
@@ -96,8 +96,8 @@ pub fn lower_vaffle_to_ir<P: Clone>(module: &Module<P>) -> (IRBlocks<P>, IRTypes
 /// transfers its bodies into the SSA rewrite rather than cloning the complete
 /// input before lower-to-IR begins.
 pub fn lower_vaffle_to_ir_owned<P: Clone>(module: Module<P>) -> (IRBlocks<P>, IRTypes) {
-    let ssa_module = crate::vaffle_ssa::ssa_ify_module_owned(module);
-    let mut ctx = LowerCtx::new(&ssa_module);
+    let mut ssa_module = crate::vaffle_ssa::ssa_ify_module_owned(module);
+    let mut ctx = LowerCtx::new(&mut ssa_module);
     ctx.lower_all();
     ctx.finish()
 }
@@ -116,178 +116,42 @@ pub fn lower_vaffle_to_ir_owned<P: Clone>(module: Module<P>) -> (IRBlocks<P>, IR
 /// every callee as the entry (SP seeding differs). Per-function lowering
 /// must not intern new types beyond what whole-module lowering would (the
 /// debug assertion on the types table catches a violation).
+/// Incremental counterpart to [`lower_vaffle_to_ir_owned`]: one persistent
+/// [`LowerCtx`], functions appended to a single block sequence.
+///
+/// Per the call protocol (module doc): a VAFFLE `Value::Call` lowers to a
+/// STATIC jump to the callee's entry block, and the callee's `Return` lowers
+/// to a `Dyn` jump back to the caller's continuation — Volar IR has no call
+/// statements, so every cross-function edge must be a real terminator edge.
+/// This driver makes that hold for every function without holding all SSA'd
+/// bodies at once:
+///
+/// 1. `plan_functions_dynamic` records every function's frame layout from a
+///    throwaway per-function SSA (facts dropped immediately — peak memory is
+///    the raw module plus one SSA'd body), so a call site knows its callee's
+///    frame size even before the callee lowers.
+/// 2. Functions lower in sequence (entry first), each SSA-ified, lowered
+///    into the shared block sequence, then dropped. Block ids are assigned
+///    dynamically — absolute and final at emission — so continuation `Const`s
+///    and intra-function targets never need rebasing.
+/// 3. `func_info[fi].entry_block` is the persistent function-to-entry map: a
+///    call to an already-lowered callee emits its real static edge directly;
+///    a call to a not-yet-lowered callee records a pending edge (jump-piece
+///    block id, callee, arg count to keep) and the final
+///    `resolve_pending_call_edges` pass retargets it once the entry arrives
+///    (or to a deduped on-demand abort sink for declaration-only imports).
 pub fn lower_vaffle_to_ir_incremental<P: Clone>(mut module: Module<P>) -> (IRBlocks<P>, IRTypes) {
     let entry_fi = module
         .funcs
         .iter()
         .position(|f| matches!(f, FuncDecl::Body(_)))
         .unwrap_or(0);
-    let func_sigs = crate::vaffle_ssa::module_func_sigs(&module.funcs);
-    let sp_step = crate::vaffle_ssa::compute_sp_step(&module);
-    let mut out = IRBlocks {
-        oracles: module.oracles.clone(),
-        actions: module.actions.clone(),
-        rngs: Default::default(),
-        blocks: alloc::vec::Vec::new(),
-        pre_init: module.pre_init.clone(),
-    };
-    let mut out_types: Option<IRTypes> = None;
-    // The ENTRY function lowers first (it owns the module scaffold);
-    // everything else lowers with reserved-but-empty ids 0/1.
-    let mut order: alloc::vec::Vec<usize> = (0..module.funcs.len()).collect();
-    if let Some(pos) = order.iter().position(|&f| f == entry_fi) {
-        order.remove(pos);
-        order.insert(0, entry_fi);
-    }
-    for fi in order {
-        let f = core::mem::replace(
-            &mut module.funcs[fi],
-            FuncDecl::Import {
-                module: alloc::string::String::new(),
-                name: alloc::string::String::new(),
-                sig: SigId(0),
-            },
-        );
-        let body = match f {
-            FuncDecl::Body(b) => b,
-            other => {
-                module.funcs[fi] = other;
-                continue;
-            }
-        };
-        // Per-function SSA with the ORIGINAL entry flag.
-        let mut types = module.types.clone();
-        let bit_tid = types.bit();
-        let addr_tid = types.intern(IrType::Vec(
-            crate::vaffle_ssa::SPILL_ADDR_BITS,
-            bit_tid,
-        ));
-        let this_sig = body.sig;
-        let ssa_body = crate::vaffle_ssa::ssa_ify_function_owned(
-            &module,
-            body,
-            &func_sigs,
-            addr_tid,
-            bit_tid,
-            sp_step,
-            fi == entry_fi,
-            entry_fi,
-        );
-        // ALL functions stay present as sig-preserving Import decls so
-        // call lowering can resolve callee layouts; only the current
-        // body is real, keeping peak memory to one body's representations.
-        let mut sub_funcs: alloc::vec::Vec<FuncDecl<P>> = module
-            .funcs
-            .iter()
-            .map(|g| match g {
-                FuncDecl::Import {
-                    module: m,
-                    name,
-                    sig,
-                } => FuncDecl::Import {
-                    module: m.clone(),
-                    name: name.clone(),
-                    sig: *sig,
-                },
-                FuncDecl::Body(b) => FuncDecl::Import {
-                    module: alloc::string::String::new(),
-                    name: alloc::string::String::new(),
-                    sig: b.sig,
-                },
-                _ => FuncDecl::Import {
-                    module: alloc::string::String::new(),
-                    name: alloc::string::String::new(),
-                    sig: SigId(0),
-                },
-            })
-            .collect();
-        sub_funcs[fi] = FuncDecl::Body(ssa_body);
-        let _ = this_sig;
-        let sub = Module {
-            pointer_width: module.pointer_width,
-            types,
-            oracles: Default::default(),
-            actions: Default::default(),
-            funcs: sub_funcs,
-            sigs: module.sigs.clone(),
-            exports: Default::default(),
-            pre_init: Default::default(),
-        };
-        let mut ctx = LowerCtx::new(&sub);
-        let first = fi == entry_fi;
-        ctx.lower_all_with(first, first);
-        let (blocks, types) = ctx.finish();
-        if let Some(prev) = &out_types {
-            debug_assert_eq!(
-                prev.0.as_slice(),
-                types.0.as_slice(),
-                "lower_vaffle_to_ir_incremental: per-function type tables diverged"
-            );
-        } else {
-            out_types = Some(types);
-        }
-        // Rebase this function's block ids into the output. The first
-        // (entry) sub-module lowers the scaffold itself: identity. Later
-        // sub-modules reserved empty ids 0/1 and emitted at planned ids
-        // >= 2: exit references (local 1) keep targeting the GLOBAL exit;
-        // everything else shifts to base + (id - 2).
-        let base = out.blocks.len() as u32;
-        let map = |x: u32| -> u32 {
-            if first {
-                x
-            } else if x == 1 {
-                1
-            } else {
-                base + x - 2
-            }
-        };
-        for mut blk in blocks.blocks {
-            blk.terminator = rebase_ir_terminator_blocks(blk.terminator, map);
-            out.blocks.push(blk);
-        }
-    }
-    (
-        out,
-        out_types.expect("incremental lowering produced no typed blocks"),
-    )
-}
-
-/// Shift every concrete block target of `term` forward by `base`.
-fn rebase_ir_terminator_blocks(
-    term: IRTerminator<IRVarId>,
-    map: impl Fn(u32) -> u32,
-) -> IRTerminator<IRVarId> {
-    let shift_target = |t: &mut IRBranchTarget<IRVarId>| {
-        if let IRBlockTargetId::Block(bid) = &mut t.dest {
-            bid.0 = map(bid.0);
-        }
-    };
-    match term {
-        IRTerminator::Jmp { mut target } => {
-            shift_target(&mut target);
-            IRTerminator::Jmp { target }
-        }
-        IRTerminator::JumpCond {
-            condition,
-            mut then_target,
-            mut else_target,
-        } => {
-            shift_target(&mut then_target);
-            shift_target(&mut else_target);
-            IRTerminator::JumpCond {
-                condition,
-                then_target,
-                else_target,
-            }
-        }
-        IRTerminator::JumpTable { index, mut cases } => {
-            for t in cases.values_mut() {
-                shift_target(t);
-            }
-            IRTerminator::JumpTable { index, cases }
-        }
-        other => other,
-    }
+    let mut ctx = LowerCtx::new(&mut module);
+    ctx.dyn_alloc = true;
+    ctx.plan_functions_dynamic();
+    ctx.lower_all_dynamic(entry_fi);
+    ctx.resolve_pending_call_edges();
+    ctx.finish()
 }
 
 /// Lower a VAFFLE module that may contain a statement-free entry body.
@@ -299,8 +163,8 @@ pub fn lower_vaffle_to_ir_with_control_provenance<P: Clone>(
     module: &Module<P>,
     control_prov: &P,
 ) -> (IRBlocks<P>, IRTypes) {
-    let ssa_module = crate::vaffle_ssa::ssa_ify_module(module);
-    let mut ctx = LowerCtx::new_with_control_provenance(&ssa_module, control_prov.clone());
+    let mut ssa_module = crate::vaffle_ssa::ssa_ify_module(module);
+    let mut ctx = LowerCtx::new_with_control_provenance(&mut ssa_module, control_prov.clone());
     ctx.lower_all();
     ctx.finish()
 }
@@ -339,8 +203,8 @@ pub fn lower_vaffle_to_ir_fully_inlined<P: Clone>(
 pub fn lower_vaffle_to_ir_with_spill_trace<P: Clone>(
     module: &Module<P>,
 ) -> (IRBlocks<P>, IRTypes, alloc::vec::Vec<alloc::string::String>) {
-    let ssa_module = crate::vaffle_ssa::ssa_ify_module(module);
-    let mut ctx = LowerCtx::new(&ssa_module);
+    let mut ssa_module = crate::vaffle_ssa::ssa_ify_module(module);
+    let mut ctx = LowerCtx::new(&mut ssa_module);
     ctx.lower_all();
     let trace = ctx.spill_trace.clone();
     let (blocks, types) = ctx.finish();
@@ -585,6 +449,11 @@ fn remap_type_id(
 
 struct FuncInfo {
     /// Index of the function's entry block in the global blocks array.
+    /// This is the persistent function-to-entry map: call sites consult it
+    /// to emit a real static jump edge. Planned (whole-module) mode assigns
+    /// it in `plan_functions`; dynamic (persistent-incremental) mode assigns
+    /// it when the function actually lowers, and call sites whose callee is
+    /// still `None` record a pending edge for the final resolve pass.
     /// Declaration-only imports have no body and therefore no entry block.
     entry_block: Option<usize>,
     /// Reserved abort sink for a declaration-only import. It accepts the
@@ -611,7 +480,7 @@ struct FuncInfo {
 }
 
 pub(crate) struct LowerCtx<'m, P: Clone = ()> {
-    module: &'m Module<P>,
+    module: &'m mut Module<P>,
     /// First `FuncDecl::Body` index (the module entry function). The
     /// scaffold's provenance reads THIS function, not funcs[0] — an
     /// import-first module has no body at 0.
@@ -637,6 +506,25 @@ pub(crate) struct LowerCtx<'m, P: Clone = ()> {
     /// call from an earlier function can't see that a later function's own
     /// reserved entry-block slot still sits unfilled ahead of it.
     total_blocks: usize,
+    /// Dynamic-allocation mode (persistent-incremental lowering): block ids
+    /// are assigned as functions lower instead of being pre-planned, so all
+    /// ids are absolute and final at emission (continuation `Const`s and
+    /// intra-function targets never need rebasing). Unknown callees record
+    /// pending edges instead of targeting pre-planned abort slots.
+    dyn_alloc: bool,
+    /// Dynamic mode, per lowered function: vaffle block index -> IR id of
+    /// the block's FIRST piece (call splitting gives a block one piece per
+    /// `Value::Call` plus one for the terminator). Reset per function.
+    vaffle_ir_first: Vec<u32>,
+    /// Dynamic mode: call edges to not-yet-lowered callees, as
+    /// `(jump piece block id, callee func idx, args length to KEEP)`. The
+    /// recorded edge's args carry appended zero-return bits for import-sink
+    /// arity; `keep` is the length before them, so resolution to a real
+    /// entry truncates them off.
+    pending_call_edges: Vec<(u32, usize, usize)>,
+    /// Dynamic mode: deduped on-demand abort sinks for declaration-only
+    /// imports (func idx -> sink block id), built during edge resolution.
+    import_sink_ids: BTreeMap<usize, u32>,
     pre_init: alloc::vec::Vec<volar_ir_common::PreInitSegment>,
     /// Temporary diagnostic: logs every cross-block spill/reload's own
     /// `(vaffle_block, vid, address)`, for tracing write-vs-read mismatches
@@ -649,12 +537,25 @@ pub(crate) struct LowerCtx<'m, P: Clone = ()> {
 }
 
 impl<'m, P: Clone> LowerCtx<'m, P> {
-    pub(crate) fn new(module: &'m Module<P>) -> Self {
+    pub(crate) fn new(module: &'m mut Module<P>) -> Self {
         let pointer_bits = module.pointer_width.bits();
         let mut types = IRTypes::new();
         types.push(IrType::Primitive(Type::Bit)); // index 0 = BIT_TID
         types.push(IrType::Vec(pointer_bits, BIT_TID)); // index 1 = ADDR_TID
         types.push(IrType::Vec(PACK_W, BIT_TID)); // index 2 = PACK_TID
+
+        // The SSA rewrite threads a `SPILL_ADDR_BITS`-wide stack-pointer
+        // parameter onto every non-entry function's entry block (and appends
+        // SP bits to every call's args), interning this VAFFLE type into the
+        // module's table. The persistent (dynamic) lowering builds its type
+        // map BEFORE any function's SSA runs, so intern it up front —
+        // idempotent for the planned paths, where `ssa_ify_module` already
+        // interned it into the table this constructor receives.
+        let vaffle_bit = module.types.bit();
+        let _sp_addr_vtid =
+            module
+                .types
+                .intern(IrType::Vec(crate::vaffle_ssa::SPILL_ADDR_BITS, vaffle_bit));
 
         // Build a mapping from VAFFLE TypeId → IR TypeId by interning each
         // VAFFLE type into the IR type table (recursively remapping inner refs).
@@ -752,13 +653,17 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             actions,
             extra_blocks: Vec::new(),
             total_blocks: 0,
+            dyn_alloc: false,
+            vaffle_ir_first: Vec::new(),
+            pending_call_edges: Vec::new(),
+            import_sink_ids: BTreeMap::new(),
             pre_init,
             spill_trace: Vec::new(),
             control_prov: None,
         }
     }
 
-    fn new_with_control_provenance(module: &'m Module<P>, control_prov: P) -> Self {
+    fn new_with_control_provenance(module: &'m mut Module<P>, control_prov: P) -> Self {
         let mut ctx = Self::new(module);
         ctx.control_prov = Some(control_prov);
         ctx
@@ -787,17 +692,12 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         types.intern(IrType::Block { params })
     }
 
-    fn import_func_info(&mut self, sig: &SigDecl, abort_block: usize) -> FuncInfo {
-        let n_params: usize = sig
-            .params
-            .iter()
-            .map(|&vtid| ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize]))
-            .sum();
-        let total_ret_bits: usize = sig
-            .results
-            .iter()
-            .map(|&vtid| ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize]))
-            .sum();
+    fn import_func_info(
+        &mut self,
+        n_params: usize,
+        total_ret_bits: usize,
+        abort_block: Option<usize>,
+    ) -> FuncInfo {
         let n_param_words = n_packs(n_params);
         let n_ret_words = n_packs(total_ret_bits);
         let ret = (total_ret_bits > 0).then_some((0, n_ret_words as u64, PACK_TID));
@@ -814,7 +714,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
 
         FuncInfo {
             entry_block: None,
-            abort_block: Some(abort_block),
+            abort_block,
             callee_layout: callee_layout.clone(),
             own_layout: callee_layout,
             n_param_words,
@@ -828,131 +728,188 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     // ---- Planning ----------------------------------------------------------
 
     pub(crate) fn plan_functions(&mut self) {
+        // Snapshot pass: the module is borrowed mutably by the context, so
+        // collect every fact this planning needs from it BEFORE any `&mut
+        // self` call below (the borrow checker no longer allows interleaving
+        // module reads with method calls the way a shared `&'m Module` did).
+        enum Snap {
+            Body {
+                n_blocks: usize,
+                n_params: usize,
+                n_values: usize,
+                cross: BTreeSet<usize>,
+                width: (usize, usize), // (entry-param bits, sig result bits)
+            },
+            Import {
+                name_empty: bool,
+                width: (usize, usize),
+            },
+            Skip,
+        }
+        let mut snaps: Vec<Snap> = Vec::with_capacity(self.module.funcs.len());
+        for func_decl in &self.module.funcs {
+            match func_decl {
+                FuncDecl::Body(b) => {
+                    let sig = &self.module.sigs[b.sig.0];
+                    // Total bit-width of all *entry-block* params -- deliberately
+                    // NOT `sig.params` (a producer is free to make the entry
+                    // block's own param list wider than the function's declared
+                    // signature; `vaffle_ssa::ssa_ify_function` does exactly this,
+                    // threading an extra `SPILL_ADDR_BITS`-wide SP param onto every
+                    // non-entry function's entry block -- see its own module doc
+                    // -- without touching `module.sigs`, since that SP is a
+                    // lowering-internal detail, not a real logical parameter).
+                    // `lower_vaffle_to_ir` always runs `ssa_ify_module` first, and
+                    // `wire_call_sites` appends that same SP's bits to every
+                    // `Value::Call`/`Terminator::ReturnCall`'s own `args` -- so the
+                    // call site's packed arg-word count and the callee's own
+                    // declared entry-param-word count must agree on *this* wider
+                    // shape, or the callee's entry block receives the wrong number
+                    // of packed words (confirmed: computing this from `sig.params`
+                    // instead reproducibly desyncs by exactly `SPILL_ADDR_BITS`
+                    // bits for any non-entry function, i.e. any function reachable
+                    // via an internal call). For the entry function itself (no SP
+                    // threading, see `ssa_ify_function`'s "Phase 1" comment) the
+                    // entry block's own params are exactly the logical params, so
+                    // this agrees with `sig.params` there too -- reading from the
+                    // block is strictly more correct, never different when the two
+                    // could otherwise agree.
+                    let n_params: usize = b.blocks[b.entry.0]
+                        .params
+                        .iter()
+                        .map(|&(_vid, vtid)| {
+                            ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize])
+                        })
+                        .sum();
+                    let total_ret_bits: usize = sig
+                        .results
+                        .iter()
+                        .map(|&vtid| {
+                            ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize])
+                        })
+                        .sum();
+                    snaps.push(Snap::Body {
+                        n_blocks: b.blocks.len(),
+                        n_params,
+                        n_values: b.values.len(),
+                        cross: compute_cross_block_values(b),
+                        width: (n_params, total_ret_bits),
+                    });
+                }
+                FuncDecl::Import { name, sig, .. } => {
+                    let sigd = &self.module.sigs[sig.0];
+                    let width = (
+                        sigd.params
+                            .iter()
+                            .map(|&vtid| {
+                                ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize])
+                            })
+                            .sum(),
+                        sigd.results
+                            .iter()
+                            .map(|&vtid| {
+                                ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize])
+                            })
+                            .sum(),
+                    );
+                    snaps.push(Snap::Import {
+                        name_empty: name.is_empty(),
+                        width,
+                    });
+                }
+                _ => snaps.push(Snap::Skip),
+            }
+        }
+
         // Reserve block 0 for the module entry; block 1 for the exit continuation.
         let mut block_offset = 2usize;
 
-        for func_decl in &self.module.funcs {
-            let body = match func_decl {
-                FuncDecl::Body(b) => b,
-                FuncDecl::Import { name, sig, .. } => {
-                    let import_info = self.import_func_info(&self.module.sigs[sig.0], block_offset);
-                    self.func_info.push(import_info);
+        for snap in snaps {
+            match snap {
+                Snap::Skip => continue,
+                Snap::Import {
+                    name_empty,
+                    width: (param_bits, ret_bits),
+                } => {
                     // Empty-name imports are the incremental lowering's
-                    // placeholders for not-yet-lowered bodies — they get
+                    // placeholders for not-yet-lowered bodies -- they get
                     // real sub-module lowerings instead of abort sinks, so
                     // they reserve no sink slot (matching the emission
-                    // gate in lower_all_with).
-                    if !name.is_empty() {
+                    // gate in lower_all_with). Dynamic mode reserves no
+                    // slots at all (abort_block stays None; sinks are
+                    // built on demand) -- see plan_functions_dynamic.
+                    let abort = (!name_empty).then_some(block_offset);
+                    if !name_empty {
                         block_offset += 1;
                     }
-                    continue;
+                    let import_info = self.import_func_info(param_bits, ret_bits, abort);
+                    self.func_info.push(import_info);
                 }
-                _ => continue,
-            };
+                Snap::Body {
+                    n_blocks,
+                    n_params,
+                    n_values,
+                    cross,
+                    width: (_, total_ret_bits),
+                } => {
+                    let n_ret_words = n_packs(total_ret_bits);
 
-            let sig = &self.module.sigs[body.sig.0];
-            // Total bit-width of all *entry-block* params -- deliberately
-            // NOT `sig.params` (a producer is free to make the entry
-            // block's own param list wider than the function's declared
-            // signature; `vaffle_ssa::ssa_ify_function` does exactly this,
-            // threading an extra `SPILL_ADDR_BITS`-wide SP param onto every
-            // non-entry function's entry block -- see its own module doc
-            // -- without touching `module.sigs`, since that SP is a
-            // lowering-internal detail, not a real logical parameter).
-            // `lower_vaffle_to_ir` always runs `ssa_ify_module` first, and
-            // `wire_call_sites` appends that same SP's bits to every
-            // `Value::Call`/`Terminator::ReturnCall`'s own `args` -- so the
-            // call site's packed arg-word count and the callee's own
-            // declared entry-param-word count must agree on *this* wider
-            // shape, or the callee's entry block receives the wrong number
-            // of packed words (confirmed: computing this from `sig.params`
-            // instead reproducibly desyncs by exactly `SPILL_ADDR_BITS`
-            // bits for any non-entry function, i.e. any function reachable
-            // via an internal call). For the entry function itself (no SP
-            // threading, see `ssa_ify_function`'s "Phase 1" comment) the
-            // entry block's own params are exactly the logical params, so
-            // this agrees with `sig.params` there too -- reading from the
-            // block is strictly more correct, never different when the two
-            // could otherwise agree.
-            let n_params: usize = body.blocks[body.entry.0]
-                .params
-                .iter()
-                .map(|&(_vid, vtid)| {
-                    let ir_tid = self.type_map[vtid.0 as usize];
-                    ir_type_bit_width(&self.types, ir_tid)
-                })
-                .sum();
-            let n_values = body.values.len();
+                    let mut offset = 0u64;
+                    let ret = if total_ret_bits > 0 {
+                        let o = offset;
+                        offset += n_ret_words as u64;
+                        Some((o, n_ret_words as u64, PACK_TID))
+                    } else {
+                        None
+                    };
+                    let cont_ty =
+                        Some(Self::intern_cont_block_shape(&mut self.types, self.pointer_bits, total_ret_bits));
+                    let callee_size = offset;
 
-            // Total bit-width of all return values (supports multi-bit types).
-            let total_ret_bits: usize = sig
-                .results
-                .iter()
-                .map(|&vtid| {
-                    let ir_tid = self.type_map[vtid.0 as usize];
-                    ir_type_bit_width(&self.types, ir_tid)
-                })
-                .sum();
+                    let callee_layout = FrameLayout {
+                        params: vec![],
+                        ret,
+                        cont_ty,
+                        spill_base: 0,
+                        n_spill: 0,
+                        size: callee_size,
+                        storage: StorageId::STACK,
+                    };
 
-            // Callee layout: params are now passed as entry-block params (not
-            // written to the frame), so the frame only needs ret + cont slots.
-            let n_param_words = n_packs(n_params);
-            let n_ret_words = n_packs(total_ret_bits);
+                    // Own layout: this function's call-spill slots (packed words).
+                    let n_spill_words = n_packs(n_values) as u64;
+                    let spill_base = callee_size;
 
-            let mut offset = 0u64;
-            let ret = if total_ret_bits > 0 {
-                let o = offset;
-                offset += n_ret_words as u64;
-                Some((o, n_ret_words as u64, PACK_TID))
-            } else {
-                None
-            };
-            let cont_ty = Some(self.intern_cont_block_type(total_ret_bits));
-            let callee_size = offset;
+                    // Cross-block value slots: a genuinely separate, individually
+                    // `Bit`-typed region placed right after the packed call-spill
+                    // region (see `compute_cross_block_values`'s own doc comment).
+                    let cross_block_base = spill_base + n_spill_words;
+                    let own_size = cross_block_base + n_values as u64;
 
-            let callee_layout = FrameLayout {
-                params: vec![],
-                ret,
-                cont_ty,
-                spill_base: 0,
-                n_spill: 0,
-                size: callee_size,
-                storage: StorageId::STACK,
-            };
+                    let own_layout = FrameLayout {
+                        params: vec![],
+                        ret: callee_layout.ret,
+                        cont_ty,
+                        spill_base,
+                        n_spill: n_spill_words,
+                        size: own_size,
+                        storage: StorageId::STACK,
+                    };
 
-            // Own layout: this function's call-spill slots (packed words).
-            let n_spill_words = n_packs(n_values) as u64;
-            let spill_base = callee_size;
-
-            // Cross-block value slots: a genuinely separate, individually
-            // `Bit`-typed region placed right after the packed call-spill
-            // region (see `compute_cross_block_values`'s own doc comment).
-            let cross_block_values = compute_cross_block_values(body);
-            let cross_block_base = spill_base + n_spill_words;
-            let own_size = cross_block_base + n_values as u64;
-
-            let own_layout = FrameLayout {
-                params: vec![],
-                ret: callee_layout.ret,
-                cont_ty,
-                spill_base,
-                n_spill: n_spill_words,
-                size: own_size,
-                storage: StorageId::STACK,
-            };
-
-            self.func_info.push(FuncInfo {
-                entry_block: Some(block_offset),
-                abort_block: None,
-                callee_layout,
-                own_layout,
-                n_param_words,
-                n_params,
-                cross_block_values,
-                cross_block_base,
-                total_ret_bits,
-            });
-            block_offset += body.blocks.len();
+                    self.func_info.push(FuncInfo {
+                        entry_block: Some(block_offset),
+                        abort_block: None,
+                        callee_layout,
+                        own_layout,
+                        n_param_words: n_packs(n_params),
+                        n_params,
+                        cross_block_values: cross,
+                        cross_block_base,
+                        total_ret_bits,
+                    });
+                    block_offset += n_blocks;
+                }
+            }
         }
         self.total_blocks = block_offset;
     }
@@ -1014,20 +971,377 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             self.emit_entry_and_exit();
         }
 
-        for (func_idx, func_decl) in self.module.funcs.iter().enumerate() {
-            match func_decl {
-                FuncDecl::Body(body) => self.lower_function(func_idx, body),
-                FuncDecl::Import { name, .. } => {
-                    if import_sinks && !name.is_empty() {
+        // The module is borrowed mutably by the context, so take each body
+        // out one at a time, lower it from the owned local, and put it back.
+        for func_idx in 0..self.module.funcs.len() {
+            let taken = core::mem::replace(
+                &mut self.module.funcs[func_idx],
+                FuncDecl::Import {
+                    module: alloc::string::String::new(),
+                    name: alloc::string::String::new(),
+                    sig: SigId(0),
+                },
+            );
+            match taken {
+                FuncDecl::Body(body) => {
+                    self.lower_function(func_idx, &body);
+                    self.module.funcs[func_idx] = FuncDecl::Body(body);
+                }
+                FuncDecl::Import { name, sig, .. } => {
+                    let name_empty = name.is_empty();
+                    self.module.funcs[func_idx] = FuncDecl::Import {
+                        module: alloc::string::String::new(),
+                        name,
+                        sig,
+                    };
+                    if import_sinks && !name_empty {
                         self.lower_import_abort_sink(func_idx);
                     }
                 }
-                _ => continue,
+                _ => {}
             }
         }
 
         // Append extra blocks (continuations created by call splitting).
         self.blocks.append(&mut self.extra_blocks);
+    }
+
+    // ---- Persistent-incremental (dynamic) lowering -------------------------
+
+    /// Planning for [`lower_vaffle_to_ir_incremental`]: compute EVERY
+    /// function's frame layout up front — each body is SSA-ified once in a
+    /// throwaway pass whose two layout facts (SSA value count, entry-param
+    /// bit width) are recorded and then dropped, so peak memory is the raw
+    /// module plus one SSA'd body. With layouts complete before any function
+    /// lowers, a call site knows its callee's exact frame size even when the
+    /// callee has not lowered yet.
+    ///
+    /// `entry_block` stays `None` until the function actually lowers — that
+    /// None-ness is the persistent map's "unknown" state: call sites emit a
+    /// pending edge and the final resolve pass retargets it. Imports reserve
+    /// no abort slot here (sinks are built on demand, deduped, at resolve).
+    fn plan_functions_dynamic(&mut self) {
+        let entry_fi = self.entry_fi;
+        let func_sigs = crate::vaffle_ssa::module_func_sigs(&self.module.funcs);
+        let sp_step = crate::vaffle_ssa::compute_sp_step(self.module);
+        // ---- Phase A: per-Body layout facts via throwaway SSA ----
+        let mut facts: Vec<Option<(usize, usize)>> =
+            alloc::vec![None; self.module.funcs.len()];
+        for fi in 0..self.module.funcs.len() {
+            let taken = core::mem::replace(
+                &mut self.module.funcs[fi],
+                FuncDecl::Import {
+                    module: alloc::string::String::new(),
+                    name: alloc::string::String::new(),
+                    sig: SigId(0),
+                },
+            );
+            match taken {
+                FuncDecl::Body(body) => {
+                    let mut types = self.module.types.clone();
+                    let bit_tid = types.bit();
+                    let addr_tid =
+                        types.intern(IrType::Vec(crate::vaffle_ssa::SPILL_ADDR_BITS, bit_tid));
+                    let ssa = crate::vaffle_ssa::ssa_ify_function_owned(
+                        self.module,
+                        body.clone(),
+                        &func_sigs,
+                        addr_tid,
+                        bit_tid,
+                        sp_step,
+                        fi == entry_fi,
+                        entry_fi,
+                    );
+                    let n_values = ssa.values.len();
+                    let n_entry_param_bits: usize = ssa.blocks[ssa.entry.0]
+                        .params
+                        .iter()
+                        .map(|&(_, vtid)| {
+                            // Widths go against the IR table (`self.types`)
+                            // via the VAFFLE→IR map — the throwaway `types`
+                            // clone here is the VAFFLE table used only for
+                            // the SSA pass's own addr/bit TypeIds.
+                            let _ = &types;
+                            ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize])
+                        })
+                        .sum();
+                    facts[fi] = Some((n_values, n_entry_param_bits));
+                    drop(ssa);
+                    drop(types);
+                    self.module.funcs[fi] = FuncDecl::Body(body);
+                }
+                other => {
+                    self.module.funcs[fi] = other;
+                }
+            }
+        }
+        // ---- Phase B: func_info for every function (entry_block: None) ----
+        let sig_ids: Vec<SigId> = self
+            .module
+            .funcs
+            .iter()
+            .map(|d| match d {
+                FuncDecl::Body(b) => b.sig,
+                FuncDecl::Import { sig, .. } => *sig,
+                _ => SigId(0),
+            })
+            .collect();
+        let widths: Vec<(usize, usize)> = sig_ids
+            .iter()
+            .map(|sid| {
+                let sig = &self.module.sigs[sid.0];
+                let params = sig
+                    .params
+                    .iter()
+                    .map(|&vtid| ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize]))
+                    .sum();
+                let results = sig
+                    .results
+                    .iter()
+                    .map(|&vtid| ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize]))
+                    .sum();
+                (params, results)
+            })
+            .collect();
+        self.func_info.clear();
+        for fi in 0..sig_ids.len() {
+            let (param_bits, ret_bits) = widths[fi];
+            let is_body = matches!(self.module.funcs[fi], FuncDecl::Body(_));
+            let info = if is_body {
+                let (n_values, n_params) =
+                    facts[fi].expect("Body function must have recorded layout facts");
+                self.body_func_info_dynamic(n_params, n_values, ret_bits)
+            } else {
+                self.import_func_info(param_bits, ret_bits, None)
+            };
+            self.func_info.push(info);
+        }
+    }
+
+    /// Body layout arithmetic mirroring `plan_functions`' Body arm, with the
+    /// SSA'd body's facts supplied by the throwaway pre-pass instead of read
+    /// from a resident body. `param_bits` is unused here (n_params already
+    /// carries the entry-param bit width).
+    fn body_func_info_dynamic(&mut self, n_params: usize, n_values: usize, ret_bits: usize) -> FuncInfo {
+        let total_ret_bits = ret_bits;
+        let n_ret_words = n_packs(total_ret_bits);
+        let ret = (total_ret_bits > 0).then_some((0, n_ret_words as u64, PACK_TID));
+        let cont_ty =
+            Some(Self::intern_cont_block_shape(&mut self.types, self.pointer_bits, total_ret_bits));
+        let callee_size = n_ret_words as u64;
+        let callee_layout = FrameLayout {
+            params: vec![],
+            ret,
+            cont_ty,
+            spill_base: 0,
+            n_spill: 0,
+            size: callee_size,
+            storage: StorageId::STACK,
+        };
+        let n_spill_words = n_packs(n_values) as u64;
+        let spill_base = callee_size;
+        let cross_block_base = spill_base + n_spill_words;
+        let own_layout = FrameLayout {
+            params: vec![],
+            ret: callee_layout.ret,
+            cont_ty,
+            spill_base,
+            n_spill: n_spill_words,
+            size: cross_block_base + n_values as u64,
+            storage: StorageId::STACK,
+        };
+        FuncInfo {
+            entry_block: None,
+            abort_block: None,
+            callee_layout,
+            own_layout,
+            n_param_words: n_packs(n_params),
+            n_params,
+            total_ret_bits,
+            cross_block_values: BTreeSet::new(),
+            cross_block_base,
+        }
+    }
+
+    /// Lower every Body function into the shared block sequence (entry
+    /// first), one SSA'd body at a time. Block ids are absolute and final at
+    /// emission; edges to not-yet-lowered callees sit in
+    /// `pending_call_edges` until `resolve_pending_call_edges` runs.
+    fn lower_all_dynamic(&mut self, entry_fi: usize) {
+        self.emit_entry_and_exit();
+        let mut order: Vec<usize> = (0..self.module.funcs.len()).collect();
+        if let Some(pos) = order.iter().position(|&f| f == entry_fi) {
+            order.remove(pos);
+            order.insert(0, entry_fi);
+        }
+        for fi in order {
+            self.lower_one_dynamic(fi, entry_fi);
+        }
+    }
+
+    fn lower_one_dynamic(&mut self, fi: usize, entry_fi: usize) {
+        let sig = match &self.module.funcs[fi] {
+            FuncDecl::Body(b) => b.sig,
+            FuncDecl::Import { sig, .. } => *sig,
+            _ => SigId(0),
+        };
+        let taken = core::mem::replace(
+            &mut self.module.funcs[fi],
+            FuncDecl::Import {
+                module: alloc::string::String::new(),
+                name: alloc::string::String::new(),
+                sig: SigId(0),
+            },
+        );
+        let body = match taken {
+            FuncDecl::Body(b) => b,
+            other => {
+                self.module.funcs[fi] = other;
+                return;
+            }
+        };
+        let mut types = self.module.types.clone();
+        let bit_tid = types.bit();
+        let addr_tid = types.intern(IrType::Vec(crate::vaffle_ssa::SPILL_ADDR_BITS, bit_tid));
+        let func_sigs = crate::vaffle_ssa::module_func_sigs(&self.module.funcs);
+        let sp_step = crate::vaffle_ssa::compute_sp_step(self.module);
+        let ssa_body = crate::vaffle_ssa::ssa_ify_function_owned(
+            self.module,
+            body,
+            &func_sigs,
+            addr_tid,
+            bit_tid,
+            sp_step,
+            fi == entry_fi,
+            entry_fi,
+        );
+        drop(types);
+        self.lower_function(fi, &ssa_body);
+        // Drop the SSA body; keep a sig-preserving placeholder so later
+        // functions' `module_func_sigs` snapshots still resolve calls that
+        // target this function.
+        self.module.funcs[fi] = FuncDecl::Import {
+            module: alloc::string::String::new(),
+            name: alloc::string::String::new(),
+            sig,
+        };
+    }
+
+    /// Resolve every pending unknown-callee edge recorded during dynamic
+    /// lowering: a callee that lowered meanwhile gets its real entry block
+    /// (the placeholder zero-return args appended at emission are truncated
+    /// off); a callee that never lowered (a declaration-only import) gets a
+    /// deduped on-demand abort sink whose arity matches the recorded edge
+    /// args. Must run after every function has lowered and before `finish`.
+    fn resolve_pending_call_edges(&mut self) {
+        let pending = core::mem::take(&mut self.pending_call_edges);
+        for (bid, callee_idx, keep_args) in pending {
+            match self.func_info[callee_idx].entry_block {
+                Some(entry) => {
+                    let block = &mut self.blocks[bid as usize];
+                    match &mut block.terminator {
+                        IRTerminator::Jmp { target } => {
+                            target.args.truncate(keep_args);
+                            target.dest = IRBlockTargetId::Block(IRBlockId(entry as u32));
+                        }
+                        _ => panic!("pending call edge recorded on a non-Jmp terminator"),
+                    }
+                }
+                None => {
+                    let word_args = match &self.blocks[bid as usize].terminator {
+                        IRTerminator::Jmp { target } => {
+                            target.args.len() - self.entry_return_bits()
+                        }
+                        _ => panic!("pending call edge recorded on a non-Jmp terminator"),
+                    };
+                    let sink = self.import_sink_for(callee_idx, word_args);
+                    let block = &mut self.blocks[bid as usize];
+                    match &mut block.terminator {
+                        IRTerminator::Jmp { target } => {
+                            target.dest = IRBlockTargetId::Block(IRBlockId(sink));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        // Fail loudly if any sentinel target escaped resolution.
+        let is_sentinel = |d: &IRBlockTargetId<IRVarId>| {
+            matches!(d, IRBlockTargetId::Block(IRBlockId(0xffff_ffff)))
+        };
+        for (bi, b) in self.blocks.iter().enumerate() {
+            let bad = match &b.terminator {
+                IRTerminator::Jmp { target } => is_sentinel(&target.dest),
+                IRTerminator::JumpCond {
+                    then_target,
+                    else_target,
+                    ..
+                } => is_sentinel(&then_target.dest) || is_sentinel(&else_target.dest),
+                IRTerminator::JumpTable { cases, .. } => {
+                    cases.values().any(|t| is_sentinel(&t.dest))
+                }
+                _ => false,
+            };
+            if bad {
+                panic!("lower_to_ir: unresolved pending call edge at block {bi}");
+            }
+        }
+    }
+
+    /// Build (or reuse) the abort sink for a declaration-only import: it
+    /// accepts the recorded edge's `[sp, args…]` word args plus the module
+    /// entry's zero return bits, and returns (jumps to module `Return`).
+    fn import_sink_for(&mut self, func_idx: usize, word_args: usize) -> u32 {
+        if let Some(&bid) = self.import_sink_ids.get(&func_idx) {
+            return bid;
+        }
+        let ret_bits = self.entry_return_bits();
+        let mut params = alloc::vec![PACK_TID; word_args];
+        params.extend(alloc::vec![BIT_TID; ret_bits]);
+        let return_args: Vec<IRVarId> = (word_args as u32..(word_args + ret_bits) as u32)
+            .map(IRVarId)
+            .collect();
+        let bid = self.blocks.len() as u32;
+        self.blocks.push(IRBlock {
+            params,
+            stmts: vec![],
+            terminator: IRTerminator::Jmp {
+                target: IRBranchTarget::new(IRBlockTargetId::Return, return_args),
+            },
+        });
+        self.import_sink_ids.insert(func_idx, bid);
+        bid
+    }
+
+    /// Temporarily take function `fi`'s body out of the module (callers
+    /// lower with an owned body so the context's mutable module borrow is
+    /// never aliased). Returns `None` for declaration-only imports.
+    pub(crate) fn take_body(&mut self, fi: usize) -> Option<FuncBody<P>> {
+        let taken = core::mem::replace(
+            &mut self.module.funcs[fi],
+            FuncDecl::Import {
+                module: alloc::string::String::new(),
+                name: alloc::string::String::new(),
+                sig: SigId(0),
+            },
+        );
+        match taken {
+            FuncDecl::Body(b) => Some(b),
+            other => {
+                self.module.funcs[fi] = other;
+                None
+            }
+        }
+    }
+
+    /// Put a body taken by [`Self::take_body`] back.
+    pub(crate) fn restore_body(&mut self, fi: usize, body: FuncBody<P>) {
+        self.module.funcs[fi] = FuncDecl::Body(body);
+    }
+
+    /// Number of functions in the borrowed module.
+    pub(crate) fn func_count(&self) -> usize {
+        self.module.funcs.len()
     }
 
     pub(crate) fn emit_entry_and_exit(&mut self) {
@@ -1099,10 +1413,20 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         let mut jump_args = pack_bits(&mut em, &new_sp_bits, PACK_W);
         jump_args.extend(param_words);
 
-        let entry_target = IRBlockId(
-            info.entry_block
-                .expect("the first lowered function must have a body") as u32,
-        );
+        let entry_target = if self.dyn_alloc {
+            // The entry function has not lowered yet in dynamic mode — the
+            // scaffold edge is a pending call edge, resolved once its entry
+            // block lands. No zero-return args are appended: the callee
+            // entry expects exactly [SP, params].
+            self.pending_call_edges
+                .push((0, self.entry_fi, jump_args.len()));
+            IRBlockId(u32::MAX)
+        } else {
+            IRBlockId(
+                info.entry_block
+                    .expect("the first lowered function must have a body") as u32,
+            )
+        };
         self.blocks.push(em.finish(IRTerminator::Jmp {
             target: IRBranchTarget::new(IRBlockTargetId::Block(entry_target), jump_args),
         }));
@@ -1128,6 +1452,30 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     }
 
     pub(crate) fn lower_function(&mut self, func_idx: usize, body: &FuncBody<P>) {
+        if self.dyn_alloc {
+            // Dynamic block-id assignment: pre-scan the body's call sites so
+            // each vaffle block's first-piece IR id is known before any block
+            // lowers (intra-function jump targets and the entry map need
+            // them), then publish this function's entry into the persistent
+            // function-to-entry map — call edges recorded earlier resolve to
+            // it, and later callers edge straight to it.
+            let mut first: Vec<u32> = Vec::with_capacity(body.blocks.len());
+            let mut off = self.blocks.len() as u32;
+            for vb in &body.blocks {
+                first.push(off);
+                off += 1
+                    + vb
+                        .stmts
+                        .iter()
+                        .filter(|&svid| {
+                            matches!(&body.values[svid.0].kind, Value::Call { .. })
+                        })
+                        .count() as u32;
+            }
+            self.vaffle_ir_first = first;
+            let entry_ir = self.vaffle_ir_first[body.entry.0] as usize;
+            self.func_info[func_idx].entry_block = Some(entry_ir);
+        }
         let info = &self.func_info[func_idx];
         let entry_block_offset = info
             .entry_block
@@ -1138,11 +1486,19 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         let sp_packs = n_packs(self.pointer_bits);
         let n_param_words = info.n_param_words;
         let n_params = info.n_params;
-        let cross_block_values = info.cross_block_values.clone();
+        let cross_block_values = if self.dyn_alloc {
+            compute_cross_block_values(body)
+        } else {
+            info.cross_block_values.clone()
+        };
         let value_sides = compute_effective_sides(&body.values);
 
         for (vaffle_bi, vaffle_block) in body.blocks.iter().enumerate() {
-            let ir_bi = entry_block_offset + vaffle_bi;
+            let ir_bi = if self.dyn_alloc {
+                self.vaffle_ir_first[vaffle_bi] as usize
+            } else {
+                entry_block_offset + vaffle_bi
+            };
             let is_entry = vaffle_bi == body.entry.0;
 
             // Every block takes SP as packed words.
@@ -1296,6 +1652,10 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             let mut current_em = em;
             let mut current_sp_bits = sp_bits.clone();
             let mut current_frame_sp = frame_sp.clone();
+            // Pieces of this vaffle block pushed so far (dynamic mode): the
+            // jump piece lands at `ir_bi + pieces_pushed`, its continuation
+            // at `+ 1`.
+            let mut pieces_pushed: usize = 0;
 
             while !remaining_stmts.is_empty() {
                 let (before_call, at_call, after_call) = find_call(remaining_stmts, body);
@@ -1388,10 +1748,29 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                     spill_keys.push(key);
                                 }
                             }
-                            let spill_bits: Vec<IRVarId> = spill_keys
-                                .iter()
-                                .map(|&key| val_map.required(key))
-                                .collect();
+                            // Explode each spilled value to its FULL bit
+                            // width: `pack_bits` treats every var as ONE
+                            // bit position of the packed word, so a wide
+                            // wire (a merged helper operand, a widened
+                            // param) must contribute all of its bits —
+                            // packing the bare wire collapses it to a
+                            // single bit and the continuation's reload
+                            // hands downstream uses a 1-bit wire.
+                            let mut spill_bits: Vec<IRVarId> = Vec::new();
+                            let mut spill_widths: Vec<(usize, TypeId)> = Vec::new();
+                            for &key in &spill_keys {
+                                let var = val_map.required(key);
+                                let vtid = vaffle_value_vtid(
+                                    self.module,
+                                    &body.values,
+                                    ValueId(key),
+                                );
+                                let ir_tid = self.type_map[vtid.0 as usize];
+                                let w = ir_type_bit_width(&self.types, ir_tid).max(1);
+                                spill_bits
+                                    .extend(explode_to_bits(&mut current_em, var, w));
+                                spill_widths.push((w, ir_tid));
+                            }
                             let spill_words = pack_bits(&mut current_em, &spill_bits, PACK_W);
                             for (wi, &word) in spill_words.iter().enumerate() {
                                 frame_spill(
@@ -1451,9 +1830,15 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             // happened to return exactly 1 bit.
                             let n_ret_bits_orig = callee_info.total_ret_bits;
                             let callee_jump_takes_extra_slot = self.blocks.len() != ir_bi;
-                            let cont_block_idx = self.total_blocks
-                                + self.extra_blocks.len()
-                                + usize::from(callee_jump_takes_extra_slot);
+                            let cont_block_idx = if self.dyn_alloc {
+                                // Dynamic ids: the continuation is the very
+                                // next piece this vaffle block emits.
+                                ir_bi + pieces_pushed + 1
+                            } else {
+                                self.total_blocks
+                                    + self.extra_blocks.len()
+                                    + usize::from(callee_jump_takes_extra_slot)
+                            };
                             let cont_ir_idx = cont_block_idx as u32;
                             let cont_ty = cl.cont_ty.unwrap_or(BIT_TID);
                             let cont_var = current_em.emit(IRStmt::Const(
@@ -1486,12 +1871,27 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                         &mut current_em,
                                         &mut sp_words,
                                     );
-                                    IRBlockId(
-                                        callee_info
-                                            .abort_block
-                                            .expect("an import must reserve an abort sink")
-                                            as u32,
-                                    )
+                                    if self.dyn_alloc {
+                                        // Not lowered yet: record a pending
+                                        // edge. Resolution retargets to the
+                                        // real entry (truncating the
+                                        // zero-return args appended above) or,
+                                        // for an import that never lowers, to
+                                        // a deduped abort sink.
+                                        let jump_bid = (ir_bi + pieces_pushed) as u32;
+                                        let keep_args =
+                                            sp_words.len() - self.entry_return_bits();
+                                        self.pending_call_edges
+                                            .push((jump_bid, callee_idx, keep_args));
+                                        IRBlockId(u32::MAX)
+                                    } else {
+                                        IRBlockId(
+                                            callee_info
+                                                .abort_block
+                                                .expect("an import must reserve an abort sink")
+                                                as u32,
+                                        )
+                                    }
                                 }
                             };
                             let block = current_em.finish(IRTerminator::Jmp {
@@ -1500,7 +1900,10 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                     sp_words,
                                 ),
                             });
-                            if self.blocks.len() == ir_bi {
+                            if self.dyn_alloc {
+                                self.blocks.push(block);
+                                pieces_pushed += 1;
+                            } else if self.blocks.len() == ir_bi {
                                 self.blocks.push(block);
                             } else {
                                 self.extra_blocks.push(block);
@@ -1584,14 +1987,29 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             let reloaded_bits = unpack_words(
                                 &mut cont_em,
                                 &reloaded_words,
-                                spill_keys.len(),
+                                spill_bits.len(),
                                 PACK_W,
                             );
+                            // Re-compose each key's wire at its full width
+                            // (the mirror of the explode at the spill site;
+                            // `cursor` walks the flattened bit list).
+                            let mut spill_cursor = 0usize;
                             for (ki, &key) in spill_keys.iter().enumerate() {
+                                let (w, ir_tid) = spill_widths[ki];
+                                let bits = &reloaded_bits[spill_cursor..spill_cursor + w];
+                                spill_cursor += w;
                                 if key == call_vid.0 {
                                     continue;
                                 }
-                                val_map.insert(key, reloaded_bits[ki]);
+                                let composed = if w == 1 {
+                                    bits[0]
+                                } else {
+                                    cont_em.emit(IRStmt::Merge {
+                                        parts: bits.to_vec(),
+                                        ty: ir_tid,
+                                    })
+                                };
+                                val_map.insert(key, composed);
                             }
 
                             current_em = cont_em;
@@ -1612,14 +2030,19 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 &vaffle_block.terminator,
                 &val_map,
                 func_idx,
+                body,
                 &current_sp_bits,
                 &current_frame_sp,
                 &own_layout,
                 &mut current_em,
+                (ir_bi + pieces_pushed) as u32,
             );
 
             let block = current_em.finish(terminator);
-            if self.blocks.len() == ir_bi {
+            if self.dyn_alloc {
+                self.blocks.push(block);
+                pieces_pushed += 1;
+            } else if self.blocks.len() == ir_bi {
                 self.blocks.push(block);
             } else {
                 self.extra_blocks.push(block);
@@ -1627,29 +2050,35 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         }
     }
 
+    /// Map a vaffle block index of `func_idx` to the IR id of its first
+    /// piece: dynamic mode looks up the per-function pre-scan (call splitting
+    /// gives a vaffle block one piece per `Value::Call` plus a terminator
+    /// piece, so first-piece ids are not contiguous in the vaffle index);
+    /// planned mode uses the reserved contiguous range.
+    fn ir_target_of(&self, func_idx: usize, vb: usize) -> u32 {
+        if self.dyn_alloc {
+            self.vaffle_ir_first[vb]
+        } else {
+            (self.func_info[func_idx]
+                .entry_block
+                .expect("translate_terminator requires a function body")
+                + vb) as u32
+        }
+    }
+
     fn translate_terminator(
-        &self,
+        &mut self,
         term: &Terminator,
         val_map: &ValueMap,
         func_idx: usize,
+        body: &FuncBody<P>,
         sp_bits: &[IRVarId],
         frame_sp: &StackPtr<IRVarId>,
         own_layout: &FrameLayout,
         em: &mut BlockEmitter<P>,
+        piece_bid: u32,
     ) -> IRTerminator {
         let s = |vid: &ValueId| val_map.get(vid.0).unwrap_or(IRVarId(0));
-        let entry_off = self.func_info[func_idx]
-            .entry_block
-            .expect("translate_terminator requires a function body");
-
-        let body = match &self.module.funcs[func_idx] {
-            FuncDecl::Body(b) => b,
-            _ => {
-                return IRTerminator::Jmp {
-                    target: IRBranchTarget::new(IRBlockTargetId::Return, vec![]),
-                };
-            }
-        };
 
         match term {
             Terminator::Return { values } => {
@@ -1700,7 +2129,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 }
             }
             Terminator::Jump(target) => {
-                let ir_block = IRBlockId((entry_off + target.block.0) as u32);
+                let ir_block = IRBlockId(self.ir_target_of(func_idx, target.block.0));
                 // Pack SP, append unpacked VAFFLE block args (internal).
                 let sp_words = pack_bits(em, sp_bits, PACK_W);
                 let mut args: Vec<IRVarId> = sp_words;
@@ -1718,8 +2147,8 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 then_target,
                 else_target,
             } => {
-                let then_block = IRBlockId((entry_off + then_target.block.0) as u32);
-                let else_block = IRBlockId((entry_off + else_target.block.0) as u32);
+                let then_block = IRBlockId(self.ir_target_of(func_idx, then_target.block.0));
+                let else_block = IRBlockId(self.ir_target_of(func_idx, else_target.block.0));
                 let sp_words = pack_bits(em, sp_bits, PACK_W);
                 let mut then_args: Vec<IRVarId> = sp_words.clone();
                 then_args.extend(then_target.args.iter().map(&s));
@@ -1782,12 +2211,24 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     Some(entry_block) => IRBlockId(entry_block as u32),
                     None => {
                         self.append_import_abort_return_bits(em, &mut sp_words);
-                        IRBlockId(
-                            callee_info
-                                .abort_block
-                                .expect("an import must reserve an abort sink")
-                                as u32,
-                        )
+                        if self.dyn_alloc {
+                            // Not lowered yet: record a pending edge on the
+                            // piece carrying this terminator. Resolution
+                            // retargets to the real entry (truncating the
+                            // zero-return args appended above) or, for an
+                            // import that never lowers, to a deduped sink.
+                            let keep_args = sp_words.len() - self.entry_return_bits();
+                            self.pending_call_edges
+                                .push((piece_bid, callee_idx, keep_args));
+                            IRBlockId(u32::MAX)
+                        } else {
+                            IRBlockId(
+                                callee_info
+                                    .abort_block
+                                    .expect("an import must reserve an abort sink")
+                                    as u32,
+                            )
+                        }
                     }
                 };
                 IRTerminator::Jmp {
@@ -1806,7 +2247,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 let sp_words = pack_bits(em, sp_bits, PACK_W);
                 let mut cases = BTreeMap::new();
                 for (i, t) in targets.iter().enumerate() {
-                    let ir_block = IRBlockId((entry_off + t.block.0) as u32);
+                    let ir_block = IRBlockId(self.ir_target_of(func_idx, t.block.0));
                     let mut args: Vec<IRVarId> = sp_words.clone();
                     args.extend(t.args.iter().map(&s));
                     cases.insert(
@@ -1821,7 +2262,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                         },
                     );
                 }
-                let default_block = IRBlockId((entry_off + default_target.block.0) as u32);
+                let default_block = IRBlockId(self.ir_target_of(func_idx, default_target.block.0));
                 let mut default_args: Vec<IRVarId> = sp_words;
                 default_args.extend(default_target.args.iter().map(&s));
                 cases.insert(

@@ -2819,6 +2819,16 @@ fn movfuscate_biir_impl<P: Clone>(blocks: &BIrBlocks<P>, control_prov: Option<&P
 ///
 /// `types` is used for type inference; an `IRType::Bit` entry is added if
 /// absent.  Single-block input is returned unchanged.
+/// Diagnostic sidecar: high 32 bits = post-layout block count of the last
+/// `movfuscate_ir*` call; low 32 bits = its SMALLEST block's stmt count
+/// (0 when the smallest block has none). Read by std-side probes.
+pub static LAST_LAYOUT_STATS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+/// Diagnostic sidecar: the post-layout total statement count of the last
+/// `movfuscate_ir*` call.
+pub static MOV_TOTAL_STMTS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 pub fn movfuscate_ir<P: Clone>(blocks: &IRBlocks<P>, types: &mut IRTypes) -> IRBlocks<P> {
     // Preserve the long-standing borrowed API.  Pipeline callers that own
     // their input should use `movfuscate_ir_owned`, which transfers Poly
@@ -3023,6 +3033,16 @@ fn movfuscate_ir_impl<P: Clone>(
     // terminator targets.
     crate::cfg_layout::layout_cfg_for_movfuscation_typed(blocks, &types.0);
     let n = blocks.blocks.len();
+    // Diagnostic sidecar (no_std-safe): the post-layout block count and the
+    // total statement count, readable by std-side drivers/probes.
+    LAST_LAYOUT_STATS.store(
+        (n as u64) << 32 | (blocks.blocks.iter().map(|b| b.stmts.len()).min().unwrap_or(0) as u64),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    MOV_TOTAL_STMTS.store(
+        blocks.blocks.iter().map(|b| b.stmts.len()).sum::<usize>() as u64,
+        core::sync::atomic::Ordering::Relaxed,
+    );
     if n == 1 {
         let empty_init = MovfuscAccumInit {
             start: 0,
