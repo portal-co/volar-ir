@@ -1517,9 +1517,28 @@ impl<'ctx> Importer<'ctx> {
                 let next = instr.get_next_instruction();
                 if std::env::var("VLVI_INSTR_TRACE").is_ok() {
                     trace_i += 1;
-                    if trace_i % 1 == 0 {
+                    eprintln!(
+                        "[trace] bb{i} instr{trace_i} opcode={:?} values={}",
+                        instr.get_opcode(),
+                        fctx.values.len()
+                    );
+                    // Explosion probe: die EARLY with a backtrace instead of
+                    // RSS-ing to 14GB — names the exact emitting path. The
+                    // zero-return memo makes ~160k a legitimate one-time
+                    // cost for wide-return functions; explosions are
+                    // multi-million.
+                    if fctx.values.len() > 1_000_000 {
                         eprintln!(
-                            "[trace] bb{i} instr{trace_i} opcode={:?} values={}",
+                            "exploding instruction: {}",
+                            instr
+                                .print_to_string()
+                                .to_string()
+                                .chars()
+                                .take(600)
+                                .collect::<String>()
+                        );
+                        panic!(
+                            "value explosion: bb{i} instr{trace_i} opcode={:?} values={}",
                             instr.get_opcode(),
                             fctx.values.len()
                         );
@@ -1678,17 +1697,30 @@ impl<'ctx> Importer<'ctx> {
             .collect())
     }
 
-    fn bc_const_at(&mut self, fctx: &mut FuncCtx<'ctx>, block: BlockId, val: bool) -> ValueId {
-        fctx.emit(
-            block,
+    fn bc_const_at(&mut self, fctx: &mut FuncCtx<'ctx>, _block: BlockId, val: bool) -> ValueId {
+        // Hash-consed constants, hoisted to the entry block: constants are
+        // pure and function-scoped, so ONE node per distinct value serves
+        // every use — huge constant aggregates (drop-glue zero fills, wide
+        // zero-return vectors, exploded aggregate stores) collapse from
+        // per-bit nodes to two shared entries. Block order is irrelevant
+        // for pure constants and the entry block is always executed, so
+        // references from any block resolve.
+        let key = val as u128;
+        if let Some(&vid) = fctx.const_cache.get(&key) {
+            return vid;
+        }
+        let vid = fctx.emit(
+            BlockId(0),
             Value::Op(Stmt::Const(
                 Constant {
                     hi: 0,
-                    lo: val as u128,
+                    lo: key,
                 },
                 self.bit_tid,
             )),
-        )
+        );
+        fctx.const_cache.insert(key, vid);
+        vid
     }
 
     fn translate_instruction(
@@ -1948,6 +1980,35 @@ impl<'ctx> Importer<'ctx> {
                             "unaligned access through a word-cell storage".into(),
                         ));
                     }
+                    // Pointer-VALUE provenance through memory: a load of a
+                    // pointer-typed value from a slot holding a tracked
+                    // pointer returns that pointer's encoding directly
+                    // (bit-identical to the stored bytes) and RE-REGISTERS
+                    // the tracked identity, so -O0 spill round-trips keep
+                    // downstream accesses specialized instead of
+                    // dispatching over every candidate storage.
+                    let load_ty_kind = unsafe {
+                        inkwell::llvm_sys::core::LLVMGetTypeKind(
+                            inkwell::llvm_sys::core::LLVMTypeOf(instr.as_value_ref()),
+                        )
+                    };
+                    if load_ty_kind
+                        == inkwell::llvm_sys::LLVMTypeKind::LLVMPointerTypeKind
+                    {
+                        if let Some(spilled) =
+                            fctx.slot_ptr_of.get(&ptr.as_any_value_enum()).cloned()
+                        {
+                            fctx.stack_slot_of.insert(instr.as_any_value_enum(), spilled.clone());
+                            let bits = self.encode_stack_ptr(
+                                fctx,
+                                cur,
+                                spilled.storage,
+                                &spilled.addr_bits,
+                            )?;
+                            fctx.cache.insert(instr.as_any_value_enum(), bits);
+                            return Ok(called);
+                        }
+                    }
                     let ptr_bits0 = fctx
                         .cache
                         .get(&ptr.as_any_value_enum())
@@ -2004,6 +2065,24 @@ impl<'ctx> Importer<'ctx> {
                         return Err(ImportError::Unsupported(
                             "unaligned access through a word-cell storage".into(),
                         ));
+                    }
+                    // Pointer-VALUE provenance pairing: a tracked pointer
+                    // stored to a tracked slot teaches the slot's identity;
+                    // a non-tracked value stored over it invalidates the
+                    // pairing (the slot may then hold an untracked pointer).
+                    if let Some(val_ev) = instr
+                        .get_operand(0)
+                        .and_then(|o| o.value())
+                        .map(|v| v.as_any_value_enum())
+                    {
+                        match fctx.stack_slot_of.get(&val_ev).cloned() {
+                            Some(spilled) => {
+                                fctx.slot_ptr_of.insert(ptr.as_any_value_enum(), spilled);
+                            }
+                            None => {
+                                fctx.slot_ptr_of.remove(&ptr.as_any_value_enum());
+                            }
+                        }
                     }
                     let ptr_bits0 = fctx
                         .cache
@@ -5057,12 +5136,21 @@ impl<'ctx> Importer<'ctx> {
                 }
                 // Opt-in lowering for compiler-proven-dead arms: return
                 // zeros sized to the enclosing function's return width.
-                // Runtime-unreachable by construction.
-                Terminator::Return {
-                    values: (0..fctx.return_bits)
+                // Runtime-unreachable by construction. The all-zero vector
+                // is identical for every terminator of a given width —
+                // emit once, share the ValueIds (a wide-return function
+                // otherwise pays return_bits Const nodes PER BLOCK).
+                let width = fctx.return_bits;
+                let values = if let Some(shared) = fctx.zero_returns.get(&width) {
+                    shared.clone()
+                } else {
+                    let shared: Vec<ValueId> = (0..width)
                         .map(|_| self.bc_const_at(fctx, fctx.current, false))
-                        .collect(),
-                }
+                        .collect();
+                    fctx.zero_returns.insert(width, shared.clone());
+                    shared
+                };
+                Terminator::Return { values }
             }
             other => {
                 return Err(ImportError::Unsupported(format!(
@@ -5711,6 +5799,21 @@ struct FuncCtx<'ctx> {
     /// The enclosing function's flattened return width (bits), for
     /// zero-return lowering of reachable `unreachable` instructions.
     return_bits: usize,
+    /// Hash-consed bit constants (value -> ValueId), hoisted to the entry
+    /// block. See `bc_const_at`.
+    const_cache: HashMap<u128, ValueId>,
+    /// Pointer-VALUE provenance through memory: slot -> the tracked
+    /// pointer stored there. -O0 spills every parameter
+    /// (`store ptr %ctx, %spill` ... `%r = load %spill`), and a bare load
+    /// loses tracked provenance, degenerating every downstream access into
+    /// full storage dispatch. Pairs tracked store/load slots so spilled
+    /// pointers stay tracked.
+    slot_ptr_of: HashMap<inkwell::values::AnyValueEnum<'ctx>, StackPtr>,
+    /// Shared all-zero return vectors per width: the
+    /// reachable-`unreachable` zero-return lowering emits the same Const
+    /// vector for every such terminator in a function — a wide-return
+    /// function (158k-bit wasm multi-value returns) paid it PER BLOCK.
+    zero_returns: HashMap<usize, Vec<ValueId>>,
 }
 
 impl<'ctx> FuncCtx<'ctx> {
@@ -5729,6 +5832,9 @@ impl<'ctx> FuncCtx<'ctx> {
             stack_slot_of: HashMap::new(),
             global_ptr_of: HashMap::new(),
             return_bits: 0,
+            const_cache: HashMap::new(),
+            slot_ptr_of: HashMap::new(),
+            zero_returns: HashMap::new(),
         }
     }
 
