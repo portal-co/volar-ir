@@ -126,9 +126,12 @@ type IResult<T> = Result<T, ImportError>;
 /// remaining bits for a global split `GLOBAL_ID_BITS`:`GLOBAL_ADDR_BITS`,
 /// high:low). Reused directly as a compact, already-dense candidate index
 /// rather than building a separate table -- `StorageAllocator::new(64)`
-/// already hands out small sequential ids. 12 bits comfortably covers any
-/// realistic module's global count (up to ~4000).
-const GLOBAL_ID_BITS: usize = 12;
+/// already hands out small sequential ids. 14 bits covers big real-world
+/// modules whose escaping per-alloca data stacks each consume a storage
+/// (unmodified revm at -O0 exhausted 12 bits at ~2000 imported functions).
+/// The cost is taken from the ADDR field (wasm32: 19 -> 17 bits), which
+/// multi-pool carving absorbs by spawning smaller pools.
+const GLOBAL_ID_BITS: usize = 14;
 /// Bits reserved for a global's byte offset within the same encoding.
 
 /// First `StorageId` this importer's allocator hands out. Globals, per-alloca
@@ -753,15 +756,20 @@ struct Importer<'ctx> {
     /// statically (see `Prov`).
     func_ids: HashMap<(PointerValue<'ctx>, Vec<Prov>), FuncId>,
     storage_for_global: HashMap<PointerValue<'ctx>, StorageId>,
-    /// All module globals pack into ONE pool storage: a global has exactly
-    /// one possible location, so its identity is a constant byte offset
-    /// within the pool (`global_pool_offset`) rather than a distinct
-    /// `StorageId`. Non-escaping allocas carve from the same pool tail
-    /// (`pool_next_byte`); a runtime-dispatched pointer can then only name
-    /// this one global-class storage plus escaping per-alloca stacks.
-    pool_storage: Option<StorageId>,
+    /// All module globals pack into pool[0]: a global has exactly one
+    /// possible location, so its identity is a constant byte offset within
+    /// the pool (`global_pool_offset`) rather than a distinct `StorageId`.
+    /// Non-escaping allocas carve from the pool tails. ONE pool's encoded
+    /// address space is the pointer-value ADDR field (allocas are
+    /// bit-addressed in their tracked encoding, so each pool holds at most
+    /// 2^(ADDR_BITS-3) carved bytes); big modules (revm at -O0) outgrow a
+    /// single pool, so carving spills into FRESH pool STORAGES (`pools`),
+    /// each a global-class dispatch candidate picked up by the candidate
+    /// enumeration automatically (neither per-alloca data stacks nor SP
+    /// globals). A runtime-dispatched pointer still names each pool by its
+    /// own storage ID, so coherence is preserved.
+    pools: Vec<(StorageId, u64)>,
     global_pool_offset: HashMap<PointerValue<'ctx>, u64>,
-    pool_next_byte: u64,
     /// The one SigId per LLVM function. Signature shape is
     /// provenance-independent (param/result types don't change across
     /// specialized copies); only the FuncId specializes.
@@ -954,9 +962,8 @@ impl<'ctx> Importer<'ctx> {
             exports: Default::default(),
             func_ids: HashMap::new(),
             storage_for_global: HashMap::new(),
-            pool_storage: None,
             global_pool_offset: HashMap::new(),
-            pool_next_byte: 0,
+            pools: Vec::new(),
             sig_of: HashMap::new(),
             storage_alloc: StorageAllocator::new(GLOBAL_STORAGE_BASE),
             alloca_data: Vec::new(),
@@ -1372,13 +1379,12 @@ impl<'ctx> Importer<'ctx> {
             if self.storage_for_global.contains_key(&key) {
                 continue;
             }
-            let pool = self.pool_ensure();
             let ty: BasicTypeEnum = global
                 .get_value_type()
                 .try_into()
                 .map_err(|_| ImportError::Unsupported("global of non-first-class type".into()))?;
             let size = self.memory_byte_size(ty)?;
-            let base = self.pool_carve(self.pool_next_byte, size)?;
+            let (pool, base) = self.pool_carve_global(size)?;
             self.storage_for_global.insert(key, pool);
             self.global_pool_offset.insert(key, base);
             count += 1;
@@ -1393,42 +1399,76 @@ impl<'ctx> Importer<'ctx> {
         Ok(())
     }
 
-    /// The static pool storage, allocating it on first use. Globals register
-    /// from it eagerly in `register_all_globals`; a module with no globals
-    /// allocates it lazily when its first non-escaping alloca carves from
-    /// the tail (pool storages are neither per-alloca data stacks nor SP
-    /// globals, so the dispatch candidate enumeration picks them up
-    /// whenever they appear).
+    /// Pool[0], allocated on first use. Globals register from it eagerly in
+    /// `register_all_globals`; a module with no globals allocates it lazily
+    /// when its first non-escaping alloca carves from the tail (pool
+    /// storages are neither per-alloca data stacks nor SP globals, so the
+    /// dispatch candidate enumeration picks them up whenever they appear).
     fn pool_ensure(&mut self) -> StorageId {
-        match self.pool_storage {
-            Some(p) => p,
-            None => {
-                let p = self.storage_alloc.alloc();
-                self.pool_storage = Some(p);
-                p
-            }
+        if self.pools.is_empty() {
+            let p = self.storage_alloc.alloc();
+            self.pools.push((p, 0));
         }
+        self.pools[0].0
     }
 
-    /// Carve `n_bytes` from the static pool's tail at 16-byte alignment,
-    /// returning the byte offset. Globals register from the pool head;
-    /// non-escaping allocas carve from the tail as function bodies are
-    /// walked. Fails closed when the pool outgrows the pointer-value
-    /// encoding's address field.
-    fn pool_carve(&mut self, base: u64, n_bytes: u64) -> IResult<u64> {
+    /// True when `sid` is one of the module's pool storages (pool-backed
+    /// pointers get no trimmed-address bound).
+    fn is_pool_storage(&self, sid: StorageId) -> bool {
+        self.pools.iter().any(|&(p, _)| p == sid)
+    }
+
+    /// Carve `n_bytes` for a GLOBAL from pool[0]'s tail at 16-byte
+    /// alignment, returning `(pool, byte offset)`. Globals live only in
+    /// pool[0] so their dispatch-candidate byte addressing stays uniform.
+    /// Fails closed when pool[0] outgrows the pointer-value encoding's
+    /// address field (a module whose GLOBALS alone exceed it has no
+    /// multi-pool remedy — the encoding itself is the limit).
+    fn pool_carve_global(&mut self, n_bytes: u64) -> IResult<(StorageId, u64)> {
+        let base = self.pools.first().map(|&(_, b)| b).unwrap_or(0);
         let base = base.next_multiple_of(16);
         let end = base
             .checked_add(n_bytes)
             .ok_or_else(|| ImportError::Unsupported("static pool size overflow".into()))?;
         if end >= (1u64 << self.global_addr_bits()) {
             return Err(ImportError::Unsupported(
-                "static pool exhausted: globals plus non-escaping allocas \
-                 exceed the pointer-value address field"
+                "static pool exhausted: module globals exceed the \
+                 pointer-value address field"
                     .into(),
             ));
         }
-        self.pool_next_byte = end;
-        Ok(base)
+        let pool = self.pool_ensure();
+        self.pools[0].1 = end;
+        Ok((pool, base))
+    }
+
+    /// Carve `n_bytes` for a NON-ESCAPING ALLOCA, returning
+    /// `(pool, byte offset)`. An alloca's tracked encoding keeps its
+    /// BIT offset in the ADDR field, so each pool holds at most
+    /// 2^(ADDR_BITS-3) carved bytes; when pool[0] is full (or its global
+    /// head leaves no bit room), carving spills into a FRESH pool storage.
+    /// Allocas carve at 16-byte alignment as function bodies are walked.
+    fn pool_carve_alloca(&mut self, n_bytes: u64) -> IResult<(StorageId, u64)> {
+        let capacity = 1u64 << (self.global_addr_bits() - 3);
+        let mut base = None;
+        for pool in self.pools.iter_mut() {
+            let aligned = pool.1.next_multiple_of(16);
+            if aligned
+                .checked_add(n_bytes)
+                .is_some_and(|end| end <= capacity)
+            {
+                base = Some((pool.0, aligned));
+                pool.1 = aligned + n_bytes;
+                break;
+            }
+        }
+        if base.is_none() {
+            // A fresh pool starts at offset 0 (already 16-aligned).
+            let p = self.storage_alloc.alloc();
+            self.pools.push((p, n_bytes));
+            base = Some((p, 0));
+        }
+        Ok(base.expect("carve resolved"))
     }
 
     /// Like `storage_for`, but also folds in a constant-index `getelementptr`
@@ -1838,8 +1878,12 @@ impl<'ctx> Importer<'ctx> {
         }
         let width = i.get_type().get_bit_width() as usize;
         let val = i.get_sign_extended_constant().unwrap_or(0) as u64;
+        // Wider-than-64 constants (i128 spills) extend the sign bit; the
+        // truncated u64's bit 63 IS that sign.
         Ok((0..width)
-            .map(|b| self.bc_const_at(fctx, fctx.current, (val >> b) & 1 != 0))
+            .map(|b| {
+                self.bc_const_at(fctx, fctx.current, (val >> b.min(63)) & 1 != 0)
+            })
             .collect())
     }
 
@@ -2795,17 +2839,11 @@ impl<'ctx> Importer<'ctx> {
                 // stacks: a runtime-dispatched pointer may name any of
                 // them, so dispatch must read them all.
                 if !self.alloca_escapes(instr) {
-                    let pool = self.pool_ensure();
                     let n_bytes = total_slots.div_ceil(8);
-                    let base = self.pool_carve(self.pool_next_byte, n_bytes)?;
+                    let (pool, base) = self.pool_carve_alloca(n_bytes)?;
                     let base_bit_off = base.checked_mul(8).ok_or_else(|| {
                         ImportError::Unsupported("alloca pool offset overflow".into())
                     })?;
-                    if base_bit_off >= (1u64 << self.global_addr_bits()) {
-                        return Err(ImportError::Unsupported(
-                            "alloca pool offset exceeds the pointer-value encoding".into(),
-                        ));
-                    }
                     let addr_bits: Bits = (0..self.pointer_bits)
                         .map(|b| self.bc_const_at(fctx, cur, (base_bit_off >> b) & 1 != 0))
                         .collect();
@@ -4672,7 +4710,7 @@ impl<'ctx> Importer<'ctx> {
     /// bounded by the whole pool, not the alloca) and seeded parameter
     /// pointers (offset unknown) get no bound.
     fn stack_addr_bound(&self, ptr: &StackPtr) -> u64 {
-        if Some(ptr.storage) == self.pool_storage || ptr.allocation_bits == u64::MAX {
+        if self.is_pool_storage(ptr.storage) || ptr.allocation_bits == u64::MAX {
             0
         } else {
             ptr.allocation_bits
