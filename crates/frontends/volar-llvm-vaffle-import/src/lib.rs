@@ -1870,7 +1870,7 @@ impl<'ctx> Importer<'ctx> {
                 bits.push(vid);
                 next_bit_idx += 1;
             }
-            fctx.cache.insert((*param).as_any_value_enum(), bits);
+            self.cache_put(&mut fctx, (*param).as_any_value_enum(), bits);
         }
 
         // Call-site specialization: seed pointer parameters with the
@@ -1949,13 +1949,18 @@ impl<'ctx> Importer<'ctx> {
                     bits.push(vid);
                     idx += 1;
                 }
-                fctx.cache.insert(phi.as_any_value_enum(), bits);
+                self.cache_put(&mut fctx, phi.as_any_value_enum(), bits);
             }
         }
 
         let mut called = Vec::new();
 
         let reachable = reachable_blocks(f)?;
+        let idom = llvm_immediate_dominators(&blocks, &reachable)?;
+        // The vaffle block where each LLVM block's lowering ENDED — the
+        // entry parent for the idom tree (an idom's full lowering dominates
+        // everything its subtree lowers).
+        let mut llvm_exit: Vec<Option<BlockId>> = vec![None; blocks.len()];
 
         // The enclosing function's flattened return width (the same width as
         // the single wide result `func_id` interns). Computed before Pass B
@@ -1981,6 +1986,13 @@ impl<'ctx> Importer<'ctx> {
             }
             let vb = BlockId(i);
             fctx.current = vb;
+            // Dominance seed: the immediate dominator's END block dominates
+            // this block's whole lowering.
+            if let Some(Some(di)) = idom.get(i) {
+                if let Some(exit_vb) = llvm_exit[*di] {
+                    fctx.block_parent[vb.0] = Some(exit_vb);
+                }
+            }
             if std::env::var("VLVI_INSTR_TRACE").is_ok() {
                 eprintln!("[trace] bb{i} start values={}", fctx.values.len());
             }
@@ -2027,6 +2039,7 @@ impl<'ctx> Importer<'ctx> {
                 }
                 inst = next;
             }
+            llvm_exit[i] = Some(fctx.current);
         }
 
         // Reuse the `SigId` `func_id` already allocated for this function
@@ -2145,11 +2158,69 @@ impl<'ctx> Importer<'ctx> {
                 return Ok(self.null_ptr_bits(fctx, fctx.current));
             }
         }
-        if let Some(bits) = fctx.cache.get(&v.as_any_value_enum()) {
-            return Ok(bits.clone());
+        if let Some(bits) = self.cache_get_dominant(fctx, &v.as_any_value_enum()) {
+            return Ok(bits);
+        }
+        // Dominance guard failed (block-scoped bits from another block's
+        // dispatch cont or phi decomposition): re-run the defining
+        // instruction in the current chain. Re-running is sound for every
+        // value-producing opcode this importer lowers — loads re-read
+        // storage (dispatch reads re-dispatch here), GEPs and arithmetic
+        // are pure — and the fresh bits are defined at or after the
+        // current block, so they dominate everything downstream.
+        let rerunnable = |op: InstructionOpcode| {
+            !matches!(
+                op,
+                InstructionOpcode::Store
+                    | InstructionOpcode::Call
+                    | InstructionOpcode::Invoke
+                    | InstructionOpcode::Return
+                    | InstructionOpcode::Br
+                    | InstructionOpcode::Switch
+                    | InstructionOpcode::Unreachable
+            )
+        };
+        use inkwell::values::BasicValue;
+        if let Some(instr) = v.as_instruction_value() {
+            if rerunnable(instr.get_opcode()) {
+                self.translate_instruction(fctx, instr)?;
+                if let Some(bits) = self.cache_get_dominant(fctx, &v.as_any_value_enum()) {
+                    return Ok(bits);
+                }
+            }
         }
         let bits = match v {
-            BasicValueEnum::IntValue(i) => self.int_const_bits(fctx, i)?,
+            BasicValueEnum::IntValue(i) => {
+                if std::env::var_os("VLVI_DOM_TRACE").is_some() {
+                    let def = fctx
+                        .cache_block
+                        .get(&v.as_any_value_enum())
+                        .copied();
+                    let op = BasicValueEnum::IntValue(i)
+                        .as_instruction_value()
+                        .map(|iv| format!("{:?}", iv.get_opcode()));
+                    let mut climb = Vec::new();
+                    if let Some(d) = def {
+                        let mut c = fctx.current;
+                        for _ in 0..30 {
+                            climb.push(c.0);
+                            match fctx.block_parent.get(c.0).copied().flatten() {
+                                Some(p) => c = p,
+                                None => {
+                                    climb.push(usize::MAX);
+                                    break;
+                                }
+                            }
+                        }
+                        let _ = d;
+                    }
+                    eprintln!(
+                        "int fallthrough: def={def:?} cur={:?} op={op:?} climb={climb:?}",
+                        fctx.current
+                    );
+                }
+                self.int_const_bits(fctx, i)?
+            }
             BasicValueEnum::PointerValue(p) => {
                 let block = fctx.current;
                 self.ptr_value_bits(fctx, block, p)?
@@ -2160,8 +2231,99 @@ impl<'ctx> Importer<'ctx> {
                 ));
             }
         };
-        fctx.cache.insert(v.as_any_value_enum(), bits.clone());
+        self.cache_put(fctx, v.as_any_value_enum(), bits.clone());
         Ok(bits)
+    }
+
+    /// Dominance guard for the value cache: bits are valid in the block
+    /// that defined them, and otherwise only when every bit is
+    /// function-global (entry-hoisted Consts or the entry's params).
+    /// Dispatch conts and phi decompositions define block-scoped bits;
+    /// serving them across blocks let a join block compose bits whose
+    /// defining cont only dominated some of the join's incoming paths.
+    fn cache_get_dominant(&self, fctx: &FuncCtx<'ctx>, v: &AnyValueEnum<'ctx>) -> Option<Bits> {
+        let bits = fctx.cache.get(v)?.clone();
+        let def = fctx.cache_block.get(v).copied()?;
+        if def == fctx.current
+            || def.0 == 0
+            || fctx.block_dominates(def, fctx.current)
+            || self.bits_are_function_global(fctx, &bits)
+        {
+            Some(bits)
+        } else {
+            if std::env::var_os("VLVI_DOM_TRACE").is_some() {
+                let mut climb = Vec::new();
+                let mut c = fctx.current;
+                for _ in 0..40 {
+                    climb.push(format!("{c:?}"));
+                    match fctx.block_parent.get(c.0).copied().flatten() {
+                        Some(p) => c = p,
+                        None => {
+                            climb.push("NONE".into());
+                            break;
+                        }
+                    }
+                }
+                if std::env::var_os("VLVI_DOM_TRACE").is_some() {
+                    eprintln!(
+                        "dom guard reject: def={def:?} cur={:?}",
+                        fctx.current
+                    );
+                }
+            }
+            None
+        }
+    }
+
+    fn bits_are_function_global(&self, fctx: &FuncCtx<'ctx>, bits: &[ValueId]) -> bool {
+        bits.iter()
+            .all(|&b| self.value_is_function_global(fctx, b, 0))
+    }
+
+    /// Consts are entry-hoisted, entry params are bound at call time, and
+    /// repackings (Merge/Shuffle) of function-global bits are themselves
+    /// function-global — this is what keeps slot-pointer encodings valid
+    /// everywhere while dispatch-cont extracts (of a cont's param) stay
+    /// block-scoped under the guard.
+    fn value_is_function_global(
+        &self,
+        fctx: &FuncCtx<'ctx>,
+        vid: ValueId,
+        depth: usize,
+    ) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        match &fctx.values[vid.0].kind {
+            Value::Op(Stmt::Const(_, _)) => true,
+            Value::Param { block, .. } => block.0 == 0,
+            Value::Op(Stmt::Merge { parts, .. }) => parts
+                .iter()
+                .all(|&p| self.value_is_function_global(fctx, p, depth + 1)),
+            Value::Op(Stmt::Shuffle { result_bits, .. }) => result_bits
+                .iter()
+                .all(|(_, src)| self.value_is_function_global(fctx, *src, depth + 1)),
+            // Pure bit algebra over global bits is itself global: the GEP
+            // class-bit adders are Polys over param/const bits.
+            Value::Op(Stmt::Poly { coeffs, .. }) => coeffs
+                .iter()
+                .all(|(vars, _)| {
+                    vars.iter()
+                        .all(|&p| self.value_is_function_global(fctx, p, depth + 1))
+                }),
+            Value::Op(Stmt::Splat { src, .. }) => {
+                self.value_is_function_global(fctx, *src, depth + 1)
+            }
+            Value::Op(Stmt::Transmute { src, .. }) => {
+                self.value_is_function_global(fctx, *src, depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    fn cache_put(&self, fctx: &mut FuncCtx<'ctx>, v: AnyValueEnum<'ctx>, bits: Bits) {
+        fctx.cache_block.insert(v, fctx.current);
+        fctx.cache.insert(v, bits);
     }
 
     fn int_const_bits(&mut self, fctx: &mut FuncCtx<'ctx>, i: IntValue<'ctx>) -> IResult<Bits> {
@@ -2214,7 +2376,7 @@ impl<'ctx> Importer<'ctx> {
     ) -> IResult<Vec<(FunctionValue<'ctx>, Vec<Prov>)>> {
         let mut called = Vec::new();
         let opcode = instr.get_opcode();
-        let cur = fctx.current;
+        let mut cur = fctx.current;
 
         macro_rules! op {
             ($i:expr) => {{
@@ -2222,7 +2384,13 @@ impl<'ctx> Importer<'ctx> {
                     .get_operand($i)
                     .and_then(|o| o.value())
                     .ok_or_else(|| ImportError::Unsupported("expected value operand".into()))?;
-                self.value_bits(fctx, v)?
+                // value_bits may re-run the operand's defining instruction
+                // (the dominance guard's re-derivation), which can split
+                // the block — re-sync `cur` so later emissions in this arm
+                // land where the operand's bits are defined.
+                let bits = self.value_bits(fctx, v)?;
+                cur = fctx.current;
+                bits
             }};
         }
 
@@ -2489,13 +2657,12 @@ impl<'ctx> Importer<'ctx> {
                                 spilled.storage,
                                 &spilled.addr_bits,
                             )?;
-                            fctx.cache.insert(instr.as_any_value_enum(), bits);
+                            self.cache_put(fctx, instr.as_any_value_enum(), bits);
                             return Ok(called);
                         }
                     }
-                    let ptr_bits0 = fctx
-                        .cache
-                        .get(&ptr.as_any_value_enum())
+                    let ptr_bits0 = self
+                        .cache_get_dominant(fctx, &ptr.as_any_value_enum())
                         .and_then(|b| b.first().copied())
                         .ok_or_else(|| {
                             ImportError::Unsupported("stack pointer bits missing (internal)".into())
@@ -2568,9 +2735,8 @@ impl<'ctx> Importer<'ctx> {
                             }
                         }
                     }
-                    let ptr_bits0 = fctx
-                        .cache
-                        .get(&ptr.as_any_value_enum())
+                    let ptr_bits0 = self
+                        .cache_get_dominant(fctx, &ptr.as_any_value_enum())
                         .and_then(|b| b.first().copied())
                         .ok_or_else(|| {
                             ImportError::Unsupported("stack pointer bits missing (internal)".into())
@@ -2723,10 +2889,8 @@ impl<'ctx> Importer<'ctx> {
                         }
                     };
 
-                    let base_bits = fctx
-                        .cache
-                        .get(&base.as_any_value_enum())
-                        .cloned()
+                    let base_bits = self
+                        .cache_get_dominant(fctx, &base.as_any_value_enum())
                         .unwrap_or_else(|| new_stack_ptr.addr_bits.clone());
                     fctx.emit(
                         cur,
@@ -3212,7 +3376,7 @@ impl<'ctx> Importer<'ctx> {
         };
 
         if let Some(bits) = result_bits {
-            fctx.cache.insert(instr.as_any_value_enum(), bits);
+            self.cache_put(fctx, instr.as_any_value_enum(), bits);
         }
         Ok(called)
     }
@@ -3787,9 +3951,11 @@ impl<'ctx> Importer<'ctx> {
             ));
         }
         let preheader = fctx.current;
-        let header = fctx.append_block();
+        let header = fctx.extend_block();
         let body = fctx.append_block();
+        fctx.block_parent[body.0] = Some(header);
         let continuation = fctx.append_block();
+        fctx.block_parent[continuation.0] = Some(body);
 
         let zero_index: Bits = (0..length_bits.len())
             .map(|_| self.bc_const_at(fctx, preheader, false))
@@ -3911,9 +4077,11 @@ impl<'ctx> Importer<'ctx> {
         // Dispatch side through the generic `symbolic_memory_loop` first.)
         let index_width = (usize::BITS - n_iters.leading_zeros()) as usize;
         let preheader = fctx.current;
-        let header = fctx.append_block();
+        let header = fctx.extend_block();
         let body = fctx.append_block();
+        fctx.block_parent[body.0] = Some(header);
         let continuation = fctx.append_block();
+        fctx.block_parent[continuation.0] = Some(body);
 
         let zero_index: Bits = (0..index_width)
             .map(|_| self.bc_const_at(fctx, preheader, false))
@@ -4360,9 +4528,8 @@ impl<'ctx> Importer<'ctx> {
         ptr: PointerValue<'ctx>,
     ) -> IResult<IntrinsicPointer> {
         if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
-            let ptr_bits0 = fctx
-                .cache
-                .get(&ptr.as_any_value_enum())
+            let ptr_bits0 = self
+                .cache_get_dominant(fctx, &ptr.as_any_value_enum())
                 .and_then(|bits| bits.first().copied())
                 .ok_or_else(|| {
                     ImportError::Unsupported("stack pointer bits missing (internal)".into())
@@ -6007,7 +6174,7 @@ impl<'ctx> Importer<'ctx> {
             args: jump_args,
             reentry: None,
         }));
-        let cont = fctx.append_block();
+        let cont = fctx.extend_block();
         let packed_param = fctx.add_param(cont, packed_tid, 0);
         let cont_bits: Vec<ValueId> = (0..n_bits)
             .map(|b| {
@@ -6157,7 +6324,7 @@ impl<'ctx> Importer<'ctx> {
             args: jump_args,
             reentry: None,
         }));
-        let cont = fctx.append_block();
+        let cont = fctx.extend_block();
         let (r_block, r_tag_param, dead, targets) = {
             let class = fctx.shared_dispatch.get_mut(&key).expect("usable class");
             class.r_targets.push(Target {
@@ -6215,7 +6382,7 @@ impl<'ctx> Importer<'ctx> {
             .types
             .intern(IrType::Vec(n_bits, self.bit_tid));
         let tag_tid = self.types.intern(IrType::Vec(tag_width, self.bit_tid));
-        let d = fctx.append_block();
+        let d = fctx.extend_block();
         let ptrv = fctx.add_param(d, packed_tid, 0);
         // Extract the pointer's fields from the packed param.
         let ptr_bits: Bits = (0..self.pointer_bits)
@@ -6286,6 +6453,7 @@ impl<'ctx> Importer<'ctx> {
         // RD: owns the candidate Table so the selection can be computed
         // once (in D) and reused by derived-pointer sites.
         let rd = fctx.append_block();
+        fctx.block_parent[rd.0] = Some(d);
         let rd_mi = fctx.add_param(rd, sel_tid, 0);
         let rd_ptr = fctx.add_param(rd, packed_tid, 1);
         let (rd_val, rd_tag_idx) = if is_write {
@@ -6296,7 +6464,9 @@ impl<'ctx> Importer<'ctx> {
         let rd_tag = fctx.add_param(rd, tag_tid, rd_tag_idx);
         // R: read routes [loaded, tag]; write routes [tag].
         let r = fctx.append_block();
+        fctx.block_parent[r.0] = Some(rd);
         let dead = fctx.append_block();
+        fctx.block_parent[dead.0] = Some(rd);
         fctx.terminators[dead.0] = Some(Terminator::Jump(Target {
             block: dead,
             args: Vec::new(),
@@ -6310,6 +6480,7 @@ impl<'ctx> Importer<'ctx> {
         let saved_current = fctx.current;
         for (sid, is_stack) in entries {
             let case_b = fctx.append_block();
+            fctx.block_parent[case_b.0] = Some(rd);
             fctx.current = case_b;
             let c_ptrv = fctx.add_param(case_b, packed_tid, 0);
             let (c_valv, c_tag_idx) = if is_write {
@@ -7052,11 +7223,12 @@ impl<'ctx> Importer<'ctx> {
         let selector_val = self.compose_address(fctx, cur, &selector);
         // Split: one call block per candidate, all resuming at the
         // continuation block; translation continues there.
-        let cont = fctx.append_block();
+        let cont = fctx.extend_block();
         let mut targets: Vec<Target> = Vec::with_capacity(n);
         let mut called: Vec<(FunctionValue<'ctx>, Vec<Prov>)> = Vec::with_capacity(n);
         for (callee_fn, _) in &candidate_encodings {
             let case_b = fctx.append_block();
+            fctx.block_parent[case_b.0] = Some(cur);
             let callee_id = self.func_id(*callee_fn, &prov)?;
             called.push((*callee_fn, prov.clone()));
             fctx.emit(
@@ -7339,6 +7511,132 @@ fn reachable_blocks<'ctx>(f: FunctionValue<'ctx>) -> IResult<HashSet<LlvmBlock<'
     Ok(reachable)
 }
 
+/// Immediate dominators (by block index) over the same supported-terminator
+/// CFG `reachable_blocks` walks. Entry is index 0. Unreachable or
+/// unsupported-terminator blocks get `None` (they never walk).
+fn llvm_immediate_dominators<'ctx>(
+    blocks: &[LlvmBlock<'ctx>],
+    reachable: &HashSet<LlvmBlock<'ctx>>,
+) -> IResult<Vec<Option<usize>>> {
+    let successors = |i: usize| -> IResult<Vec<usize>> {
+        let bb = &blocks[i];
+        let terminator = bb
+            .get_terminator()
+            .ok_or_else(|| ImportError::Unsupported("reachable block has no terminator".into()))?;
+        if !matches!(
+            terminator.get_opcode(),
+            InstructionOpcode::Br | InstructionOpcode::Switch
+        ) {
+            return Ok(Vec::new());
+        }
+        let n = unsafe { LLVMGetNumSuccessors(terminator.as_value_ref()) };
+        let mut out = Vec::with_capacity(n as usize);
+        for k in 0..n {
+            let successor =
+                unsafe { LlvmBlock::new(LLVMGetSuccessor(terminator.as_value_ref(), k)) }
+                    .ok_or_else(|| {
+                        ImportError::Unsupported("terminator successor is not a basic block".into())
+                    })?;
+            if let Some(j) = blocks.iter().position(|b| *b == successor) {
+                out.push(j);
+            }
+        }
+        Ok(out)
+    };
+
+    // RPO from the entry (index 0). Iterative DFS: each stack slot is
+    // (block, next-successor index); a block enters postorder when its
+    // successors are exhausted.
+    let mut postorder: Vec<usize> = Vec::new();
+    let mut seen = vec![false; blocks.len()];
+    let mut pending: Vec<(usize, usize)> = vec![(0, 0)];
+    seen[0] = true;
+    while let Some(top) = pending.last().copied() {
+        let (b, mut si) = top;
+        let succs = if reachable.contains(&blocks[b]) {
+            successors(b)?
+        } else {
+            Vec::new()
+        };
+        let mut advanced = false;
+        while (si as usize) < succs.len() {
+            let s = succs[si as usize];
+            si += 1;
+            if !seen[s] {
+                seen[s] = true;
+                *pending.last_mut().expect("nonempty") = (b, si);
+                pending.push((s, 0));
+                advanced = true;
+                break;
+            }
+        }
+        if !advanced {
+            postorder.push(b);
+            pending.pop();
+        }
+    }
+    let mut rpo = postorder;
+    rpo.reverse();
+
+    // Cooper-Harvey-Kennedy.
+    let mut idom: Vec<Option<usize>> = vec![None; blocks.len()];
+    idom[0] = Some(0);
+    let rpo_pos: HashMap<usize, usize> =
+        rpo.iter().enumerate().map(|(p, &b)| (b, p)).collect();
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); blocks.len()];
+    for b in rpo.iter().copied() {
+        for s in successors(b)? {
+            preds[s].push(b);
+        }
+    }
+    let intersect = |mut a: usize, mut b: usize, idom: &Vec<Option<usize>>| -> usize {
+        while a != b {
+            while rpo_pos[&a] > rpo_pos[&b] {
+                a = idom[a].expect("dominator of a processed block");
+            }
+            while rpo_pos[&b] > rpo_pos[&a] {
+                b = idom[b].expect("dominator of a processed block");
+            }
+            if a == b {
+                break;
+            }
+        }
+        a
+    };
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in rpo.iter().skip(1) {
+            let mut new_idom: Option<usize> = None;
+            for &p in &preds[b] {
+                if reachable.contains(&blocks[p]) && idom[p].is_some() {
+                    new_idom = Some(match new_idom {
+                        None => p,
+                        Some(d) => intersect(d, p, &idom),
+                    });
+                }
+            }
+            if let Some(d) = new_idom {
+                if idom[b] != Some(d) {
+                    idom[b] = Some(d);
+                    changed = true;
+                }
+            }
+        }
+    }
+    if std::env::var_os("VLVI_DOM_TRACE").is_some() {
+        let in_rpo10 = rpo.iter().position(|&b| b == 10).is_some();
+        eprintln!(
+            "idom: blocks={} rpo={} reachable={} idom[10]={:?} 10-in-rpo={in_rpo10}",
+            blocks.len(),
+            rpo.len(),
+            reachable.len(),
+            idom[10]
+        );
+    }
+    Ok(idom)
+}
+
 fn call_value_operand<'ctx>(
     instr: InstructionValue<'ctx>,
     index: u32,
@@ -7522,6 +7820,16 @@ struct FuncCtx<'ctx> {
     stmts: Vec<Vec<ValueId>>,
     terminators: Vec<Option<Terminator>>,
     cache: HashMap<AnyValueEnum<'ctx>, Bits>,
+    /// Extension parent per block: `Some(pred)` for blocks appended as a
+    /// linear continuation of the current block (dispatch conts, loop
+    /// chains), `None` for everything else (joins, pre-created successor
+    /// blocks). `block_dominates` walks this chain — sound because a
+    /// continuation is reachable only through the block it extends.
+    block_parent: Vec<Option<BlockId>>,
+    /// The vaffle block where each cached bits vector was defined. The
+    /// dominance guard (see `cache_get_dominant`) refuses cross-block
+    /// hits unless the bits are function-global.
+    cache_block: HashMap<AnyValueEnum<'ctx>, BlockId>,
     /// Fields of the fixed `{ integer, i1 }` values returned by LLVM's
     /// arithmetic-overflow intrinsics. LLVM only lets the importer observe
     /// these through `extractvalue`, so they stay out of the general value
@@ -7579,6 +7887,8 @@ impl<'ctx> FuncCtx<'ctx> {
             stmts: vec![Vec::new(); n_blocks],
             terminators: vec![None; n_blocks],
             cache: HashMap::new(),
+            cache_block: HashMap::new(),
+            block_parent: vec![None; n_blocks],
             aggregate_fields: HashMap::new(),
             current: BlockId(0),
             sp_globals: Vec::new(),
@@ -7603,7 +7913,34 @@ impl<'ctx> FuncCtx<'ctx> {
         self.params.push(Vec::new());
         self.stmts.push(Vec::new());
         self.terminators.push(None);
+        self.block_parent.push(None);
         block
+    }
+
+    /// Append a block that is a LINEAR continuation of the current block
+    /// (a dispatch cont, a loop chain link): it is reachable only through
+    /// the block it extends, so that block dominates it.
+    fn extend_block(&mut self) -> BlockId {
+        let block = self.append_block();
+        self.block_parent[block.0] = Some(self.current);
+        block
+    }
+
+    /// Walk the extension-parent chain from `cur` looking for `def`.
+    /// Conservative: `None`-parented blocks (joins, pre-created
+    /// successors) terminate the walk as non-dominating.
+    fn block_dominates(&self, def: BlockId, cur: BlockId) -> bool {
+        let mut cur = cur;
+        for _ in 0..256 {
+            if cur == def {
+                return true;
+            }
+            match self.block_parent.get(cur.0).copied().flatten() {
+                Some(parent) => cur = parent,
+                None => return false,
+            }
+        }
+        false
     }
 
     fn add_param(&mut self, block: BlockId, ty: TypeId, idx: usize) -> ValueId {

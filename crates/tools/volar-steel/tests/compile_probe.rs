@@ -2227,11 +2227,15 @@ fn dispatch_table_read_write_reuse() {
             "dispatch_probe.ll",
         ))
         .expect("LLVM IR parses");
+    let config = if std::env::var_os("VLVI_DOM_CASCADE").is_some() {
+        volar_llvm_vaffle_import::LlvmImportConfig::default()
+    } else {
+        volar_llvm_vaffle_import::LlvmImportConfig::default().with_table_dispatch()
+    };
     let module = volar_llvm_vaffle_import::import_module_with_config(
         &llvm_mod,
         &["dispatch_probe"],
-        volar_llvm_vaffle_import::LlvmImportConfig::default()
-            .with_table_dispatch(),
+        config,
     )
     .expect("LLVM import");
     let fid = module
@@ -2259,13 +2263,22 @@ fn dispatch_table_read_write_reuse() {
                 .chain((0..32).map(|b| vec![(v >> b) & 1 == 1]))
                 .chain((0..32).map(|b| vec![(w >> b) & 1 == 1]))
                 .collect();
-            if let Some(out) =
-                volar_fuzz::interpreter::vaffle::eval_vaffle(&module, fid, &inputs)
-            {
-                let ret = decode_bits(&out);
-                if ret == want {
-                    got = Some((ret, sid));
-                    break;
+            match volar_fuzz::interpreter::vaffle::eval_vaffle(&module, fid, &inputs) {
+                Some(out) => {
+                    let ret = decode_bits(&out);
+                    if ret == want {
+                        eprintln!("MATCH at sid {sid}");
+                        got = Some((ret, sid));
+                        break;
+                    }
+                    if std::env::var_os("VLVI_DISPATCH_TRACE").is_some() {
+                        eprintln!("sid {sid}: ret={ret:#x} want={want:#x}");
+                    }
+                }
+                None => {
+                    if std::env::var_os("VLVI_DISPATCH_TRACE").is_some() {
+                        eprintln!("sid {sid}: eval returned None");
+                    }
                 }
             }
         }

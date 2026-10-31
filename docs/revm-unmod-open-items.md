@@ -124,6 +124,35 @@ Guarded by the 12GB RSS kill-switch; it never fired.
   site ptr_bits composition re-derive (or dominance-check) cached
   pointer bits per block instead of trusting the cache across conts.
 
+## Dominance guards (this round)
+
+- **Value-cache dominance guard**: cache entries record their defining
+  vaffle block; `cache_get_dominant` serves a hit only when def==cur,
+  def is the entry, the def block dominates cur via the parent chain,
+  the bits are function-global (recursively: Const / entry Param /
+  Merge / Shuffle / Poly / Splat / Transmute over global bits), or —
+  on rejection — the defining instruction is re-run in the current
+  chain (sound for every value-producing opcode; Store/Call/terminators
+  excluded). translate_instruction's `op!` re-syncs `cur` after each
+  operand fetch because a re-run can split the block.
+- **Dominance chain**: `block_parent` per block — `extend_block` links
+  dispatch/loop conts linearly; program blocks are seeded at walk entry
+  with `exit(idom(LLVM block))` from a Cooper-Harvey-Kennedy idom over
+  the supported-terminator CFG. Debug: VLVI_DOM_TRACE=1.
+- Validated: dispatch_table_read_write_reuse (write/read/reuse through
+  a GEP'd pointer param), the bulk differential, cascade revm import +
+  lowering clean (1172 blocks / 4.27M stmts), works with
+  VLVI_JUMP_THREAD=1, volar-fuzz 91/91.
+- **OPEN (Table path only)**: lowering a Table-dispatched revm module
+  still trips vaffle_ssa's dominance assert on one join shape — my
+  import-time chain accepts a cont's bits at a 64-pred join that
+  vaffle_ssa's post-SSA idom rejects; the shared D/R router makes the
+  vaffle CFG a web (every site's traversal can CFG-reach every
+  continuation), which a linear parent chain cannot fully express.
+  Next step: make dispatch cont bits flow through the router as block
+  params (or invalidate cache entries whose def cont is reachable via
+  a different site's traversal) instead of trusting the parent chain.
+
 ## Open items
 
 1. **Word-cell freeze does not converge on this module** — needs
