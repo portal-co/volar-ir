@@ -54,7 +54,7 @@ use alloc::{
     vec::Vec,
 };
 
-use vaffle::{Block, FuncBody, FuncDecl, FuncId, Module, SigDecl, Terminator, Value, ValueId};
+use vaffle::{Block, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Terminator, Value, ValueId};
 use volar_ir::ir::{
     ActionDecl, IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt,
     IRTerminator, IRTypeId, IRTypes, IRVarId, OracleDecl,
@@ -100,6 +100,194 @@ pub fn lower_vaffle_to_ir_owned<P: Clone>(module: Module<P>) -> (IRBlocks<P>, IR
     let mut ctx = LowerCtx::new(&ssa_module);
     ctx.lower_all();
     ctx.finish()
+}
+
+/// Incremental counterpart to [`lower_vaffle_to_ir_owned`]: one function at
+/// a time — SSA-ify the body, lower it, rebase its block ids into the
+/// output, then DROP both representations before touching the next
+/// function. Peak memory holds one function's input and SSA copies plus
+/// the growing output, instead of the whole input plus the whole SSA copy
+/// plus the whole output (a ~1B-value module does not fit 12GB that way).
+///
+/// Correctness notes: IR vars are block-scoped (each block's emitter starts
+/// at its own param count), so only terminator BLOCK ids need rebasing.
+/// `ssa_ify_function_owned` is called directly with the ORIGINAL entry
+/// flag — routing through a one-function sub-module would wrongly treat
+/// every callee as the entry (SP seeding differs). Per-function lowering
+/// must not intern new types beyond what whole-module lowering would (the
+/// debug assertion on the types table catches a violation).
+pub fn lower_vaffle_to_ir_incremental<P: Clone>(mut module: Module<P>) -> (IRBlocks<P>, IRTypes) {
+    let entry_fi = module
+        .funcs
+        .iter()
+        .position(|f| matches!(f, FuncDecl::Body(_)))
+        .unwrap_or(0);
+    let func_sigs = crate::vaffle_ssa::module_func_sigs(&module.funcs);
+    let sp_step = crate::vaffle_ssa::compute_sp_step(&module);
+    let mut out = IRBlocks {
+        oracles: module.oracles.clone(),
+        actions: module.actions.clone(),
+        rngs: Default::default(),
+        blocks: alloc::vec::Vec::new(),
+        pre_init: module.pre_init.clone(),
+    };
+    let mut out_types: Option<IRTypes> = None;
+    // The ENTRY function lowers first (it owns the module scaffold);
+    // everything else lowers with reserved-but-empty ids 0/1.
+    let mut order: alloc::vec::Vec<usize> = (0..module.funcs.len()).collect();
+    if let Some(pos) = order.iter().position(|&f| f == entry_fi) {
+        order.remove(pos);
+        order.insert(0, entry_fi);
+    }
+    for fi in order {
+        let f = core::mem::replace(
+            &mut module.funcs[fi],
+            FuncDecl::Import {
+                module: alloc::string::String::new(),
+                name: alloc::string::String::new(),
+                sig: SigId(0),
+            },
+        );
+        let body = match f {
+            FuncDecl::Body(b) => b,
+            other => {
+                module.funcs[fi] = other;
+                continue;
+            }
+        };
+        // Per-function SSA with the ORIGINAL entry flag.
+        let mut types = module.types.clone();
+        let bit_tid = types.bit();
+        let addr_tid = types.intern(IrType::Vec(
+            crate::vaffle_ssa::SPILL_ADDR_BITS,
+            bit_tid,
+        ));
+        let this_sig = body.sig;
+        let ssa_body = crate::vaffle_ssa::ssa_ify_function_owned(
+            &module,
+            body,
+            &func_sigs,
+            addr_tid,
+            bit_tid,
+            sp_step,
+            fi == entry_fi,
+            entry_fi,
+        );
+        // ALL functions stay present as sig-preserving Import decls so
+        // call lowering can resolve callee layouts; only the current
+        // body is real, keeping peak memory to one body's representations.
+        let mut sub_funcs: alloc::vec::Vec<FuncDecl<P>> = module
+            .funcs
+            .iter()
+            .map(|g| match g {
+                FuncDecl::Import {
+                    module: m,
+                    name,
+                    sig,
+                } => FuncDecl::Import {
+                    module: m.clone(),
+                    name: name.clone(),
+                    sig: *sig,
+                },
+                FuncDecl::Body(b) => FuncDecl::Import {
+                    module: alloc::string::String::new(),
+                    name: alloc::string::String::new(),
+                    sig: b.sig,
+                },
+                _ => FuncDecl::Import {
+                    module: alloc::string::String::new(),
+                    name: alloc::string::String::new(),
+                    sig: SigId(0),
+                },
+            })
+            .collect();
+        sub_funcs[fi] = FuncDecl::Body(ssa_body);
+        let _ = this_sig;
+        let sub = Module {
+            pointer_width: module.pointer_width,
+            types,
+            oracles: Default::default(),
+            actions: Default::default(),
+            funcs: sub_funcs,
+            sigs: module.sigs.clone(),
+            exports: Default::default(),
+            pre_init: Default::default(),
+        };
+        let mut ctx = LowerCtx::new(&sub);
+        let first = fi == entry_fi;
+        ctx.lower_all_with(first, first);
+        let (blocks, types) = ctx.finish();
+        if let Some(prev) = &out_types {
+            debug_assert_eq!(
+                prev.0.as_slice(),
+                types.0.as_slice(),
+                "lower_vaffle_to_ir_incremental: per-function type tables diverged"
+            );
+        } else {
+            out_types = Some(types);
+        }
+        // Rebase this function's block ids into the output. The first
+        // (entry) sub-module lowers the scaffold itself: identity. Later
+        // sub-modules reserved empty ids 0/1 and emitted at planned ids
+        // >= 2: exit references (local 1) keep targeting the GLOBAL exit;
+        // everything else shifts to base + (id - 2).
+        let base = out.blocks.len() as u32;
+        let map = |x: u32| -> u32 {
+            if first {
+                x
+            } else if x == 1 {
+                1
+            } else {
+                base + x - 2
+            }
+        };
+        for mut blk in blocks.blocks {
+            blk.terminator = rebase_ir_terminator_blocks(blk.terminator, map);
+            out.blocks.push(blk);
+        }
+    }
+    (
+        out,
+        out_types.expect("incremental lowering produced no typed blocks"),
+    )
+}
+
+/// Shift every concrete block target of `term` forward by `base`.
+fn rebase_ir_terminator_blocks(
+    term: IRTerminator<IRVarId>,
+    map: impl Fn(u32) -> u32,
+) -> IRTerminator<IRVarId> {
+    let shift_target = |t: &mut IRBranchTarget<IRVarId>| {
+        if let IRBlockTargetId::Block(bid) = &mut t.dest {
+            bid.0 = map(bid.0);
+        }
+    };
+    match term {
+        IRTerminator::Jmp { mut target } => {
+            shift_target(&mut target);
+            IRTerminator::Jmp { target }
+        }
+        IRTerminator::JumpCond {
+            condition,
+            mut then_target,
+            mut else_target,
+        } => {
+            shift_target(&mut then_target);
+            shift_target(&mut else_target);
+            IRTerminator::JumpCond {
+                condition,
+                then_target,
+                else_target,
+            }
+        }
+        IRTerminator::JumpTable { index, mut cases } => {
+            for t in cases.values_mut() {
+                shift_target(t);
+            }
+            IRTerminator::JumpTable { index, cases }
+        }
+        other => other,
+    }
 }
 
 /// Lower a VAFFLE module that may contain a statement-free entry body.
@@ -424,6 +612,10 @@ struct FuncInfo {
 
 pub(crate) struct LowerCtx<'m, P: Clone = ()> {
     module: &'m Module<P>,
+    /// First `FuncDecl::Body` index (the module entry function). The
+    /// scaffold's provenance reads THIS function, not funcs[0] — an
+    /// import-first module has no body at 0.
+    entry_fi: usize,
     pointer_bits: usize,
     types: IRTypes,
     /// Maps VAFFLE TypeId → IR TypeId (index = VAFFLE TypeId.0).
@@ -528,8 +720,29 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             })
             .collect();
 
+        let entry_fi = module
+            .funcs
+            .iter()
+            .position(|f| matches!(f, FuncDecl::Body(_)))
+            .unwrap_or(0);
+        // Pre-intern every DISTINCT continuation-block shape (one per
+        // signature's return width) so the per-function incremental
+        // lowerings hit warm intern cache entries instead of appending
+        // shape types in call-mix-dependent order.
+        for sig in &module.sigs {
+            let total_ret_bits: usize = sig
+                .results
+                .iter()
+                .map(|&vtid| {
+                    ir_type_bit_width(&types, type_map[vtid.0 as usize])
+                })
+                .sum();
+            Self::intern_cont_block_shape(&mut types, pointer_bits, total_ret_bits);
+        }
+
         LowerCtx {
             module,
+            entry_fi,
             pointer_bits,
             types,
             type_map,
@@ -554,10 +767,24 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     /// Intern a Block type for a continuation that receives packed
     /// `[sp_words…, ret_words…]`.
     fn intern_cont_block_type(&mut self, n_ret_bits: usize) -> TypeId {
-        let sp_words = n_packs(self.pointer_bits);
+        Self::intern_cont_block_shape(&mut self.types, self.pointer_bits, n_ret_bits)
+    }
+
+    /// The shape intern behind [`Self::intern_cont_block_type`], callable
+    /// without a context: the INCREMENTAL lowering pre-interns every
+    /// distinct shape up front (see `new`'s tail) so per-function
+    /// lowerings never intern lazily — a lazy intern's TypeId depends on
+    /// the function's own call mix, which would diverge per-function type
+    /// tables and corrupt the merged module.
+    fn intern_cont_block_shape(
+        types: &mut IRTypes,
+        pointer_bits: usize,
+        n_ret_bits: usize,
+    ) -> TypeId {
+        let sp_words = n_packs(pointer_bits);
         let ret_words = n_packs(n_ret_bits);
         let params = vec![PACK_TID; sp_words + ret_words];
-        self.types.intern(IrType::Block { params })
+        types.intern(IrType::Block { params })
     }
 
     fn import_func_info(&mut self, sig: &SigDecl, abort_block: usize) -> FuncInfo {
@@ -607,10 +834,17 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         for func_decl in &self.module.funcs {
             let body = match func_decl {
                 FuncDecl::Body(b) => b,
-                FuncDecl::Import { sig, .. } => {
+                FuncDecl::Import { name, sig, .. } => {
                     let import_info = self.import_func_info(&self.module.sigs[sig.0], block_offset);
                     self.func_info.push(import_info);
-                    block_offset += 1;
+                    // Empty-name imports are the incremental lowering's
+                    // placeholders for not-yet-lowered bodies — they get
+                    // real sub-module lowerings instead of abort sinks, so
+                    // they reserve no sink slot (matching the emission
+                    // gate in lower_all_with).
+                    if !name.is_empty() {
+                        block_offset += 1;
+                    }
                     continue;
                 }
                 _ => continue,
@@ -762,16 +996,32 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     // ---- Lowering ----------------------------------------------------------
 
     fn lower_all(&mut self) {
+        self.lower_all_with(true, true);
+    }
+
+    /// Incremental-lowering variant: `scaffold=false` skips the module
+    /// entry/exit blocks (plan_functions still RESERVES ids 0/1, so
+    /// return wiring keeps targeting the first sub-module's global exit);
+    /// `import_sinks=false` skips abort sinks (the incremental driver
+    /// substitutes empty-name placeholder imports for not-yet-lowered
+    /// bodies).
+    fn lower_all_with(&mut self, scaffold: bool, import_sinks: bool) {
         self.plan_functions();
 
         // Block 0: module entry — SP=0, jump to first function's entry.
         // Block 1: exit continuation — receives [SP, ret], emits Return.
-        self.emit_entry_and_exit();
+        if scaffold {
+            self.emit_entry_and_exit();
+        }
 
         for (func_idx, func_decl) in self.module.funcs.iter().enumerate() {
             match func_decl {
                 FuncDecl::Body(body) => self.lower_function(func_idx, body),
-                FuncDecl::Import { .. } => self.lower_import_abort_sink(func_idx),
+                FuncDecl::Import { name, .. } => {
+                    if import_sinks && !name.is_empty() {
+                        self.lower_import_abort_sink(func_idx);
+                    }
+                }
                 _ => continue,
             }
         }
@@ -807,7 +1057,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         // write) have no VAFFLE source statement of their own — they scaffold
         // the jump into func 0's body, so they inherit that function's first
         // value's provenance.
-        let entry_prov = match &self.module.funcs[0] {
+        let entry_prov = match &self.module.funcs[self.entry_fi] {
             FuncDecl::Body(b) => b.values.first().map(|n| n.prov.clone()),
             _ => None,
         }.or_else(|| self.control_prov.clone())

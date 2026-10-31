@@ -2047,7 +2047,7 @@ fn revm_wasm32_import_probe() {
             if std::env::var_os("REVM_UNMOD_LOWER").is_some() {
                 let lowered_at = std::time::Instant::now();
                 let (blocks, types) =
-                    volar_vaffle_target::lower_vaffle_to_ir_owned(vaffle);
+                    volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
                 let n_stmts: usize =
                     blocks.blocks.iter().map(|b| b.stmts.len()).sum();
                 eprintln!(
@@ -2122,7 +2122,7 @@ fn revm_unmodified_import_probe() {
             if std::env::var_os("REVM_UNMOD_LOWER").is_some() {
                 let lowered_at = std::time::Instant::now();
                 let (blocks, types) =
-                    volar_vaffle_target::lower_vaffle_to_ir_owned(vaffle);
+                    volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
                 let n_stmts: usize =
                     blocks.blocks.iter().map(|b| b.stmts.len()).sum();
                 eprintln!(
@@ -2209,14 +2209,8 @@ fn native_bulk_sum(sel: u32) -> u32 {
 
 /// S6d: constant-length bulk memset/memcpy lower as runtime loops in
 /// `BulkMemoryMode::Loop`, evaluate identically to the unrolled lowering
-/// (at the VAFFLE level), and cost several times fewer entry-function
-/// import values (the point of the mode).
-///
-/// Correctness gates through `eval_vaffle` because the lowered-CFG eval
-/// path currently trips a PRE-EXISTING lower_vaffle_to_ir off-by-one on
-/// this program shape (a join block emits 35 args into a 34-param block
-/// in BOTH modes — see the b24->b38 dump in the session notes). That bug
-/// is independent of bulk memory and needs its own fix.
+/// (VAFFLE level, lowered-CFG level, and the INCREMENTAL lowering), and
+/// cost several times fewer entry-function import values.
 #[test]
 fn bulk_memory_loop_matches_unroll() {
     let file = "bulk_mem.ll";
@@ -2227,11 +2221,12 @@ fn bulk_memory_loop_matches_unroll() {
             entry,
             volar_llvm_vaffle_import::LlvmImportConfig::default(),
         );
-    let (loop_mod, loop_fid, loop_values, loop_ir, loop_types) = import_vaffle_with_config(
-        file,
-        entry,
-        volar_llvm_vaffle_import::LlvmImportConfig::default().with_bulk_memory_loop(),
-    );
+    let (loop_mod, loop_fid, loop_values, loop_ir, loop_types) =
+        import_vaffle_with_config(
+            file,
+            entry,
+            volar_llvm_vaffle_import::LlvmImportConfig::default().with_bulk_memory_loop(),
+        );
 
     // The importer's own metric: the entry body's values shrink several
     // times (the 300-byte fills/copy collapse to loop scaffolding).
@@ -2243,8 +2238,10 @@ fn bulk_memory_loop_matches_unroll() {
     for sel in [0u32, 1] {
         // VAFFLE flattens the u32 param to 32 one-bit entry params; the
         // lowered IR keeps one 32-bit value.
-        let vaffle_inputs: Vec<Vec<bool>> = (0..32).map(|b| vec![(sel >> b) & 1 == 1]).collect();
-        let lowered_inputs: Vec<Vec<bool>> = vec![(0..32).map(|b| (sel >> b) & 1 == 1).collect()];
+        let vaffle_inputs: Vec<Vec<bool>> =
+            (0..32).map(|b| vec![(sel >> b) & 1 == 1]).collect();
+        let lowered_inputs: Vec<Vec<bool>> =
+            vec![(0..32).map(|b| (sel >> b) & 1 == 1).collect()];
         let unroll_out =
             volar_fuzz::interpreter::vaffle::eval_vaffle(&unroll_mod, unroll_fid, &vaffle_inputs)
                 .expect("unroll eval");
@@ -2252,10 +2249,8 @@ fn bulk_memory_loop_matches_unroll() {
             volar_fuzz::interpreter::vaffle::eval_vaffle(&loop_mod, loop_fid, &vaffle_inputs)
                 .expect("loop eval");
         let want = native_bulk_sum(sel) as u64;
-        let got_unroll = decode_bits(&unroll_out);
-        let got_loop = decode_bits(&loop_out);
-        assert_eq!(got_unroll, want, "unroll mode sel={sel}");
-        assert_eq!(got_loop, want, "loop mode sel={sel}");
+        assert_eq!(decode_bits(&unroll_out), want, "unroll mode sel={sel}");
+        assert_eq!(decode_bits(&loop_out), want, "loop mode sel={sel}");
 
         // The lowered-CFG path agrees too (this exercises
         // lower_vaffle_to_ir on loop CFGs; the off-by-one seen earlier was
@@ -2274,11 +2269,26 @@ fn bulk_memory_loop_matches_unroll() {
         )
         .0
         .expect("lowered loop eval");
-        assert_eq!(
-            decode_bits(&lowered_unroll),
-            want,
-            "lowered unroll sel={sel}"
-        );
+        assert_eq!(decode_bits(&lowered_unroll), want, "lowered unroll sel={sel}");
         assert_eq!(decode_bits(&lowered_loop), want, "lowered loop sel={sel}");
+    }
+
+    // The INCREMENTAL lowering agrees as well (block ids are rebased per
+    // function; vars are block-scoped so no var rebase is needed). It
+    // consumes the module, so it runs after the borrow-heavy gates.
+    let (inc_blocks, inc_types) =
+        volar_vaffle_target::lower_vaffle_to_ir_incremental(unroll_mod);
+    for sel in [0u32, 1] {
+        let lowered_inputs: Vec<Vec<bool>> =
+            vec![(0..32).map(|b| (sel >> b) & 1 == 1).collect()];
+        let inc_out = volar_fuzz::interpreter::ir::eval_ir_with_storage(
+            &inc_blocks,
+            &inc_types,
+            &lowered_inputs,
+        )
+        .0
+        .expect("incremental eval");
+        let want = native_bulk_sum(sel) as u64;
+        assert_eq!(decode_bits(&inc_out), want, "incremental sel={sel}");
     }
 }

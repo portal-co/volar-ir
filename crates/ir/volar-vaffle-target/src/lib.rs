@@ -31,7 +31,8 @@ pub use circuit_helpers::{
 pub use import_config::{WaffleImportConfig, WaffleImportKind};
 pub use lower_to_ir::{
     entry_param_sides, lower_vaffle_to_ir, lower_vaffle_to_ir_fully_inlined,
-    lower_vaffle_to_ir_owned, lower_vaffle_to_ir_with_control_provenance,
+    lower_vaffle_to_ir_incremental, lower_vaffle_to_ir_owned,
+    lower_vaffle_to_ir_with_control_provenance,
     lower_vaffle_to_ir_with_inlining,
 };
 pub use target::{VaffleBlock, VaffleTarget, VaffleValue};

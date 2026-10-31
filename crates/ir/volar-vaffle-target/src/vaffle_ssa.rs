@@ -97,13 +97,13 @@ use crate::lower_to_ir::{collect_unique_uses, compute_cross_block_values, comput
 /// generous recursion-depth margin — 64 bits leaves an enormous margin
 /// (SP can advance `SP_STEP` roughly `2^64 / SP_STEP` times before
 /// wrapping, i.e. billions of recursive calls even for a large module).
-const SPILL_ADDR_BITS: usize = 64;
+pub(crate) const SPILL_ADDR_BITS: usize = 64;
 
 /// Per-call SP advance. Chosen larger than the largest `ValueId` in the
 /// whole module, so two different call depths' own `SP + vid` ranges can
 /// never overlap regardless of which function is called or which values
 /// it happens to spill.
-fn compute_sp_step<P: Clone>(module: &Module<P>) -> u128 {
+pub(crate) fn compute_sp_step<P: Clone>(module: &Module<P>) -> u128 {
     let max_vid = module
         .funcs
         .iter()
@@ -121,7 +121,7 @@ fn compute_sp_step<P: Clone>(module: &Module<P>) -> u128 {
 /// Retain only the declaration data needed to type a direct `Value::Call`.
 /// The consuming rewrite moves the function bodies out of the module, so it
 /// cannot use `lower_to_ir::sig_of`, which indexes those bodies directly.
-fn module_func_sigs<P: Clone>(funcs: &[FuncDecl<P>]) -> Vec<SigId> {
+pub(crate) fn module_func_sigs<P: Clone>(funcs: &[FuncDecl<P>]) -> Vec<SigId> {
     funcs
         .iter()
         .map(|func| match func {
@@ -363,7 +363,7 @@ pub fn ssa_ify_function<P: Clone>(
     )
 }
 
-fn ssa_ify_function_owned<P: Clone>(
+pub(crate) fn ssa_ify_function_owned<P: Clone>(
     module: &Module<P>,
     body: FuncBody<P>,
     func_sigs: &[SigId],
