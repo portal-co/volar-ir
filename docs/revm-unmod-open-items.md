@@ -160,15 +160,18 @@ Guarded by the 12GB RSS kill-switch; it never fired.
   panic is removed; the line-676 postcondition ("cross-block values
   remain after spilling") governs residuals. The unit test was
   repurposed: test_cross_block_use_is_spilled_not_rejected (75/75).
-- **OPEN (Table path only, NEXT LAYER)**: with the assert gone, the
-  Table-dispatched revm module now progresses import OK -> SSA/spill
-  OK -> lowering, and hits a NEW uncharted bug: frame_write_ret
-  (volar-lir circuits.rs:1089) indexes ret_bits[j] with an empty
-  slice against a non-empty FrameLayout.ret — a ReturnCall whose
-  forwarded return bits are empty. Previously masked by the assert
-  (the Table module never got spilled+lowered before). Next step:
-  read lower_to_ir's ReturnCall arm to see where ret_bits come from
-  and why the Table-shaped module produces an empty forwarding set.
+- **frame_write_ret FIXED (this round)**: the failing Return was a
+  reachable-but-instruction-less block's fallback `Return{[]}` under a
+  non-void sig (f164 b264: sig_results=1 stmts=0). The Return arm now
+  forwards the zero-return convention: short/empty ret_bits are padded
+  with zero Const bits to FrameLayout.ret's slot count before
+  frame_write_ret. **THE TABLE-DISPATCHED REVM MODULE NOW LOWERS
+  END-TO-END FOR THE FIRST TIME**: import OK (1.68M values) -> lower
+  OK in 8.45s: 5092 blocks / 3.35M stmts / 15 types (the Table
+  trade-off vs cascade: more blocks, fewer stmts — 1172/4.27M).
+  Suites green: dispatch test, differential, cascade import+lower,
+  vaffle-target 75/75, fuzz 91/91, lir 7/7, pre_movfuscate 9/9,
+  works with VLVI_JUMP_THREAD=1.
 
 ## Open items
 

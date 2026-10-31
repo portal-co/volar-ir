@@ -1663,7 +1663,21 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     let n_bits = ir_type_bit_width(&self.types, ir_tid);
                     all_ret_bits.extend(explode_to_bits(em, ir_var, n_bits));
                 }
-                // Pack all return bits into words.
+                // Pack all return bits into words. A short/empty return
+                // (e.g. a reachable-but-instruction-less block's fallback
+                // `Return{[]}` under a non-void sig) forwards the
+                // zero-return convention instead of panicking in
+                // frame_write_ret: pad with zero bits to the layout's slot
+                // count.
+                let want_slots =
+                    own_layout.ret.as_ref().map(|(_, sc, _)| *sc as usize);
+                if let Some(want_slots) = want_slots {
+                    let want_bits = want_slots * PACK_W;
+                    while all_ret_bits.len() < want_bits {
+                        let z = em.bc_const(false);
+                        all_ret_bits.push(z);
+                    }
+                }
                 let ret_words = pack_bits(em, &all_ret_bits, PACK_W);
                 // frame_write_ret expects one value per ret slot;
                 // our layout has ceil(total_ret_bits/PACK_W) slots of PACK_TID.

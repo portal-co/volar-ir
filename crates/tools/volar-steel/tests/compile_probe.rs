@@ -1964,6 +1964,28 @@ fn revm_wasm32_import_probe() {
                 vaffle.funcs.len()
             );
             if std::env::var_os("VLVI_DOM_TRACE").is_some() {
+                // Empty-Return probe: Return{[]} in a sig with results.
+                for (fi, f) in vaffle.funcs.iter().enumerate() {
+                    if let vaffle::FuncDecl::Body(b) = f {
+                        let sig_results = vaffle.sigs[b.sig.0].results.len();
+                        if sig_results == 0 {
+                            continue;
+                        }
+                        for (bi, blk) in b.blocks.iter().enumerate() {
+                            if let vaffle::Terminator::Return { values } =
+                                &blk.terminator
+                            {
+                                if values.is_empty() {
+                                    eprintln!(
+                                        "EMPTY RET PROBE f{fi} b{bi}: sig_results={sig_results} stmts={}",
+                                        blk.stmts.len()
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
                 for (fi, f) in vaffle.funcs.iter().enumerate() {
                     if let vaffle::FuncDecl::Body(b) = f {
                         let mut def_block = vec![usize::MAX; b.values.len()];
