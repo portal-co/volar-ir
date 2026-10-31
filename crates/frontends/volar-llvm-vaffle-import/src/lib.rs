@@ -119,6 +119,178 @@ impl From<ConstChainError> for ImportError {
     }
 }
 
+/// Jump-thread one imported body: splice statement-empty pure-`Jump`
+/// non-entry blocks into their predecessors (substituting jump args
+/// through the spliced block's params), then compact dead blocks once.
+///
+/// This is the glue-block eater: the Table dispatch's case/result blocks,
+/// bulk-memory loops, and narrowing chains all leave trivial forward
+/// blocks whose only content is control flow. Bounds: the entry block is
+/// never spliced, self-loops are skipped, dead blocks are marked before
+/// re-scan, and the whole thing runs at most `JUMP_THREAD_PASSES`
+/// sweeps plus ONE compaction — the previous attempt's hang was an
+/// unbounded fixpoint over cycles; marking-before-rescan terminates it.
+const JUMP_THREAD_PASSES: usize = 6;
+
+fn jump_thread_body<P: Clone>(body: &mut FuncBody<P>) {
+    let n = body.blocks.len();
+    if n == 0 {
+        return;
+    }
+    let entry = body.entry.0 as usize;
+    let mut dead = vec![false; n];
+    let mut changed = true;
+    let mut passes = 0;
+    while changed && passes < JUMP_THREAD_PASSES {
+        changed = false;
+        passes += 1;
+        for bi in 0..n {
+            if dead[bi] || bi == entry {
+                continue;
+            }
+            // Splice only statement-empty unconditional jumps that are
+            // not self-loops and whose target is still alive.
+            let (target, targs) = match &body.blocks[bi].terminator {
+                Terminator::Jump(t)
+                    if body.blocks[bi].stmts.is_empty()
+                        && t.block.0 as usize != bi
+                        && !dead[t.block.0 as usize] =>
+                {
+                    (t.block.0 as usize, t.args.clone())
+                }
+                _ => continue,
+            };
+            // Availability guard: after splicing, the predecessor's edge
+            // must carry every value the target's params need. Sound when
+            // each jump arg is one of THIS block's own params (fed by the
+            // predecessor's edge args) or a function-global Const — a jump
+            // arg defined in some other dominating block is available at
+            // `bi` but NOT necessarily at the predecessor.
+            {
+                let param_set: std::collections::HashSet<ValueId> =
+                    body.blocks[bi].params.iter().map(|&(vid, _)| vid).collect();
+                let all_available = targs.iter().all(|&a| {
+                    param_set.contains(&a)
+                        || matches!(
+                            &body.values[a.0].kind,
+                            Value::Op(Stmt::Const(_, _))
+                        )
+                });
+                if !all_available {
+                    continue;
+                }
+            }
+            // This block's params map positionally onto the outgoing
+            // jump's args; predecessor edges into `bi` substitute the
+            // same positions with THEIR args.
+            let params: Vec<ValueId> =
+                body.blocks[bi].params.iter().map(|&(vid, _)| vid).collect();
+            for pb in 0..n {
+                if dead[pb] {
+                    continue;
+                }
+                let mut subst =
+                    |a: &mut ValueId, targs: &Vec<ValueId>| {
+                        if let Some(i) =
+                            params.iter().position(|&p| p == *a)
+                        {
+                            if let Some(&nv) = targs.get(i) {
+                                *a = nv;
+                            }
+                        }
+                    };
+                match &mut body.blocks[pb].terminator {
+                    Terminator::Jump(t) if t.block.0 as usize == bi => {
+                        for a in &mut t.args {
+                            subst(a, &targs);
+                        }
+                        t.block = BlockId(target);
+                        changed = true;
+                    }
+                    Terminator::IfNonzero {
+                        then_target,
+                        else_target,
+                        ..
+                    } => {
+                        for t2 in [then_target, else_target] {
+                            if t2.block.0 as usize == bi {
+                                for a in &mut t2.args {
+                                    subst(a, &targs);
+                                }
+                                t2.block = BlockId(target);
+                                changed = true;
+                            }
+                        }
+                    }
+                    Terminator::Table {
+                        targets,
+                        default_target,
+                        ..
+                    } => {
+                        for t2 in targets.iter_mut() {
+                            if t2.block.0 as usize == bi {
+                                for a in &mut t2.args {
+                                    subst(a, &targs);
+                                }
+                                t2.block = BlockId(target);
+                                changed = true;
+                            }
+                        }
+                        if default_target.block.0 as usize == bi {
+                            for a in &mut default_target.args {
+                                subst(a, &targs);
+                            }
+                            default_target.block = BlockId(target);
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            dead[bi] = true;
+        }
+    }
+    // One compaction: renumber live blocks, remap every terminator's
+    // block targets, keep the entry (never spliced => always live).
+    let mut map = vec![usize::MAX; n];
+    let mut live = Vec::with_capacity(n);
+    for bi in 0..n {
+        if !dead[bi] {
+            map[bi] = live.len();
+            live.push(body.blocks[bi].clone());
+        }
+    }
+    for blk in &mut live {
+        match &mut blk.terminator {
+            Terminator::Jump(t) => {
+                t.block = BlockId(map[t.block.0]);
+            }
+            Terminator::IfNonzero {
+                then_target,
+                else_target,
+                ..
+            } => {
+                then_target.block = BlockId(map[then_target.block.0]);
+                else_target.block = BlockId(map[else_target.block.0]);
+            }
+            Terminator::Table {
+                targets,
+                default_target,
+                ..
+            } => {
+                for t in targets.iter_mut() {
+                    t.block = BlockId(map[t.block.0]);
+                }
+                default_target.block =
+                    BlockId(map[default_target.block.0]);
+            }
+            _ => {}
+        }
+    }
+    body.blocks = live;
+    body.entry = BlockId(map[entry]);
+}
+
 type IResult<T> = Result<T, ImportError>;
 
 /// Bits reserved for a global's `StorageId` within `Importer::ptr_value_bits`'s
@@ -150,6 +322,20 @@ const MAX_DISPATCH_CANDIDATES: usize = 64;
 
 /// Bits needed to represent every integer in `0..=v` (at least 1). Matches
 /// `VaffleTarget::switch`'s dense positional selector width.
+/// FNV-1a over a candidate-set fingerprint (storage ids + stack flags).
+fn fnv64(entries: &[(StorageId, bool)]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for (sid, is_stack) in entries {
+        for byte in sid.0.to_le_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h ^= *is_stack as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 fn bits_for_max_value(v: usize) -> usize {
     if v == 0 {
         1
@@ -656,6 +842,25 @@ enum GlobalPtr {
 }
 
 #[derive(Clone, Debug)]
+/// One shared Table-on-ID dispatch class. See `FuncCtx::shared_dispatch`.
+struct SharedDispatch {
+    d_block: BlockId,
+    r_block: BlockId,
+    /// R's params: read = [loaded_packed, tag]; write = [tag].
+    r_loaded_param: ValueId,
+    r_tag_param: ValueId,
+    dead_block: BlockId,
+    /// Grows per site: Target { block: site continuation, args: the
+    /// result block's loaded-value param }.
+    r_targets: Vec<Target>,
+    tag_width: usize,
+    tag_tid: TypeId,
+    packed_tid: TypeId,
+    next_tag: u32,
+    /// The candidate set this class was built for (verified on hit).
+    entries: Vec<(StorageId, bool)>,
+}
+
 enum IntrinsicPointer {
     Stack {
         ptr: StackPtr,
@@ -1850,12 +2055,19 @@ impl<'ctx> Importer<'ctx> {
             );
         }
         let values = core::mem::take(&mut fctx.values);
-        let body = FuncBody {
+        let mut body = FuncBody {
             sig,
             blocks: fctx.finish_blocks(fallback_return_values),
             values,
             entry: entry_block,
         };
+        // Experimental (VLVI_JUMP_THREAD=1): the pass still has a known
+        // eval bug — after threading, a callee's non-entry block param can
+        // go unbound ("value N not in table"); evidence trail in
+        // docs/revm-unmod-open-items.md. Off by default.
+        if std::env::var_os("VLVI_JUMP_THREAD").is_some() {
+            jump_thread_body(&mut body);
+        }
         self.funcs[id.0] = FuncDecl::Body(body);
         Ok(called)
     }
@@ -5670,113 +5882,95 @@ impl<'ctx> Importer<'ctx> {
         allocas: &[StorageId],
         candidates: &[StorageId],
     ) -> IResult<Bits> {
-        let cur = fctx.current;
-        let offset_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
-        let tag_bit = ptr_bits[self.pointer_bits - 1];
-        let not_tag = {
-            let mut c = Ctx {
-                fctx,
-                bit_tid: self.bit_tid,
-                block: cur,
-            };
-            c.bc_not(tag_bit)
-        };
-        // One unified candidate list: stacks first, then globals.
-        let mut entries: Vec<(StorageId, bool)> = Vec::with_capacity(allocas.len() + candidates.len());
+        let mut entries: Vec<(StorageId, bool)> =
+            Vec::with_capacity(allocas.len() + candidates.len());
         for &sid in allocas {
             entries.push((sid, true));
         }
         for &sid in candidates {
             entries.push((sid, false));
         }
-        let n = entries.len();
-        let sel_width = bits_for_max_value(n);
-        // Dense selector: default = n (no candidate matched).
-        let mut selector: Vec<ValueId> = {
+        let key = (fnv64(&entries), n_bits, false);
+        let usable = match fctx.shared_dispatch.get(&key) {
+            Some(c) => c.entries == entries && c.next_tag < (1u32 << c.tag_width),
+            None => {
+                let new_class =
+                    self.build_shared_dispatch(fctx, &entries, n_bits, pointee_ty, false);
+                fctx.shared_dispatch.insert(key, new_class);
+                true
+            }
+        };
+        if !usable {
+            return self.dispatch_read_cascade(fctx, ptr_bits, pointee_ty, n_bits);
+        }
+        let cur = fctx.current;
+        // Reserve the tag before any emission (drop the borrow first).
+        let tag = {
+            let class = fctx.shared_dispatch.get_mut(&key).expect("usable class");
+            let tag = class.next_tag;
+            class.next_tag += 1;
+            let (d_block, tag_tid, tag_width, packed_tid) =
+                (class.d_block, class.tag_tid, class.tag_width, class.packed_tid);
+            (tag, d_block, tag_tid, tag_width, packed_tid)
+        };
+        let (tag, d_block, tag_tid, tag_width, packed_tid) = tag;
+        let tagv = {
             let mut c = Ctx {
                 fctx,
                 bit_tid: self.bit_tid,
                 block: cur,
             };
-            (0..sel_width)
-                .map(|b| c.bc_const((n >> b) & 1 != 0))
-                .collect()
+            let parts: Vec<ValueId> = (0..tag_width)
+                .map(|b| c.bc_const((tag >> b) & 1 != 0))
+                .collect();
+            fctx.emit(
+                cur,
+                Value::Op(Stmt::Merge {
+                    parts,
+                    ty: tag_tid,
+                }),
+            )
         };
-        for (case_i, (sid, is_stack)) in entries.iter().enumerate().rev() {
-            let gate = if *is_stack { not_tag } else { tag_bit };
-            let matched = self.dispatch_id_matches_one(fctx, cur, ptr_bits, *sid, gate);
-            let case_idx_bits: Vec<ValueId> = {
-                let mut c = Ctx {
-                    fctx,
-                    bit_tid: self.bit_tid,
-                    block: cur,
-                };
-                (0..sel_width)
-                    .map(|b| c.bc_const((case_i >> b) & 1 != 0))
-                    .collect()
-            };
-            selector = {
-                let mut c = Ctx {
-                    fctx,
-                    bit_tid: self.bit_tid,
-                    block: cur,
-                };
-                circuits::bc_select_vec(&mut c, matched, &case_idx_bits, &selector)
-            };
-        }
-        let selector_val = self.compose_address(fctx, cur, &selector);
-
-        // Continuation carries the loaded bits as block params.
-        let cont = fctx.append_block();
-        let cont_bits: Vec<ValueId> = (0..n_bits)
-            .map(|i| fctx.add_param(cont, self.bit_tid, i))
-            .collect();
-        let zero = self.bc_const_at(fctx, cur, false);
-        let zeros: Vec<ValueId> = vec![zero; n_bits];
-
-        let mut targets: Vec<Target> = Vec::with_capacity(n);
-        for (sid, is_stack) in &entries {
-            let case_b = fctx.append_block();
-            let loaded = if *is_stack {
-                let idx = self
-                    .alloca_data
-                    .iter()
-                    .position(|&s| s == *sid)
-                    .unwrap_or(0);
-                self.stack_load_dynamic(
-                    fctx,
-                    *sid,
-                    ptr_bits[0],
-                    &offset_bits,
-                    pointee_ty,
-                    n_bits,
-                    self.alloca_sizes[idx],
-                )
-            } else {
-                self.mem_load_dynamic(fctx, *sid, &offset_bits, n_bits.div_ceil(8))
-            };
-            fctx.terminators[case_b.0] = Some(Terminator::Jump(Target {
-                block: cont,
-                args: loaded,
-                reentry: None,
-            }));
-            targets.push(Target {
-                block: case_b,
-                args: Vec::new(),
-                reentry: None,
-            });
-        }
-        let default_b = fctx.append_block();
-        fctx.terminators[default_b.0] = Some(Terminator::Jump(Target {
-            block: cont,
-            args: zeros,
+        let ptrv = self.compose_address(fctx, cur, ptr_bits);
+        fctx.terminators[cur.0] = Some(Terminator::Jump(Target {
+            block: d_block,
+            args: vec![ptrv, tagv],
             reentry: None,
         }));
-        fctx.terminators[cur.0] = Some(Terminator::Table {
-            index: selector_val,
+        let cont = fctx.append_block();
+        let packed_param = fctx.add_param(cont, packed_tid, 0);
+        let cont_bits: Vec<ValueId> = (0..n_bits)
+            .map(|b| {
+                fctx.emit(
+                    cont,
+                    Value::Op(Stmt::Shuffle {
+                        result_bits: vec![(b as u8, packed_param)],
+                        ty: self.bit_tid,
+                    }),
+                )
+            })
+            .collect();
+        let (r_block, r_loaded_param, r_tag_param, dead, targets) = {
+            let class = fctx.shared_dispatch.get_mut(&key).expect("usable class");
+            class.r_targets.push(Target {
+                block: cont,
+                args: vec![class.r_loaded_param],
+                reentry: None,
+            });
+            let targets = class.r_targets.clone();
+            (
+                class.r_block,
+                class.r_loaded_param,
+                class.r_tag_param,
+                class.dead_block,
+                targets,
+            )
+        };
+        fctx.terminators[r_block.0] = Some(Terminator::Table {
+            index: r_tag_param,
             targets,
             default_target: Target {
-                block: default_b,
+                block: dead,
                 args: Vec::new(),
                 reentry: None,
             },
@@ -5785,11 +5979,6 @@ impl<'ctx> Importer<'ctx> {
         Ok(cont_bits)
     }
 
-    /// Table-on-ID dispatch, WRITE side: same selector, but each case
-    /// block stores DIRECTLY (only that block executes — the old
-    /// unconditional-then-mux RMW dance exists precisely because the
-    /// cascade has no control split; the Table does). No continuation
-    /// parameters: the stored value dominates every case block.
     fn dispatch_write_table(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
@@ -5798,8 +5987,126 @@ impl<'ctx> Importer<'ctx> {
         allocas: &[StorageId],
         candidates: &[StorageId],
     ) -> IResult<()> {
+        let n_bits = val.len();
+        let mut entries: Vec<(StorageId, bool)> =
+            Vec::with_capacity(allocas.len() + candidates.len());
+        for &sid in allocas {
+            entries.push((sid, true));
+        }
+        for &sid in candidates {
+            entries.push((sid, false));
+        }
+        let key = (fnv64(&entries), n_bits, true);
+        let usable = match fctx.shared_dispatch.get(&key) {
+            Some(c) => c.entries == entries && c.next_tag < (1u32 << c.tag_width),
+            None => {
+                let new_class =
+                    self.build_shared_dispatch(fctx, &entries, n_bits, self.bit_tid, true);
+                fctx.shared_dispatch.insert(key, new_class);
+                true
+            }
+        };
+        if !usable {
+            self.dispatch_write_cascade(fctx, ptr_bits, val);
+            return Ok(());
+        }
         let cur = fctx.current;
-        let offset_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
+        let tag = {
+            let class = fctx.shared_dispatch.get_mut(&key).expect("usable class");
+            let tag = class.next_tag;
+            class.next_tag += 1;
+            let (d_block, tag_tid, tag_width, packed_tid) =
+                (class.d_block, class.tag_tid, class.tag_width, class.packed_tid);
+            (tag, d_block, tag_tid, tag_width, packed_tid)
+        };
+        let (tag, d_block, tag_tid, tag_width, packed_tid) = tag;
+        let tagv = {
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block: cur,
+            };
+            let parts: Vec<ValueId> = (0..tag_width)
+                .map(|b| c.bc_const((tag >> b) & 1 != 0))
+                .collect();
+            fctx.emit(
+                cur,
+                Value::Op(Stmt::Merge {
+                    parts,
+                    ty: tag_tid,
+                }),
+            )
+        };
+        let ptrv = self.compose_address(fctx, cur, ptr_bits);
+        let valv = fctx.emit(
+            cur,
+            Value::Op(Stmt::Merge {
+                parts: val.to_vec(),
+                ty: packed_tid,
+            }),
+        );
+        fctx.terminators[cur.0] = Some(Terminator::Jump(Target {
+            block: d_block,
+            args: vec![ptrv, valv, tagv],
+            reentry: None,
+        }));
+        let cont = fctx.append_block();
+        let (r_block, r_tag_param, dead, targets) = {
+            let class = fctx.shared_dispatch.get_mut(&key).expect("usable class");
+            class.r_targets.push(Target {
+                block: cont,
+                args: Vec::new(),
+                reentry: None,
+            });
+            let targets = class.r_targets.clone();
+            (class.r_block, class.r_tag_param, class.dead_block, targets)
+        };
+        fctx.terminators[r_block.0] = Some(Terminator::Table {
+            index: r_tag_param,
+            targets,
+            default_target: Target {
+                block: dead,
+                args: Vec::new(),
+                reentry: None,
+            },
+        });
+        fctx.current = cont;
+        Ok(())
+    }
+
+    /// Build the SHARED dispatch class: D (selector + Table), per-candidate
+    /// case blocks, R (result router). All statements are
+    /// site-independent — the pointer arrives as D's own block param.
+    fn build_shared_dispatch(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        entries: &[(StorageId, bool)],
+        n_bits: usize,
+        _pointee_ty: TypeId,
+        is_write: bool,
+    ) -> SharedDispatch {
+        let tag_width = 12usize;
+        let packed_tid = self
+            .types
+            .intern(IrType::Vec(n_bits, self.bit_tid));
+        let tag_tid = self.types.intern(IrType::Vec(tag_width, self.bit_tid));
+        let d = fctx.append_block();
+        let ptrv = fctx.add_param(d, packed_tid, 0);
+        // Extract the pointer's fields from the packed param.
+        let ptr_bits: Bits = (0..self.pointer_bits)
+            .map(|b| {
+                fctx.emit(
+                    d,
+                    Value::Op(Stmt::Shuffle {
+                        result_bits: vec![(b as u8, ptrv)],
+                        ty: self.bit_tid,
+                    }),
+                )
+            })
+            .collect();
+        let tagv = fctx.add_param(d, tag_tid, 1);
+        let cur = d;
+        let offset_bits = self.dispatch_global_addr_bits(fctx, cur, &ptr_bits);
         let tag_bit = ptr_bits[self.pointer_bits - 1];
         let not_tag = {
             let mut c = Ctx {
@@ -5809,13 +6116,6 @@ impl<'ctx> Importer<'ctx> {
             };
             c.bc_not(tag_bit)
         };
-        let mut entries: Vec<(StorageId, bool)> = Vec::new();
-        for &sid in allocas {
-            entries.push((sid, true));
-        }
-        for &sid in candidates {
-            entries.push((sid, false));
-        }
         let n = entries.len();
         let sel_width = bits_for_max_value(n);
         let mut selector: Vec<ValueId> = {
@@ -5830,7 +6130,7 @@ impl<'ctx> Importer<'ctx> {
         };
         for (case_i, (sid, is_stack)) in entries.iter().enumerate().rev() {
             let gate = if *is_stack { not_tag } else { tag_bit };
-            let matched = self.dispatch_id_matches_one(fctx, cur, ptr_bits, *sid, gate);
+            let matched = self.dispatch_id_matches_one(fctx, cur, &ptr_bits, *sid, gate);
             let case_idx_bits: Vec<ValueId> = {
                 let mut c = Ctx {
                     fctx,
@@ -5851,72 +6151,274 @@ impl<'ctx> Importer<'ctx> {
             };
         }
         let selector_val = self.compose_address(fctx, cur, &selector);
-
-        let cont = fctx.append_block();
-        let mut targets: Vec<Target> = Vec::with_capacity(n);
-        for (sid, is_stack) in &entries {
-            let case_b = fctx.append_block();
-            if *is_stack {
-                let idx = self
-                    .alloca_data
-                    .iter()
-                    .position(|&s| s == *sid)
-                    .unwrap_or(0);
-                self.stack_store_dynamic(
-                    fctx,
-                    *sid,
-                    ptr_bits[0],
-                    &offset_bits,
-                    val,
-                    self.alloca_sizes[idx],
-                );
-            } else {
-                self.mem_store_dynamic(fctx, *sid, &offset_bits, val, val.len().div_ceil(8));
-            }
-            fctx.terminators[case_b.0] = Some(Terminator::Jump(Target {
-                block: cont,
-                args: Vec::new(),
-                reentry: None,
-            }));
-            targets.push(Target {
-                block: case_b,
-                args: Vec::new(),
-                reentry: None,
-            });
-        }
-        let default_b = fctx.append_block();
-        fctx.terminators[default_b.0] = Some(Terminator::Jump(Target {
-            block: cont,
+        // R: read routes [loaded, tag]; write routes [tag].
+        let r = fctx.append_block();
+        let dead = fctx.append_block();
+        fctx.terminators[dead.0] = Some(Terminator::Jump(Target {
+            block: dead,
             args: Vec::new(),
             reentry: None,
         }));
-        fctx.terminators[cur.0] = Some(Terminator::Table {
+        let mut targets: Vec<Target> = Vec::with_capacity(n);
+        for (sid, is_stack) in entries {
+            let case_b = fctx.append_block();
+            let c_ptrv = fctx.add_param(case_b, packed_tid, 0);
+            let c_tagv = fctx.add_param(case_b, tag_tid, 1);
+            let c_ptr_bits: Bits = (0..self.pointer_bits)
+                .map(|b| {
+                    fctx.emit(
+                        case_b,
+                        Value::Op(Stmt::Shuffle {
+                            result_bits: vec![(b as u8, c_ptrv)],
+                            ty: self.bit_tid,
+                        }),
+                    )
+                })
+                .collect();
+            let c_offset = self.dispatch_global_addr_bits(fctx, case_b, &c_ptr_bits);
+            if is_write {
+                let c_valv = fctx.add_param(case_b, packed_tid, 2);
+                if *is_stack {
+                    let idx = self
+                        .alloca_data
+                        .iter()
+                        .position(|&s| s == *sid)
+                        .unwrap_or(0);
+                    let val_bits: Bits = (0..n_bits)
+                        .map(|b| {
+                            fctx.emit(
+                                case_b,
+                                Value::Op(Stmt::Shuffle {
+                                    result_bits: vec![(b as u8, c_valv)],
+                                    ty: self.bit_tid,
+                                }),
+                            )
+                        })
+                        .collect();
+                    let idx2 = self
+                        .alloca_data
+                        .iter()
+                        .position(|&s| s == *sid)
+                        .unwrap_or(0);
+                    self.stack_store_dynamic(
+                        fctx,
+                        *sid,
+                        c_ptr_bits[0],
+                        &c_offset,
+                        &val_bits,
+                        self.alloca_sizes[idx2],
+                    );
+                    let _ = idx;
+                } else {
+                    let val_bits: Bits = (0..n_bits)
+                        .map(|b| {
+                            fctx.emit(
+                                case_b,
+                                Value::Op(Stmt::Shuffle {
+                                    result_bits: vec![(b as u8, c_valv)],
+                                    ty: self.bit_tid,
+                                }),
+                            )
+                        })
+                        .collect();
+                    self.mem_store_dynamic(
+                        fctx,
+                        *sid,
+                        &c_offset,
+                        &val_bits,
+                        n_bits.div_ceil(8),
+                    );
+                }
+                fctx.terminators[case_b.0] = Some(Terminator::Jump(Target {
+                    block: r,
+                    args: vec![c_tagv],
+                    reentry: None,
+                }));
+            } else {
+                let loaded = if *is_stack {
+                    let idx = self
+                        .alloca_data
+                        .iter()
+                        .position(|&s| s == *sid)
+                        .unwrap_or(0);
+                    self.stack_load_dynamic(
+                        fctx,
+                        *sid,
+                        c_ptr_bits[0],
+                        &c_offset,
+                        self.bit_tid,
+                        n_bits,
+                        self.alloca_sizes[idx],
+                    )
+                } else {
+                    self.mem_load_dynamic(fctx, *sid, &c_offset, n_bits.div_ceil(8))
+                };
+                let loaded_packed = fctx.emit(
+                    case_b,
+                    Value::Op(Stmt::Merge {
+                        parts: loaded,
+                        ty: packed_tid,
+                    }),
+                );
+                fctx.terminators[case_b.0] = Some(Terminator::Jump(Target {
+                    block: r,
+                    args: vec![loaded_packed, c_tagv],
+                    reentry: None,
+                }));
+            }
+            targets.push(Target {
+                block: case_b,
+                args: vec![ptrv, tagv]/* D's params, forwarded */,
+                reentry: None,
+            });
+        }
+        fctx.terminators[d.0] = Some(Terminator::Table {
             index: selector_val,
             targets,
             default_target: Target {
-                block: default_b,
-                args: Vec::new(),
+                block: r,
+                args: if is_write {
+                    vec![tagv]
+                } else {
+                    let zero = self.bc_const_at(fctx, d, false);
+                    let zeros: Vec<ValueId> = (0..n_bits)
+                        .map(|_| zero)
+                        .collect();
+                    let zeros_packed = fctx.emit(
+                        d,
+                        Value::Op(Stmt::Merge {
+                            parts: zeros,
+                            ty: packed_tid,
+                        }),
+                    );
+                    vec![zeros_packed, tagv]
+                },
                 reentry: None,
             },
         });
-        fctx.current = cont;
-        Ok(())
+        // R's terminator is filled per site registration; a self-loop
+        // placeholder keeps it terminated until then.
+        fctx.terminators[r.0] = Some(Terminator::Jump(Target {
+            block: dead,
+            args: Vec::new(),
+            reentry: None,
+        }));
+        let r_loaded_param = if is_write {
+            fctx.add_param(r, tag_tid, 0)
+        } else {
+            fctx.add_param(r, packed_tid, 0)
+        };
+        let r_tag_param = if is_write {
+            r_loaded_param
+        } else {
+            fctx.add_param(r, tag_tid, 1)
+        };
+        SharedDispatch {
+            d_block: d,
+            r_block: r,
+            r_loaded_param,
+            r_tag_param,
+            dead_block: dead,
+            r_targets: Vec::new(),
+            tag_width,
+            tag_tid,
+            packed_tid,
+            next_tag: 0,
+            entries: entries.to_vec(),
+        }
     }
 
-    /// Runtime storage-identity dispatch for a `Load` through a pointer
-    /// whose provenance isn't statically resolvable (neither
-    /// `stack_slot_of` nor `global_ptr_of`/`storage_for_with_offset` could
-    /// pin it down -- e.g. a pointer function parameter, or a
-    /// `phi`/`select`-merged value whose tag isn't a compile-time
-    /// constant). Reads every per-alloca data stack (tag 0, bit address) and
-    /// every module global (tag 1, byte address) and muxes the one
-    /// `ptr_bits` actually names, decoding `ptr_bits` per
-    /// `ptr_value_bits`'s own tag+ID+ADDR encoding -- the uniform encoding
-    /// every pointer *value* this importer produces already uses (see
-    /// `docs/llvm-ptr-value-bits.md`), which is what makes decode-by-bits
-    /// sufficient here without any provenance analysis. Mirrors
-    /// `translate_switch`'s `bc_eq`/`bc_select_vec` cascade, applied to
-    /// data bits instead of a jump-table index.
+    /// The per-bit mux cascade (fallback for shared-dispatch collisions).
+    fn dispatch_read_cascade(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        ptr_bits: &Bits,
+        pointee_ty: TypeId,
+        n_bytes_times8: usize,
+    ) -> IResult<Bits> {
+        let n_bits = n_bytes_times8;
+        let allocas = self.alloca_data.clone();
+        let candidates = self.dispatch_candidates()?;
+        let cur = fctx.current;
+        let offset_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
+        let tag_bit = ptr_bits[self.pointer_bits - 1];
+        let not_tag = {
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block: cur,
+            };
+            c.bc_not(tag_bit)
+        };
+        let stack_matches = self.dispatch_id_matches(fctx, cur, ptr_bits, &allocas, not_tag);
+        let zero = self.bc_const_at(fctx, cur, false);
+        let mut result = vec![zero; n_bits];
+        for (candidate_idx, &sid) in allocas.iter().enumerate() {
+            let loaded = self.stack_load_dynamic(
+                fctx,
+                sid,
+                ptr_bits[0],
+                &offset_bits,
+                pointee_ty,
+                n_bits,
+                self.alloca_sizes[candidate_idx],
+            );
+            result = mux_bits(self, fctx, cur, stack_matches[candidate_idx], &loaded, &result);
+        }
+        let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
+        for (candidate_idx, &sid) in candidates.iter().enumerate() {
+            let global_bits = self.mem_load_dynamic(fctx, sid, &offset_bits, n_bits.div_ceil(8));
+            result = mux_bits(self, fctx, cur, matches[candidate_idx], &global_bits, &result);
+        }
+        Ok(result)
+    }
+
+    fn dispatch_write_cascade(&mut self, fctx: &mut FuncCtx<'ctx>, ptr_bits: &Bits, val: &Bits) {
+        let n_bits = val.len();
+        let allocas = self.alloca_data.clone();
+        let candidates = self.dispatch_candidates().unwrap_or_default();
+        let cur = fctx.current;
+        let offset_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
+        let tag_bit = ptr_bits[self.pointer_bits - 1];
+        let not_tag = {
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block: cur,
+            };
+            c.bc_not(tag_bit)
+        };
+        let stack_matches = self.dispatch_id_matches(fctx, cur, ptr_bits, &allocas, not_tag);
+        let bit_tid = self.bit_tid;
+        for (candidate_idx, &sid) in allocas.iter().enumerate() {
+            let bound = self.alloca_sizes[candidate_idx];
+            let old = self.stack_load_dynamic(
+                fctx,
+                sid,
+                ptr_bits[0],
+                &offset_bits,
+                bit_tid,
+                n_bits,
+                bound,
+            );
+            let new_val = mux_bits(self, fctx, cur, stack_matches[candidate_idx], val, &old);
+            self.stack_store_dynamic(fctx, sid, ptr_bits[0], &offset_bits, &new_val, bound);
+        }
+        let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
+        for (candidate_idx, &sid) in candidates.iter().enumerate() {
+            let old = self.mem_load_dynamic(fctx, sid, &offset_bits, n_bits.div_ceil(8));
+            let new_val = mux_bits(self, fctx, cur, matches[candidate_idx], val, &old);
+            self.mem_store_dynamic(fctx, sid, &offset_bits, &new_val, n_bits.div_ceil(8));
+        }
+    }
+
+
+
+    /// Table-on-ID dispatch, WRITE side: same selector, but each case
+    /// block stores DIRECTLY (only that block executes — the old
+    /// unconditional-then-mux RMW dance exists precisely because the
+    /// cascade has no control split; the Table does). No continuation
+    /// parameters: the stored value dominates every case block.
     fn dispatch_read(
         &mut self,
         fctx: &mut FuncCtx<'ctx>,
@@ -6870,6 +7372,14 @@ struct FuncCtx<'ctx> {
     /// Hash-consed bit constants (value -> ValueId), hoisted to the entry
     /// block. See `bc_const_at`.
     const_cache: HashMap<u128, ValueId>,
+    /// Shared Table-on-ID dispatch classes, keyed by (candidate-set hash,
+    /// access width, is-write). Each class owns ONE dispatch block D
+    /// (params [ptr, tag]), per-candidate case blocks (same params), and a
+    /// result block R; sites jump into D with their pointer and a fresh
+    /// dense tag, and R's Table routes [loaded, tag] to the site's own
+    /// continuation block. Per-site cost: one Jump; the ~430 case blocks
+    /// exist ONCE per class instead of once per site.
+    shared_dispatch: HashMap<(u64, usize, bool), SharedDispatch>,
     /// Pointer-VALUE provenance through memory: slot -> the tracked
     /// pointer stored there. -O0 spills every parameter
     /// (`store ptr %ctx, %spill` ... `%r = load %spill`), and a bare load
@@ -6901,6 +7411,7 @@ impl<'ctx> FuncCtx<'ctx> {
             global_ptr_of: HashMap::new(),
             return_bits: 0,
             const_cache: HashMap::new(),
+            shared_dispatch: HashMap::new(),
             slot_ptr_of: HashMap::new(),
             zero_returns: HashMap::new(),
         }

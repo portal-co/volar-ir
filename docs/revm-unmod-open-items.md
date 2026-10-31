@@ -69,6 +69,27 @@ Guarded by the 12GB RSS kill-switch; it never fired.
   (same candidate set + width -> same access blocks) before Table can
   ship at this scale. Cascade-based import remains the working path.
 
+## Shared case blocks + jump threading (this round)
+
+- **Shared dispatch classes**: Table-on-ID's per-site case blocks are
+  now SHARED — one dispatch block D (params [ptr, tag]) + selector +
+  per-candidate case blocks + result router R per (candidate-set hash,
+  width, read/write) class; sites jump into D with a fresh dense tag
+  and R's Table routes [loaded, tag] straight to the site's own
+  continuation (zero extra blocks per site). Static module with bulk
+  loop: 6,606 -> 4,523 blocks, 2.50M -> 1.68M values, 332ms.
+  Cascade fallback on candidate-set collision or tag exhaustion.
+- **Jump threading** (VLVI_JUMP_THREAD=1, experimental): splices
+  statement-empty pure-Jmp non-entry blocks with jump-arg
+  substitution, bounded sweeps, single compaction — the old attempt's
+  hang is fixed (works suite 19s, no hang). KNOWN BUG: after
+  threading, a callee's non-entry block param can go unbound
+  (eval_vaffle "value N not in table"; evidence: callee v303 =
+  Param{block 6, idx 0} never seeded). The dominator-availability
+  guard (jump args must be the block's own params or Consts) did NOT
+  close it — the leak is elsewhere in the edge substitution. Off by
+  default; debug tooling under VLVI_THREAD_DEBUG / VLVI_SSA_TRACE.
+
 ## Open items
 
 1. **Word-cell freeze does not converge on this module** — needs

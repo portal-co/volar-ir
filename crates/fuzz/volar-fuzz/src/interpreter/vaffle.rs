@@ -148,6 +148,25 @@ fn eval_vaffle_depth(
 
         // Evaluate each stmt value in this block.
         for &vid in &block.stmts {
+            if std::env::var_os("VLVI_SSA_TRACE").is_some() {
+                let d = format!("{:?}", body.values[vid.0].kind);
+                if d.contains("ValueId(303)") {
+                    eprintln!(
+                        "EVAL: block {:?} stmt {} uses 303; table[303]={:?} def={}",
+                        current_block_id,
+                        vid.0,
+                        value_table.get(303).and_then(|v| v.clone()),
+                        {
+                            let dd = body
+                                .values
+                                .get(303)
+                                .map(|n| format!("{:?}", n.kind))
+                                .unwrap_or_default();
+                            dd.chars().take(60).collect::<String>()
+                        }
+                    );
+                }
+            }
             let val = eval_vaffle_value(
                 vid,
                 &body.values,
@@ -276,6 +295,21 @@ fn eval_vaffle_value(
     depth: usize,
     max_call_depth: usize,
 ) -> Option<IrValue> {
+    if std::env::var_os("VLVI_SSA_TRACE").is_some() && vid.0 == 303 {
+        eprintln!(
+            "EVALUATE v303 tbl={:p} len={} table[303]={:?} def={}",
+            value_table.as_ptr(),
+            value_table.len(),
+            value_table[303],
+            {
+                let d = values
+                    .get(303)
+                    .map(|n| format!("{:?}", n.kind))
+                    .unwrap_or_default();
+                d.chars().take(60).collect::<String>()
+            }
+        );
+    }
     let val = match &values[vid.0].kind {
         Value::Param { ty, .. } => {
             value_tys[vid.0] = Some(*ty);

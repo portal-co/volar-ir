@@ -2242,6 +2242,58 @@ fn bulk_memory_loop_matches_unroll() {
             (0..32).map(|b| vec![(sel >> b) & 1 == 1]).collect();
         let lowered_inputs: Vec<Vec<bool>> =
             vec![(0..32).map(|b| (sel >> b) & 1 == 1).collect()];
+        if std::env::var_os("VLVI_THREAD_DEBUG").is_some() {
+            for f2 in &unroll_mod.funcs {
+                if let vaffle::FuncDecl::Body(b) = f2 {
+                    if b.values.len() > 303 {
+                        let def = format!("{:?}", b.values[303].kind);
+                        eprintln!(
+                            "THREAD DBG: v303 def={} owner-find",
+                            def.chars().take(100).collect::<String>()
+                        );
+                        for (bi, blk) in b.blocks.iter().enumerate() {
+                            if let Some(pos303) =
+                                blk.stmts.iter().position(|&sid| sid.0 == 303)
+                            {
+                                let pos313 =
+                                    blk.stmts.iter().position(|&sid| sid.0 == 313);
+                                eprintln!(
+                                    "THREAD DBG: v303 in b{bi} stmts at pos {pos303}; v313 at {pos313:?}; block stmts {}",
+                                    blk.stmts.len()
+                                );
+                                for w in blk.stmts.iter().take(6) {
+                                    let d = format!("{:?}", b.values[w.0].kind);
+                                    eprintln!(
+                                        "  b{bi} v{}: {}",
+                                        w.0,
+                                        d.chars().take(70).collect::<String>()
+                                    );
+                                }
+                            }
+                            if blk.params.iter().any(|&(vid, _)| vid.0 == 303) {
+                                eprintln!("THREAD DBG: v303 is a PARAM of b{bi} ({} params)", blk.params.len());
+                            }
+                            let t = format!("{:?}", blk.terminator);
+                            if t.contains("ValueId(303)") {
+                                eprintln!(
+                                    "THREAD DBG: v303 TERM-USED b{bi}: {}",
+                                    t.chars().take(160).collect::<String>()
+                                );
+                            }
+                            for &sid in &blk.stmts {
+                                let d = format!("{:?}", b.values[sid.0].kind);
+                                if d.contains("ValueId(303)") {
+                                    eprintln!(
+                                        "THREAD DBG: v303 used in b{bi} stmt {sid:?}: {}",
+                                        d.chars().take(140).collect::<String>()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let unroll_out =
             volar_fuzz::interpreter::vaffle::eval_vaffle(&unroll_mod, unroll_fid, &vaffle_inputs)
                 .expect("unroll eval");
