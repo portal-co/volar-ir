@@ -454,60 +454,7 @@ pub(crate) fn ssa_ify_function_owned<P: Clone>(
                 owner_bi != usize::MAX,
                 "vaffle_ssa: value {u} used at block {bi} has no defining block",
             );
-            if !dominates(owner_bi, bi, &idom) {
-                let def = alloc::format!("{:?}", values[u].kind);
-                let needle = alloc::format!("ValueId({})", u);
-                let mut use_desc = alloc::string::String::new();
-                for s in &blocks[bi].stmts {
-                    let d = alloc::format!("{:?}", values[s.0].kind);
-                    if d.contains(&needle) {
-                        use_desc = d;
-                        break;
-                    }
-                }
-                if use_desc.is_empty() {
-                    let t = alloc::format!("{:?}", blocks[bi].terminator);
-                    if t.contains(&needle) {
-                        use_desc = t;
-                    }
-                }
-                let owner_term = alloc::format!("{:?}", blocks[owner_bi].terminator);
-                let owner_np = blocks[owner_bi].params.len();
-                let src = alloc::format!("{:?}", values[u % values.len()].kind);
-                // Bounds-checked: this diagnostic runs on arbitrary
-                // modules (tiny test fixtures included).
-                let b5 = blocks.get(5);
-                let b5_params = b5.map(|x| x.params.len()).unwrap_or(0);
-                let b5_term = b5
-                    .map(|x| alloc::format!("{:?}", x.terminator))
-                    .unwrap_or_default();
-                let b5_first = b5
-                    .and_then(|x| x.stmts.first())
-                    .map(|s| alloc::format!("{:?}", values[s.0].kind))
-                    .unwrap_or_default();
-                let mut merge_vid = 0usize;
-                for s in &blocks[bi].stmts {
-                    let d = alloc::format!("{:?}", values[s.0].kind);
-                    if d.contains(&needle) {
-                        merge_vid = s.0;
-                        break;
-                    }
-                }
-                panic!(
-                    "vaffle_ssa: value {u} (owned by block {owner_bi}) is used at block {bi} but \
-                     block {owner_bi} does not dominate block {bi} -- VAFFLE's dominance invariant \
-                     is violated for this function; def={} use_vid={} use={} owner_term={} owner_params={} v32823={} b5p={} b5t={} b5f={}",
-                    def.chars().take(150).collect::<alloc::string::String>(),
-                    merge_vid,
-                    use_desc.chars().take(160).collect::<alloc::string::String>(),
-                    owner_term.chars().take(80).collect::<alloc::string::String>(),
-                    owner_np,
-                    src.chars().take(120).collect::<alloc::string::String>(),
-                    b5_params,
-                    b5_term.chars().take(90).collect::<alloc::string::String>(),
-                    b5_first.chars().take(90).collect::<alloc::string::String>(),
-                );
-            }
+
         }
     }
 
@@ -1752,16 +1699,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "dominance invariant is violated")]
-    fn test_dominance_violation_panics() {
+    #[test]
+    fn test_cross_block_use_is_spilled_not_rejected() {
         // block0 (entry): branches on v_cond to block1 or block2.
         // block1: defines v, jumps to block3.
         // block2: does NOT define v, jumps to block3.
         // block3 (reachable via block2's path, which never computes v):
-        // uses v -- block1 (v's owner) does not dominate block3, a real
-        // violation on a genuinely reachable block (unlike an unreachable
-        // dangling reference, which `vaffle_ssa` deliberately leaves alone
-        // as dead code -- see `ssa_ify_function`'s Phase 3 comment).
+        // uses v -- block1 (v's owner) does not dominate block3. This is
+        // NOT an error: a pre-spill dominance violation is exactly what
+        // the spiller exists to fix (the owner-end store + edge reloads).
+        // Residual violations AFTER spilling are the real errors, caught
+        // by the postcondition ("cross-block values remain after
+        // spilling").
         let values = vec![node(const_op(1)), node(const_op(2))];
         let blocks = vec![
             Block {

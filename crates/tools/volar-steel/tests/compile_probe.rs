@@ -2088,6 +2088,46 @@ fn revm_wasm32_import_probe() {
             // Next pipeline stage: VAFFLE -> volar IR. Gated so the
             // import-only measurement stays isolable.
             if std::env::var_os("REVM_UNMOD_LOWER").is_some() {
+                // Pre/post-SP dominance comparison on the failing function.
+                if std::env::var_os("VLVI_DOM_TRACE").is_some() {
+                    use volar_vaffle_target::vaffle_ssa;
+                    let post = vaffle_ssa::ssa_ify_module(&vaffle);
+                    let mut reported = 0usize;
+                    for (fi, (pre_f, post_f)) in
+                        vaffle.funcs.iter().zip(post.funcs.iter()).enumerate()
+                    {
+                        if reported >= 2 {
+                            break;
+                        }
+                        if let (
+                            vaffle::FuncDecl::Body(pre_b),
+                            vaffle::FuncDecl::Body(post_b),
+                        ) = (pre_f, post_f)
+                        {
+                            let pre_v = dom_violations(pre_b);
+                            if pre_v.is_empty() {
+                                continue;
+                            }
+                            let post_v = dom_violations(post_b);
+                            reported += 1;
+                            eprintln!(
+                                "DOM CMP f{fi}: pre={} post={} violations",
+                                pre_v.len(),
+                                post_v.len()
+                            );
+                            for (vid, owner, use_b, pre_preds) in pre_v.iter().take(2) {
+                                let post_entry = post_v
+                                    .iter()
+                                    .find(|(v2, _, _, _)| v2 == vid);
+                                let post_preds: Option<&Vec<usize>> =
+                                    post_entry.map(|(_, _, _, ps)| ps);
+                                eprintln!(
+                                    "  v{vid} owner=b{owner} use=b{use_b} pre_preds={pre_preds:?} post_preds={post_preds:?}"
+                                );
+                            }
+                        }
+                    }
+                }
                 let lowered_at = std::time::Instant::now();
                 let (blocks, types) =
                     volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
@@ -2254,7 +2294,155 @@ fn native_bulk_sum(sel: u32) -> u32 {
 /// `BulkMemoryMode::Loop`, evaluate identically to the unrolled lowering
 /// (VAFFLE level, lowered-CFG level, and the INCREMENTAL lowering), and
 /// cost several times fewer entry-function import values.
-#[test]
+/// Dominance-violation scanner for one VAFFLE body: cross-block uses
+/// whose def block does not dominate the using block. Returns
+/// (value, owner, use_block, use_block_preds) triples.
+fn dom_violations(
+    b: &vaffle::FuncBody,
+) -> Vec<(usize, usize, usize, Vec<usize>)> {
+    let n = b.blocks.len();
+    let mut def_block = vec![usize::MAX; b.values.len()];
+    let mut preds: Vec<std::collections::BTreeSet<usize>> =
+        vec![std::collections::BTreeSet::new(); n];
+    for (bi, blk) in b.blocks.iter().enumerate() {
+        for &sid in &blk.stmts {
+            def_block[sid.0] = bi;
+        }
+        for &(vid, _) in &blk.params {
+            if vid.0 < def_block.len() {
+                def_block[vid.0] = bi;
+            }
+        }
+        let succs: Vec<usize> = match &blk.terminator {
+            vaffle::Terminator::Jump(t) => vec![t.block.0],
+            vaffle::Terminator::IfNonzero {
+                then_target,
+                else_target,
+                ..
+            } => vec![then_target.block.0, else_target.block.0],
+            vaffle::Terminator::Table {
+                targets,
+                default_target,
+                ..
+            } => {
+                let mut v: Vec<usize> =
+                    targets.iter().map(|t| t.block.0).collect();
+                v.push(default_target.block.0);
+                v
+            }
+            _ => Vec::new(),
+        };
+        for s in succs {
+            preds[s].insert(bi);
+        }
+    }
+    // RPO from entry
+    let entry = b.entry.0;
+    let mut succs_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (bi, ps) in preds.iter().enumerate() {
+        for &p in ps {
+            succs_adj[p].push(bi);
+        }
+    }
+    let mut seen = vec![false; n];
+    let mut post = Vec::new();
+    let mut stack: Vec<(usize, usize)> = vec![(entry, 0)];
+    seen[entry] = true;
+    while let Some(top) = stack.last().copied() {
+        let (node, mut si) = top;
+        let mut advanced = false;
+        while si < succs_adj[node].len() {
+            let c = succs_adj[node][si];
+            si += 1;
+            if !seen[c] {
+                seen[c] = true;
+                stack.last_mut().expect("nonempty").1 = si;
+                stack.push((c, 0));
+                advanced = true;
+                break;
+            }
+        }
+        if advanced {
+            stack.last_mut().expect("nonempty").1 = si;
+        } else {
+            post.push(node);
+            stack.pop();
+        }
+    }
+    let mut rpo = post;
+    rpo.reverse();
+    let rpo_pos: std::collections::HashMap<usize, usize> =
+        rpo.iter().enumerate().map(|(p, &b)| (b, p)).collect();
+    // CHK idom
+    let mut idom = vec![usize::MAX; n];
+    idom[entry] = entry;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in rpo.iter().skip(1) {
+            let mut new_idom = usize::MAX;
+            for &p in &preds[b] {
+                if idom[p] != usize::MAX {
+                    new_idom = if new_idom == usize::MAX {
+                        p
+                    } else {
+                        let (mut a, mut m) = (new_idom, p);
+                        while a != m {
+                            while rpo_pos[&a] > rpo_pos[&m] {
+                                a = idom[a];
+                            }
+                            while rpo_pos[&m] > rpo_pos[&a] {
+                                m = idom[m];
+                            }
+                        }
+                        a
+                    };
+                }
+            }
+            if new_idom != usize::MAX && idom[b] != new_idom {
+                idom[b] = new_idom;
+                changed = true;
+            }
+        }
+    }
+    let dominates = |a: usize, mut x: usize| -> bool {
+        loop {
+            if a == x {
+                return true;
+            }
+            if x == usize::MAX || idom[x] == usize::MAX || idom[x] == x {
+                return false;
+            }
+            x = idom[x];
+        }
+    };
+    // Cross-block uses violating dominance
+    let mut out = Vec::new();
+    for (bi, blk) in b.blocks.iter().enumerate() {
+        for &sid in &blk.stmts {
+            let k = format!("{:?}", b.values[sid.0].kind);
+            let mut scan = &k[..];
+            while let Some(pos) = scan.find("ValueId(") {
+                let rest = &scan[pos + "ValueId(".len()..];
+                let end = match rest.find(')') {
+                    Some(e) => e,
+                    None => break,
+                };
+                let vid: usize = rest[..end].parse().unwrap_or(usize::MAX);
+                scan = &rest[end..];
+                if vid == usize::MAX || vid >= def_block.len() {
+                    continue;
+                }
+                let d = def_block[vid];
+                if d != bi && d != usize::MAX && !dominates(d, bi) {
+                    out.push((vid, d, bi, preds[bi].iter().copied().collect()));
+                }
+            }
+        }
+    }
+    out
+}
+
 #[test]
 fn dispatch_table_read_write_reuse() {
     // A pointer-typed parameter has unresolved provenance, so the stores

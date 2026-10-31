@@ -150,14 +150,25 @@ Guarded by the 12GB RSS kill-switch; it never fired.
   f41/f110/f136 web-leak shapes now re-run soundly). The linear
   parent-chain dominance check is gone; the walk-entry resets the
   active token. The old LLVM-idom seeding was removed as dead code.
-- **OPEN (Table path only)**: one join shape remains — a token-0
-  (program-lowering) composition at a 64-pred join that vaffle_ssa's
-  post-SP idom rejects while the import-time LLVM-dominance model
-  accepts it. The disagreement is between the import-time CFG model
-  and vaffle_ssa's post-SP CFG; next step is a pre/post-SP pred-set
-  comparison on the failing function (the DOM PROBE in the revm
-  probe, VLVI_DOM_TRACE=1, shows the surviving cross-block Merges:
-  f122-style token-0 program compositions).
+- **Pre/post-SP comparison DONE (finding)**: the scanner shows f0
+  pre=3359 -> post=0 violations and f13 pre=489 -> post=0 — the
+  importer emits direct cross-block references BY DESIGN and
+  vaffle_ssa's spilling is what makes them sound. The dominance
+  panic sat in the PRE-spill collection phase, firing on exactly the
+  violations the spiller was about to fix (the cascade path only ever
+  passed because its imports happen to compose no foreign bits). The
+  panic is removed; the line-676 postcondition ("cross-block values
+  remain after spilling") governs residuals. The unit test was
+  repurposed: test_cross_block_use_is_spilled_not_rejected (75/75).
+- **OPEN (Table path only, NEXT LAYER)**: with the assert gone, the
+  Table-dispatched revm module now progresses import OK -> SSA/spill
+  OK -> lowering, and hits a NEW uncharted bug: frame_write_ret
+  (volar-lir circuits.rs:1089) indexes ret_bits[j] with an empty
+  slice against a non-empty FrameLayout.ret — a ReturnCall whose
+  forwarded return bits are empty. Previously masked by the assert
+  (the Table module never got spilled+lowered before). Next step:
+  read lower_to_ir's ReturnCall arm to see where ret_bits come from
+  and why the Table-shaped module produces an empty forwarding set.
 
 ## Open items
 
