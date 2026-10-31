@@ -181,9 +181,37 @@ pub enum LlvmExternalImportKind {
 /// LLVM import.
 pub use volar_vaffle_target::circuit_helpers::CircuitHelperMode;
 
+/// Constant-length bulk memory lowering mode. See
+/// [`LlvmImportConfig::bulk_memory`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BulkMemoryMode {
+    /// Full unroll (default).
+    #[default]
+    Unroll,
+    /// Runtime loop per operation.
+    Loop,
+}
+
+/// Bulk operations below this many bytes always unroll: a loop's
+/// scaffolding (header, index adder, compare) dominates below roughly a
+/// cell row, and small fills/copies fold almost entirely to constants.
+pub const BULK_LOOP_MIN_BYTES: usize = 64;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LlvmImportConfig {
     pub pointer_width: Option<PointerWidth>,
+    /// How constant-length bulk memory operations (`llvm.memcpy` /
+    /// `llvm.memset` at least [`BULK_LOOP_MIN_BYTES`]) lower.
+    ///
+    /// [`BulkMemoryMode::Unroll`] keeps every cell address
+    /// compile-time-constant, which constant-folds to zero gate circuits
+    /// per cell — smallest circuits after downstream unrolling, so
+    /// circuit-proving targets want it. [`BulkMemoryMode::Loop`] emits one
+    /// runtime loop per operation (tracked-pointer fast body, word cells
+    /// on word-frozen storages): import values and interpreter-style eval
+    /// cost become O(loop scaffolding) instead of O(bytes), at the price
+    /// of a per-iteration index adder circuits would pay for.
+    pub bulk_memory: BulkMemoryMode,
     pub externals: BTreeMap<String, LlvmExternalImportKind>,
     /// Inline `bc_*` into the parent block, or intern one typed function per
     /// `(op, operand widths)` and call it. Address math and stack-pointer
@@ -271,6 +299,22 @@ impl LlvmImportConfig {
 
     /// Opt in to zero-return lowering of reachable `unreachable`
     /// instructions; see the field docs.
+    /// Lower constant-length bulk memory operations (64+ bytes) as runtime
+    /// loops instead of unrolls. See [`BulkMemoryMode`].
+    pub fn with_bulk_memory_loop(mut self) -> Self {
+        self.bulk_memory = BulkMemoryMode::Loop;
+        self
+    }
+
+    /// Probe convenience: opt into [`BulkMemoryMode::Loop`] via the
+    /// `VLVI_BULK_LOOP` environment variable.
+    pub fn with_bulk_if_env(mut self) -> Self {
+        if std::env::var_os("VLVI_BULK_LOOP").is_some() {
+            self.bulk_memory = BulkMemoryMode::Loop;
+        }
+        self
+    }
+
     pub fn with_reachable_unreachable_zeros(mut self) -> Self {
         self.lower_reachable_unreachable_to_zeros = true;
         self
@@ -380,6 +424,7 @@ fn import_module_with_config_attempt<'ctx>(
         config.circuit_helpers,
         config.max_dispatch_candidates,
         config.lower_reachable_unreachable_to_zeros,
+        config.bulk_memory,
     );
     importer.set_data_layout(inkwell::targets::TargetData::create(
         &llvm_module.get_data_layout().as_str().to_string_lossy(),
@@ -778,6 +823,9 @@ struct Importer<'ctx> {
     data_layout: Option<inkwell::targets::TargetData>,
     /// Zero-return lowering of reachable `unreachable` instructions.
     lower_reachable_unreachable_to_zeros: bool,
+    /// Constant-length bulk memory lowering mode (see
+    /// [`LlvmImportConfig::bulk_memory`]).
+    bulk_memory: BulkMemoryMode,
 }
 
 impl<'ctx> Importer<'ctx> {
@@ -787,6 +835,7 @@ impl<'ctx> Importer<'ctx> {
         helper_mode: CircuitHelperMode,
         max_dispatch_candidates: Option<usize>,
         lower_reachable_unreachable_to_zeros: bool,
+        bulk_memory: BulkMemoryMode,
     ) -> Self {
         let pointer_bits = pointer_width.bits();
         let mut types = TypeTable::new();
@@ -835,6 +884,7 @@ impl<'ctx> Importer<'ctx> {
             max_dispatch_candidates: max_dispatch_candidates.unwrap_or(MAX_DISPATCH_CANDIDATES),
             data_layout: None,
             lower_reachable_unreachable_to_zeros,
+            bulk_memory,
         }
     }
 
@@ -3123,6 +3173,42 @@ impl<'ctx> Importer<'ctx> {
                     MemoryIntrinsicLength::Constant(n_bytes) => {
                         let dest = self.intrinsic_pointer(fctx, dest_ptr)?;
                         self.validate_intrinsic_pointer(&dest, n_bytes)?;
+                        if self.bulk_memory == BulkMemoryMode::Loop
+                            && n_bytes >= BULK_LOOP_MIN_BYTES
+                        {
+                            if matches!(
+                                dest,
+                                IntrinsicPointer::Dispatch { .. }
+                            ) {
+                                // Unknown destination: the generic
+                                // dispatch loop (any pointer mix).
+                                let dest_bits = self.value_bits(
+                                    fctx,
+                                    BasicValueEnum::PointerValue(dest_ptr),
+                                )?;
+                                let len_bits: Bits = (0..usize::BITS
+                                    - n_bytes.leading_zeros() as u32)
+                                    .map(|i| {
+                                        self.bc_const_at(
+                                            fctx,
+                                            fctx.current,
+                                            n_bytes >> i & 1 != 0,
+                                        )
+                                    })
+                                    .collect();
+                                self.symbolic_memory_loop(
+                                    fctx,
+                                    &dest_bits,
+                                    &len_bits,
+                                    SymbolicByteOperation::Fill { byte: &fill_bits },
+                                )?;
+                                return Ok(());
+                            }
+                            self.emit_bulk_memory_loop(
+                                fctx, &dest, None, Some(&fill_bits), n_bytes,
+                            )?;
+                            return Ok(());
+                        }
                         let n_bits = n_bytes.checked_mul(8).ok_or_else(|| {
                             ImportError::Unsupported("memory intrinsic length is too large".into())
                         })?;
@@ -3155,6 +3241,52 @@ impl<'ctx> Importer<'ctx> {
                         let src = self.intrinsic_pointer(fctx, src_ptr)?;
                         self.validate_intrinsic_pointer(&dest, n_bytes)?;
                         self.validate_intrinsic_pointer(&src, n_bytes)?;
+                        if self.bulk_memory == BulkMemoryMode::Loop
+                            && n_bytes >= BULK_LOOP_MIN_BYTES
+                        {
+                            // A forward cell-by-cell loop is memmove
+                            // semantics, so no overlap check is needed
+                            // (and the check would be the wrong policy for
+                            // a path that handles overlap correctly).
+                            if matches!(
+                                dest,
+                                IntrinsicPointer::Dispatch { .. }
+                            ) || matches!(
+                                src,
+                                IntrinsicPointer::Dispatch { .. }
+                            ) {
+                                // Unknown side: the generic dispatch loop.
+                                let dest_bits = self.value_bits(
+                                    fctx,
+                                    BasicValueEnum::PointerValue(dest_ptr),
+                                )?;
+                                let src_bits = self.value_bits(
+                                    fctx,
+                                    BasicValueEnum::PointerValue(src_ptr),
+                                )?;
+                                let len_bits: Bits = (0..usize::BITS
+                                    - n_bytes.leading_zeros() as u32)
+                                    .map(|i| {
+                                        self.bc_const_at(
+                                            fctx,
+                                            fctx.current,
+                                            n_bytes >> i & 1 != 0,
+                                        )
+                                    })
+                                    .collect();
+                                self.symbolic_memory_loop(
+                                    fctx,
+                                    &dest_bits,
+                                    &len_bits,
+                                    SymbolicByteOperation::Copy { src_base: &src_bits },
+                                )?;
+                                return Ok(());
+                            }
+                            self.emit_bulk_memory_loop(
+                                fctx, &dest, Some(&src), None, n_bytes,
+                            )?;
+                            return Ok(());
+                        }
                         if intrinsic == MemoryIntrinsic::Memcpy
                             && intrinsic_ranges_overlap(&dest, &src, n_bytes)?
                         {
@@ -3268,6 +3400,234 @@ impl<'ctx> Importer<'ctx> {
         // The source block's remaining LLVM instructions and terminator are
         // translated into this continuation. It is deliberately left without
         // a terminator until that normal walk resumes.
+        fctx.current = continuation;
+        Ok(())
+    }
+
+    /// Lower a CONSTANT-length bulk set/copy as a runtime loop instead of
+    /// a full unroll: a preheader feeding a header/body/continuation
+    /// triangle (same shape as `symbolic_memory_loop`), stepping one cell
+    /// per iteration. Tracked pointers keep their storage identity, so the
+    /// body uses direct per-cell reads/writes (word cells on word-frozen
+    /// storages) instead of the full dispatch cascade; only genuinely
+    /// unknown pointers fall back to the generic dispatch loop. Import
+    /// values and interpreter-style eval become O(loop scaffolding) instead
+    /// of O(bytes); circuit targets prefer [`BulkMemoryMode::Unroll`]
+    /// because a const-addressed unroll folds every cell address while a
+    /// loop pays an index adder per iteration.
+    ///
+    /// `fill8` (an 8-bit fill pattern) selects set mode; `src` selects copy
+    /// mode (exactly one must be set). `set` copies the fill pattern into
+    /// each cell; `copy` reads the source cell first. For copies the step
+    /// is word-granular only when BOTH sides sit on word-frozen storages;
+    /// otherwise the finer byte granularity keeps the cells coherent.
+    fn emit_bulk_memory_loop(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        dest: &IntrinsicPointer,
+        src: Option<&IntrinsicPointer>,
+        fill8: Option<&Bits>,
+        n_bytes: usize,
+    ) -> IResult<()> {
+        debug_assert!(
+            (fill8.is_some()) != src.is_some(),
+            "bulk loop is either set or copy"
+        );
+        let step_bytes = {
+            let dest_word = matches!(
+                dest,
+                IntrinsicPointer::Stack { ptr, .. } if self.storage_is_word(ptr.storage)
+            );
+            let src_word = match src {
+                Some(IntrinsicPointer::Stack { ptr, .. }) => self.storage_is_word(ptr.storage),
+                Some(_) => false,
+                None => true,
+            };
+            if dest_word
+                && src_word
+                && n_bytes % (self.word_bytes as usize) == 0
+            {
+                self.word_bytes as usize
+            } else {
+                1
+            }
+        };
+        let cell_bits = step_bytes * 8;
+        let n_iters = n_bytes / step_bytes;
+        // (Unknown-pointer mixes never reach here: the callers route any
+        // Dispatch side through the generic `symbolic_memory_loop` first.)
+        let index_width = (usize::BITS - n_iters.leading_zeros()) as usize;
+        let preheader = fctx.current;
+        let header = fctx.append_block();
+        let body = fctx.append_block();
+        let continuation = fctx.append_block();
+
+        let zero_index: Bits = (0..index_width)
+            .map(|_| self.bc_const_at(fctx, preheader, false))
+            .collect();
+        fctx.terminators[preheader.0] = Some(Terminator::Jump(Target {
+            block: header,
+            args: zero_index,
+            reentry: None,
+        }));
+
+        let length_bits: Bits = (0..index_width)
+            .map(|i| self.bc_const_at(fctx, preheader, n_iters >> i & 1 != 0))
+            .collect();
+        fctx.current = header;
+        let index_bits: Bits = (0..index_width)
+            .map(|index| fctx.add_param(header, self.bit_tid, index))
+            .collect();
+        let active = {
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block: header,
+            };
+            circuits::bc_ult(&mut c, &index_bits, &length_bits)
+        };
+        fctx.terminators[header.0] = Some(Terminator::IfNonzero {
+            cond: active,
+            then_target: Target {
+                block: body,
+                args: Vec::new(),
+                reentry: None,
+            },
+            else_target: Target {
+                block: continuation,
+                args: Vec::new(),
+                reentry: None,
+            },
+        });
+
+        // Per-iteration: read the source cell (copy) or build the fill
+        // cell (set), then write the destination cell.
+        fctx.current = body;
+        let cell_ty = if step_bytes > 1 {
+            self.word_tid
+        } else {
+            self.byte_tid
+        };
+        let src_cell = match src {
+            Some(IntrinsicPointer::Stack { ptr, .. }) => {
+                let base = self.byte_base_of(fctx, body, &ptr.addr_bits);
+                let bound = self.stack_addr_bound(ptr);
+                let addr = self.byte_addr_runtime(fctx, body, &base, &index_bits, step_bytes as u64, bound);
+                Some(fctx.emit(
+                    body,
+                    Value::Op(Stmt::StorageRead {
+                        storage: ptr.storage,
+                        ty: cell_ty,
+                        addr,
+                    }),
+                ))
+            }
+            Some(IntrinsicPointer::Global {
+                storage,
+                byte_offset,
+            }) => {
+                // Constant global offset + runtime index: one narrow adder
+                // over the offset bits.
+                let off_bits: Bits = (0..self.pointer_bits)
+                    .map(|i| self.bc_const_at(fctx, body, byte_offset >> i & 1 != 0))
+                    .collect();
+                let addr = self.dynamic_addr_runtime(
+                    fctx, body, &off_bits, &index_bits, step_bytes as u64, 0,
+                );
+                Some(fctx.emit(
+                    body,
+                    Value::Op(Stmt::StorageRead {
+                        storage: *storage,
+                        ty: cell_ty,
+                        addr,
+                    }),
+                ))
+            }
+            // Dispatch sources are routed at the call site.
+            Some(IntrinsicPointer::Dispatch { .. }) => {
+                return Err(ImportError::Unsupported(
+                    "bulk loop source through dispatch (internal)".into(),
+                ))
+            }
+            None => None,
+        };
+        let fill_cell = fill8.map(|fill| {
+            let cell = fctx.emit(
+                body,
+                Value::Op(Stmt::Merge {
+                    parts: (0..cell_bits / 8).flat_map(|_| fill.iter().copied()).collect(),
+                    ty: cell_ty,
+                }),
+            );
+            cell
+        });
+        let write_val = match (src_cell, fill_cell) {
+            (Some(v), None) => v,
+            (None, Some(v)) => v,
+            _ => {
+                return Err(ImportError::Unsupported(
+                    "bulk loop needs exactly one of src/fill (internal)".into(),
+                ))
+            }
+        };
+        match dest {
+            IntrinsicPointer::Stack { ptr, .. } => {
+                let base = self.byte_base_of(fctx, body, &ptr.addr_bits);
+                let bound = self.stack_addr_bound(ptr);
+                let addr = self.byte_addr_runtime(fctx, body, &base, &index_bits, step_bytes as u64, bound);
+                fctx.emit(
+                    body,
+                    Value::Op(Stmt::StorageWrite {
+                        storage: ptr.storage,
+                        src: write_val,
+                        ty: cell_ty,
+                        addr,
+                    }),
+                );
+            }
+            IntrinsicPointer::Global {
+                storage,
+                byte_offset,
+            } => {
+                let off_bits: Bits = (0..self.pointer_bits)
+                    .map(|i| self.bc_const_at(fctx, body, byte_offset >> i & 1 != 0))
+                    .collect();
+                let addr = self.dynamic_addr_runtime(
+                    fctx, body, &off_bits, &index_bits, step_bytes as u64, 0,
+                );
+                fctx.emit(
+                    body,
+                    Value::Op(Stmt::StorageWrite {
+                        storage: *storage,
+                        src: write_val,
+                        ty: cell_ty,
+                        addr,
+                    }),
+                );
+            }
+            IntrinsicPointer::Dispatch { .. } => {
+                return Err(ImportError::Unsupported(
+                    "bulk loop destination through dispatch (internal)".into(),
+                ))
+            }
+        }
+        let next_index = {
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block: body,
+            };
+            circuits::bc_add_const(&mut c, &index_bits, 1)
+        };
+        fctx.terminators[body.0] = Some(Terminator::Jump(Target {
+            block: header,
+            args: next_index,
+            reentry: None,
+        }));
+
+        // The source block's remaining LLVM instructions and terminator are
+        // translated into this continuation, exactly as in
+        // `symbolic_memory_loop`.
         fctx.current = continuation;
         Ok(())
     }
@@ -4241,6 +4601,138 @@ impl<'ctx> Importer<'ctx> {
             }
         }
         ByteBase::Const(byte_base >> 3)
+    }
+
+    /// `base + idx*step` with a RUNTIME index (loop iterations), mirroring
+    /// `dynamic_addr`'s constant-index shapes: a constant byte base stays
+    /// `bc_add_const` over the shifted index; a runtime base gets the
+    /// trimmed-width adder (the same in-bounds argument holds — the index
+    /// is capped by the constant trip count). `step` must be a power of
+    /// two, so the scale is pure rewiring.
+    fn dynamic_addr_runtime(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        base_addr_bits: &Bits,
+        idx_bits: &Bits,
+        step: u64,
+        addr_bound: u64,
+    ) -> ValueId {
+        debug_assert!(step.is_power_of_two());
+        let shift = step.trailing_zeros();
+        // Shift left by `shift` bits: append low zero constants — pure
+        // rewiring of the index bits above them.
+        let idx_shifted: Bits = if shift == 0 {
+            idx_bits.to_vec()
+        } else {
+            let mut shifted: Bits = (0..shift)
+                .map(|_| self.bc_const_at(fctx, block, false))
+                .collect();
+            shifted.extend_from_slice(idx_bits);
+            shifted
+        };
+        let width = if addr_bound != 0 && addr_bound != u64::MAX {
+            ((u64::BITS - (addr_bound - 1).leading_zeros()) as usize)
+                .min(base_addr_bits.len())
+        } else {
+            base_addr_bits.len()
+        };
+        // Read base shape BEFORE opening the mutable Ctx borrow.
+        let mut const_base = 0u64;
+        let all_const = base_addr_bits.iter().enumerate().all(|(b, vid)| {
+            match &fctx.values[vid.0].kind {
+                Value::Op(Stmt::Const(cst, _)) => {
+                    if cst.lo & 1 != 0 {
+                        const_base |= 1u64 << b;
+                    }
+                    true
+                }
+                _ => false,
+            }
+        });
+        // `bc_add` needs equal widths: truncate both sides to the narrow
+        // one. The in-bounds argument (the same one `dynamic_addr` leans
+        // on) covers this — high bits of a bounded index over a bounded
+        // base are semantically zero inside the bound.
+        let w = width
+            .min(base_addr_bits.len())
+            .min(idx_shifted.len());
+        let idx_lo = &idx_shifted[..w];
+        let sum = {
+            let mut c = Ctx {
+                fctx,
+                bit_tid: self.bit_tid,
+                block,
+            };
+            if all_const {
+                // Constant base: bc_add_const absorbs it into the adder's
+                // constant terms.
+                circuits::bc_add_const(&mut c, idx_lo, const_base)
+            } else {
+                let low = &base_addr_bits[..w];
+                circuits::bc_add(&mut c, low, idx_lo, false)
+            }
+        };
+        fctx.emit(
+            block,
+            Value::Op(Stmt::Merge {
+                parts: sum,
+                ty: self.addr_tid,
+            }),
+        )
+    }
+
+    /// Loop-iteration cell address: `byte_addr` with a runtime byte index
+    /// scaled by `step_bytes` (the cell stride). Mirrors `byte_addr`'s two
+    /// base shapes.
+    fn byte_addr_runtime(
+        &mut self,
+        fctx: &mut FuncCtx<'ctx>,
+        block: BlockId,
+        base: &ByteBase,
+        idx_bits: &Bits,
+        step_bytes: u64,
+        addr_bound: u64,
+    ) -> ValueId {
+        match base {
+            ByteBase::Const(byte_base) => {
+                // addr = idx*step + byte_base: a single narrow adder whose
+                // constant side is folded into bc_add_const.
+                let shifted_bits = {
+                    let shift = step_bytes.trailing_zeros();
+                    let mut shifted: Bits = (0..shift)
+                        .map(|_| self.bc_const_at(fctx, block, false))
+                        .collect();
+                    shifted.extend_from_slice(idx_bits);
+                    shifted
+                };
+                let sum = {
+                    let mut c = Ctx {
+                        fctx,
+                        bit_tid: self.bit_tid,
+                        block,
+                    };
+                    circuits::bc_add_const(&mut c, &shifted_bits, *byte_base)
+                };
+                fctx.emit(
+                    block,
+                    Value::Op(Stmt::Merge {
+                        parts: sum,
+                        ty: self.addr_tid,
+                    }),
+                )
+            }
+            ByteBase::Runtime(byte_bits) => {
+                self.dynamic_addr_runtime(
+                    fctx,
+                    block,
+                    byte_bits,
+                    idx_bits,
+                    step_bytes,
+                    addr_bound,
+                )
+            }
+        }
     }
 
     /// The byte-granular cell address of byte `byte_i` of a dynamic access
