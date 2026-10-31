@@ -395,8 +395,12 @@ pub fn import_module_with_config<'ctx>(
                     return Err(e);
                 }
                 if pass + 1 == MAX_WORD_FREEZE_PASSES {
+                    let mut ids: Vec<u32> =
+                        tainted.iter().map(|s| s.0).collect();
+                    ids.sort_unstable();
                     return Err(ImportError::Unsupported(format!(
-                        "word-cell freeze did not converge in {MAX_WORD_FREEZE_PASSES} passes"
+                        "word-cell freeze did not converge in \
+                         {MAX_WORD_FREEZE_PASSES} passes (tainted: {ids:?})"
                     )));
                 }
             }
@@ -829,6 +833,98 @@ struct Importer<'ctx> {
 }
 
 impl<'ctx> Importer<'ctx> {
+    /// Jump-threaded compile-time resolution of ONE bit value: `Const`
+    /// resolves directly; a block parameter resolves when EVERY incoming
+    /// edge passes the same constant (recursively resolved, depth-capped).
+    /// This threads constants through phi-like joins without any SSA
+    /// rewriting — a pointer's tag/ID bits that were constant on all paths
+    /// into a block stay constant in that block, so derived pointers keep
+    /// narrowing dispatch long after their base crossed a CFG edge.
+    fn resolve_const_bit(
+        &self,
+        fctx: &FuncCtx<'ctx>,
+        vid: ValueId,
+        depth: u32,
+    ) -> Option<bool> {
+        if depth > 8 {
+            return None;
+        }
+        match &fctx.values[vid.0].kind {
+            Value::Op(Stmt::Const(c, _)) => Some(c.lo & 1 != 0),
+            Value::Param { block, idx, .. } => {
+                // Collect every terminator edge into `block` and the arg
+                // each passes at this parameter's position.
+                let mut resolved: Option<bool> = None;
+                for term in fctx.terminators.iter().flatten() {
+                    let args_opt: Option<&Vec<ValueId>> = match term {
+                        Terminator::Jump(t) => {
+                            if t.block == *block {
+                                Some(&t.args)
+                            } else {
+                                None
+                            }
+                        }
+                        Terminator::IfNonzero {
+                            then_target,
+                            else_target,
+                            ..
+                        } => {
+                            if then_target.block == *block {
+                                Some(&then_target.args)
+                            } else if else_target.block == *block {
+                                Some(&else_target.args)
+                            } else {
+                                None
+                            }
+                        }
+                        Terminator::Table { targets, .. } => targets
+                            .iter()
+                            .find(|t| t.block == *block)
+                            .map(|t| &t.args),
+                        Terminator::ReturnCall { .. } | Terminator::Return { .. } => None,
+                        _ => None,
+                    };
+                    let Some(args) = args_opt else {
+                        continue;
+                    };
+                    let Some(&arg) = args.get(*idx as usize) else {
+                        return None;
+                    };
+                    let this = self.resolve_const_bit(fctx, arg, depth + 1)?;
+                    if let Some(prev) = resolved {
+                        if prev != this {
+                            return None;
+                        }
+                    } else {
+                        resolved = Some(this);
+                    }
+                }
+                resolved
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a bit SUB-FIELD (e.g. a pointer's tag/ID bits) to a u64
+    /// when every bit is jump-threaded constant. Returns `None` if any bit
+    /// stays runtime.
+    fn resolve_const_field(
+        &self,
+        fctx: &FuncCtx<'ctx>,
+        bits: &[ValueId],
+    ) -> Option<u64> {
+        let mut field = 0u64;
+        for (b, &vid) in bits.iter().enumerate() {
+            if b >= 64 {
+                return None;
+            }
+            if self.resolve_const_bit(fctx, vid, 0)? {
+                field |= 1u64 << b;
+            }
+        }
+        Some(field)
+    }
+
     fn new(
         pointer_width: PointerWidth,
         externals: BTreeMap<String, LlvmExternalImportKind>,
@@ -2451,19 +2547,44 @@ impl<'ctx> Importer<'ctx> {
                     let base_bits = self.value_bits(fctx, BasicValueEnum::PointerValue(base))?;
                     let idx_bits = self.value_bits(fctx, idx_val)?;
                     let idx_bits = resize_bits_signed(&idx_bits, self.pointer_bits);
-                    let new_bits = {
+                    // In-bounds address arithmetic never carries out of the
+                    // ADDR field, so the derived pointer's tag/ID class bits
+                    // are the BASE's — kept as jump-threaded constants when
+                    // they resolve (a base whose class was constant on all
+                    // incoming paths stays narrowed after the join), base
+                    // wires otherwise. Re-adding full width demoted every
+                    // derived pointer's class to adder outputs and forced
+                    // dispatch over the whole candidate set.
+                    let global_addr_bits = self.global_addr_bits();
+                    // Resolve class bits BEFORE the mutable Ctx borrow.
+                    let class_resolved: Vec<Option<bool>> =
+                        (global_addr_bits..self.pointer_bits)
+                            .map(|b| self.resolve_const_bit(fctx, base_bits[b], 0))
+                            .collect();
+                    let mut new_bits: Bits = {
                         let mut c = Ctx {
                             fctx,
                             bit_tid: self.bit_tid,
                             block: cur,
                         };
-                        circuits::bc_add_scaled_const(
+                        let addr = circuits::bc_add_scaled_const(
                             &mut c,
-                            &base_bits,
+                            &base_bits[..global_addr_bits],
                             &idx_bits,
                             elem_bytes as u64,
-                        )
+                        );
+                        let mut bits = addr;
+                        for (i, b) in
+                            (global_addr_bits..self.pointer_bits).enumerate()
+                        {
+                            bits.push(match class_resolved[i] {
+                                Some(v) => c.bc_const(v),
+                                None => base_bits[b],
+                            });
+                        }
+                        bits
                     };
+                    new_bits.truncate(self.pointer_bits);
                     Some(new_bits)
                 }
             }
@@ -5461,11 +5582,39 @@ impl<'ctx> Importer<'ctx> {
         let n_bits = n_bytes
             .checked_mul(8)
             .ok_or_else(|| ImportError::Unsupported("dispatch read length too large".into()))?;
-        let allocas = self.alloca_data.clone();
-        let candidates = self.dispatch_candidates()?;
-        let cur = fctx.current;
-        let offset_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
+        // Jump-threaded narrowing: a tag/ID field that is constant on
+        // every path into this block (constants threaded through joins by
+        // `resolve_const_bit`) prunes the candidate walk before any
+        // circuit is built. A fully resolved pointer names at most ONE
+        // storage; naming none reads zeros (the unmatched-identity
+        // convention).
         let tag_bit = ptr_bits[self.pointer_bits - 1];
+        let resolved_tag = self.resolve_const_bit(fctx, tag_bit, 0);
+        let global_addr_bits = self.global_addr_bits();
+        let resolved_id = self.resolve_const_field(
+            fctx,
+            &ptr_bits[global_addr_bits..global_addr_bits + GLOBAL_ID_BITS],
+        );
+        let allocas: Vec<StorageId> = self
+            .alloca_data
+            .iter()
+            .copied()
+            .filter(|sid| resolved_tag != Some(true))
+            .filter(|sid| resolved_id.is_none_or(|id| id == sid.0 as u64))
+            .collect();
+        let candidates: Vec<StorageId> = self
+            .dispatch_candidates()?
+            .into_iter()
+            .filter(|sid| resolved_tag != Some(false))
+            .filter(|sid| resolved_id.is_none_or(|id| id == sid.0 as u64))
+            .collect();
+        let cur = fctx.current;
+        let zero = self.bc_const_at(fctx, cur, false);
+        let mut result = vec![zero; n_bits];
+        if allocas.is_empty() && candidates.is_empty() {
+            return Ok(result);
+        }
+        let offset_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
         let not_tag = {
             let mut c = Ctx {
                 fctx,
@@ -5474,9 +5623,31 @@ impl<'ctx> Importer<'ctx> {
             };
             c.bc_not(tag_bit)
         };
+        // A single surviving candidate with a fully resolved ID IS the
+        // pointer's target: skip the gate/mux entirely and read directly.
+        if resolved_id.is_some()
+            && allocas.len() + candidates.len() == 1
+        {
+            if let Some(&sid) = allocas.first() {
+                return Ok(self.stack_load_dynamic(
+                    fctx,
+                    sid,
+                    ptr_bits[0],
+                    &offset_bits,
+                    pointee_ty,
+                    n_bits,
+                    self.alloca_sizes[self
+                        .alloca_data
+                        .iter()
+                        .position(|&s| s == sid)
+                        .unwrap_or(0)],
+                ));
+            }
+            if let Some(&sid) = candidates.first() {
+                return Ok(self.mem_load_dynamic(fctx, sid, &offset_bits, n_bytes));
+            }
+        }
         let stack_matches = self.dispatch_id_matches(fctx, cur, ptr_bits, &allocas, not_tag);
-        let zero = self.bc_const_at(fctx, cur, false);
-        let mut result = vec![zero; n_bits];
         for (candidate_idx, &sid) in allocas.iter().enumerate() {
             let loaded = self.stack_load_dynamic(
                 fctx,
@@ -5529,11 +5700,52 @@ impl<'ctx> Importer<'ctx> {
     ) -> IResult<()> {
         let n_bits = val.len();
         let n_bytes = n_bits.div_ceil(8);
-        let allocas = self.alloca_data.clone();
-        let candidates = self.dispatch_candidates()?;
+        // Jump-threaded narrowing, mirroring `dispatch_read`: resolved
+        // tag/ID fields prune the walk; a fully resolved single target
+        // stores DIRECTLY (no gates, no read-modify-write mux); naming no
+        // storage drops the write (the unmatched-identity convention).
+        let tag_bit = ptr_bits[self.pointer_bits - 1];
+        let resolved_tag = self.resolve_const_bit(fctx, tag_bit, 0);
+        let global_addr_bits = self.global_addr_bits();
+        let resolved_id = self.resolve_const_field(
+            fctx,
+            &ptr_bits[global_addr_bits..global_addr_bits + GLOBAL_ID_BITS],
+        );
+        let allocas: Vec<StorageId> = self
+            .alloca_data
+            .iter()
+            .copied()
+            .filter(|sid| resolved_tag != Some(true))
+            .filter(|sid| resolved_id.is_none_or(|id| id == sid.0 as u64))
+            .collect();
+        let candidates: Vec<StorageId> = self
+            .dispatch_candidates()?
+            .into_iter()
+            .filter(|sid| resolved_tag != Some(false))
+            .filter(|sid| resolved_id.is_none_or(|id| id == sid.0 as u64))
+            .collect();
+        if allocas.is_empty() && candidates.is_empty() {
+            return Ok(());
+        }
         let cur = fctx.current;
         let offset_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
-        let tag_bit = ptr_bits[self.pointer_bits - 1];
+        if resolved_id.is_some()
+            && allocas.len() + candidates.len() == 1
+        {
+            if let Some(&sid) = allocas.first() {
+                let bound = self.alloca_sizes[self
+                    .alloca_data
+                    .iter()
+                    .position(|&s| s == sid)
+                    .unwrap_or(0)];
+                self.stack_store_dynamic(fctx, sid, ptr_bits[0], &offset_bits, val, bound);
+                return Ok(());
+            }
+            if let Some(&sid) = candidates.first() {
+                self.mem_store_dynamic(fctx, sid, &offset_bits, val, n_bytes);
+                return Ok(());
+            }
+        }
         let not_tag = {
             let mut c = Ctx {
                 fctx,
