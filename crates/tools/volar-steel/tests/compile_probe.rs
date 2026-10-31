@@ -2212,6 +2212,72 @@ fn native_bulk_sum(sel: u32) -> u32 {
 /// (VAFFLE level, lowered-CFG level, and the INCREMENTAL lowering), and
 /// cost several times fewer entry-function import values.
 #[test]
+#[test]
+fn dispatch_table_read_write_reuse() {
+    // A pointer-typed parameter has unresolved provenance, so the stores
+    // and loads (direct and through a GEP off the param) route through the
+    // shared Table-on-ID dispatch: write path (incl. the value-param
+    // threading), read path, and check-once reuse for the derived pointer.
+    let ll = std::fs::read_to_string(artifacts().join("dispatch_probe.ll"))
+        .expect("dispatch_probe.ll");
+    let context = Context::create();
+    let llvm_mod = context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            ll.as_bytes(),
+            "dispatch_probe.ll",
+        ))
+        .expect("LLVM IR parses");
+    let module = volar_llvm_vaffle_import::import_module_with_config(
+        &llvm_mod,
+        &["dispatch_probe"],
+        volar_llvm_vaffle_import::LlvmImportConfig::default()
+            .with_table_dispatch(),
+    )
+    .expect("LLVM import");
+    let fid = module
+        .exports
+        .get("dispatch_probe")
+        .copied()
+        .expect("entry export");
+    for (v, w) in [
+        (5u32, 9u32),
+        (0, 1),
+        (0xdead_beef, 7),
+        (1, 0x7fff_ffff),
+        (0xffff_ffff, 3),
+    ] {
+        let want = v.wrapping_add(w.wrapping_shl(1)) as u64;
+        // This module is x86_64: pointers are 64 bits, encoded
+        // [ADDR: 49][ID: 14][TAG: 1] with tag=1 for the global class;
+        // brute-force BUF's import-time StorageId (the eval seeds its own
+        // storage, so stores/loads round-trip within one eval).
+        let mut got: Option<(u64, u32)> = None;
+        for sid in 1u32..=64 {
+            let p = 0x8000_0000_0000_0000u64 | ((sid as u64) << 49);
+            let inputs: Vec<Vec<bool>> = (0..64)
+                .map(|b| vec![(p >> b) & 1 == 1])
+                .chain((0..32).map(|b| vec![(v >> b) & 1 == 1]))
+                .chain((0..32).map(|b| vec![(w >> b) & 1 == 1]))
+                .collect();
+            if let Some(out) =
+                volar_fuzz::interpreter::vaffle::eval_vaffle(&module, fid, &inputs)
+            {
+                let ret = decode_bits(&out);
+                if ret == want {
+                    got = Some((ret, sid));
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            got.map(|(r, _)| r),
+            Some(want),
+            "dispatch probe v={v:#x} w={w:#x}: no storage id produced the expected value"
+        );
+    }
+}
+
+#[test]
 fn bulk_memory_loop_matches_unroll() {
     let file = "bulk_mem.ll";
     let entry = "bulk_sum";

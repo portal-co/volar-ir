@@ -90,6 +90,40 @@ Guarded by the 12GB RSS kill-switch; it never fired.
   close it — the leak is elsewhere in the edge substitution. Off by
   default; debug tooling under VLVI_THREAD_DEBUG / VLVI_SSA_TRACE.
 
+## Threading fix + check-once dispatch (this round)
+
+- **Jump threading FIXED**: the pass substituted the predecessor's edge
+  args IN PLACE and installed them under the splice target — but those
+  args bind the spliced block's params positionally, so edges landed
+  misaligned with dropped const args (the "value N not in table" eval
+  failure). The construction now rewrites `targs` with each of the
+  spliced block's params replaced by that edge's own arg. Validated:
+  bulk differential passes with VLVI_JUMP_THREAD=1 (14.8s), works
+  19.5s (no hang), pre_movfuscate/fuzz/lir/vaffle-target green.
+- **Check-once dispatch reuse**: the shared class builds D (selector)
+  -> RD (candidate Table); a site whose pointer's ID+TAG bits are
+  ValueId-identical to the last full dispatch's, in the directly
+  continuing block, jumps straight to RD with the recorded selector
+  value — the tag/ID check runs once per derived-pointer chain
+  (GEPs preserve class bits, so derived pointers match by
+  construction). Trace: VLVI_DISPATCH_TRACE=1.
+- **Two latent Table-path bugs fixed**: write classes jumped 3 args at
+  a 2-param D (value param never threaded; the write Table path had
+  never been exercised), and case bodies were built with the site's
+  fctx.current, so their storage accesses landed in the site's block
+  (dominance violation at lowering). New regression test
+  dispatch_table_read_write_reuse exercises write+read+reuse with a
+  pointer param and a GEP off it.
+- **OPEN (Table path only, env-gated)**: lowering a Table-dispatched
+  revm module still trips the dominance assert — a value defined in a
+  dispatch CONT block (bit extracts of the cont's packed param) is
+  packed by a Merge in an early program block (64-param join): the
+  value cache serves bits across dispatch conts without dominance
+  guards. Default (cascade) path lowers clean end-to-end (import 615ms
+  -> lower 3.9s, 1172 blocks / 4.27M stmts). Next step: make
+  site ptr_bits composition re-derive (or dominance-check) cached
+  pointer bits per block instead of trusting the cache across conts.
+
 ## Open items
 
 1. **Word-cell freeze does not converge on this module** — needs

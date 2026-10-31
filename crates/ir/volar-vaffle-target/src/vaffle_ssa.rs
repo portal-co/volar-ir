@@ -454,12 +454,56 @@ pub(crate) fn ssa_ify_function_owned<P: Clone>(
                 owner_bi != usize::MAX,
                 "vaffle_ssa: value {u} used at block {bi} has no defining block",
             );
-            assert!(
-                dominates(owner_bi, bi, &idom),
-                "vaffle_ssa: value {u} (owned by block {owner_bi}) is used at block {bi} but \
-                 block {owner_bi} does not dominate block {bi} -- VAFFLE's dominance invariant \
-                 is violated for this function",
-            );
+            if !dominates(owner_bi, bi, &idom) {
+                let def = alloc::format!("{:?}", values[u].kind);
+                let needle = alloc::format!("ValueId({})", u);
+                let mut use_desc = alloc::string::String::new();
+                for s in &blocks[bi].stmts {
+                    let d = alloc::format!("{:?}", values[s.0].kind);
+                    if d.contains(&needle) {
+                        use_desc = d;
+                        break;
+                    }
+                }
+                if use_desc.is_empty() {
+                    let t = alloc::format!("{:?}", blocks[bi].terminator);
+                    if t.contains(&needle) {
+                        use_desc = t;
+                    }
+                }
+                let owner_term = alloc::format!("{:?}", blocks[owner_bi].terminator);
+                let owner_np = blocks[owner_bi].params.len();
+                let src = alloc::format!("{:?}", values[u % values.len()].kind);
+                let b5_params = blocks[5].params.len();
+                let b5_term = alloc::format!("{:?}", blocks[5].terminator);
+                let b5_first = blocks[5]
+                    .stmts
+                    .first()
+                    .map(|s| alloc::format!("{:?}", values[s.0].kind))
+                    .unwrap_or_default();
+                let mut merge_vid = 0usize;
+                for s in &blocks[bi].stmts {
+                    let d = alloc::format!("{:?}", values[s.0].kind);
+                    if d.contains(&needle) {
+                        merge_vid = s.0;
+                        break;
+                    }
+                }
+                panic!(
+                    "vaffle_ssa: value {u} (owned by block {owner_bi}) is used at block {bi} but \
+                     block {owner_bi} does not dominate block {bi} -- VAFFLE's dominance invariant \
+                     is violated for this function; def={} use_vid={} use={} owner_term={} owner_params={} v32823={} b5p={} b5t={} b5f={}",
+                    def.chars().take(150).collect::<alloc::string::String>(),
+                    merge_vid,
+                    use_desc.chars().take(160).collect::<alloc::string::String>(),
+                    owner_term.chars().take(80).collect::<alloc::string::String>(),
+                    owner_np,
+                    src.chars().take(120).collect::<alloc::string::String>(),
+                    b5_params,
+                    b5_term.chars().take(90).collect::<alloc::string::String>(),
+                    b5_first.chars().take(90).collect::<alloc::string::String>(),
+                );
+            }
         }
     }
 
