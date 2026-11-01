@@ -363,3 +363,39 @@ Next levers — ALL THREE DONE (2026-11-01):
    (iter/keys yield &[V], insert/entry/from_iter take Vec<V>). At the
    movfuscator's ~50M single-variable monomials this removes ~50M heap
    allocations (~1.5GB) and halves the per-Poly malloc count.
+
+
+## Post-lever measured budget (2026-11-01, all three levers landed)
+
+Static LTO pipeline, CSE'd input (12.68M stmts in / 73.4M out):
+
+| term | bytes |
+|---|---|
+| start baseline at movfuscation entry | ~4.2GB (lowered module 12.68M x 72B = 0.9GB + ir-opt high-water + import residue) |
+| output flat Vec (73.4M x 72B Node) | ~5.3GB |
+| var_types (73.4M x 4B) | ~0.3GB |
+| Poly outer monomial-Vec heaps (50.4M x ~65B avg: 1-mono 56B, 2-mono 96B) | ~3.3GB |
+| **movfuscation peak** | **~12.6GB** |
+| post-mov DCE (dense remap + in-place compaction) | +~0.5GB |
+
+The machine's jetsam ceiling that day sat at 11.7-12.2GB, so the
+pipeline is ~1GB short (was ~8GB short before the levers; the same
+ceiling killed the unoptimized pipeline inside its ~17GB growth
+transient). Three consecutive attempts confirmed it is a real
+shortfall on that machine, not variance.
+
+Remaining reducible terms, in impact order:
+1. **Poly outer monomial heaps (~3.3GB)**: even a 1-monomial Poly
+   allocates one outer `Vec<(PolyKey, u8)>`. Eliminating it needs
+   either an inline-single-monomial `PolyCoeffs` repr (grows the struct
+   24 -> 32B+, pushing the Stmt enum 64 -> 80B — a wash against the
+   flat Vec) or FEWER Polys.
+2. **Fewer Polys**: an IR-level `Stmt::Xor { a, b, ty }` variant
+   (12 bytes inline, zero heap) would replace roughly half the
+   movfuscator's Polys (xor/field-add shapes): saves ~2.5GB of heap +
+   inline at revm scale and speeds evaluation. IR semantic addition —
+   eval/fold/CSE/remap/text/fuzz-gen blast radius, similar size to the
+   boxing change.
+3. **Start baseline (~4.2GB)**: the ir-opt high-water survives
+   `malloc_pressure_relief` (fragmentation). A two-process pipeline
+   (serialize the module between stages) would reset it to ~1GB.

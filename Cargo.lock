@@ -2827,6 +2827,126 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "portal-pc-waffle"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-backend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-fuzzing"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-hooking"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-lowering"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes-shared"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-solutions-sdk"
+version = "0.0.2"
+
+[[patch.unused]]
+name = "pit-gen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-js-teavm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-lang-generic"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-packaging"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-packaging-contrib"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-rust-generic"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-aarch64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-arm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-riscv32"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-riscv64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-writer"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86-64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-patch"
+version = "0.5.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-jsc-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-cfg"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ll-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-tac"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-util"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
 name = "lazy-repo-crypto"
 version = "0.1.0"
 
@@ -2835,8 +2955,136 @@ name = "lazy-repo-std"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-solutions-sdk"
-version = "0.0.2"
+name = "portal-jit-host-names"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-ffi-sig"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "thin-mcp"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-crypto"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-std"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-aarch64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-arch"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-cli"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-host"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-meta-gen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-riscv"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-swap"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-target-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-target-js"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-target-wasm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-web"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-wsdom"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-blitz-aarch64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-blitz-arm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-blitz-c"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-blitz-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-blitz-i686"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-blitz-js"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-blitz-opt"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-blitz-riscv32"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-blitz-x86-64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-jit-host-names"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-pc-asm-common"
+version = "0.1.1"
+
+[[patch.unused]]
+name = "pit-core"
+version = "0.5.0-alpha.1"
+
+[[patch.unused]]
+name = "dreamcompiler-log"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc-c-interp"
+version = "0.1.0"
 
 [[patch.unused]]
 name = "os-abi-codegen"
@@ -2957,254 +3205,6 @@ version = "0.1.0"
 [[patch.unused]]
 name = "os-unix-wasi"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-jsc-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-cfg"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ll-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-tac"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-util"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jit-host-names"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-aarch64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-arm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-riscv32"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-riscv64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-writer"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86-64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-patch"
-version = "0.5.0-alpha.1"
-
-[[patch.unused]]
-name = "dreamcompiler-ffi-sig"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-core"
-version = "0.5.0-alpha.1"
-
-[[patch.unused]]
-name = "vane"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-aarch64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-arch"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-cli"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-host"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-meta-gen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-riscv"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-swap"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-target-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-target-js"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-target-wasm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-web"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-wsdom"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-pc-asm-common"
-version = "0.1.1"
-
-[[patch.unused]]
-name = "portal-jit-host-names"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo-crypto"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo-std"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-log"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc-c-interp"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-blitz-aarch64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-blitz-arm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-blitz-c"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-blitz-common"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-blitz-i686"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-blitz-js"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-blitz-opt"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-blitz-riscv32"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-blitz-x86-64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "thin-mcp"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-gen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-js-teavm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-lang-generic"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-packaging"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-packaging-contrib"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-rust-generic"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-pc-waffle"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-backend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-fuzzing"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-hooking"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-lowering"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes-shared"
-version = "0.6.0-alpha.1"
 
 [[patch.unused]]
 name = "ephemera"
