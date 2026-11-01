@@ -4,10 +4,9 @@
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use volar_ir_common::{
-    ActionCallData, ActionStoreData, BoolRing, Constant, IrType, PolyCoeffs, PrimeSpec, Stmt,
-    Type, TypeId, TypeTable,
-    contains_prime_field, eval_prime_poly, monomial_product, mul_identity, mul_is_idempotent,
-    prime_spec, repetition_residue,
+    ActionCallData, ActionStoreData, BoolRing, Constant, IrType, PolyCoeffs, PrimeSpec, Stmt, Type,
+    TypeId, TypeTable, contains_prime_field, eval_prime_poly, monomial_product, mul_identity,
+    mul_is_idempotent, prime_spec, repetition_residue,
 };
 
 // ============================================================================
@@ -336,7 +335,12 @@ pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
             }
         }
         Stmt::ActionCall(data) => {
-            let ActionCallData { guard, args, fallbacks, .. } = &mut **data;
+            let ActionCallData {
+                guard,
+                args,
+                fallbacks,
+                ..
+            } = &mut **data;
             let cg = canon_alias(alias_map, *guard);
             if cg != *guard {
                 *guard = cg;
@@ -358,7 +362,13 @@ pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
             }
         }
         Stmt::ActionStore(data) => {
-            let ActionStoreData { guard, args, fallbacks, targets, .. } = &mut **data;
+            let ActionStoreData {
+                guard,
+                args,
+                fallbacks,
+                targets,
+                ..
+            } = &mut **data;
             let cg = canon_alias(alias_map, *guard);
             if cg != *guard {
                 *guard = cg;
@@ -859,11 +869,7 @@ fn merge_repetition(prev: u8, add: u8, spec: Option<&PrimeSpec>) -> Option<u8> {
         }
         _ => {
             let sum = prev as u16 + add as u16;
-            if sum > 255 {
-                None
-            } else {
-                Some(sum as u8)
-            }
+            if sum > 255 { None } else { Some(sum as u8) }
         }
     }
 }

@@ -138,7 +138,7 @@ fn jump_thread_body<P: Clone>(body: &mut FuncBody<P>) {
     if n == 0 {
         return;
     }
-    let entry = body.entry.0 as usize;
+    let entry = body.entry.0;
     let mut dead = vec![false; n];
     let mut changed = true;
     let mut passes = 0;
@@ -153,11 +153,9 @@ fn jump_thread_body<P: Clone>(body: &mut FuncBody<P>) {
             // not self-loops and whose target is still alive.
             let (target, targs) = match &body.blocks[bi].terminator {
                 Terminator::Jump(t)
-                    if body.blocks[bi].stmts.is_empty()
-                        && t.block.0 as usize != bi
-                        && !dead[t.block.0 as usize] =>
+                    if body.blocks[bi].stmts.is_empty() && t.block.0 != bi && !dead[t.block.0] =>
                 {
-                    (t.block.0 as usize, t.args.clone())
+                    (t.block.0, t.args.clone())
                 }
                 _ => continue,
             };
@@ -172,10 +170,7 @@ fn jump_thread_body<P: Clone>(body: &mut FuncBody<P>) {
                     body.blocks[bi].params.iter().map(|&(vid, _)| vid).collect();
                 let all_available = targs.iter().all(|&a| {
                     param_set.contains(&a)
-                        || matches!(
-                            &body.values[a.0].kind,
-                            Value::Op(Stmt::Const(_, _))
-                        )
+                        || matches!(&body.values[a.0].kind, Value::Op(Stmt::Const(_, _)))
                 });
                 if !all_available {
                     continue;
@@ -190,28 +185,26 @@ fn jump_thread_body<P: Clone>(body: &mut FuncBody<P>) {
             // THIS block's params positionally, so installing them under
             // the target left args misaligned and dropped const args —
             // the "value N not in table" eval failure.)
-            let params: Vec<ValueId> =
-                body.blocks[bi].params.iter().map(|&(vid, _)| vid).collect();
+            let params: Vec<ValueId> = body.blocks[bi].params.iter().map(|&(vid, _)| vid).collect();
             {
-                let rewrite_edge =
-                    |pargs: &[ValueId]| -> Vec<ValueId> {
-                        targs.iter()
-                            .map(|&ta| {
-                                params.iter()
-                                    .position(|&p| p == ta)
-                                    .and_then(|i| pargs.get(i).copied())
-                                    .unwrap_or(ta)
-                            })
-                            .collect()
-                    };
+                let rewrite_edge = |pargs: &[ValueId]| -> Vec<ValueId> {
+                    targs
+                        .iter()
+                        .map(|&ta| {
+                            params
+                                .iter()
+                                .position(|&p| p == ta)
+                                .and_then(|i| pargs.get(i).copied())
+                                .unwrap_or(ta)
+                        })
+                        .collect()
+                };
                 for pb in 0..n {
                     if dead[pb] {
                         continue;
                     }
                     match &mut body.blocks[pb].terminator {
-                        Terminator::Jump(t)
-                            if t.block.0 as usize == bi =>
-                        {
+                        Terminator::Jump(t) if t.block.0 == bi => {
                             let pargs = core::mem::take(&mut t.args);
                             t.args = rewrite_edge(&pargs);
                             t.block = BlockId(target);
@@ -223,9 +216,8 @@ fn jump_thread_body<P: Clone>(body: &mut FuncBody<P>) {
                             ..
                         } => {
                             for t2 in [then_target, else_target] {
-                                if t2.block.0 as usize == bi {
-                                    let pargs =
-                                        core::mem::take(&mut t2.args);
+                                if t2.block.0 == bi {
+                                    let pargs = core::mem::take(&mut t2.args);
                                     t2.args = rewrite_edge(&pargs);
                                     t2.block = BlockId(target);
                                     changed = true;
@@ -238,17 +230,15 @@ fn jump_thread_body<P: Clone>(body: &mut FuncBody<P>) {
                             ..
                         } => {
                             for t2 in targets.iter_mut() {
-                                if t2.block.0 as usize == bi {
-                                    let pargs =
-                                        core::mem::take(&mut t2.args);
+                                if t2.block.0 == bi {
+                                    let pargs = core::mem::take(&mut t2.args);
                                     t2.args = rewrite_edge(&pargs);
                                     t2.block = BlockId(target);
                                     changed = true;
                                 }
                             }
-                            if default_target.block.0 as usize == bi {
-                                let pargs =
-                                    core::mem::take(&mut default_target.args);
+                            if default_target.block.0 == bi {
+                                let pargs = core::mem::take(&mut default_target.args);
                                 default_target.args = rewrite_edge(&pargs);
                                 default_target.block = BlockId(target);
                                 changed = true;
@@ -292,8 +282,7 @@ fn jump_thread_body<P: Clone>(body: &mut FuncBody<P>) {
                 for t in targets.iter_mut() {
                     t.block = BlockId(map[t.block.0]);
                 }
-                default_target.block =
-                    BlockId(map[default_target.block.0]);
+                default_target.block = BlockId(map[default_target.block.0]);
             }
             _ => {}
         }
@@ -607,8 +596,7 @@ pub fn import_module_with_config<'ctx>(
                     return Err(e);
                 }
                 if pass + 1 == MAX_WORD_FREEZE_PASSES {
-                    let mut ids: Vec<u32> =
-                        tainted.iter().map(|s| s.0).collect();
+                    let mut ids: Vec<u32> = tainted.iter().map(|s| s.0).collect();
                     ids.sort_unstable();
                     return Err(ImportError::Unsupported(format!(
                         "word-cell freeze did not converge in \
@@ -650,77 +638,72 @@ fn import_module_with_config_attempt<'ctx>(
     let tainted_out = importer.tainted_word.clone();
     let result: IResult<Module> = (|| {
         importer.validate_configured_external_symbols(llvm_module)?;
-    // Eagerly assign every module global its `StorageId` before walking any
-    // function body, so `dispatch_read`/`dispatch_write` (runtime
-    // storage-identity dispatch for a pointer whose provenance isn't
-    // statically resolvable) always sees the complete, stable candidate set
-    // -- never just whichever globals happened to be referenced by earlier
-    // functions' own direct loads/stores/GEPs.
-    importer.register_all_globals(llvm_module)?;
-    importer.collect_fnptr_candidates(llvm_module);
-    let mut worklist: Vec<(FunctionValue<'ctx>, Vec<Prov>)> = Vec::new();
-    for &name in entries {
-        let f = llvm_module.get_function(name).ok_or_else(|| {
-            ImportError::Unsupported(format!("entry function `{name}` does not exist"))
-        })?;
-        // Entry functions have no caller: their pointer parameters carry no
-        // static provenance (empty vector, never seeded).
-        importer.func_id(f, &[])?;
-        worklist.push((f, Vec::new()));
-    }
-    let mut done: std::collections::HashSet<(PointerValue<'ctx>, Vec<Prov>)> = Default::default();
-    let mut imported_count = 0usize;
-    while let Some((f, prov)) = worklist.pop() {
-        let key = (f.as_global_value().as_pointer_value(), prov.clone());
-        if done.contains(&key) {
-            continue;
+        // Eagerly assign every module global its `StorageId` before walking any
+        // function body, so `dispatch_read`/`dispatch_write` (runtime
+        // storage-identity dispatch for a pointer whose provenance isn't
+        // statically resolvable) always sees the complete, stable candidate set
+        // -- never just whichever globals happened to be referenced by earlier
+        // functions' own direct loads/stores/GEPs.
+        importer.register_all_globals(llvm_module)?;
+        importer.collect_fnptr_candidates(llvm_module);
+        let mut worklist: Vec<(FunctionValue<'ctx>, Vec<Prov>)> = Vec::new();
+        for &name in entries {
+            let f = llvm_module.get_function(name).ok_or_else(|| {
+                ImportError::Unsupported(format!("entry function `{name}` does not exist"))
+            })?;
+            // Entry functions have no caller: their pointer parameters carry no
+            // static provenance (empty vector, never seeded).
+            importer.func_id(f, &[])?;
+            worklist.push((f, Vec::new()));
         }
-        done.insert(key);
-        if std::env::var("VLVI_IMPORT_NEXT").is_ok() {
-            eprintln!("next: {}", f.get_name().to_string_lossy());
+        let mut done: std::collections::HashSet<(PointerValue<'ctx>, Vec<Prov>)> =
+            Default::default();
+        let mut imported_count = 0usize;
+        while let Some((f, prov)) = worklist.pop() {
+            let key = (f.as_global_value().as_pointer_value(), prov.clone());
+            if done.contains(&key) {
+                continue;
+            }
+            done.insert(key);
+            if std::env::var("VLVI_IMPORT_NEXT").is_ok() {
+                eprintln!("next: {}", f.get_name().to_string_lossy());
+            }
+            let before = importer.total_values();
+            let called = importer.import_function(f, &prov)?;
+            worklist.extend(called);
+            imported_count += 1;
+            if std::env::var("VLVI_IMPORT_PROGRESS").is_ok() {
+                eprintln!(
+                    "import: #{imported_count} {} (worklist {}, values {})",
+                    f.get_name().to_string_lossy(),
+                    worklist.len(),
+                    importer.total_values() - before
+                );
+            }
+            let _ = before;
         }
-        let before = importer.total_values();
-        let called = importer.import_function(f, &prov)?;
-        worklist.extend(called);
-        imported_count += 1;
-        if std::env::var("VLVI_IMPORT_PROGRESS").is_ok() {
-            eprintln!(
-                "import: #{imported_count} {} (worklist {}, values {})",
-                f.get_name().to_string_lossy(),
-                worklist.len(),
-                importer.total_values() - before
-            );
-        }
-        let _ = before;
-    }
-    let mut module = importer.finish();
-    // vaffle_ssa's SP seeding needs at least one real value per non-entry
-    // body (provenance to clone); trivial trap/stub functions at -O0
-    // otherwise assemble with zero values. A single unused Const in the
-    // entry block satisfies that invariant harmlessly.
-    let bit_tid = module.types.bit();
-    for f in module.funcs.iter_mut() {
-        if let FuncDecl::Body(body) = f {
-            if body.values.is_empty() {
+        let mut module = importer.finish();
+        // vaffle_ssa's SP seeding needs at least one real value per non-entry
+        // body (provenance to clone); trivial trap/stub functions at -O0
+        // otherwise assemble with zero values. A single unused Const in the
+        // entry block satisfies that invariant harmlessly.
+        let bit_tid = module.types.bit();
+        for f in module.funcs.iter_mut() {
+            if let FuncDecl::Body(body) = f
+                && body.values.is_empty()
+            {
                 let vid = ValueId(body.values.len());
                 body.values.push(Node::new(
-                    Value::Op(Stmt::Const(
-                        Constant {
-                            hi: 0,
-                            lo: 0,
-                        },
-                        bit_tid,
-                    )),
+                    Value::Op(Stmt::Const(Constant { hi: 0, lo: 0 }, bit_tid)),
                     (),
                     None,
                 ));
-                if let Some(entry) = body.blocks.get_mut(body.entry.0 as usize) {
+                if let Some(entry) = body.blocks.get_mut(body.entry.0) {
                     entry.stmts.push(vid);
                 }
             }
         }
-    }
-    Ok(module)
+        Ok(module)
     })();
     match result {
         Ok(module) => Ok((module, tainted_out.borrow().clone())),
@@ -1139,12 +1122,7 @@ impl<'ctx> Importer<'ctx> {
     /// rewriting — a pointer's tag/ID bits that were constant on all paths
     /// into a block stay constant in that block, so derived pointers keep
     /// narrowing dispatch long after their base crossed a CFG edge.
-    fn resolve_const_bit(
-        &self,
-        fctx: &FuncCtx<'ctx>,
-        vid: ValueId,
-        depth: u32,
-    ) -> Option<bool> {
+    fn resolve_const_bit(&self, fctx: &FuncCtx<'ctx>, vid: ValueId, depth: u32) -> Option<bool> {
         if depth > 8 {
             return None;
         }
@@ -1176,17 +1154,16 @@ impl<'ctx> Importer<'ctx> {
                                 None
                             }
                         }
-                        Terminator::Table { targets, .. } => targets
-                            .iter()
-                            .find(|t| t.block == *block)
-                            .map(|t| &t.args),
+                        Terminator::Table { targets, .. } => {
+                            targets.iter().find(|t| t.block == *block).map(|t| &t.args)
+                        }
                         Terminator::ReturnCall { .. } | Terminator::Return { .. } => None,
                         _ => None,
                     };
                     let Some(args) = args_opt else {
                         continue;
                     };
-                    let Some(&arg) = args.get(*idx as usize) else {
+                    let Some(&arg) = args.get((*idx)) else {
                         return None;
                     };
                     let this = self.resolve_const_bit(fctx, arg, depth + 1)?;
@@ -1207,11 +1184,7 @@ impl<'ctx> Importer<'ctx> {
     /// Resolve a bit SUB-FIELD (e.g. a pointer's tag/ID bits) to a u64
     /// when every bit is jump-threaded constant. Returns `None` if any bit
     /// stays runtime.
-    fn resolve_const_field(
-        &self,
-        fctx: &FuncCtx<'ctx>,
-        bits: &[ValueId],
-    ) -> Option<u64> {
+    fn resolve_const_field(&self, fctx: &FuncCtx<'ctx>, bits: &[ValueId]) -> Option<u64> {
         let mut field = 0u64;
         for (b, &vid) in bits.iter().enumerate() {
             if b >= 64 {
@@ -1235,8 +1208,7 @@ impl<'ctx> Importer<'ctx> {
     ) -> Self {
         // Env force-enable keeps the probe scripts working regardless of
         // the config they build.
-        let table_dispatch = table_dispatch
-            || std::env::var_os("VLVI_TABLE_DISPATCH").is_some();
+        let table_dispatch = table_dispatch || std::env::var_os("VLVI_TABLE_DISPATCH").is_some();
         let pointer_bits = pointer_width.bits();
         let mut types = TypeTable::new();
         let bit_tid = types.bit();
@@ -1774,11 +1746,10 @@ impl<'ctx> Importer<'ctx> {
             && aligned_head
                 .checked_add(n_bytes)
                 .is_some_and(|end| end <= 1u64 << self.global_addr_bits())
+            && let Some(first) = self.pools.first_mut()
         {
-            if let Some(first) = self.pools.first_mut() {
-                first.1 = aligned_head + n_bytes;
-                return Ok((first.0, aligned_head));
-            }
+            first.1 = aligned_head + n_bytes;
+            return Ok((first.0, aligned_head));
         }
         // Dedicated global pools: byte-addressed, exclusive to globals.
         let mut base = None;
@@ -2242,21 +2213,18 @@ impl<'ctx> Importer<'ctx> {
             )
         };
         use inkwell::values::BasicValue;
-        if let Some(instr) = v.as_instruction_value() {
-            if rerunnable(instr.get_opcode()) {
-                self.translate_instruction(fctx, instr)?;
-                if let Some(bits) = self.cache_get_dominant(fctx, &v.as_any_value_enum()) {
-                    return Ok(bits);
-                }
+        if let Some(instr) = v.as_instruction_value()
+            && rerunnable(instr.get_opcode())
+        {
+            self.translate_instruction(fctx, instr)?;
+            if let Some(bits) = self.cache_get_dominant(fctx, &v.as_any_value_enum()) {
+                return Ok(bits);
             }
         }
         let bits = match v {
             BasicValueEnum::IntValue(i) => {
                 if std::env::var_os("VLVI_DOM_TRACE").is_some() {
-                    let def = fctx
-                        .cache_block
-                        .get(&v.as_any_value_enum())
-                        .copied();
+                    let def = fctx.cache_block.get(&v.as_any_value_enum()).copied();
                     let op = BasicValueEnum::IntValue(i)
                         .as_instruction_value()
                         .map(|iv| format!("{:?}", iv.get_opcode()));
@@ -2330,7 +2298,11 @@ impl<'ctx> Importer<'ctx> {
                 let ty = format!("{:?}", v.get_type());
                 return Err(ImportError::Unsupported(format!(
                     "unsupported value kind (only integers and pointers-into-globals are supported): type={ty} value={}",
-                    v.print_to_string().to_string_lossy().chars().take(220).collect::<String>()
+                    v.print_to_string()
+                        .to_string_lossy()
+                        .chars()
+                        .take(220)
+                        .collect::<String>()
                 )));
             }
         };
@@ -2370,10 +2342,7 @@ impl<'ctx> Importer<'ctx> {
                     }
                 }
                 if std::env::var_os("VLVI_DOM_TRACE").is_some() {
-                    eprintln!(
-                        "dom guard reject: def={def:?} cur={:?}",
-                        fctx.current
-                    );
+                    eprintln!("dom guard reject: def={def:?} cur={:?}", fctx.current);
                 }
             }
             None
@@ -2390,12 +2359,7 @@ impl<'ctx> Importer<'ctx> {
     /// function-global — this is what keeps slot-pointer encodings valid
     /// everywhere while dispatch-cont extracts (of a cont's param) stay
     /// block-scoped under the guard.
-    fn value_is_function_global(
-        &self,
-        fctx: &FuncCtx<'ctx>,
-        vid: ValueId,
-        depth: usize,
-    ) -> bool {
+    fn value_is_function_global(&self, fctx: &FuncCtx<'ctx>, vid: ValueId, depth: usize) -> bool {
         if depth > 8 {
             return false;
         }
@@ -2410,12 +2374,10 @@ impl<'ctx> Importer<'ctx> {
                 .all(|(_, src)| self.value_is_function_global(fctx, *src, depth + 1)),
             // Pure bit algebra over global bits is itself global: the GEP
             // class-bit adders are Polys over param/const bits.
-            Value::Op(Stmt::Poly { coeffs, .. }) => coeffs
-                .iter()
-                .all(|(vars, _)| {
-                    vars.iter()
-                        .all(|&p| self.value_is_function_global(fctx, p, depth + 1))
-                }),
+            Value::Op(Stmt::Poly { coeffs, .. }) => coeffs.iter().all(|(vars, _)| {
+                vars.iter()
+                    .all(|&p| self.value_is_function_global(fctx, p, depth + 1))
+            }),
             Value::Op(Stmt::Splat { src, .. }) => {
                 self.value_is_function_global(fctx, *src, depth + 1)
             }
@@ -2443,9 +2405,7 @@ impl<'ctx> Importer<'ctx> {
         // Wider-than-64 constants (i128 spills) extend the sign bit; the
         // truncated u64's bit 63 IS that sign.
         Ok((0..width)
-            .map(|b| {
-                self.bc_const_at(fctx, fctx.current, (val >> b.min(63)) & 1 != 0)
-            })
+            .map(|b| self.bc_const_at(fctx, fctx.current, (val >> b.min(63)) & 1 != 0))
             .collect())
     }
 
@@ -2463,13 +2423,7 @@ impl<'ctx> Importer<'ctx> {
         }
         let vid = fctx.emit(
             BlockId(0),
-            Value::Op(Stmt::Const(
-                Constant {
-                    hi: 0,
-                    lo: key,
-                },
-                self.bit_tid,
-            )),
+            Value::Op(Stmt::Const(Constant { hi: 0, lo: key }, self.bit_tid)),
         );
         fctx.const_cache.insert(key, vid);
         vid
@@ -2750,22 +2704,16 @@ impl<'ctx> Importer<'ctx> {
                             inkwell::llvm_sys::core::LLVMTypeOf(instr.as_value_ref()),
                         )
                     };
-                    if load_ty_kind
-                        == inkwell::llvm_sys::LLVMTypeKind::LLVMPointerTypeKind
-                    {
-                        if let Some(spilled) =
+                    if load_ty_kind == inkwell::llvm_sys::LLVMTypeKind::LLVMPointerTypeKind
+                        && let Some(spilled) =
                             fctx.slot_ptr_of.get(&ptr.as_any_value_enum()).cloned()
-                        {
-                            fctx.stack_slot_of.insert(instr.as_any_value_enum(), spilled.clone());
-                            let bits = self.encode_stack_ptr(
-                                fctx,
-                                cur,
-                                spilled.storage,
-                                &spilled.addr_bits,
-                            )?;
-                            self.cache_put(fctx, instr.as_any_value_enum(), bits);
-                            return Ok(called);
-                        }
+                    {
+                        fctx.stack_slot_of
+                            .insert(instr.as_any_value_enum(), spilled.clone());
+                        let bits =
+                            self.encode_stack_ptr(fctx, cur, spilled.storage, &spilled.addr_bits)?;
+                        self.cache_put(fctx, instr.as_any_value_enum(), bits);
+                        return Ok(called);
                     }
                     let ptr_bits0 = self
                         .cache_get_dominant(fctx, &ptr.as_any_value_enum())
@@ -2901,62 +2849,54 @@ impl<'ctx> Importer<'ctx> {
                     .map(|v| v.get_type())
                     .ok_or_else(|| ImportError::Unsupported("malformed cmpxchg".into()))?;
                 let n_bits = self.llvm_bit_width(val_ty)?;
-                let old_bits =
-                    if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned()
-                    {
-                        let ptr_bits0 = self
-                            .cache_get_dominant(fctx, &ptr.as_any_value_enum())
-                            .and_then(|b| b.first().copied())
-                            .ok_or_else(|| {
-                                ImportError::Unsupported(
-                                    "stack pointer bits missing (internal)".into(),
-                                )
-                            })?;
-                        let pointee_tid = self.llvm_type_id(val_ty)?;
-                        let addr_bound = self.stack_addr_bound(&stack_ptr);
-                        self.stack_load_dynamic(
-                            fctx,
-                            stack_ptr.storage,
-                            ptr_bits0,
-                            &stack_ptr.addr_bits,
-                            pointee_tid,
-                            n_bits,
-                            addr_bound,
-                        )
-                    } else {
-                        match self.resolve_global_ptr(fctx, ptr) {
-                            Ok(GlobalPtr::Const(g)) => self.mem_load(
-                                fctx,
-                                g.storage,
-                                g.byte_offset,
-                                n_bits.div_ceil(8),
-                            ),
-                            Ok(GlobalPtr::Symbolic {
-                                storage,
-                                offset_bits,
-                            }) => self.mem_load_dynamic(
-                                fctx,
-                                storage,
-                                &offset_bits,
-                                n_bits.div_ceil(8),
-                            ),
-                            Err(_) => {
-                                let pointee_tid = self.llvm_type_id(val_ty)?;
-                                let ptr_bits =
-                                    self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
-                                self.dispatch_read(fctx, &ptr_bits, pointee_tid, n_bits)?
-                            }
+                let old_bits = if let Some(stack_ptr) =
+                    fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned()
+                {
+                    let ptr_bits0 = self
+                        .cache_get_dominant(fctx, &ptr.as_any_value_enum())
+                        .and_then(|b| b.first().copied())
+                        .ok_or_else(|| {
+                            ImportError::Unsupported("stack pointer bits missing (internal)".into())
+                        })?;
+                    let pointee_tid = self.llvm_type_id(val_ty)?;
+                    let addr_bound = self.stack_addr_bound(&stack_ptr);
+                    self.stack_load_dynamic(
+                        fctx,
+                        stack_ptr.storage,
+                        ptr_bits0,
+                        &stack_ptr.addr_bits,
+                        pointee_tid,
+                        n_bits,
+                        addr_bound,
+                    )
+                } else {
+                    match self.resolve_global_ptr(fctx, ptr) {
+                        Ok(GlobalPtr::Const(g)) => {
+                            self.mem_load(fctx, g.storage, g.byte_offset, n_bits.div_ceil(8))
                         }
-                    };
+                        Ok(GlobalPtr::Symbolic {
+                            storage,
+                            offset_bits,
+                        }) => {
+                            self.mem_load_dynamic(fctx, storage, &offset_bits, n_bits.div_ceil(8))
+                        }
+                        Err(_) => {
+                            let pointee_tid = self.llvm_type_id(val_ty)?;
+                            let ptr_bits =
+                                self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
+                            self.dispatch_read(fctx, &ptr_bits, pointee_tid, n_bits)?
+                        }
+                    }
+                };
                 // success = (old == cmp) as one bit; store = sel(success,
                 // val, old) via AND/NOT/OR (no Select helper exists).
                 let success = self.alu(fctx, cur, HelperOp::Eq, &[old_bits.clone(), cmp.clone()]);
-                let not_success = self.alu(fctx, cur, HelperOp::Not, &[success.clone()]);
+                let not_success =
+                    self.alu(fctx, cur, HelperOp::Not, std::slice::from_ref(&success));
                 let val_keep = self.alu(fctx, cur, HelperOp::And, &[val.clone(), success.clone()]);
                 let old_keep = self.alu(fctx, cur, HelperOp::And, &[old_bits.clone(), not_success]);
                 let stored = self.alu(fctx, cur, HelperOp::Or, &[val_keep, old_keep]);
-                if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned()
-                {
+                if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
                     let ptr_bits0 = self
                         .cache_get_dominant(fctx, &ptr.as_any_value_enum())
                         .and_then(|b| b.first().copied())
@@ -3007,16 +2947,13 @@ impl<'ctx> Importer<'ctx> {
                 // [old value, success flag]).
                 fctx.aggregate_fields.insert(
                     instr.as_any_value_enum(),
-                    vec![
-                        Some(result[..n_bits].to_vec()),
-                        Some(vec![success_bit]),
-                    ],
+                    vec![Some(result[..n_bits].to_vec()), Some(vec![success_bit])],
                 );
                 Some(result)
             }
             InstructionOpcode::AtomicRMW => {
                 use inkwell::AtomicRMWBinOp;
-                use inkwell::values::InstructionValue as _;
+
                 let ptr = load_store_pointer(instr, 0)?;
                 self.ensure_default_address_space(ptr)?;
                 let val = op!(1);
@@ -3031,48 +2968,46 @@ impl<'ctx> Importer<'ctx> {
                     .get_atomic_rmw_bin_op()
                     .ok_or_else(|| ImportError::Unsupported("malformed atomicrmw".into()))?;
                 // OLD bits: the same resolution order as the Load arm.
-                let old_bits =
-                    if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned()
-                    {
-                        let ptr_bits0 = self
-                            .cache_get_dominant(fctx, &ptr.as_any_value_enum())
-                            .and_then(|b| b.first().copied())
-                            .ok_or_else(|| {
-                                ImportError::Unsupported(
-                                    "stack pointer bits missing (internal)".into(),
-                                )
-                            })?;
-                        let pointee_tid = self.llvm_type_id(instr.get_type())?;
-                        let addr_bound = self.stack_addr_bound(&stack_ptr);
-                        self.stack_load_dynamic(
-                            fctx,
-                            stack_ptr.storage,
-                            ptr_bits0,
-                            &stack_ptr.addr_bits,
-                            pointee_tid,
-                            n_bits,
-                            addr_bound,
-                        )
-                    } else {
-                        match self.resolve_global_ptr(fctx, ptr) {
-                            Ok(GlobalPtr::Const(g)) => {
-                                self.mem_load(fctx, g.storage, g.byte_offset, n_bytes)
-                            }
-                            Ok(GlobalPtr::Symbolic {
-                                storage,
-                                offset_bits,
-                            }) => self.mem_load_dynamic(fctx, storage, &offset_bits, n_bytes),
-                            // Runtime-dispatch fallback (pointer params,
-                            // phi/select-merged values): mirrors the Load
-                            // arm's fail-open path.
-                            Err(_) => {
-                                let pointee_tid = self.llvm_type_id(instr.get_type())?;
-                                let ptr_bits =
-                                    self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
-                                self.dispatch_read(fctx, &ptr_bits, pointee_tid, n_bytes)?
-                            }
+                let old_bits = if let Some(stack_ptr) =
+                    fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned()
+                {
+                    let ptr_bits0 = self
+                        .cache_get_dominant(fctx, &ptr.as_any_value_enum())
+                        .and_then(|b| b.first().copied())
+                        .ok_or_else(|| {
+                            ImportError::Unsupported("stack pointer bits missing (internal)".into())
+                        })?;
+                    let pointee_tid = self.llvm_type_id(instr.get_type())?;
+                    let addr_bound = self.stack_addr_bound(&stack_ptr);
+                    self.stack_load_dynamic(
+                        fctx,
+                        stack_ptr.storage,
+                        ptr_bits0,
+                        &stack_ptr.addr_bits,
+                        pointee_tid,
+                        n_bits,
+                        addr_bound,
+                    )
+                } else {
+                    match self.resolve_global_ptr(fctx, ptr) {
+                        Ok(GlobalPtr::Const(g)) => {
+                            self.mem_load(fctx, g.storage, g.byte_offset, n_bytes)
                         }
-                    };
+                        Ok(GlobalPtr::Symbolic {
+                            storage,
+                            offset_bits,
+                        }) => self.mem_load_dynamic(fctx, storage, &offset_bits, n_bytes),
+                        // Runtime-dispatch fallback (pointer params,
+                        // phi/select-merged values): mirrors the Load
+                        // arm's fail-open path.
+                        Err(_) => {
+                            let pointee_tid = self.llvm_type_id(instr.get_type())?;
+                            let ptr_bits =
+                                self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
+                            self.dispatch_read(fctx, &ptr_bits, pointee_tid, n_bytes)?
+                        }
+                    }
+                };
                 let new_bits = match bin {
                     AtomicRMWBinOp::Add => {
                         self.alu(fctx, cur, HelperOp::Add, &[old_bits.clone(), val.clone()])
@@ -3091,14 +3026,11 @@ impl<'ctx> Importer<'ctx> {
                     }
                     AtomicRMWBinOp::Xchg => val.clone(),
                     op => {
-                        return Err(ImportError::Unsupported(format!(
-                            "atomicrmw op {op:?}"
-                        )));
+                        return Err(ImportError::Unsupported(format!("atomicrmw op {op:?}")));
                     }
                 };
                 // NEW bits: the same resolution order as the Store arm.
-                if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned()
-                {
+                if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned() {
                     let ptr_bits0 = self
                         .cache_get_dominant(fctx, &ptr.as_any_value_enum())
                         .and_then(|b| b.first().copied())
@@ -3116,12 +3048,15 @@ impl<'ctx> Importer<'ctx> {
                     );
                 } else {
                     match self.resolve_global_ptr(fctx, ptr) {
-                        Ok(GlobalPtr::Const(g)) => self
-                            .mem_store(fctx, g.storage, g.byte_offset, &new_bits, n_bytes),
+                        Ok(GlobalPtr::Const(g)) => {
+                            self.mem_store(fctx, g.storage, g.byte_offset, &new_bits, n_bytes)
+                        }
                         Ok(GlobalPtr::Symbolic {
                             storage,
                             offset_bits,
-                        }) => self.mem_store_dynamic(fctx, storage, &offset_bits, &new_bits, n_bytes),
+                        }) => {
+                            self.mem_store_dynamic(fctx, storage, &offset_bits, &new_bits, n_bytes)
+                        }
                         Err(_) => {
                             let ptr_bits =
                                 self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
@@ -3327,7 +3262,7 @@ impl<'ctx> Importer<'ctx> {
                                                 &mut c,
                                                 &base_offset_bits,
                                                 &idx_bits,
-                                                elem_bytes as u64,
+                                                elem_bytes,
                                             )
                                         };
                                         Some(GlobalPtr::Symbolic {
@@ -3421,10 +3356,9 @@ impl<'ctx> Importer<'ctx> {
                     // dispatch over the whole candidate set.
                     let global_addr_bits = self.global_addr_bits();
                     // Resolve class bits BEFORE the mutable Ctx borrow.
-                    let class_resolved: Vec<Option<bool>> =
-                        (global_addr_bits..self.pointer_bits)
-                            .map(|b| self.resolve_const_bit(fctx, base_bits[b], 0))
-                            .collect();
+                    let class_resolved: Vec<Option<bool>> = (global_addr_bits..self.pointer_bits)
+                        .map(|b| self.resolve_const_bit(fctx, base_bits[b], 0))
+                        .collect();
                     let mut new_bits: Bits = {
                         let mut c = Ctx {
                             fctx,
@@ -3435,12 +3369,10 @@ impl<'ctx> Importer<'ctx> {
                             &mut c,
                             &base_bits[..global_addr_bits],
                             &idx_bits,
-                            elem_bytes as u64,
+                            elem_bytes,
                         );
                         let mut bits = addr;
-                        for (i, b) in
-                            (global_addr_bits..self.pointer_bits).enumerate()
-                        {
+                        for (i, b) in (global_addr_bits..self.pointer_bits).enumerate() {
                             bits.push(match class_resolved[i] {
                                 Some(v) => c.bc_const(v),
                                 None => base_bits[b],
@@ -3696,10 +3628,8 @@ impl<'ctx> Importer<'ctx> {
                     // (see `alloca_word_aligned`). Dispatch coherence holds
                     // because the dispatch path routes candidates through
                     // the same stack_load/store_dynamic this flag switches.
-                    self.storage_word.insert(
-                        storage,
-                        self.alloca_word_aligned(instr, self.word_bytes),
-                    );
+                    self.storage_word
+                        .insert(storage, self.alloca_word_aligned(instr, self.word_bytes));
                     self.sp_globals.push(sp);
                     self.pre_init.push(PreInitSegment {
                         storage: sp,
@@ -4155,24 +4085,14 @@ impl<'ctx> Importer<'ctx> {
                         if self.bulk_memory == BulkMemoryMode::Loop
                             && n_bytes >= BULK_LOOP_MIN_BYTES
                         {
-                            if matches!(
-                                dest,
-                                IntrinsicPointer::Dispatch { .. }
-                            ) {
+                            if matches!(dest, IntrinsicPointer::Dispatch { .. }) {
                                 // Unknown destination: the generic
                                 // dispatch loop (any pointer mix).
-                                let dest_bits = self.value_bits(
-                                    fctx,
-                                    BasicValueEnum::PointerValue(dest_ptr),
-                                )?;
-                                let len_bits: Bits = (0..usize::BITS
-                                    - n_bytes.leading_zeros() as u32)
+                                let dest_bits =
+                                    self.value_bits(fctx, BasicValueEnum::PointerValue(dest_ptr))?;
+                                let len_bits: Bits = (0..usize::BITS - n_bytes.leading_zeros())
                                     .map(|i| {
-                                        self.bc_const_at(
-                                            fctx,
-                                            fctx.current,
-                                            n_bytes >> i & 1 != 0,
-                                        )
+                                        self.bc_const_at(fctx, fctx.current, n_bytes >> i & 1 != 0)
                                     })
                                     .collect();
                                 self.symbolic_memory_loop(
@@ -4184,7 +4104,11 @@ impl<'ctx> Importer<'ctx> {
                                 return Ok(());
                             }
                             self.emit_bulk_memory_loop(
-                                fctx, &dest, None, Some(&fill_bits), n_bytes,
+                                fctx,
+                                &dest,
+                                None,
+                                Some(&fill_bits),
+                                n_bytes,
                             )?;
                             return Ok(());
                         }
@@ -4227,43 +4151,30 @@ impl<'ctx> Importer<'ctx> {
                             // semantics, so no overlap check is needed
                             // (and the check would be the wrong policy for
                             // a path that handles overlap correctly).
-                            if matches!(
-                                dest,
-                                IntrinsicPointer::Dispatch { .. }
-                            ) || matches!(
-                                src,
-                                IntrinsicPointer::Dispatch { .. }
-                            ) {
+                            if matches!(dest, IntrinsicPointer::Dispatch { .. })
+                                || matches!(src, IntrinsicPointer::Dispatch { .. })
+                            {
                                 // Unknown side: the generic dispatch loop.
-                                let dest_bits = self.value_bits(
-                                    fctx,
-                                    BasicValueEnum::PointerValue(dest_ptr),
-                                )?;
-                                let src_bits = self.value_bits(
-                                    fctx,
-                                    BasicValueEnum::PointerValue(src_ptr),
-                                )?;
-                                let len_bits: Bits = (0..usize::BITS
-                                    - n_bytes.leading_zeros() as u32)
+                                let dest_bits =
+                                    self.value_bits(fctx, BasicValueEnum::PointerValue(dest_ptr))?;
+                                let src_bits =
+                                    self.value_bits(fctx, BasicValueEnum::PointerValue(src_ptr))?;
+                                let len_bits: Bits = (0..usize::BITS - n_bytes.leading_zeros())
                                     .map(|i| {
-                                        self.bc_const_at(
-                                            fctx,
-                                            fctx.current,
-                                            n_bytes >> i & 1 != 0,
-                                        )
+                                        self.bc_const_at(fctx, fctx.current, n_bytes >> i & 1 != 0)
                                     })
                                     .collect();
                                 self.symbolic_memory_loop(
                                     fctx,
                                     &dest_bits,
                                     &len_bits,
-                                    SymbolicByteOperation::Copy { src_base: &src_bits },
+                                    SymbolicByteOperation::Copy {
+                                        src_base: &src_bits,
+                                    },
                                 )?;
                                 return Ok(());
                             }
-                            self.emit_bulk_memory_loop(
-                                fctx, &dest, Some(&src), None, n_bytes,
-                            )?;
+                            self.emit_bulk_memory_loop(fctx, &dest, Some(&src), None, n_bytes)?;
                             return Ok(());
                         }
                         if intrinsic == MemoryIntrinsic::Memcpy
@@ -4424,10 +4335,7 @@ impl<'ctx> Importer<'ctx> {
                 Some(_) => false,
                 None => true,
             };
-            if dest_word
-                && src_word
-                && n_bytes % (self.word_bytes as usize) == 0
-            {
+            if dest_word && src_word && n_bytes.is_multiple_of(self.word_bytes as usize) {
                 self.word_bytes as usize
             } else {
                 1
@@ -4495,7 +4403,14 @@ impl<'ctx> Importer<'ctx> {
             Some(IntrinsicPointer::Stack { ptr, .. }) => {
                 let base = self.byte_base_of(fctx, body, &ptr.addr_bits);
                 let bound = self.stack_addr_bound(ptr);
-                let addr = self.byte_addr_runtime(fctx, body, &base, &index_bits, step_bytes as u64, bound);
+                let addr = self.byte_addr_runtime(
+                    fctx,
+                    body,
+                    &base,
+                    &index_bits,
+                    step_bytes as u64,
+                    bound,
+                );
                 Some(fctx.emit(
                     body,
                     Value::Op(Stmt::StorageRead {
@@ -4515,7 +4430,12 @@ impl<'ctx> Importer<'ctx> {
                     .map(|i| self.bc_const_at(fctx, body, byte_offset >> i & 1 != 0))
                     .collect();
                 let addr = self.dynamic_addr_runtime(
-                    fctx, body, &off_bits, &index_bits, step_bytes as u64, 0,
+                    fctx,
+                    body,
+                    &off_bits,
+                    &index_bits,
+                    step_bytes as u64,
+                    0,
                 );
                 Some(fctx.emit(
                     body,
@@ -4530,19 +4450,20 @@ impl<'ctx> Importer<'ctx> {
             Some(IntrinsicPointer::Dispatch { .. }) => {
                 return Err(ImportError::Unsupported(
                     "bulk loop source through dispatch (internal)".into(),
-                ))
+                ));
             }
             None => None,
         };
         let fill_cell = fill8.map(|fill| {
-            let cell = fctx.emit(
+            fctx.emit(
                 body,
                 Value::Op(Stmt::Merge {
-                    parts: (0..cell_bits / 8).flat_map(|_| fill.iter().copied()).collect(),
+                    parts: (0..cell_bits / 8)
+                        .flat_map(|_| fill.iter().copied())
+                        .collect(),
                     ty: cell_ty,
                 }),
-            );
-            cell
+            )
         });
         let write_val = match (src_cell, fill_cell) {
             (Some(v), None) => v,
@@ -4550,14 +4471,21 @@ impl<'ctx> Importer<'ctx> {
             _ => {
                 return Err(ImportError::Unsupported(
                     "bulk loop needs exactly one of src/fill (internal)".into(),
-                ))
+                ));
             }
         };
         match dest {
             IntrinsicPointer::Stack { ptr, .. } => {
                 let base = self.byte_base_of(fctx, body, &ptr.addr_bits);
                 let bound = self.stack_addr_bound(ptr);
-                let addr = self.byte_addr_runtime(fctx, body, &base, &index_bits, step_bytes as u64, bound);
+                let addr = self.byte_addr_runtime(
+                    fctx,
+                    body,
+                    &base,
+                    &index_bits,
+                    step_bytes as u64,
+                    bound,
+                );
                 fctx.emit(
                     body,
                     Value::Op(Stmt::StorageWrite {
@@ -4576,7 +4504,12 @@ impl<'ctx> Importer<'ctx> {
                     .map(|i| self.bc_const_at(fctx, body, byte_offset >> i & 1 != 0))
                     .collect();
                 let addr = self.dynamic_addr_runtime(
-                    fctx, body, &off_bits, &index_bits, step_bytes as u64, 0,
+                    fctx,
+                    body,
+                    &off_bits,
+                    &index_bits,
+                    step_bytes as u64,
+                    0,
                 );
                 fctx.emit(
                     body,
@@ -4591,7 +4524,7 @@ impl<'ctx> Importer<'ctx> {
             IntrinsicPointer::Dispatch { .. } => {
                 return Err(ImportError::Unsupported(
                     "bulk loop destination through dispatch (internal)".into(),
-                ))
+                ));
             }
         }
         let next_index = {
@@ -5343,10 +5276,7 @@ impl<'ctx> Importer<'ctx> {
             let raw = ptr.as_value_ref();
             if !unsafe { inkwell::llvm_sys::core::LLVMIsAFunction(raw) }.is_null() {
                 let next = self.fn_symbols.len() as u64 + 1; // 0 reserved
-                let idx = *self
-                    .fn_symbols
-                    .entry(raw as usize)
-                    .or_insert(next);
+                let idx = *self.fn_symbols.entry(raw as usize).or_insert(next);
                 let global_addr_bits = self.global_addr_bits();
                 if idx >= (1u64 << global_addr_bits) {
                     return Err(ImportError::Unsupported(
@@ -5621,31 +5551,30 @@ impl<'ctx> Importer<'ctx> {
             shifted
         };
         let width = if addr_bound != 0 && addr_bound != u64::MAX {
-            ((u64::BITS - (addr_bound - 1).leading_zeros()) as usize)
-                .min(base_addr_bits.len())
+            ((u64::BITS - (addr_bound - 1).leading_zeros()) as usize).min(base_addr_bits.len())
         } else {
             base_addr_bits.len()
         };
         // Read base shape BEFORE opening the mutable Ctx borrow.
         let mut const_base = 0u64;
-        let all_const = base_addr_bits.iter().enumerate().all(|(b, vid)| {
-            match &fctx.values[vid.0].kind {
-                Value::Op(Stmt::Const(cst, _)) => {
-                    if cst.lo & 1 != 0 {
-                        const_base |= 1u64 << b;
+        let all_const =
+            base_addr_bits
+                .iter()
+                .enumerate()
+                .all(|(b, vid)| match &fctx.values[vid.0].kind {
+                    Value::Op(Stmt::Const(cst, _)) => {
+                        if cst.lo & 1 != 0 {
+                            const_base |= 1u64 << b;
+                        }
+                        true
                     }
-                    true
-                }
-                _ => false,
-            }
-        });
+                    _ => false,
+                });
         // `bc_add` needs equal widths: truncate both sides to the narrow
         // one. The in-bounds argument (the same one `dynamic_addr` leans
         // on) covers this — high bits of a bounded index over a bounded
         // base are semantically zero inside the bound.
-        let w = width
-            .min(base_addr_bits.len())
-            .min(idx_shifted.len());
+        let w = width.min(base_addr_bits.len()).min(idx_shifted.len());
         let idx_lo = &idx_shifted[..w];
         let sum = {
             let mut c = Ctx {
@@ -5712,14 +5641,7 @@ impl<'ctx> Importer<'ctx> {
                 )
             }
             ByteBase::Runtime(byte_bits) => {
-                self.dynamic_addr_runtime(
-                    fctx,
-                    block,
-                    byte_bits,
-                    idx_bits,
-                    step_bytes,
-                    addr_bound,
-                )
+                self.dynamic_addr_runtime(fctx, block, byte_bits, idx_bits, step_bytes, addr_bound)
             }
         }
     }
@@ -5800,7 +5722,13 @@ impl<'ctx> Importer<'ctx> {
         let byte_base = self.byte_base_of(fctx, cur, base_addr_bits);
         let mut bits = Vec::with_capacity(n_bits);
         for cell_i in 0..n_cells as u64 {
-            let addr = self.byte_addr(fctx, cur, &byte_base, cell_i * cell_bytes as u64, addr_bound);
+            let addr = self.byte_addr(
+                fctx,
+                cur,
+                &byte_base,
+                cell_i * cell_bytes as u64,
+                addr_bound,
+            );
             let cell_var = fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageRead {
@@ -5852,7 +5780,13 @@ impl<'ctx> Importer<'ctx> {
         let n_cells = val.len().div_ceil(cell_bits);
         let byte_base = self.byte_base_of(fctx, cur, base_addr_bits);
         for cell_i in 0..n_cells {
-            let addr = self.byte_addr(fctx, cur, &byte_base, cell_i as u64 * cell_bytes as u64, addr_bound);
+            let addr = self.byte_addr(
+                fctx,
+                cur,
+                &byte_base,
+                cell_i as u64 * cell_bytes as u64,
+                addr_bound,
+            );
             let lo = cell_i * cell_bits;
             let have = (lo + cell_bits).min(val.len()) - lo;
             let mut parts: Vec<ValueId> = val[lo..lo + have].to_vec();
@@ -5880,13 +5814,7 @@ impl<'ctx> Importer<'ctx> {
                     parts.push(old_bit);
                 }
             }
-            let cell_val = fctx.emit(
-                cur,
-                Value::Op(Stmt::Merge {
-                    parts,
-                    ty: cell_ty,
-                }),
-            );
+            let cell_val = fctx.emit(cur, Value::Op(Stmt::Merge { parts, ty: cell_ty }));
             fctx.emit(
                 cur,
                 Value::Op(Stmt::StorageWrite {
@@ -6127,9 +6055,7 @@ impl<'ctx> Importer<'ctx> {
             return;
         }
         let pv = unsafe { PointerValue::new(raw) };
-        if !pv
-            .as_value_ref()
-            .is_null()
+        if !pv.as_value_ref().is_null()
             && !self
                 .fnptr_candidates
                 .iter()
@@ -6165,8 +6091,7 @@ impl<'ctx> Importer<'ctx> {
                     continue;
                 }
                 let opcode = unsafe { InstructionValue::new(user) }.get_opcode();
-                if opcode == InstructionOpcode::Store
-                    && unsafe { LLVMGetOperand(user, 0) } == vref
+                if opcode == InstructionOpcode::Store && unsafe { LLVMGetOperand(user, 0) } == vref
                 {
                     is_candidate = true;
                     break;
@@ -6236,10 +6161,10 @@ impl<'ctx> Importer<'ctx> {
                         // Store operands are (value, pointer). A store of
                         // the pointer VALUE (vref as operand 0) is value
                         // flow, not a memory access through it.
-                        if unsafe { LLVMGetOperand(user, 1) } == vref {
-                            if (instr.get_alignment().unwrap_or(1) as u64) < w_bytes {
-                                return false;
-                            }
+                        if unsafe { LLVMGetOperand(user, 1) } == vref
+                            && (instr.get_alignment().unwrap_or(1) as u64) < w_bytes
+                        {
+                            return false;
                         }
                     }
                     InstructionOpcode::Phi
@@ -6496,8 +6421,12 @@ impl<'ctx> Importer<'ctx> {
             let class = fctx.shared_dispatch.get_mut(&key).expect("usable class");
             let tag = class.next_tag;
             class.next_tag += 1;
-            let (d_block, tag_tid, tag_width, packed_tid) =
-                (class.d_block, class.tag_tid, class.tag_width, class.packed_tid);
+            let (d_block, tag_tid, tag_width, packed_tid) = (
+                class.d_block,
+                class.tag_tid,
+                class.tag_width,
+                class.packed_tid,
+            );
             (tag, d_block, tag_tid, tag_width, packed_tid)
         };
         let (tag, d_block, tag_tid, tag_width, packed_tid) = tag;
@@ -6510,13 +6439,7 @@ impl<'ctx> Importer<'ctx> {
             let parts: Vec<ValueId> = (0..tag_width)
                 .map(|b| c.bc_const((tag >> b) & 1 != 0))
                 .collect();
-            fctx.emit(
-                cur,
-                Value::Op(Stmt::Merge {
-                    parts,
-                    ty: tag_tid,
-                }),
-            )
+            fctx.emit(cur, Value::Op(Stmt::Merge { parts, ty: tag_tid }))
         };
         let ptrv = self.compose_address(fctx, cur, ptr_bits);
         // Check-once reuse: a derived pointer (ID+TAG bits ValueId-equal
@@ -6558,7 +6481,7 @@ impl<'ctx> Importer<'ctx> {
                 )
             })
             .collect();
-        let (r_block, r_loaded_param, r_tag_param, dead, targets) = {
+        let (r_block, _r_loaded_param, r_tag_param, dead, targets) = {
             let class = fctx.shared_dispatch.get_mut(&key).expect("usable class");
             class.r_targets.push(Target {
                 block: cont,
@@ -6591,13 +6514,17 @@ impl<'ctx> Importer<'ctx> {
             }
             None => {
                 let (rd_block, sel) = {
-                    let class =
-                        fctx.shared_dispatch.get(&key).expect("usable class");
+                    let class = fctx.shared_dispatch.get(&key).expect("usable class");
                     (class.rd_block, class.d_sel)
                 };
                 fctx.dispatch_check.insert(
                     key,
-                    DispatchCheck { bits_key, rd_block, sel, cont },
+                    DispatchCheck {
+                        bits_key,
+                        rd_block,
+                        sel,
+                        cont,
+                    },
                 );
             }
         }
@@ -6643,8 +6570,12 @@ impl<'ctx> Importer<'ctx> {
             let class = fctx.shared_dispatch.get_mut(&key).expect("usable class");
             let tag = class.next_tag;
             class.next_tag += 1;
-            let (d_block, tag_tid, tag_width, packed_tid) =
-                (class.d_block, class.tag_tid, class.tag_width, class.packed_tid);
+            let (d_block, tag_tid, tag_width, packed_tid) = (
+                class.d_block,
+                class.tag_tid,
+                class.tag_width,
+                class.packed_tid,
+            );
             (tag, d_block, tag_tid, tag_width, packed_tid)
         };
         let (tag, d_block, tag_tid, tag_width, packed_tid) = tag;
@@ -6657,13 +6588,7 @@ impl<'ctx> Importer<'ctx> {
             let parts: Vec<ValueId> = (0..tag_width)
                 .map(|b| c.bc_const((tag >> b) & 1 != 0))
                 .collect();
-            fctx.emit(
-                cur,
-                Value::Op(Stmt::Merge {
-                    parts,
-                    ty: tag_tid,
-                }),
-            )
+            fctx.emit(cur, Value::Op(Stmt::Merge { parts, ty: tag_tid }))
         };
         let ptrv = self.compose_address(fctx, cur, ptr_bits);
         let valv = fctx.emit(
@@ -6725,13 +6650,17 @@ impl<'ctx> Importer<'ctx> {
             }
             None => {
                 let (rd_block, sel) = {
-                    let class =
-                        fctx.shared_dispatch.get(&key).expect("usable class");
+                    let class = fctx.shared_dispatch.get(&key).expect("usable class");
                     (class.rd_block, class.d_sel)
                 };
                 fctx.dispatch_check.insert(
                     key,
-                    DispatchCheck { bits_key, rd_block, sel, cont },
+                    DispatchCheck {
+                        bits_key,
+                        rd_block,
+                        sel,
+                        cont,
+                    },
                 );
             }
         }
@@ -6751,9 +6680,7 @@ impl<'ctx> Importer<'ctx> {
         is_write: bool,
     ) -> SharedDispatch {
         let tag_width = 12usize;
-        let packed_tid = self
-            .types
-            .intern(IrType::Vec(n_bits, self.bit_tid));
+        let packed_tid = self.types.intern(IrType::Vec(n_bits, self.bit_tid));
         let tag_tid = self.types.intern(IrType::Vec(tag_width, self.bit_tid));
         let d = fctx.extend_block();
         let ptrv = fctx.add_param(d, packed_tid, 0);
@@ -6771,11 +6698,14 @@ impl<'ctx> Importer<'ctx> {
             .collect();
         // Write classes thread the stored value through D as its own
         // param; site edge order is [ptr, val, tag].
-        let (d_val, d_tag_idx) =
-            if is_write { (Some(fctx.add_param(d, packed_tid, 1)), 2) } else { (None, 1) };
+        let (d_val, d_tag_idx) = if is_write {
+            (Some(fctx.add_param(d, packed_tid, 1)), 2)
+        } else {
+            (None, 1)
+        };
         let tagv = fctx.add_param(d, tag_tid, d_tag_idx);
         let cur = d;
-        let offset_bits = self.dispatch_global_addr_bits(fctx, cur, &ptr_bits);
+        let _offset_bits = self.dispatch_global_addr_bits(fctx, cur, &ptr_bits);
         let tag_bit = ptr_bits[self.pointer_bits - 1];
         let not_tag = {
             let mut c = Ctx {
@@ -6820,9 +6750,7 @@ impl<'ctx> Importer<'ctx> {
             };
         }
         let selector_val = self.compose_address(fctx, cur, &selector);
-        let sel_tid = self
-            .types
-            .intern(IrType::Vec(sel_width, self.bit_tid));
+        let sel_tid = self.types.intern(IrType::Vec(sel_width, self.bit_tid));
         // RD: owns the candidate Table so the selection can be computed
         // once (in D) and reused by derived-pointer sites.
         let rd = fctx.append_block();
@@ -6919,13 +6847,7 @@ impl<'ctx> Importer<'ctx> {
                             )
                         })
                         .collect();
-                    self.mem_store_dynamic(
-                        fctx,
-                        *sid,
-                        &c_offset,
-                        &val_bits,
-                        n_bits.div_ceil(8),
-                    );
+                    self.mem_store_dynamic(fctx, *sid, &c_offset, &val_bits, n_bits.div_ceil(8));
                 }
                 fctx.terminators[case_b.0] = Some(Terminator::Jump(Target {
                     block: r,
@@ -6990,9 +6912,7 @@ impl<'ctx> Importer<'ctx> {
             let default_args = if is_write {
                 vec![rd_tag]
             } else {
-                let zeros: Vec<ValueId> = (0..n_bits)
-                    .map(|_| zero)
-                    .collect();
+                let zeros: Vec<ValueId> = (0..n_bits).map(|_| zero).collect();
                 let zeros_packed = fctx.emit(
                     rd,
                     Value::Op(Stmt::Merge {
@@ -7081,12 +7001,26 @@ impl<'ctx> Importer<'ctx> {
                 n_bits,
                 self.alloca_sizes[candidate_idx],
             );
-            result = mux_bits(self, fctx, cur, stack_matches[candidate_idx], &loaded, &result);
+            result = mux_bits(
+                self,
+                fctx,
+                cur,
+                stack_matches[candidate_idx],
+                &loaded,
+                &result,
+            );
         }
         let matches = self.dispatch_matches(fctx, cur, ptr_bits, &candidates);
         for (candidate_idx, &sid) in candidates.iter().enumerate() {
             let global_bits = self.mem_load_dynamic(fctx, sid, &offset_bits, n_bits.div_ceil(8));
-            result = mux_bits(self, fctx, cur, matches[candidate_idx], &global_bits, &result);
+            result = mux_bits(
+                self,
+                fctx,
+                cur,
+                matches[candidate_idx],
+                &global_bits,
+                &result,
+            );
         }
         Ok(result)
     }
@@ -7130,8 +7064,6 @@ impl<'ctx> Importer<'ctx> {
         }
     }
 
-
-
     /// Table-on-ID dispatch, WRITE side: same selector, but each case
     /// block stores DIRECTLY (only that block executes — the old
     /// unconditional-then-mux RMW dance exists precisely because the
@@ -7164,13 +7096,13 @@ impl<'ctx> Importer<'ctx> {
             .alloca_data
             .iter()
             .copied()
-            .filter(|sid| resolved_tag != Some(true))
+            .filter(|_sid| resolved_tag != Some(true))
             .filter(|sid| resolved_id.is_none_or(|id| id == sid.0 as u64))
             .collect();
         let candidates: Vec<StorageId> = self
             .dispatch_candidates()?
             .into_iter()
-            .filter(|sid| resolved_tag != Some(false))
+            .filter(|_sid| resolved_tag != Some(false))
             .filter(|sid| resolved_id.is_none_or(|id| id == sid.0 as u64))
             .collect();
         let cur = fctx.current;
@@ -7190,9 +7122,7 @@ impl<'ctx> Importer<'ctx> {
         };
         // Table-on-ID: equality selector + per-candidate direct-access
         // blocks, replacing the per-bit mux cascade.
-        if self.table_dispatch
-            && allocas.len() + candidates.len() > 1
-        {
+        if self.table_dispatch && allocas.len() + candidates.len() > 1 {
             return self.dispatch_read_table(
                 fctx,
                 ptr_bits,
@@ -7204,9 +7134,7 @@ impl<'ctx> Importer<'ctx> {
         }
         // A single surviving candidate with a fully resolved ID IS the
         // pointer's target: skip the gate/mux entirely and read directly.
-        if resolved_id.is_some()
-            && allocas.len() + candidates.len() == 1
-        {
+        if resolved_id.is_some() && allocas.len() + candidates.len() == 1 {
             if let Some(&sid) = allocas.first() {
                 return Ok(self.stack_load_dynamic(
                     fctx,
@@ -7215,11 +7143,7 @@ impl<'ctx> Importer<'ctx> {
                     &offset_bits,
                     pointee_ty,
                     n_bits,
-                    self.alloca_sizes[self
-                        .alloca_data
-                        .iter()
-                        .position(|&s| s == sid)
-                        .unwrap_or(0)],
+                    self.alloca_sizes[self.alloca_data.iter().position(|&s| s == sid).unwrap_or(0)],
                 ));
             }
             if let Some(&sid) = candidates.first() {
@@ -7294,13 +7218,13 @@ impl<'ctx> Importer<'ctx> {
             .alloca_data
             .iter()
             .copied()
-            .filter(|sid| resolved_tag != Some(true))
+            .filter(|_sid| resolved_tag != Some(true))
             .filter(|sid| resolved_id.is_none_or(|id| id == sid.0 as u64))
             .collect();
         let candidates: Vec<StorageId> = self
             .dispatch_candidates()?
             .into_iter()
-            .filter(|sid| resolved_tag != Some(false))
+            .filter(|_sid| resolved_tag != Some(false))
             .filter(|sid| resolved_id.is_none_or(|id| id == sid.0 as u64))
             .collect();
         if allocas.is_empty() && candidates.is_empty() {
@@ -7308,20 +7232,13 @@ impl<'ctx> Importer<'ctx> {
         }
         let cur = fctx.current;
         let offset_bits = self.dispatch_global_addr_bits(fctx, cur, ptr_bits);
-        if self.table_dispatch
-            && allocas.len() + candidates.len() > 1
-        {
+        if self.table_dispatch && allocas.len() + candidates.len() > 1 {
             return self.dispatch_write_table(fctx, ptr_bits, val, &allocas, &candidates);
         }
-        if resolved_id.is_some()
-            && allocas.len() + candidates.len() == 1
-        {
+        if resolved_id.is_some() && allocas.len() + candidates.len() == 1 {
             if let Some(&sid) = allocas.first() {
-                let bound = self.alloca_sizes[self
-                    .alloca_data
-                    .iter()
-                    .position(|&s| s == sid)
-                    .unwrap_or(0)];
+                let bound =
+                    self.alloca_sizes[self.alloca_data.iter().position(|&s| s == sid).unwrap_or(0)];
                 self.stack_store_dynamic(fctx, sid, ptr_bits[0], &offset_bits, val, bound);
                 return Ok(());
             }
@@ -7469,10 +7386,7 @@ impl<'ctx> Importer<'ctx> {
             .get_type()
             .try_into()
             .map(|t: BasicTypeEnum| {
-                matches!(
-                    t,
-                    BasicTypeEnum::IntType(_) | BasicTypeEnum::PointerType(_)
-                )
+                matches!(t, BasicTypeEnum::IntType(_) | BasicTypeEnum::PointerType(_))
             })
             .unwrap_or(false)
         {
@@ -7498,14 +7412,14 @@ impl<'ctx> Importer<'ctx> {
         // bits come from the load's cache (a dispatch over the table
         // storage returns exactly the encodings stored, so the selector's
         // equality keys below are consistent by construction).
-        let callee_ref = unsafe { LLVMGetOperand(instr.as_value_ref(), (n_ops - 1) as u32) };
+        let callee_ref = unsafe { LLVMGetOperand(instr.as_value_ref(), (n_ops - 1)) };
         let callee_val = unsafe { BasicValueEnum::new(callee_ref) };
         let callee_bits = self.value_bits(fctx, callee_val)?;
         // Argument conversions land in the pre-split block.
         let args = self.call_arg_bits(fctx, instr)?;
         // Provenance per pointer argument (mirrors the direct-call arm,
         // driven by operand types instead of a known signature).
-        let prov: Vec<Prov> = (0..(n_ops - 1) as u32)
+        let prov: Vec<Prov> = (0..(n_ops - 1))
             .map(|i| {
                 let arg_ref = unsafe { LLVMGetOperand(instr.as_value_ref(), i) };
                 if arg_ref.is_null() {
@@ -7555,7 +7469,7 @@ impl<'ctx> Importer<'ctx> {
                 .map(|b| c.bc_const((n >> b) & 1 != 0))
                 .collect()
         };
-        for (case_i, cand) in candidates.iter().enumerate() {
+        for (_case_i, cand) in candidates.iter().enumerate() {
             let cand_bits = self.ptr_value_bits(fctx, cur, *cand)?;
             let callee_fn = unsafe { FunctionValue::new(cand.as_value_ref()) };
             let Some(callee_fn) = callee_fn else {

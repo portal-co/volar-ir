@@ -273,7 +273,9 @@ fn bit_width_for_ty(types: &IRTypes, ty: IRTypeId) -> Result<usize, StorageToMux
             _ => return Err(StorageToMuxError::UnsupportedAddressType { ty }),
         }),
         // The `Type::_n` cutover: a wider bit-vector is `Vec(n, Bit)`.
-        IRType::Vec(n, elem) if matches!(types.0[elem.0 as usize], IRType::Primitive(Type::Bit)) => {
+        IRType::Vec(n, elem)
+            if matches!(types.0[elem.0 as usize], IRType::Primitive(Type::Bit)) =>
+        {
             Ok(*n)
         }
         _ => Err(StorageToMuxError::UnsupportedAddressType { ty }),

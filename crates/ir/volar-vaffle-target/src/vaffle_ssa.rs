@@ -383,7 +383,7 @@ pub(crate) fn ssa_ify_function_owned<P: Clone>(
     for (i, &b) in rpo.iter().enumerate() {
         rpo_index[b] = i;
     }
-    let idom = compute_idom(&rpo, &rpo_index, &preds, entry);
+    let _idom = compute_idom(&rpo, &rpo_index, &preds, entry);
 
     // ---- Phase 1: thread SP through every block -----------------------------
     // Nothing inside the module ever calls the entry function (checked by

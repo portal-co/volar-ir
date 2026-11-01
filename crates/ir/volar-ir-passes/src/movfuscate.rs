@@ -55,8 +55,8 @@
 //! - **Typed select** (`select(bit, a: T, b: T) = bit·(a+b) + b`): three
 //!   `Poly` stmts.
 
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::{vec, vec::Vec};
 use volar_ir_common::{
     ActionCallData, ActionStoreData, Constant, OracleCallData, PolyCoeffs, PreInitSegment,
@@ -1421,7 +1421,7 @@ pub(crate) fn subst_ir(stmt: &IRStmt, var_map: &[u32]) -> IRStmt {
                     })
                     .collect(),
             }))
-        },
+        }
         IRStmt::ActionOutput { call, idx, ty } => IRStmt::ActionOutput {
             call: s(call),
             idx: *idx,

@@ -48,14 +48,16 @@
 //! 2. Reloads spilled values from own frame's spill slots.
 //! 3. Continues with remaining stmts.
 
+use alloc::boxed::Box;
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec,
     vec::Vec,
 };
-use alloc::boxed::Box;
 
-use vaffle::{Block, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Terminator, Value, ValueId};
+use vaffle::{
+    Block, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Terminator, Value, ValueId,
+};
 use volar_ir::ir::{
     ActionDecl, IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt,
     IRTerminator, IRTypeId, IRTypes, IRVarId, OracleDecl,
@@ -554,10 +556,9 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         // idempotent for the planned paths, where `ssa_ify_module` already
         // interned it into the table this constructor receives.
         let vaffle_bit = module.types.bit();
-        let _sp_addr_vtid =
-            module
-                .types
-                .intern(IrType::Vec(crate::vaffle_ssa::SPILL_ADDR_BITS, vaffle_bit));
+        let _sp_addr_vtid = module
+            .types
+            .intern(IrType::Vec(crate::vaffle_ssa::SPILL_ADDR_BITS, vaffle_bit));
 
         // Build a mapping from VAFFLE TypeId → IR TypeId by interning each
         // VAFFLE type into the IR type table (recursively remapping inner refs).
@@ -636,9 +637,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             let total_ret_bits: usize = sig
                 .results
                 .iter()
-                .map(|&vtid| {
-                    ir_type_bit_width(&types, type_map[vtid.0 as usize])
-                })
+                .map(|&vtid| ir_type_bit_width(&types, type_map[vtid.0 as usize]))
                 .sum();
             Self::intern_cont_block_shape(&mut types, pointer_bits, total_ret_bits);
         }
@@ -786,9 +785,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     let total_ret_bits: usize = sig
                         .results
                         .iter()
-                        .map(|&vtid| {
-                            ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize])
-                        })
+                        .map(|&vtid| ir_type_bit_width(&self.types, self.type_map[vtid.0 as usize]))
                         .sum();
                     snaps.push(Snap::Body {
                         n_blocks: b.blocks.len(),
@@ -864,8 +861,11 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                     } else {
                         None
                     };
-                    let cont_ty =
-                        Some(Self::intern_cont_block_shape(&mut self.types, self.pointer_bits, total_ret_bits));
+                    let cont_ty = Some(Self::intern_cont_block_shape(
+                        &mut self.types,
+                        self.pointer_bits,
+                        total_ret_bits,
+                    ));
                     let callee_size = offset;
 
                     let callee_layout = FrameLayout {
@@ -1027,8 +1027,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
         let func_sigs = crate::vaffle_ssa::module_func_sigs(&self.module.funcs);
         let sp_step = crate::vaffle_ssa::compute_sp_step(self.module);
         // ---- Phase A: per-Body layout facts via throwaway SSA ----
-        let mut facts: Vec<Option<(usize, usize)>> =
-            alloc::vec![None; self.module.funcs.len()];
+        let mut facts: Vec<Option<(usize, usize)>> = alloc::vec![None; self.module.funcs.len()];
         for fi in 0..self.module.funcs.len() {
             let taken = core::mem::replace(
                 &mut self.module.funcs[fi],
@@ -1124,12 +1123,20 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
     /// SSA'd body's facts supplied by the throwaway pre-pass instead of read
     /// from a resident body. `param_bits` is unused here (n_params already
     /// carries the entry-param bit width).
-    fn body_func_info_dynamic(&mut self, n_params: usize, n_values: usize, ret_bits: usize) -> FuncInfo {
+    fn body_func_info_dynamic(
+        &mut self,
+        n_params: usize,
+        n_values: usize,
+        ret_bits: usize,
+    ) -> FuncInfo {
         let total_ret_bits = ret_bits;
         let n_ret_words = n_packs(total_ret_bits);
         let ret = (total_ret_bits > 0).then_some((0, n_ret_words as u64, PACK_TID));
-        let cont_ty =
-            Some(Self::intern_cont_block_shape(&mut self.types, self.pointer_bits, total_ret_bits));
+        let cont_ty = Some(Self::intern_cont_block_shape(
+            &mut self.types,
+            self.pointer_bits,
+            total_ret_bits,
+        ));
         let callee_size = n_ret_words as u64;
         let callee_layout = FrameLayout {
             params: vec![],
@@ -1465,14 +1472,11 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
             let mut off = self.blocks.len() as u32;
             for vb in &body.blocks {
                 first.push(off);
-                off += 1
-                    + vb
-                        .stmts
-                        .iter()
-                        .filter(|&svid| {
-                            matches!(&body.values[svid.0].kind, Value::Call { .. })
-                        })
-                        .count() as u32;
+                off += 1 + vb
+                    .stmts
+                    .iter()
+                    .filter(|&svid| matches!(&body.values[svid.0].kind, Value::Call { .. }))
+                    .count() as u32;
             }
             self.vaffle_ir_first = first;
             let entry_ir = self.vaffle_ir_first[body.entry.0] as usize;
@@ -1762,15 +1766,11 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                             let mut spill_widths: Vec<(usize, TypeId)> = Vec::new();
                             for &key in &spill_keys {
                                 let var = val_map.required(key);
-                                let vtid = vaffle_value_vtid(
-                                    self.module,
-                                    &body.values,
-                                    ValueId(key),
-                                );
+                                let vtid =
+                                    vaffle_value_vtid(self.module, &body.values, ValueId(key));
                                 let ir_tid = self.type_map[vtid.0 as usize];
                                 let w = ir_type_bit_width(&self.types, ir_tid).max(1);
-                                spill_bits
-                                    .extend(explode_to_bits(&mut current_em, var, w));
+                                spill_bits.extend(explode_to_bits(&mut current_em, var, w));
                                 spill_widths.push((w, ir_tid));
                             }
                             let spill_words = pack_bits(&mut current_em, &spill_bits, PACK_W);
@@ -1881,8 +1881,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                                         // for an import that never lowers, to
                                         // a deduped abort sink.
                                         let jump_bid = (ir_bi + pieces_pushed) as u32;
-                                        let keep_args =
-                                            sp_words.len() - self.entry_return_bits();
+                                        let keep_args = sp_words.len() - self.entry_return_bits();
                                         self.pending_call_edges
                                             .push((jump_bid, callee_idx, keep_args));
                                         IRBlockId(u32::MAX)
@@ -2100,8 +2099,7 @@ impl<'m, P: Clone> LowerCtx<'m, P> {
                 // zero-return convention instead of panicking in
                 // frame_write_ret: pad with zero bits to the layout's slot
                 // count.
-                let want_slots =
-                    own_layout.ret.as_ref().map(|(_, sc, _)| *sc as usize);
+                let want_slots = own_layout.ret.as_ref().map(|(_, sc, _)| *sc as usize);
                 if let Some(want_slots) = want_slots {
                     let want_bits = want_slots * PACK_W;
                     while all_ret_bits.len() < want_bits {
@@ -2806,15 +2804,15 @@ pub fn compute_cross_block_values<P: Clone>(body: &FuncBody<P>) -> BTreeSet<usiz
     for (bi, block) in body.blocks.iter().enumerate() {
         match &block.terminator {
             Terminator::Jump(t) => {
-                succs[bi].insert(t.block.0 as usize);
+                succs[bi].insert(t.block.0);
             }
             Terminator::IfNonzero {
                 then_target,
                 else_target,
                 ..
             } => {
-                succs[bi].insert(then_target.block.0 as usize);
-                succs[bi].insert(else_target.block.0 as usize);
+                succs[bi].insert(then_target.block.0);
+                succs[bi].insert(else_target.block.0);
             }
             Terminator::Table {
                 targets,
@@ -2822,16 +2820,16 @@ pub fn compute_cross_block_values<P: Clone>(body: &FuncBody<P>) -> BTreeSet<usiz
                 ..
             } => {
                 for t in targets {
-                    succs[bi].insert(t.block.0 as usize);
+                    succs[bi].insert(t.block.0);
                 }
-                succs[bi].insert(default_target.block.0 as usize);
+                succs[bi].insert(default_target.block.0);
             }
             _ => {}
         }
     }
     let mut reachable = vec![false; body.blocks.len()];
-    reachable[body.entry.0 as usize] = true;
-    let mut stack = vec![body.entry.0 as usize];
+    reachable[body.entry.0] = true;
+    let mut stack = vec![body.entry.0];
     while let Some(&bi) = stack.last() {
         stack.pop();
         for &s in &succs[bi] {

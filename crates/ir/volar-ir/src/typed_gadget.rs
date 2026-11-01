@@ -52,11 +52,9 @@ pub fn typed_bit_width(ty_id: IRTypeId, types: &IRTypes) -> Option<usize> {
             _ => None,
         },
         IRType::Vec(n, elem) => typed_bit_width(*elem, types).map(|w| n.saturating_mul(w)),
-        IRType::Tuple(ids) => ids
-            .iter()
-            .try_fold(0usize, |acc, &id| {
-                typed_bit_width(id, types).map(|w| acc + w)
-            }),
+        IRType::Tuple(ids) => ids.iter().try_fold(0usize, |acc, &id| {
+            typed_bit_width(id, types).map(|w| acc + w)
+        }),
         IRType::Block { .. } | IRType::Func { .. } => Some(0),
         IRType::ExtField { .. } | IRType::PrimeField { .. } => types.value_bit_width(ty_id),
         _ => None,
@@ -158,7 +156,6 @@ impl TypedAnchor {
             } => (*addr_start, *addr_len),
         }
     }
-
 }
 
 /// One typed entry: a boundary anchor together with the regions its bits
@@ -181,15 +178,29 @@ pub struct TypedRegionEntry {
 )]
 #[cfg_attr(feature = "rkyv", rkyv(derive(PartialEq, Eq, PartialOrd, Ord)))]
 pub enum TypedBoundaryWire {
-    Input { param: u32, bit: u16 },
+    Input {
+        param: u32,
+        bit: u16,
+    },
     BlockInput {
         block: IRBlockId,
         param: u32,
         bit: u16,
     },
-    FuncInput { func: u32, param: u32, bit: u16 },
-    Output { out: u32, bit: u16 },
-    FuncOutput { func: u32, result: u32, bit: u16 },
+    FuncInput {
+        func: u32,
+        param: u32,
+        bit: u16,
+    },
+    Output {
+        out: u32,
+        bit: u16,
+    },
+    FuncOutput {
+        func: u32,
+        result: u32,
+        bit: u16,
+    },
     /// One bit plane of one typed storage cell.
     Cell {
         storage: StorageId,
@@ -232,7 +243,10 @@ pub enum TypedRegionError {
     /// The anchor kind is not meaningful for this host level (e.g.
     /// `Output` on a multi-block `IRBlocks`, which has no module output
     /// list).
-    UnsupportedAnchor { anchor: TypedAnchor, host: &'static str },
+    UnsupportedAnchor {
+        anchor: TypedAnchor,
+        host: &'static str,
+    },
 }
 
 /// The typed input/output/storage region assignment for one host program.
@@ -281,9 +295,11 @@ impl TypedRegionTable {
             }
             let end = match start.checked_add(len) {
                 Some(e) => e,
-                None => return Err(TypedRegionError::StorageRangeOverflow {
-                    anchor: entry.anchor.clone(),
-                }),
+                None => {
+                    return Err(TypedRegionError::StorageRangeOverflow {
+                        anchor: entry.anchor.clone(),
+                    });
+                }
             };
             let key = entry.anchor.space_key();
             if let Some((last_end, first)) = space_ends.get(&key)
@@ -316,7 +332,10 @@ impl TypedRegionTable {
             match &entry.anchor {
                 TypedAnchor::Input { param, start, len } => {
                     for b in *start..*start + *len {
-                        wires.push(TypedBoundaryWire::Input { param: *param, bit: b });
+                        wires.push(TypedBoundaryWire::Input {
+                            param: *param,
+                            bit: b,
+                        });
                     }
                 }
                 TypedAnchor::BlockInput {
@@ -472,7 +491,8 @@ impl TypedRegionTable {
                         });
                     }
                 }
-                TypedAnchor::BlockInput { .. } | TypedAnchor::FuncInput { .. }
+                TypedAnchor::BlockInput { .. }
+                | TypedAnchor::FuncInput { .. }
                 | TypedAnchor::FuncOutput { .. } => {
                     return Err(TypedRegionError::UnsupportedAnchor {
                         anchor: entry.anchor.clone(),
@@ -538,7 +558,8 @@ impl TypedRegionTable {
                         });
                     }
                 }
-                TypedAnchor::Output { .. } | TypedAnchor::FuncInput { .. }
+                TypedAnchor::Output { .. }
+                | TypedAnchor::FuncInput { .. }
                 | TypedAnchor::FuncOutput { .. } => {
                     return Err(TypedRegionError::UnsupportedAnchor {
                         anchor: entry.anchor.clone(),
@@ -785,9 +806,15 @@ pub enum TypedGadgetError {
     /// The body uses a statement kind with no pure Boolean lowering.
     UnsupportedBodyStmt { gadget: String, stmt: &'static str },
     /// The body's params do not match the flattened port words.
-    BodyParamMismatch { gadget: String, reason: &'static str },
+    BodyParamMismatch {
+        gadget: String,
+        reason: &'static str,
+    },
     /// The body's outputs do not match the `Data` port words.
-    BodyOutputMismatch { gadget: String, reason: &'static str },
+    BodyOutputMismatch {
+        gadget: String,
+        reason: &'static str,
+    },
     /// A port type has no Boolean bit width (e.g. `Block` or `Func`).
     UnsupportedWidth { gadget: String, ty: IRTypeId },
 }
@@ -808,9 +835,9 @@ fn is_pure_typed_stmt(stmt: &IRStmt) -> Option<&'static str> {
         IRStmt::StorageRead { .. } => Some("StorageRead"),
         IRStmt::StorageWrite { .. } => Some("StorageWrite"),
         IRStmt::OracleCall { .. } | IRStmt::OracleOutput { .. } => Some("Oracle"),
-        IRStmt::ActionCall { .. }
-        | IRStmt::ActionOutput { .. }
-        | IRStmt::ActionStore { .. } => Some("Action"),
+        IRStmt::ActionCall { .. } | IRStmt::ActionOutput { .. } | IRStmt::ActionStore { .. } => {
+            Some("Action")
+        }
         IRStmt::Rng { .. } => Some("Rng"),
         _ => Some("unknown-stmt"),
     }
@@ -823,7 +850,11 @@ pub fn validate_typed_gadget(
     spec: &TypedGadgetSpec,
     types: &IRTypes,
 ) -> Result<(), TypedGadgetError> {
-    let data_count = spec.ports.iter().filter(|p| p.kind == PortKind::Data).count();
+    let data_count = spec
+        .ports
+        .iter()
+        .filter(|p| p.kind == PortKind::Data)
+        .count();
     if data_count != 1 {
         return Err(TypedGadgetError::NotExactlyOneDataPort {
             gadget: spec.name.clone(),
@@ -916,7 +947,7 @@ fn stmt_output_type(stmt: &IRStmt) -> Option<IRTypeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IRBlock, IRBlockTargetId, IRBranchTarget, IRBlocks, IRTerminator, IRType};
+    use crate::ir::{IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRType};
     use alloc::string::ToString;
     use alloc::vec;
     use volar_ir_common::{Node, PolyCoeffs, TypeTable};
@@ -1069,7 +1100,10 @@ mod tests {
         };
         assert!(matches!(
             table.validate_vcircuit(&host, &types),
-            Err(TypedRegionError::UnsupportedAnchor { host: "VCircuit", .. })
+            Err(TypedRegionError::UnsupportedAnchor {
+                host: "VCircuit",
+                ..
+            })
         ));
     }
 
@@ -1177,7 +1211,10 @@ mod tests {
         };
         assert!(matches!(
             table.validate_irblocks(&host, &types),
-            Err(TypedRegionError::UnsupportedAnchor { host: "IRBlocks", .. })
+            Err(TypedRegionError::UnsupportedAnchor {
+                host: "IRBlocks",
+                ..
+            })
         ));
     }
 
@@ -1257,7 +1294,10 @@ mod tests {
         };
         assert!(matches!(
             validate_typed_gadget(&spec, &types),
-            Err(TypedGadgetError::UnsupportedBodyStmt { stmt: "StorageRead", .. })
+            Err(TypedGadgetError::UnsupportedBodyStmt {
+                stmt: "StorageRead",
+                ..
+            })
         ));
 
         // Wrong param shape: body takes one word too many.
@@ -1306,15 +1346,27 @@ mod tests {
         assert_eq!(wires.len(), 2 * 8); // 2 addresses × 8 planes
         assert!(matches!(
             wires[0],
-            TypedBoundaryWire::Cell { plane: 0, addr: 3, .. }
+            TypedBoundaryWire::Cell {
+                plane: 0,
+                addr: 3,
+                ..
+            }
         ));
         assert!(matches!(
             wires[1],
-            TypedBoundaryWire::Cell { plane: 0, addr: 4, .. }
+            TypedBoundaryWire::Cell {
+                plane: 0,
+                addr: 4,
+                ..
+            }
         ));
         assert!(matches!(
             wires[2],
-            TypedBoundaryWire::Cell { plane: 1, addr: 3, .. }
+            TypedBoundaryWire::Cell {
+                plane: 1,
+                addr: 3,
+                ..
+            }
         ));
     }
 }
@@ -1352,8 +1404,8 @@ mod rkyv_tests {
             names: BTreeMap::from([(RegionId(0), "public".to_string())]),
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&table).expect("serializes");
-        let archived =
-            rkyv::access::<ArchivedTypedRegionTable, rkyv::rancor::Error>(&bytes).expect("validates");
+        let archived = rkyv::access::<ArchivedTypedRegionTable, rkyv::rancor::Error>(&bytes)
+            .expect("validates");
         let round: TypedRegionTable =
             rkyv::deserialize::<TypedRegionTable, rkyv::rancor::Error>(archived)
                 .expect("deserializes");
@@ -1406,16 +1458,16 @@ mod rkyv_tests {
         };
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&lib).expect("serializes");
-        let archived =
-            rkyv::access::<ArchivedTypedGadgetLibrary, rkyv::rancor::Error>(&bytes).expect("validates");
+        let archived = rkyv::access::<ArchivedTypedGadgetLibrary, rkyv::rancor::Error>(&bytes)
+            .expect("validates");
         let round: TypedGadgetLibrary =
             rkyv::deserialize::<TypedGadgetLibrary, rkyv::rancor::Error>(archived)
                 .expect("deserializes");
         assert_eq!(round, lib);
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&binding).expect("serializes");
-        let archived =
-            rkyv::access::<ArchivedTypedGadgetBinding, rkyv::rancor::Error>(&bytes).expect("validates");
+        let archived = rkyv::access::<ArchivedTypedGadgetBinding, rkyv::rancor::Error>(&bytes)
+            .expect("validates");
         let round: TypedGadgetBinding =
             rkyv::deserialize::<TypedGadgetBinding, rkyv::rancor::Error>(archived)
                 .expect("deserializes");
