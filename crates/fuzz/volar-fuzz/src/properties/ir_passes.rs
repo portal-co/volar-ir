@@ -482,7 +482,7 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRTypeId,
     IRTypes, IRVarId,
 };
-use volar_ir_common::{Constant, IrType, Node, PolyCoeffs, Type};
+use volar_ir_common::{Constant, IrType, Node, OracleCallData, PolyCoeffs, Type};
 use volar_ir_passes::{LoweringMode, lower_to_circuit_ir};
 
 use crate::interpreter::ir::{
@@ -921,12 +921,12 @@ fn test_movfuscate_propagates_multiple_oracle_declarations() {
                 params: vec![t128.clone()],
                 stmts: vec![
                     Node::new(
-                        IRStmt::OracleCall {
+                        IRStmt::OracleCall(Box::new(OracleCallData {
                             name: "o0".to_string(),
                             args: vec![IRVarId(0)],
                             output_tys: vec![t8.clone()],
                             result_ty: t8.clone(),
-                        },
+                        })),
                         (),
                         None,
                     ),
@@ -940,12 +940,12 @@ fn test_movfuscate_propagates_multiple_oracle_declarations() {
                         None,
                     ),
                     Node::new(
-                        IRStmt::OracleCall {
+                        IRStmt::OracleCall(Box::new(OracleCallData {
                             name: "o1".to_string(),
                             args: vec![IRVarId(0)],
                             output_tys: vec![t8.clone()],
                             result_ty: t8.clone(),
-                        },
+                        })),
                         (),
                         None,
                     ),

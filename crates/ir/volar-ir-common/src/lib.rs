@@ -192,6 +192,7 @@ impl StorageTable {
     }
 }
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 /// Explicit compatibility policy for pre-executor action declarations.
@@ -787,6 +788,63 @@ impl PreInitSegment {
     }
 }
 
+/// Payload of [`Stmt::OracleCall`], boxed out of the enum.
+///
+/// The variant is near-zero-population in lowered programs but its 3 Vecs +
+/// String would otherwise set the enum's stride for every statement; at
+/// whole-program scale (tens of millions of statements) that stride is
+/// resident memory. Boxed, the enum's stride is set by `Poly` instead.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct OracleCallData<Var, Ty = TypeId> {
+    pub name: alloc::string::String,
+    pub args: Vec<Var>,
+    /// Return type of each output, in declaration order.  Non-empty.
+    pub output_tys: Vec<Ty>,
+    /// Pre-interned `TypeId` of `IrType::Tuple(output_tys)`.
+    /// Stored at construction time so type inference never mutates the table.
+    pub result_ty: Ty,
+}
+
+/// Payload of [`Stmt::ActionCall`], boxed out of the enum (same rationale as
+/// [`OracleCallData`]).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct ActionCallData<Var, Ty = TypeId> {
+    pub name: alloc::string::String,
+    pub guard: Var,
+    pub args: Vec<Var>,
+    /// Fallback vars — one per output (typed as `output_tys[i]`).  Used
+    /// when `guard = 0` and the action is not invoked.
+    pub fallbacks: Vec<Var>,
+    /// Return type of each output, in declaration order.  Non-empty.
+    pub output_tys: Vec<Ty>,
+    /// Pre-interned `TypeId` of `IrType::Tuple(output_tys)`.
+    pub result_ty: Ty,
+}
+
+/// Payload of [`Stmt::ActionStore`], boxed out of the enum (same rationale as
+/// [`OracleCallData`]).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct ActionStoreData<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
+    pub name: alloc::string::String,
+    pub guard: Var,
+    pub args: Vec<Var>,
+    pub fallbacks: Vec<Var>,
+    pub output_tys: Vec<Ty>,
+    pub targets: Vec<ActionTarget<Addr, Stor>>,
+}
+
 /// Shared computational statement type for Volar IR and VAFFLE.
 ///
 /// Generic over four parameters:
@@ -864,6 +922,10 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     Shuffle { result_bits: Vec<(u8, Var)>, ty: Ty },
 
     // ---- External access primitives ----------------------------------------
+    // Oracle/Action payloads are boxed: these variants carry 3-6 heap
+    // handles each but are near-zero-population in lowered programs, and
+    // unboxed they set the enum's stride (was 128 bytes) for every one of
+    // tens of millions of statements. Boxed, the stride is `Poly`'s 64.
     /// Invoke a named pure oracle, producing a multi-output aggregate result.
     ///
     /// The result type is `IrType::Tuple(output_tys)`, pre-interned as
@@ -872,15 +934,7 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     /// **Ordering**: an `OracleCall` is pure and may be reordered or CSE'd
     /// freely.  It may only be DCE'd when every corresponding `OracleOutput`
     /// is also DCE'd.
-    OracleCall {
-        name: alloc::string::String,
-        args: Vec<Var>,
-        /// Return type of each output, in declaration order.  Non-empty.
-        output_tys: Vec<Ty>,
-        /// Pre-interned `TypeId` of `IrType::Tuple(output_tys)`.
-        /// Stored at construction time so type inference never mutates the table.
-        result_ty: Ty,
-    },
+    OracleCall(Box<OracleCallData<Var, Ty>>),
 
     /// Project output `idx` from an [`OracleCall`] result var.
     ///
@@ -897,18 +951,7 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     /// **Ordering**: an `ActionCall` has side effects and must not be
     /// reordered, CSE'd, or DCE'd.  All `ActionOutput` projections from it
     /// are kept alive as long as the call itself is live.
-    ActionCall {
-        name: alloc::string::String,
-        guard: Var,
-        args: Vec<Var>,
-        /// Fallback vars — one per output (typed as `output_tys[i]`).  Used
-        /// when `guard = 0` and the action is not invoked.
-        fallbacks: Vec<Var>,
-        /// Return type of each output, in declaration order.  Non-empty.
-        output_tys: Vec<Ty>,
-        /// Pre-interned `TypeId` of `IrType::Tuple(output_tys)`.
-        result_ty: Ty,
-    },
+    ActionCall(Box<ActionCallData<Var, Ty>>),
 
     /// Conditionally invoke an action and store every declared result directly.
     ///
@@ -916,14 +959,7 @@ pub enum Stmt<Var, Addr = Var, Ty = TypeId, Stor = StorageId> {
     /// false, the corresponding fallback is written instead.  This is the
     /// effect-only replacement for the legacy `ActionCall`/`ActionOutput`
     /// aggregate projection pair; it deliberately has no useful SSA result.
-    ActionStore {
-        name: alloc::string::String,
-        guard: Var,
-        args: Vec<Var>,
-        fallbacks: Vec<Var>,
-        output_tys: Vec<Ty>,
-        targets: Vec<ActionTarget<Addr, Stor>>,
-    },
+    ActionStore(Box<ActionStoreData<Var, Addr, Ty, Stor>>),
 
     /// Project output `idx` from an [`ActionCall`] result var.
     ///
@@ -1036,84 +1072,93 @@ impl<Var: Ord, Ty, Stor> Stmt<Var, Var, Ty, Stor> {
                     .collect::<Result<Vec<(u8, NV)>, E>>()?,
                 ty: ty_fn(ctx, ty)?,
             },
-            Stmt::OracleCall {
-                name,
-                args,
-                output_tys,
-                result_ty,
-            } => Stmt::OracleCall {
-                name,
-                args: args
-                    .into_iter()
-                    .map(|v| go(ctx, v))
-                    .collect::<Result<Vec<NV>, E>>()?,
-                output_tys: output_tys
-                    .into_iter()
-                    .map(|t| ty_fn(ctx, t))
-                    .collect::<Result<Vec<NT>, E>>()?,
-                result_ty: ty_fn(ctx, result_ty)?,
-            },
+            Stmt::OracleCall(data) => {
+                let OracleCallData {
+                    name,
+                    args,
+                    output_tys,
+                    result_ty,
+                } = *data;
+                Stmt::OracleCall(Box::new(OracleCallData {
+                    name,
+                    args: args
+                        .into_iter()
+                        .map(|v| go(ctx, v))
+                        .collect::<Result<Vec<NV>, E>>()?,
+                    output_tys: output_tys
+                        .into_iter()
+                        .map(|t| ty_fn(ctx, t))
+                        .collect::<Result<Vec<NT>, E>>()?,
+                    result_ty: ty_fn(ctx, result_ty)?,
+                }))
+            }
             Stmt::OracleOutput { call, idx, ty } => Stmt::OracleOutput {
                 call: go(ctx, call)?,
                 idx,
                 ty: ty_fn(ctx, ty)?,
             },
-            Stmt::ActionCall {
-                name,
-                guard,
-                args,
-                fallbacks,
-                output_tys,
-                result_ty,
-            } => Stmt::ActionCall {
-                name,
-                guard: go(ctx, guard)?,
-                args: args
-                    .into_iter()
-                    .map(|v| go(ctx, v))
-                    .collect::<Result<Vec<NV>, E>>()?,
-                fallbacks: fallbacks
-                    .into_iter()
-                    .map(|v| go(ctx, v))
-                    .collect::<Result<Vec<NV>, E>>()?,
-                output_tys: output_tys
-                    .into_iter()
-                    .map(|t| ty_fn(ctx, t))
-                    .collect::<Result<Vec<NT>, E>>()?,
-                result_ty: ty_fn(ctx, result_ty)?,
-            },
-            Stmt::ActionStore {
-                name,
-                guard,
-                args,
-                fallbacks,
-                output_tys,
-                targets,
-            } => Stmt::ActionStore {
-                name,
-                guard: go(ctx, guard)?,
-                args: args
-                    .into_iter()
-                    .map(|v| go(ctx, v))
-                    .collect::<Result<Vec<NV>, E>>()?,
-                fallbacks: fallbacks
-                    .into_iter()
-                    .map(|v| go(ctx, v))
-                    .collect::<Result<Vec<NV>, E>>()?,
-                output_tys: output_tys
-                    .into_iter()
-                    .map(|t| ty_fn(ctx, t))
-                    .collect::<Result<Vec<NT>, E>>()?,
-                targets: targets
-                    .into_iter()
-                    .map(|target| {
-                        Ok(ActionTarget {
-                            storage: stor_fn(ctx, target.storage)?,
-                            addr: go(ctx, target.addr)?,
+            Stmt::ActionCall(data) => {
+                let ActionCallData {
+                    name,
+                    guard,
+                    args,
+                    fallbacks,
+                    output_tys,
+                    result_ty,
+                } = *data;
+                Stmt::ActionCall(Box::new(ActionCallData {
+                    name,
+                    guard: go(ctx, guard)?,
+                    args: args
+                        .into_iter()
+                        .map(|v| go(ctx, v))
+                        .collect::<Result<Vec<NV>, E>>()?,
+                    fallbacks: fallbacks
+                        .into_iter()
+                        .map(|v| go(ctx, v))
+                        .collect::<Result<Vec<NV>, E>>()?,
+                    output_tys: output_tys
+                        .into_iter()
+                        .map(|t| ty_fn(ctx, t))
+                        .collect::<Result<Vec<NT>, E>>()?,
+                    result_ty: ty_fn(ctx, result_ty)?,
+                }))
+            }
+            Stmt::ActionStore(data) => {
+                let ActionStoreData {
+                    name,
+                    guard,
+                    args,
+                    fallbacks,
+                    output_tys,
+                    targets,
+                } = *data;
+                Stmt::ActionStore(Box::new(ActionStoreData {
+                    name,
+                    guard: go(ctx, guard)?,
+                    args: args
+                        .into_iter()
+                        .map(|v| go(ctx, v))
+                        .collect::<Result<Vec<NV>, E>>()?,
+                    fallbacks: fallbacks
+                        .into_iter()
+                        .map(|v| go(ctx, v))
+                        .collect::<Result<Vec<NV>, E>>()?,
+                    output_tys: output_tys
+                        .into_iter()
+                        .map(|t| ty_fn(ctx, t))
+                        .collect::<Result<Vec<NT>, E>>()?,
+                    targets: targets
+                        .into_iter()
+                        .map(|target| {
+                            Ok(ActionTarget {
+                                storage: stor_fn(ctx, target.storage)?,
+                                addr: go(ctx, target.addr)?,
+                            })
                         })
-                    })
-                    .collect::<Result<Vec<_>, E>>()?,
-            },
+                        .collect::<Result<Vec<_>, E>>()?,
+                }))
+            }
             Stmt::ActionOutput { call, idx, ty } => Stmt::ActionOutput {
                 call: go(ctx, call)?,
                 idx,
@@ -1230,84 +1275,74 @@ impl<Var, Addr, Ty, Stor> Stmt<Var, Addr, Ty, Stor> {
                     .collect::<Result<Vec<(u8, NV)>, E>>()?,
                 ty: ty_fn(ctx, ty)?,
             },
-            Stmt::OracleCall {
-                name,
-                args,
-                output_tys,
-                result_ty,
-            } => Stmt::OracleCall {
-                name,
-                args: args
-                    .into_iter()
-                    .map(|v| var_fn(ctx, v))
-                    .collect::<Result<Vec<NV>, E>>()?,
-                output_tys: output_tys
-                    .into_iter()
-                    .map(|t| ty_fn(ctx, t))
-                    .collect::<Result<Vec<NT>, E>>()?,
-                result_ty: ty_fn(ctx, result_ty)?,
-            },
+                Stmt::OracleCall(data) => {
+                    let OracleCallData { name, args, output_tys, result_ty } = *data;
+                    Stmt::OracleCall(Box::new(OracleCallData {
+                        name,
+                        args: args
+                            .into_iter()
+                            .map(|v| var_fn(ctx, v))
+                            .collect::<Result<Vec<NV>, E>>()?,
+                        output_tys: output_tys
+                            .into_iter()
+                            .map(|t| ty_fn(ctx, t))
+                            .collect::<Result<Vec<NT>, E>>()?,
+                        result_ty: ty_fn(ctx, result_ty)?,
+                    }))
+                }
             Stmt::OracleOutput { call, idx, ty } => Stmt::OracleOutput {
                 call: var_fn(ctx, call)?,
                 idx,
                 ty: ty_fn(ctx, ty)?,
             },
-            Stmt::ActionCall {
-                name,
-                guard,
-                args,
-                fallbacks,
-                output_tys,
-                result_ty,
-            } => Stmt::ActionCall {
-                name,
-                guard: var_fn(ctx, guard)?,
-                args: args
-                    .into_iter()
-                    .map(|v| var_fn(ctx, v))
-                    .collect::<Result<Vec<NV>, E>>()?,
-                fallbacks: fallbacks
-                    .into_iter()
-                    .map(|v| var_fn(ctx, v))
-                    .collect::<Result<Vec<NV>, E>>()?,
-                output_tys: output_tys
-                    .into_iter()
-                    .map(|t| ty_fn(ctx, t))
-                    .collect::<Result<Vec<NT>, E>>()?,
-                result_ty: ty_fn(ctx, result_ty)?,
-            },
-            Stmt::ActionStore {
-                name,
-                guard,
-                args,
-                fallbacks,
-                output_tys,
-                targets,
-            } => Stmt::ActionStore {
-                name,
-                guard: var_fn(ctx, guard)?,
-                args: args
-                    .into_iter()
-                    .map(|v| var_fn(ctx, v))
-                    .collect::<Result<Vec<NV>, E>>()?,
-                fallbacks: fallbacks
-                    .into_iter()
-                    .map(|v| var_fn(ctx, v))
-                    .collect::<Result<Vec<NV>, E>>()?,
-                output_tys: output_tys
-                    .into_iter()
-                    .map(|t| ty_fn(ctx, t))
-                    .collect::<Result<Vec<NT>, E>>()?,
-                targets: targets
-                    .into_iter()
-                    .map(|target| {
-                        Ok(ActionTarget {
-                            storage: stor_fn(ctx, target.storage)?,
-                            addr: addr_fn(ctx, target.addr)?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, E>>()?,
-            },
+                Stmt::ActionCall(data) => {
+                    let ActionCallData { name, guard, args, fallbacks, output_tys, result_ty } = *data;
+                    Stmt::ActionCall(Box::new(ActionCallData {
+                        name,
+                        guard: var_fn(ctx, guard)?,
+                        args: args
+                            .into_iter()
+                            .map(|v| var_fn(ctx, v))
+                            .collect::<Result<Vec<NV>, E>>()?,
+                        fallbacks: fallbacks
+                            .into_iter()
+                            .map(|v| var_fn(ctx, v))
+                            .collect::<Result<Vec<NV>, E>>()?,
+                        output_tys: output_tys
+                            .into_iter()
+                            .map(|t| ty_fn(ctx, t))
+                            .collect::<Result<Vec<NT>, E>>()?,
+                        result_ty: ty_fn(ctx, result_ty)?,
+                    }))
+                }
+                Stmt::ActionStore(data) => {
+                    let ActionStoreData { name, guard, args, fallbacks, output_tys, targets } = *data;
+                    Stmt::ActionStore(Box::new(ActionStoreData {
+                        name,
+                        guard: var_fn(ctx, guard)?,
+                        args: args
+                            .into_iter()
+                            .map(|v| var_fn(ctx, v))
+                            .collect::<Result<Vec<NV>, E>>()?,
+                        fallbacks: fallbacks
+                            .into_iter()
+                            .map(|v| var_fn(ctx, v))
+                            .collect::<Result<Vec<NV>, E>>()?,
+                        output_tys: output_tys
+                            .into_iter()
+                            .map(|t| ty_fn(ctx, t))
+                            .collect::<Result<Vec<NT>, E>>()?,
+                        targets: targets
+                            .into_iter()
+                            .map(|target| {
+                                Ok(ActionTarget {
+                                    storage: stor_fn(ctx, target.storage)?,
+                                    addr: addr_fn(ctx, target.addr)?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, E>>()?,
+                    }))
+                }
             Stmt::ActionOutput { call, idx, ty } => Stmt::ActionOutput {
                 call: var_fn(ctx, call)?,
                 idx,
@@ -1386,58 +1421,67 @@ impl<Var, Addr, Ty, Stor> Stmt<Var, Addr, Ty, Stor> {
                 result_bits: result_bits.iter().map(|(b, v)| (*b, v)).collect(),
                 ty,
             },
-            Stmt::OracleCall {
-                name,
-                args,
-                output_tys,
-                result_ty,
-            } => Stmt::OracleCall {
-                name: name.clone(),
-                args: args.iter().collect(),
-                output_tys: output_tys.iter().collect(),
-                result_ty,
-            },
+            Stmt::OracleCall(data) => {
+                let OracleCallData {
+                    name,
+                    args,
+                    output_tys,
+                    result_ty,
+                } = &**data;
+                Stmt::OracleCall(Box::new(OracleCallData {
+                    name: name.clone(),
+                    args: args.iter().collect(),
+                    output_tys: output_tys.iter().collect(),
+                    result_ty,
+                }))
+            }
             Stmt::OracleOutput { call, idx, ty } => Stmt::OracleOutput {
                 call,
                 idx: *idx,
                 ty,
             },
-            Stmt::ActionCall {
-                name,
-                guard,
-                args,
-                fallbacks,
-                output_tys,
-                result_ty,
-            } => Stmt::ActionCall {
-                name: name.clone(),
-                guard,
-                args: args.iter().collect(),
-                fallbacks: fallbacks.iter().collect(),
-                output_tys: output_tys.iter().collect(),
-                result_ty,
-            },
-            Stmt::ActionStore {
-                name,
-                guard,
-                args,
-                fallbacks,
-                output_tys,
-                targets,
-            } => Stmt::ActionStore {
-                name: name.clone(),
-                guard,
-                args: args.iter().collect(),
-                fallbacks: fallbacks.iter().collect(),
-                output_tys: output_tys.iter().collect(),
-                targets: targets
-                    .iter()
-                    .map(|target| ActionTarget {
-                        storage: &target.storage,
-                        addr: &target.addr,
-                    })
-                    .collect(),
-            },
+            Stmt::ActionCall(data) => {
+                let ActionCallData {
+                    name,
+                    guard,
+                    args,
+                    fallbacks,
+                    output_tys,
+                    result_ty,
+                } = &**data;
+                Stmt::ActionCall(Box::new(ActionCallData {
+                    name: name.clone(),
+                    guard,
+                    args: args.iter().collect(),
+                    fallbacks: fallbacks.iter().collect(),
+                    output_tys: output_tys.iter().collect(),
+                    result_ty,
+                }))
+            }
+            Stmt::ActionStore(data) => {
+                let ActionStoreData {
+                    name,
+                    guard,
+                    args,
+                    fallbacks,
+                    output_tys,
+                    targets,
+                } = &**data;
+                Stmt::ActionStore(Box::new(ActionStoreData {
+                    name: name.clone(),
+                    guard,
+                    args: args.iter().collect(),
+                    fallbacks: fallbacks.iter().collect(),
+                    output_tys: output_tys.iter().collect(),
+                    targets: targets
+                        .iter()
+                        .map(|target| ActionTarget {
+                            storage: &target.storage,
+                            addr: &target.addr,
+                        })
+                        .collect(),
+                }))
+            }
             Stmt::ActionOutput { call, idx, ty } => Stmt::ActionOutput {
                 call,
                 idx: *idx,
@@ -1591,31 +1635,23 @@ impl TypeRemapper {
             Stmt::Shuffle { ty, .. } => {
                 *ty = self.remap(*ty);
             }
-            Stmt::OracleCall {
-                output_tys,
-                result_ty,
-                ..
-            } => {
-                for t in output_tys.iter_mut() {
+            Stmt::OracleCall(data) => {
+                for t in data.output_tys.iter_mut() {
                     *t = self.remap(*t);
                 }
-                *result_ty = self.remap(*result_ty);
+                data.result_ty = self.remap(data.result_ty);
             }
             Stmt::OracleOutput { ty, .. } => {
                 *ty = self.remap(*ty);
             }
-            Stmt::ActionCall {
-                output_tys,
-                result_ty,
-                ..
-            } => {
-                for t in output_tys.iter_mut() {
+            Stmt::ActionCall(data) => {
+                for t in data.output_tys.iter_mut() {
                     *t = self.remap(*t);
                 }
-                *result_ty = self.remap(*result_ty);
+                data.result_ty = self.remap(data.result_ty);
             }
-            Stmt::ActionStore { output_tys, .. } => {
-                for t in output_tys.iter_mut() {
+            Stmt::ActionStore(data) => {
+                for t in data.output_tys.iter_mut() {
                     *t = self.remap(*t);
                 }
             }

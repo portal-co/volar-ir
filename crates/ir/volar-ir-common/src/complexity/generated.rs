@@ -33,7 +33,8 @@ unsafe impl rkyv::Portable for ArchivedStructRef
 where
     <alloc::vec::Vec<alloc::string::String> as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for StructRef {
@@ -65,10 +66,10 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<StructRef, D>
-    for ArchivedStructRef
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<StructRef, D> for ArchivedStructRef
 where
-    <alloc::vec::Vec<alloc::string::String> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<alloc::string::String>, D>,
+    <alloc::vec::Vec<alloc::string::String> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<alloc::string::String>, D>,
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::string::String, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<StructRef, D::Error> {
@@ -100,10 +101,10 @@ pub struct ReentryHintResolver {
 }
 
 #[cfg(feature = "rkyv")]
-unsafe impl rkyv::Portable for ArchivedReentryHint
-where
-    <alloc::vec::Vec<crate::complexity::MeasureSpec> as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+unsafe impl rkyv::Portable for ArchivedReentryHint where
+    <alloc::vec::Vec<crate::complexity::MeasureSpec> as rkyv::Archive>::Archived: rkyv::Portable
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for ReentryHint {
@@ -130,10 +131,10 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ReentryHint, D>
-    for ArchivedReentryHint
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ReentryHint, D> for ArchivedReentryHint
 where
-    <alloc::vec::Vec<crate::complexity::MeasureSpec> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<crate::complexity::MeasureSpec>, D>,
+    <alloc::vec::Vec<crate::complexity::MeasureSpec> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<crate::complexity::MeasureSpec>, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<ReentryHint, D::Error> {
         Ok(ReentryHint {
@@ -141,4 +142,3 @@ where
         })
     }
 }
-

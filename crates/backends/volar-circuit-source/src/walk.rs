@@ -379,17 +379,21 @@ fn volar_op(
                 addr: *addr,
             }
         }
-        Stmt::OracleCall { name, .. } => NamedVolarOp::External {
+        Stmt::OracleCall(data) => NamedVolarOp::External {
             kind: ExternalKind::Oracle,
-            name: name.clone(),
+            name: data.name.clone(),
         },
         Stmt::OracleOutput { .. } => NamedVolarOp::External {
             kind: ExternalKind::Oracle,
             name: String::from("<oracle-output>"),
         },
-        Stmt::ActionCall { name, .. } | Stmt::ActionStore { name, .. } => NamedVolarOp::External {
+        Stmt::ActionCall(data) => NamedVolarOp::External {
             kind: ExternalKind::Action,
-            name: name.clone(),
+            name: data.name.clone(),
+        },
+        Stmt::ActionStore(data) => NamedVolarOp::External {
+            kind: ExternalKind::Action,
+            name: data.name.clone(),
         },
         Stmt::ActionOutput { .. } => NamedVolarOp::External {
             kind: ExternalKind::Action,

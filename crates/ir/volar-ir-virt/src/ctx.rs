@@ -37,8 +37,8 @@ pub fn validate_ir_storage_access<P: Clone>(
                         operation: "StorageWrite",
                     });
                 }
-                Stmt::ActionStore { targets, .. } => {
-                    for target in targets {
+                Stmt::ActionStore(data) => {
+                    for target in &data.targets {
                         if storage_access.access_of(target.storage) == StorageAccess::ReadOnly {
                             return Err(StorageAccessViolation {
                                 storage: target.storage,

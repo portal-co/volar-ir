@@ -415,9 +415,8 @@ pub fn vcircuit_var_widths(host: &VCircuit, types: &IRTypes) -> BTreeMap<u32, us
             | IRStmt::Merge { ty, .. }
             | IRStmt::Splat { ty, .. }
             | IRStmt::Shuffle { ty, .. } => *ty,
-            IRStmt::OracleCall { result_ty, .. } | IRStmt::ActionCall { result_ty, .. } => {
-                *result_ty
-            }
+            IRStmt::OracleCall(data) => data.result_ty,
+            IRStmt::ActionCall(data) => data.result_ty,
             IRStmt::OracleOutput { ty, .. }
             | IRStmt::ActionOutput { ty, .. }
             | IRStmt::Rng { ty, .. } => *ty,

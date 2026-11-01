@@ -53,9 +53,7 @@ impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for Type {
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Type, D>
-    for ArchivedType
-{
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Type, D> for ArchivedType {
     fn deserialize(&self, _: &mut D) -> Result<Type, D::Error> {
         Ok(match self {
             ArchivedType::Bit => Type::Bit,
@@ -71,8 +69,7 @@ pub struct Constant {
 }
 
 #[cfg(feature = "rkyv")]
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-#[derive(rkyv::bytecheck::CheckBytes)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, rkyv::bytecheck::CheckBytes)]
 #[bytecheck(crate = rkyv::bytecheck)]
 #[repr(C)]
 pub struct ArchivedConstant {
@@ -92,7 +89,8 @@ unsafe impl rkyv::Portable for ArchivedConstant
 where
     <u128 as rkyv::Archive>::Archived: rkyv::Portable,
     <u128 as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for Constant {
@@ -124,8 +122,7 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Constant, D>
-    for ArchivedConstant
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Constant, D> for ArchivedConstant
 where
     <u128 as rkyv::Archive>::Archived: rkyv::Deserialize<u128, D>,
     <u128 as rkyv::Archive>::Archived: rkyv::Deserialize<u128, D>,
@@ -234,7 +231,9 @@ impl rkyv::Archive for ExternalRevealPolicy {
 
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let archived = match resolver {
-            ExternalRevealPolicyResolver::ExecutorOnly => ArchivedExternalRevealPolicy::ExecutorOnly,
+            ExternalRevealPolicyResolver::ExecutorOnly => {
+                ArchivedExternalRevealPolicy::ExecutorOnly
+            }
             ExternalRevealPolicyResolver::BothRoles => ArchivedExternalRevealPolicy::BothRoles,
         };
         // SAFETY: `archived` is a fully initialized repr(u8) discriminant.
@@ -359,7 +358,8 @@ where
     <ExternalExecutor as rkyv::Archive>::Archived: rkyv::Portable,
     <ExternalRevealPolicy as rkyv::Archive>::Archived: rkyv::Portable,
     <[u8; 32] as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for ActionExecutionPolicy {
@@ -448,7 +448,8 @@ where
     <ExternalExecutor as rkyv::Archive>::Archived: rkyv::Portable,
     <ExternalRevealPolicy as rkyv::Archive>::Archived: rkyv::Portable,
     <[u8; 32] as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for OracleExecutionPolicy {
@@ -544,7 +545,8 @@ where
     <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Portable,
     <OracleExecutionPolicy as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for OracleDecl {
@@ -586,12 +588,13 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<OracleDecl, D>
-    for ArchivedOracleDecl
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<OracleDecl, D> for ArchivedOracleDecl
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::string::String, D>,
-    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
-    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
+    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
+    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
     <OracleExecutionPolicy as rkyv::Archive>::Archived: rkyv::Deserialize<OracleExecutionPolicy, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<OracleDecl, D::Error> {
@@ -640,7 +643,8 @@ where
     <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Portable,
     <ActionExecutionPolicy as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for ActionDecl {
@@ -682,12 +686,13 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ActionDecl, D>
-    for ArchivedActionDecl
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ActionDecl, D> for ArchivedActionDecl
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::string::String, D>,
-    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
-    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
+    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
+    <alloc::vec::Vec<TypeId> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<TypeId>, D>,
     <ActionExecutionPolicy as rkyv::Archive>::Archived: rkyv::Deserialize<ActionExecutionPolicy, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<ActionDecl, D::Error> {
@@ -728,7 +733,8 @@ unsafe impl rkyv::Portable for ArchivedRngDecl
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Portable,
     <TypeId as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for RngDecl {
@@ -760,8 +766,7 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<RngDecl, D>
-    for ArchivedRngDecl
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<RngDecl, D> for ArchivedRngDecl
 where
     <alloc::string::String as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::string::String, D>,
     <TypeId as rkyv::Archive>::Archived: rkyv::Deserialize<TypeId, D>,
@@ -810,7 +815,8 @@ where
     <TypeId as rkyv::Archive>::Archived: rkyv::Portable,
     <usize as rkyv::Archive>::Archived: rkyv::Portable,
     <alloc::vec::Vec<Constant> as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl rkyv::Archive for PreInitSegment {
@@ -858,7 +864,8 @@ where
     <StorageId as rkyv::Archive>::Archived: rkyv::Deserialize<StorageId, D>,
     <TypeId as rkyv::Archive>::Archived: rkyv::Deserialize<TypeId, D>,
     <usize as rkyv::Archive>::Archived: rkyv::Deserialize<usize, D>,
-    <alloc::vec::Vec<Constant> as rkyv::Archive>::Archived: rkyv::Deserialize<alloc::vec::Vec<Constant>, D>,
+    <alloc::vec::Vec<Constant> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<alloc::vec::Vec<Constant>, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<PreInitSegment, D::Error> {
         Ok(PreInitSegment {
@@ -892,7 +899,9 @@ impl rkyv::Archive for TypeId {
         // SAFETY: the generated archived newtype is repr(C), contains exactly
         // one initialized portable scalar, and has no padding.
         unsafe {
-            out.write_unchecked(ArchivedTypeId(rkyv::primitive::ArchivedU32::from_native(self.0)))
+            out.write_unchecked(ArchivedTypeId(rkyv::primitive::ArchivedU32::from_native(
+                self.0,
+            )))
         }
     }
 }
@@ -905,9 +914,7 @@ impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for TypeId {
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<TypeId, D>
-    for ArchivedTypeId
-{
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<TypeId, D> for ArchivedTypeId {
     fn deserialize(&self, _: &mut D) -> Result<TypeId, D::Error> {
         Ok(TypeId(self.0.to_native()))
     }
@@ -935,7 +942,9 @@ impl rkyv::Archive for StorageId {
         // SAFETY: the generated archived newtype is repr(C), contains exactly
         // one initialized portable scalar, and has no padding.
         unsafe {
-            out.write_unchecked(ArchivedStorageId(rkyv::primitive::ArchivedU32::from_native(self.0)))
+            out.write_unchecked(ArchivedStorageId(
+                rkyv::primitive::ArchivedU32::from_native(self.0),
+            ))
         }
     }
 }
@@ -948,9 +957,7 @@ impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for StorageId {
 }
 
 #[cfg(feature = "rkyv")]
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<StorageId, D>
-    for ArchivedStorageId
-{
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<StorageId, D> for ArchivedStorageId {
     fn deserialize(&self, _: &mut D) -> Result<StorageId, D::Error> {
         Ok(StorageId(self.0.to_native()))
     }
@@ -988,7 +995,8 @@ where
     <T as rkyv::Archive>::Archived: rkyv::Portable,
     <P as rkyv::Archive>::Archived: rkyv::Portable,
     <core::option::Option<volar_side::SideId> as rkyv::Archive>::Archived: rkyv::Portable,
-{}
+{
+}
 
 #[cfg(feature = "rkyv")]
 impl<T: rkyv::Archive, P: Clone + rkyv::Archive> rkyv::Archive for Node<T, P> {
@@ -1009,7 +1017,8 @@ impl<T: rkyv::Archive, P: Clone + rkyv::Archive> rkyv::Archive for Node<T, P> {
 }
 
 #[cfg(feature = "rkyv")]
-impl<T: rkyv::Archive, P: Clone + rkyv::Archive, S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for Node<T, P>
+impl<T: rkyv::Archive, P: Clone + rkyv::Archive, S: rkyv::rancor::Fallible + ?Sized>
+    rkyv::Serialize<S> for Node<T, P>
 where
     T: rkyv::Serialize<S>,
     P: rkyv::Serialize<S>,
@@ -1025,12 +1034,13 @@ where
 }
 
 #[cfg(feature = "rkyv")]
-impl<T: rkyv::Archive, P: Clone + rkyv::Archive, D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Node<T, P>, D>
-    for ArchivedNode<T, P>
+impl<T: rkyv::Archive, P: Clone + rkyv::Archive, D: rkyv::rancor::Fallible + ?Sized>
+    rkyv::Deserialize<Node<T, P>, D> for ArchivedNode<T, P>
 where
     <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, D>,
     <P as rkyv::Archive>::Archived: rkyv::Deserialize<P, D>,
-    <core::option::Option<volar_side::SideId> as rkyv::Archive>::Archived: rkyv::Deserialize<core::option::Option<volar_side::SideId>, D>,
+    <core::option::Option<volar_side::SideId> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<core::option::Option<volar_side::SideId>, D>,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<Node<T, P>, D::Error> {
         Ok(Node {
@@ -1040,4 +1050,3 @@ where
         })
     }
 }
-

@@ -4,7 +4,8 @@
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use volar_ir_common::{
-    BoolRing, Constant, IrType, PolyCoeffs, PrimeSpec, Stmt, Type, TypeId, TypeTable,
+    ActionCallData, ActionStoreData, BoolRing, Constant, IrType, PolyCoeffs, PrimeSpec, Stmt,
+    Type, TypeId, TypeTable,
     contains_prime_field, eval_prime_poly, monomial_product, mul_identity, mul_is_idempotent,
     prime_spec, repetition_residue,
 };
@@ -195,9 +196,9 @@ pub fn stmt_output_type<V, A>(stmt: &Stmt<V, A>) -> Option<TypeId> {
         Stmt::Merge { ty, .. } => Some(*ty),
         Stmt::Splat { ty, .. } => Some(*ty),
         Stmt::Shuffle { ty, .. } => Some(*ty),
-        Stmt::OracleCall { result_ty, .. } => Some(*result_ty),
+        Stmt::OracleCall(data) => Some(data.result_ty),
         Stmt::OracleOutput { ty, .. } => Some(*ty),
-        Stmt::ActionCall { result_ty, .. } => Some(*result_ty),
+        Stmt::ActionCall(data) => Some(data.result_ty),
         Stmt::ActionStore { .. } => None,
         Stmt::ActionOutput { ty, .. } => Some(*ty),
         Stmt::Rng { ty, .. } => Some(*ty),
@@ -318,8 +319,8 @@ pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
                 }
             }
         }
-        Stmt::OracleCall { args, .. } => {
-            for a in args.iter_mut() {
+        Stmt::OracleCall(data) => {
+            for a in data.args.iter_mut() {
                 let c = canon_alias(alias_map, *a);
                 if c != *a {
                     *a = c;
@@ -334,12 +335,8 @@ pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
                 changed = true;
             }
         }
-        Stmt::ActionCall {
-            guard,
-            args,
-            fallbacks,
-            ..
-        } => {
+        Stmt::ActionCall(data) => {
+            let ActionCallData { guard, args, fallbacks, .. } = &mut **data;
             let cg = canon_alias(alias_map, *guard);
             if cg != *guard {
                 *guard = cg;
@@ -360,13 +357,8 @@ pub fn apply_aliases_to_stmt<V: Copy + Ord + Clone>(
                 }
             }
         }
-        Stmt::ActionStore {
-            guard,
-            args,
-            fallbacks,
-            targets,
-            ..
-        } => {
+        Stmt::ActionStore(data) => {
+            let ActionStoreData { guard, args, fallbacks, targets, .. } = &mut **data;
             let cg = canon_alias(alias_map, *guard);
             if cg != *guard {
                 *guard = cg;

@@ -56,8 +56,12 @@
 //!   `Poly` stmts.
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::boxed::Box;
 use alloc::{vec, vec::Vec};
-use volar_ir_common::{Constant, PolyCoeffs, PreInitSegment, StorageId, Type};
+use volar_ir_common::{
+    ActionCallData, ActionStoreData, Constant, OracleCallData, PolyCoeffs, PreInitSegment,
+    StorageId, Type,
+};
 
 use volar_ir::{
     boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
@@ -1357,57 +1361,66 @@ pub(crate) fn subst_ir(stmt: &IRStmt, var_map: &[u32]) -> IRStmt {
             result_bits: result_bits.iter().map(|(b, v)| (*b, s(v))).collect(),
             ty: ty.clone(),
         },
-        IRStmt::OracleCall {
-            name,
-            args,
-            output_tys,
-            result_ty,
-        } => IRStmt::OracleCall {
-            name: name.clone(),
-            args: args.iter().map(s).collect(),
-            output_tys: output_tys.clone(),
-            result_ty: result_ty.clone(),
-        },
+        IRStmt::OracleCall(data) => {
+            let OracleCallData {
+                name,
+                args,
+                output_tys,
+                result_ty,
+            } = &**data;
+            IRStmt::OracleCall(Box::new(OracleCallData {
+                name: name.clone(),
+                args: args.iter().map(s).collect(),
+                output_tys: output_tys.clone(),
+                result_ty: result_ty.clone(),
+            }))
+        }
         IRStmt::OracleOutput { call, idx, ty } => IRStmt::OracleOutput {
             call: s(call),
             idx: *idx,
             ty: ty.clone(),
         },
-        IRStmt::ActionCall {
-            name,
-            guard,
-            args,
-            fallbacks,
-            output_tys,
-            result_ty,
-        } => IRStmt::ActionCall {
-            name: name.clone(),
-            guard: s(guard),
-            args: args.iter().map(s).collect(),
-            fallbacks: fallbacks.iter().map(s).collect(),
-            output_tys: output_tys.clone(),
-            result_ty: result_ty.clone(),
-        },
-        IRStmt::ActionStore {
-            name,
-            guard,
-            args,
-            fallbacks,
-            output_tys,
-            targets,
-        } => IRStmt::ActionStore {
-            name: name.clone(),
-            guard: s(guard),
-            args: args.iter().map(s).collect(),
-            fallbacks: fallbacks.iter().map(s).collect(),
-            output_tys: output_tys.clone(),
-            targets: targets
-                .iter()
-                .map(|target| volar_ir::ir::ActionTarget {
-                    storage: target.storage,
-                    addr: s(&target.addr),
-                })
-                .collect(),
+        IRStmt::ActionCall(data) => {
+            let ActionCallData {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                result_ty,
+            } = &**data;
+            IRStmt::ActionCall(Box::new(ActionCallData {
+                name: name.clone(),
+                guard: s(guard),
+                args: args.iter().map(s).collect(),
+                fallbacks: fallbacks.iter().map(s).collect(),
+                output_tys: output_tys.clone(),
+                result_ty: result_ty.clone(),
+            }))
+        }
+        IRStmt::ActionStore(data) => {
+            let ActionStoreData {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                targets,
+            } = &**data;
+            IRStmt::ActionStore(Box::new(ActionStoreData {
+                name: name.clone(),
+                guard: s(guard),
+                args: args.iter().map(s).collect(),
+                fallbacks: fallbacks.iter().map(s).collect(),
+                output_tys: output_tys.clone(),
+                targets: targets
+                    .iter()
+                    .map(|target| volar_ir::ir::ActionTarget {
+                        storage: target.storage,
+                        addr: s(&target.addr),
+                    })
+                    .collect(),
+            }))
         },
         IRStmt::ActionOutput { call, idx, ty } => IRStmt::ActionOutput {
             call: s(call),
@@ -1531,9 +1544,8 @@ fn infer_stmt_result_type(
         // Shuffle carries its result type explicitly.
         IRStmt::Shuffle { ty, .. } => ty.clone(),
         // Oracle/action call results are pre-interned tuple types.
-        IRStmt::OracleCall { result_ty, .. } | IRStmt::ActionCall { result_ty, .. } => {
-            result_ty.clone()
-        }
+        IRStmt::OracleCall(data) => data.result_ty.clone(),
+        IRStmt::ActionCall(data) => data.result_ty.clone(),
         // Output projections carry their concrete scalar type.
         IRStmt::OracleOutput { ty, .. } | IRStmt::ActionOutput { ty, .. } => ty.clone(),
         // RNG produces a fresh value of the declared type.
@@ -2841,12 +2853,10 @@ fn movfuscate_biir_impl<P: Clone>(blocks: &BIrBlocks<P>, control_prov: Option<&P
 /// Diagnostic sidecar: high 32 bits = post-layout block count of the last
 /// `movfuscate_ir*` call; low 32 bits = its SMALLEST block's stmt count
 /// (0 when the smallest block has none). Read by std-side probes.
-pub static LAST_LAYOUT_STATS: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+pub static LAST_LAYOUT_STATS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// Diagnostic sidecar: the post-layout total statement count of the last
 /// `movfuscate_ir*` call.
-pub static MOV_TOTAL_STMTS: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+pub static MOV_TOTAL_STMTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 pub fn movfuscate_ir<P: Clone>(blocks: &IRBlocks<P>, types: &mut IRTypes) -> IRBlocks<P> {
     // Preserve the long-standing borrowed API.  Pipeline callers that own
@@ -3056,10 +3066,19 @@ fn movfuscate_ir_impl<P: Clone>(
     // total statement count, readable by std-side drivers/probes.
     let total_input_stmts: usize = blocks.blocks.iter().map(|b| b.stmts.len()).sum();
     LAST_LAYOUT_STATS.store(
-        (n as u64) << 32 | (blocks.blocks.iter().map(|b| b.stmts.len()).min().unwrap_or(0) as u64),
+        (n as u64) << 32
+            | (blocks
+                .blocks
+                .iter()
+                .map(|b| b.stmts.len())
+                .min()
+                .unwrap_or(0) as u64),
         core::sync::atomic::Ordering::Relaxed,
     );
-    MOV_TOTAL_STMTS.store(total_input_stmts as u64, core::sync::atomic::Ordering::Relaxed);
+    MOV_TOTAL_STMTS.store(
+        total_input_stmts as u64,
+        core::sync::atomic::Ordering::Relaxed,
+    );
     if n == 1 {
         let empty_init = MovfuscAccumInit {
             start: 0,
@@ -3143,12 +3162,8 @@ fn movfuscate_ir_impl<P: Clone>(
         // back to doubling from a large base (acceptably rare). The
         // ceiling keeps a pathological input from reserving absurd
         // virtual space.
-        (total_input_stmts
-            .saturating_mul(8)
-            .saturating_add(64))
-        .min(274_877_906_944 / core::mem::size_of::<
-            volar_ir_common::Node<IRStmt, P>,
-        >()),
+        (total_input_stmts.saturating_mul(8).saturating_add(64))
+            .min(274_877_906_944 / core::mem::size_of::<volar_ir_common::Node<IRStmt, P>>()),
     );
     let (mut result, block_ranges, accum_info, watch_results) =
         movfuscate(ctx, blocks, state_slot_types, return_slot_types, watch);

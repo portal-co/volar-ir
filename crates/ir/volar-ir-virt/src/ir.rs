@@ -25,6 +25,7 @@
 //! `(next_pc, done)` back.  When `done == 1` the dispatcher reads the
 //! return registers and exits via `Jmp(Return)`.
 
+use alloc::boxed::Box;
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use volar_ir::ir::{
@@ -32,7 +33,8 @@ use volar_ir::ir::{
     IRTypeId, IRTypes, IRVarId,
 };
 use volar_ir_common::{
-    Constant, PolyCoeffs, Stmt, StorageAccess, StorageId, StorageTable, Type as PrimType,
+    ActionCallData, Constant, OracleCallData, PolyCoeffs, Stmt, StorageAccess, StorageId,
+    StorageTable, Type as PrimType,
 };
 
 use crate::canon::{BlockImmediates, IrHandlerKey, ZERO_CONSTANT, canonicalize_ir_block};
@@ -688,9 +690,9 @@ fn stmt_output_type(s: &IRStmt) -> Option<IRTypeId> {
         Stmt::Merge { ty, .. } => Some(*ty),
         Stmt::Splat { ty, .. } => Some(*ty),
         Stmt::Shuffle { ty, .. } => Some(*ty),
-        Stmt::OracleCall { result_ty, .. } => Some(*result_ty),
+        Stmt::OracleCall(data) => Some(data.result_ty),
         Stmt::OracleOutput { ty, .. } => Some(*ty),
-        Stmt::ActionCall { result_ty, .. } => Some(*result_ty),
+        Stmt::ActionCall(data) => Some(data.result_ty),
         Stmt::ActionOutput { ty, .. } => Some(*ty),
         Stmt::Rng { ty, .. } => Some(*ty),
         _ => None,
@@ -2095,12 +2097,13 @@ fn deduplicate_oracle_calls_in_block<P: Clone>(block: &IRBlock<P>) -> IRBlock<P>
     for (stmt_idx, node) in block.stmts.iter().enumerate() {
         let old_var = IRVarId((n_params + stmt_idx) as u32);
         match &node.kind {
-            Stmt::OracleCall {
-                name,
-                args,
-                output_tys,
-                result_ty,
-            } => {
+            Stmt::OracleCall(data) => {
+                let OracleCallData {
+                    name,
+                    args,
+                    output_tys,
+                    result_ty,
+                } = &**data;
                 let remapped_args: Vec<IRVarId> =
                     args.iter().map(|v| var_remap[v.0 as usize]).collect();
                 let key = (name.clone(), remapped_args.clone());
@@ -2111,12 +2114,12 @@ fn deduplicate_oracle_calls_in_block<P: Clone>(block: &IRBlock<P>) -> IRBlock<P>
                     seen.insert(key, new_var);
                     var_remap[old_var.0 as usize] = new_var;
                     new_stmts.push(volar_ir_common::Node::new(
-                        Stmt::OracleCall {
+                        Stmt::OracleCall(Box::new(OracleCallData {
                             name: name.clone(),
                             args: remapped_args,
                             output_tys: output_tys.clone(),
                             result_ty: *result_ty,
-                        },
+                        })),
                         node.prov.clone(),
                         node.side,
                     ));
@@ -2287,37 +2290,43 @@ fn remap_stmt(s: &IRStmt, canonical_var: &[IRVarId]) -> IRStmt {
                 .collect(),
             ty: *ty,
         },
-        Stmt::OracleCall {
-            name,
-            args,
-            output_tys,
-            result_ty,
-        } => Stmt::OracleCall {
-            name: name.clone(),
-            args: remap_vars(args, canonical_var),
-            output_tys: output_tys.clone(),
-            result_ty: *result_ty,
-        },
+        Stmt::OracleCall(data) => {
+            let OracleCallData {
+                name,
+                args,
+                output_tys,
+                result_ty,
+            } = &**data;
+            Stmt::OracleCall(Box::new(OracleCallData {
+                name: name.clone(),
+                args: remap_vars(args, canonical_var),
+                output_tys: output_tys.clone(),
+                result_ty: *result_ty,
+            }))
+        }
         Stmt::OracleOutput { call, idx, ty } => Stmt::OracleOutput {
             call: remap_var(*call, canonical_var),
             idx: *idx,
             ty: *ty,
         },
-        Stmt::ActionCall {
-            name,
-            guard,
-            args,
-            fallbacks,
-            output_tys,
-            result_ty,
-        } => Stmt::ActionCall {
-            name: name.clone(),
-            guard: remap_var(*guard, canonical_var),
-            args: remap_vars(args, canonical_var),
-            fallbacks: remap_vars(fallbacks, canonical_var),
-            output_tys: output_tys.clone(),
-            result_ty: *result_ty,
-        },
+        Stmt::ActionCall(data) => {
+            let ActionCallData {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                result_ty,
+            } = &**data;
+            Stmt::ActionCall(Box::new(ActionCallData {
+                name: name.clone(),
+                guard: remap_var(*guard, canonical_var),
+                args: remap_vars(args, canonical_var),
+                fallbacks: remap_vars(fallbacks, canonical_var),
+                output_tys: output_tys.clone(),
+                result_ty: *result_ty,
+            }))
+        }
         Stmt::ActionOutput { call, idx, ty } => Stmt::ActionOutput {
             call: remap_var(*call, canonical_var),
             idx: *idx,

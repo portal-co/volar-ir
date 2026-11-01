@@ -271,12 +271,12 @@ entry:
         panic!("entry must have a body");
     };
     assert!(body.values.iter().any(|node| matches!(
-        node.kind,
-        Value::Op(Stmt::OracleCall { ref name, .. }) if name == "pure"
+        &node.kind,
+        Value::Op(Stmt::OracleCall(d)) if d.name == "pure"
     )));
     assert!(body.values.iter().any(|node| matches!(
-        node.kind,
-        Value::Op(Stmt::ActionCall { ref name, .. }) if name == "act"
+        &node.kind,
+        Value::Op(Stmt::ActionCall(d)) if d.name == "act"
     )));
 }
 

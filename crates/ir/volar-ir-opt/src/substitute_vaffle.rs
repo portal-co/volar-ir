@@ -331,23 +331,15 @@ fn rewrite_body_r<R: Clone>(
             continue;
         };
         let rewrite = match (sub_kind, stmt) {
-            (SubKind::Oracle, Stmt::OracleCall { name: n, args, .. }) if n == name => {
+            (SubKind::Oracle, Stmt::OracleCall(data)) if data.name == name => {
                 Some(Value::Call {
                     func: entry_func_id,
-                    args: args.clone(),
+                    args: data.args.clone(),
                 })
             }
-            (
-                SubKind::Action,
-                Stmt::ActionCall {
-                    name: n,
-                    guard,
-                    args,
-                    ..
-                },
-            ) if n == name => {
-                let mut call_args = vec![*guard];
-                call_args.extend_from_slice(args);
+            (SubKind::Action, Stmt::ActionCall(data)) if data.name == name => {
+                let mut call_args = vec![data.guard];
+                call_args.extend_from_slice(&data.args);
                 Some(Value::Call {
                     func: entry_func_id,
                     args: call_args,
@@ -511,25 +503,15 @@ fn rewrite_body(
             continue;
         };
         let rewrite = match (sub, stmt) {
-            (VaffleSubstitution::Oracle { .. }, Stmt::OracleCall { name: n, args, .. })
-                if n == name =>
-            {
+            (VaffleSubstitution::Oracle { .. }, Stmt::OracleCall(data)) if data.name == name => {
                 Some(Value::Call {
                     func: entry_func_id,
-                    args: args.clone(),
+                    args: data.args.clone(),
                 })
             }
-            (
-                VaffleSubstitution::Action { .. },
-                Stmt::ActionCall {
-                    name: n,
-                    guard,
-                    args,
-                    ..
-                },
-            ) if n == name => {
-                let mut call_args = vec![*guard];
-                call_args.extend_from_slice(args);
+            (VaffleSubstitution::Action { .. }, Stmt::ActionCall(data)) if data.name == name => {
+                let mut call_args = vec![data.guard];
+                call_args.extend_from_slice(&data.args);
                 Some(Value::Call {
                     func: entry_func_id,
                     args: call_args,
@@ -667,9 +649,10 @@ mod tests {
     extern crate std;
     use super::{VaffleSubstitution, substitute_vaffle};
     use alloc::{string::ToString, vec};
+    use std::boxed::Box;
     use std::collections::BTreeMap;
     use vaffle::{Block, BlockId, FuncBody, FuncDecl, Module, SigDecl, Terminator, Value, ValueId};
-    use volar_ir_common::{Constant, IrType, Node, OracleDecl, Stmt, Type, TypeTable};
+    use volar_ir_common::{ActionCallData, OracleCallData, Constant, IrType, Node, OracleDecl, Stmt, Type, TypeTable};
 
     fn empty_module_with_types() -> Module {
         Module {
@@ -714,12 +697,12 @@ mod tests {
         let v0 = ValueId(0);
         let values = vec![
             Node::new(
-                Value::Op(Stmt::OracleCall {
+                Value::Op(Stmt::OracleCall(Box::new(OracleCallData {
                     name: "hash".to_string(),
                     args: vec![],
                     output_tys: vec![u64_ty],
                     result_ty,
-                }),
+                    }))),
                 (),
                 None,
             ),
@@ -795,7 +778,8 @@ mod tests {
         // The host function body should contain no more OracleCall stmts.
         if let FuncDecl::Body(body) = &host.funcs[0] {
             for v in &body.values {
-                if let Value::Op(Stmt::OracleCall { name, .. }) = &v.kind {
+                if let Value::Op(Stmt::OracleCall(data)) = &v.kind {
+                    let name = &data.name;
                     panic!("OracleCall to '{name}' was not substituted");
                 }
             }

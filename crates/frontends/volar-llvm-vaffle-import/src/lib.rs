@@ -77,8 +77,9 @@ use vaffle::{
     Terminator, Value, ValueId,
 };
 use volar_ir_common::{
-    ActionDecl, ActionExecutionPolicy, Constant, IrType, Node, OracleDecl, OracleExecutionPolicy,
-    PolyCoeffs, PreInitSegment, Stmt, StorageAllocator, StorageId, TypeId, TypeTable, aes_extern,
+    ActionCallData, ActionDecl, ActionExecutionPolicy, Constant, IrType, Node, OracleCallData,
+    OracleDecl, OracleExecutionPolicy, PolyCoeffs, PreInitSegment, Stmt, StorageAllocator,
+    StorageId, TypeId, TypeTable, aes_extern,
 };
 use volar_lir::circuits::{self, BitCircuitBuilder};
 use volar_llvm_constchain::{ConstChainError, global_from_pointer, strip_pointer};
@@ -3919,12 +3920,12 @@ impl<'ctx> Importer<'ctx> {
                 self.register_configured_oracle(symbol, &params, &output_tys, execution)?;
                 let call = fctx.emit(
                     cur,
-                    Value::Op(Stmt::OracleCall {
+                    Value::Op(Stmt::OracleCall(Box::new(OracleCallData {
                         name: symbol.into(),
                         args,
                         output_tys: output_tys.clone(),
                         result_ty,
-                    }),
+                    }))),
                 );
                 let output = fctx.emit(
                     cur,
@@ -3964,14 +3965,14 @@ impl<'ctx> Importer<'ctx> {
                 self.register_configured_action(symbol, &action_params, &output_tys, execution)?;
                 let call = fctx.emit(
                     cur,
-                    Value::Op(Stmt::ActionCall {
+                    Value::Op(Stmt::ActionCall(Box::new(ActionCallData {
                         name: symbol.into(),
                         guard,
                         args: args[1..1 + n_args].to_vec(),
                         fallbacks: vec![fallback],
                         output_tys: output_tys.clone(),
                         result_ty,
-                    }),
+                    }))),
                 );
                 let output = fctx.emit(
                     cur,
@@ -4080,12 +4081,12 @@ impl<'ctx> Importer<'ctx> {
             .collect();
         let call = fctx.emit(
             cur,
-            Value::Op(Stmt::OracleCall {
+            Value::Op(Stmt::OracleCall(Box::new(OracleCallData {
                 name: aes_extern::ORACLE_NAME.into(),
                 args: arg_vars,
                 output_tys,
                 result_ty,
-            }),
+            }))),
         );
         let mut ct_bits: Bits = Vec::with_capacity(aes_extern::CT_BITS);
         for idx in 0..2usize {

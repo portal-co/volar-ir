@@ -49,9 +49,9 @@ entry:
     assert_eq!(ir.oracles[0].execution, oracle);
     assert_eq!(ir.actions[0].execution, action);
     assert!(ir.blocks.iter().flat_map(|block| block.stmts.iter()).any(|stmt| {
-        matches!(stmt.kind, IRStmt::OracleCall { ref name, .. } if name == "pure")
+        matches!(&stmt.kind, IRStmt::OracleCall(d) if d.name == "pure")
     }));
     assert!(ir.blocks.iter().flat_map(|block| block.stmts.iter()).any(|stmt| {
-        matches!(stmt.kind, IRStmt::ActionCall { ref name, .. } if name == "act")
+        matches!(&stmt.kind, IRStmt::ActionCall(d) if d.name == "act")
     }));
 }

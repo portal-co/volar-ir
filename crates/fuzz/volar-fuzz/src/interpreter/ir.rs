@@ -16,7 +16,8 @@ use std::collections::BTreeMap;
 
 use volar_ir::ir::{IRBlockTargetId, IRBlocks, IRStmt, IRTerminator, IRTypes, IRVarId};
 use volar_ir_common::{
-    Constant, IrType, OracleDecl, PolyCoeffs, PreInitSegment, Stmt, StorageId, Type, TypeId,
+    Constant, IrType, OracleCallData, OracleDecl, PolyCoeffs, PreInitSegment, Stmt, StorageId,
+    Type, TypeId,
 };
 
 use crate::generators::oracle::hash_oracle;
@@ -542,12 +543,13 @@ fn eval_ir_stmt(
             }
             result
         }
-        Stmt::OracleCall {
-            name,
-            args,
-            output_tys,
-            ..
-        } => {
+        Stmt::OracleCall(data) => {
+            let OracleCallData {
+                name,
+                args,
+                output_tys,
+                ..
+            } = &**data;
             // Find oracle index by name for the hash seed.
             // Seed the FNV hash oracle from the *name bytes* — the same
             // derivation `eval_biir` uses on lowered Boolar output, where no

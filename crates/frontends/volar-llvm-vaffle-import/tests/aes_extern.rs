@@ -59,12 +59,13 @@ fn aes_extern_lowers_to_oracle_call() {
     let calls: Vec<&volar_ir_common::Node<Value>> = body
         .values
         .iter()
-        .filter(|v| matches!(&v.kind, Value::Op(Stmt::OracleCall { name, .. }) if name == aes_extern::ORACLE_NAME))
+        .filter(|v| matches!(&v.kind, Value::Op(Stmt::OracleCall(d)) if d.name == aes_extern::ORACLE_NAME))
         .collect();
     assert_eq!(calls.len(), 1, "exactly one AES oracle call");
-    let Value::Op(Stmt::OracleCall { args, .. }) = &calls[0].kind else {
+    let Value::Op(Stmt::OracleCall(data)) = &calls[0].kind else {
         unreachable!()
     };
+    let args = &data.args;
     assert_eq!(args.len(), 4);
 
     // Two OracleOutput projections, one per ciphertext word.

@@ -1616,7 +1616,7 @@ mod tests {
             IRTypes, IRVarId,
         },
     };
-    use volar_ir_common::{ActionTarget, Node, StorageId, Type};
+    use volar_ir_common::{ActionStoreData, ActionTarget, Node, OracleCallData, StorageId, Type};
     use volar_ir_passes::lower_lir::{lower_biir, lower_ir};
 
     fn external_bit_fixture() -> BIrBlocks {
@@ -1985,12 +1985,12 @@ mod tests {
             },
         };
         oracle_block.push_stmt(
-            IRStmt::OracleCall {
+            IRStmt::OracleCall(Box::new(OracleCallData {
                 name: "pair".into(),
                 args: vec![IRVarId(0)],
                 output_tys: vec![wide, lanes],
                 result_ty: pair,
-            },
+            })),
             (),
         );
         oracle_block.push_stmt(
@@ -2010,7 +2010,7 @@ mod tests {
             },
         };
         action_block.push_stmt(
-            IRStmt::ActionStore {
+            IRStmt::ActionStore(Box::new(ActionStoreData {
                 name: "commit".into(),
                 guard: IRVarId(0),
                 args: vec![IRVarId(1)],
@@ -2020,7 +2020,7 @@ mod tests {
                     storage: StorageId(7),
                     addr: IRVarId(3),
                 }],
-            },
+            })),
             (),
         );
 

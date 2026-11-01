@@ -65,7 +65,10 @@ use volar_ir::{
         IRVarId, PrimType,
     },
 };
-use volar_ir_common::{BitRing, Constant, FieldSink, PolyCoeffs, StorageId, TypeId};
+use volar_ir_common::{
+    ActionCallData, ActionStoreData, BitRing, Constant, FieldSink, OracleCallData, PolyCoeffs,
+    StorageId, TypeId,
+};
 
 /// A source call did not match the external declarations carried by its
 /// containing [`IRBlocks`].  Lowering is deliberately fail-closed: a backend
@@ -205,8 +208,8 @@ pub fn try_lower_ir_to_boolar_with_tables<P: Clone>(
                     IRStmt::StorageRead { ty, .. } | IRStmt::StorageWrite { ty, .. } => {
                         alloc_lane(*ty)
                     }
-                    IRStmt::ActionStore { output_tys, .. } => {
-                        for ty in output_tys {
+                    IRStmt::ActionStore(data) => {
+                        for ty in &data.output_tys {
                             alloc_lane(*ty);
                         }
                     }
@@ -345,8 +348,8 @@ fn try_lower_ir_to_boolar_side_inner<P: Clone>(
                     IRStmt::StorageRead { ty, .. } | IRStmt::StorageWrite { ty, .. } => {
                         alloc_lane(*ty)
                     }
-                    IRStmt::ActionStore { output_tys, .. } => {
-                        for ty in output_tys {
+                    IRStmt::ActionStore(data) => {
+                        for ty in &data.output_tys {
                             alloc_lane(*ty);
                         }
                     }
@@ -421,12 +424,13 @@ fn validate_external_sources<P: Clone>(
         let mut var_types: Vec<Option<IRTypeId>> = block.params.iter().copied().map(Some).collect();
         for node in &block.stmts {
             match &node.kind {
-                IRStmt::OracleCall {
-                    name,
-                    args,
-                    output_tys,
-                    ..
-                } => {
+                IRStmt::OracleCall(data) => {
+                    let OracleCallData {
+                        name,
+                        args,
+                        output_tys,
+                        ..
+                    } = &**data;
                     let decl = blocks
                         .oracles
                         .iter()
@@ -445,14 +449,15 @@ fn validate_external_sources<P: Clone>(
                         });
                     }
                 }
-                IRStmt::ActionCall {
-                    name,
-                    guard,
-                    args,
-                    fallbacks,
-                    output_tys,
-                    ..
-                } => {
+                IRStmt::ActionCall(data) => {
+                    let ActionCallData {
+                        name,
+                        guard,
+                        args,
+                        fallbacks,
+                        output_tys,
+                        ..
+                    } = &**data;
                     let decl = blocks
                         .actions
                         .iter()
@@ -474,15 +479,16 @@ fn validate_external_sources<P: Clone>(
                         });
                     }
                 }
-                IRStmt::ActionStore {
-                    name,
-                    guard,
-                    args,
-                    fallbacks,
-                    output_tys,
-                    targets,
-                    ..
-                } => {
+                IRStmt::ActionStore(data) => {
+                    let ActionStoreData {
+                        name,
+                        guard,
+                        args,
+                        fallbacks,
+                        output_tys,
+                        targets,
+                        ..
+                    } = &**data;
                     let decl = blocks
                         .actions
                         .iter()
@@ -569,9 +575,8 @@ fn stmt_result_type(stmt: &IRStmt) -> Option<IRTypeId> {
         | IRStmt::Rng { ty, .. }
         | IRStmt::Poly { ty, .. } => Some(*ty),
         IRStmt::Transmute { dst_ty, .. } => Some(*dst_ty),
-        IRStmt::OracleCall { result_ty, .. } | IRStmt::ActionCall { result_ty, .. } => {
-            Some(*result_ty)
-        }
+        IRStmt::OracleCall(data) => Some(data.result_ty),
+        IRStmt::ActionCall(data) => Some(data.result_ty),
         IRStmt::StorageWrite { .. } | IRStmt::ActionStore { .. } | _ => None,
     }
 }
@@ -862,12 +867,13 @@ fn lower_stmt<P: Clone>(
         }
 
         // ---- OracleCall ----------------------------------------------------
-        IRStmt::OracleCall {
-            name,
-            args,
-            output_tys,
-            ..
-        } => {
+        IRStmt::OracleCall(data) => {
+            let OracleCallData {
+                name,
+                args,
+                output_tys,
+                ..
+            } = &**data;
             let flat_args: Vec<IRVarId> = args
                 .iter()
                 .flat_map(|a| var_bits[&a.0].iter().cloned())
@@ -920,14 +926,15 @@ fn lower_stmt<P: Clone>(
         }
 
         // ---- ActionCall ----------------------------------------------------
-        IRStmt::ActionCall {
-            name,
-            guard,
-            args,
-            fallbacks,
-            output_tys,
-            ..
-        } => {
+        IRStmt::ActionCall(data) => {
+            let ActionCallData {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                ..
+            } = &**data;
             let guard_bit = var_bits[&guard.0][0];
             let flat_args: Vec<IRVarId> = args
                 .iter()
@@ -978,14 +985,15 @@ fn lower_stmt<P: Clone>(
         }
 
         // ---- ActionStore ---------------------------------------------------
-        IRStmt::ActionStore {
-            name,
-            guard,
-            args,
-            fallbacks,
-            output_tys,
-            targets,
-        } => {
+        IRStmt::ActionStore(data) => {
+            let ActionStoreData {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                targets,
+            } = &**data;
             let guard_bit = var_bits[&guard.0][0];
             let flat_args: Vec<IRVarId> = args
                 .iter()
@@ -1757,6 +1765,7 @@ fn expand_pre_init_segment(
 mod tests {
     extern crate std;
     use super::*;
+    use std::boxed::Box;
     use volar_ir::ir::{
         IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRType, IRTypes, IRVarId,
         PrimType,
@@ -2250,7 +2259,7 @@ mod tests {
             // guard, argument, fallback byte, and element address.
             params: std::vec![bit, bit, byte, bit],
             stmts: std::vec![Node::new(
-                IRStmt::ActionStore {
+                IRStmt::ActionStore(Box::new(ActionStoreData {
                     name: "write_byte".into(),
                     guard: IRVarId(0),
                     args: std::vec![IRVarId(1)],
@@ -2260,7 +2269,7 @@ mod tests {
                         storage: StorageId::DEFAULT,
                         addr: IRVarId(3),
                     }],
-                },
+                })),
                 (),
                 None,
             )],

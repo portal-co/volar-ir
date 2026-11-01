@@ -19,7 +19,8 @@ use volar_ir::ir::{
     IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRVarId,
 };
 use volar_ir_common::{
-    Constant, IrType, Node, OracleDecl, PolyCoeffs, Stmt, StorageId, Type, TypeId, TypeTable,
+    Constant, IrType, Node, OracleCallData, OracleDecl, PolyCoeffs, Stmt, StorageId, Type, TypeId,
+    TypeTable,
 };
 
 use crate::interpreter::ir::primitive_width;
@@ -404,12 +405,12 @@ fn build_extended_ir_stmts(
             let result_ty = types.intern(IrType::Tuple(output_tys.clone()));
 
             // OracleCall: aggregate var at rv.
-            stmts.push(Stmt::OracleCall {
+            stmts.push(Stmt::OracleCall(Box::new(OracleCallData {
                 name: decl.name.clone(),
                 args,
                 output_tys: output_tys.clone(),
                 result_ty,
-            });
+            })));
             // OracleOutput[0]: the first result, at rv+1.
             if !output_tys.is_empty() {
                 let out_tid = output_tys[0];

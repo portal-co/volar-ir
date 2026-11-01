@@ -8,16 +8,15 @@
 //! (`IRVarId` vs `ValueId`).
 
 use alloc::{
+    boxed::Box,
     collections::BTreeMap,
     string::{String, ToString},
     vec,
     vec::Vec,
 };
 
-use volar_ir_common::{
-    ActionDecl, Constant, IrType, Node, OracleDecl, PolyCoeffs, PreInitSegment, Stmt,
-    StorageAllocator, StorageId, Type, TypeId, TypeTable,
-};
+use volar_ir_common::{ActionCallData, OracleCallData, ActionDecl, Constant, IrType, Node, OracleDecl, PolyCoeffs, PreInitSegment, Stmt,
+    StorageAllocator, StorageId, Type, TypeId, TypeTable,};
 use volar_lir::{
     BitCircuitBuilder, BranchTarget, IcmpPred, LirAbi, LirTarget, LirType, StackAllocExt,
     StructDef, StructId,
@@ -2604,12 +2603,14 @@ impl VaffleTarget {
             .collect();
         let output_tys: Vec<TypeId> = ret_tys.iter().map(|t| self.lir_type_to_tid(t)).collect();
         let result_ty = self.intern_type(IrType::Tuple(output_tys.clone()));
-        let call = self.fb().emit_value(Value::Op(Stmt::OracleCall {
-            name: name.to_string(),
-            args: arg_vars,
-            output_tys: output_tys.clone(),
-            result_ty,
-        }));
+        let call = self.fb().emit_value(Value::Op(Stmt::OracleCall(Box::new(
+            OracleCallData {
+                name: name.to_string(),
+                args: arg_vars,
+                output_tys: output_tys.clone(),
+                result_ty,
+            },
+        ))));
         let mut results = Vec::with_capacity(ret_tys.len());
         for (idx, ty) in ret_tys.iter().enumerate() {
             let tid = output_tys[idx];
@@ -2661,14 +2662,16 @@ impl VaffleTarget {
         let fb_vars: Vec<ValueId> = fallbacks.iter().map(|v| merge(self, v)).collect();
         let output_tys: Vec<TypeId> = ret_tys.iter().map(|t| self.lir_type_to_tid(t)).collect();
         let result_ty = self.intern_type(IrType::Tuple(output_tys.clone()));
-        let call = self.fb().emit_value(Value::Op(Stmt::ActionCall {
-            name: name.to_string(),
-            guard: guard_bit,
-            args: arg_vars,
-            fallbacks: fb_vars,
-            output_tys: output_tys.clone(),
-            result_ty,
-        }));
+        let call = self.fb().emit_value(Value::Op(Stmt::ActionCall(Box::new(
+            ActionCallData {
+                name: name.to_string(),
+                guard: guard_bit,
+                args: arg_vars,
+                fallbacks: fb_vars,
+                output_tys: output_tys.clone(),
+                result_ty,
+            },
+        ))));
         let mut results = Vec::with_capacity(ret_tys.len());
         for (idx, ty) in ret_tys.iter().enumerate() {
             let tid = output_tys[idx];

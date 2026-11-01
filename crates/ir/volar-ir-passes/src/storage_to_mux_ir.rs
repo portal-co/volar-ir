@@ -254,8 +254,13 @@ fn stmt_result_type(stmt: &IRStmt) -> Option<IRTypeId> {
         | IRStmt::Rng { ty, .. }
         | IRStmt::Poly { ty, .. } => Some(*ty),
         IRStmt::Transmute { dst_ty, .. } => Some(*dst_ty),
-        IRStmt::OracleCall { result_ty, .. } | IRStmt::ActionCall { result_ty, .. } => {
-            Some(*result_ty)
+        IRStmt::OracleCall(data) => {
+            let result_ty = data.result_ty;
+            Some(result_ty)
+        }
+        IRStmt::ActionCall(data) => {
+            let result_ty = data.result_ty;
+            Some(result_ty)
         }
         IRStmt::StorageWrite { .. } | IRStmt::ActionStore { .. } | _ => None,
     }

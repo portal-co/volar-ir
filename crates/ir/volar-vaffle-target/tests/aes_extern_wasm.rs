@@ -92,15 +92,10 @@ fn aes_import_survives_to_ir_as_oracle_call() {
         .collect();
     assert_eq!(calls.len(), 1, "exactly one oracle call in the IR");
     match calls[0] {
-        IRStmt::OracleCall {
-            name,
-            args,
-            output_tys,
-            ..
-        } => {
-            assert_eq!(name, aes_extern::ORACLE_NAME);
-            assert_eq!(args.len(), 4);
-            assert_eq!(output_tys.len(), 2);
+        IRStmt::OracleCall(data) => {
+            assert_eq!(data.name, aes_extern::ORACLE_NAME);
+            assert_eq!(data.args.len(), 4);
+            assert_eq!(data.output_tys.len(), 2);
         }
         _ => unreachable!(),
     }

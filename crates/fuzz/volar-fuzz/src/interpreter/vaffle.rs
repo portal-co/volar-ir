@@ -13,7 +13,9 @@
 use std::collections::BTreeMap;
 
 use vaffle::{FuncDecl, FuncId, Module, Terminator, Value, ValueId};
-use volar_ir_common::{Constant, OracleDecl, PolyCoeffs, Stmt, TypeId, TypeTable};
+use volar_ir_common::{
+    Constant, OracleCallData, OracleDecl, PolyCoeffs, Stmt, TypeId, TypeTable,
+};
 
 use crate::generators::oracle::hash_oracle;
 use crate::interpreter::ir::{
@@ -494,12 +496,13 @@ fn eval_vaffle_stmt(
             }
             result
         }
-        Stmt::OracleCall {
-            name,
-            args,
-            output_tys,
-            ..
-        } => {
+        Stmt::OracleCall(data) => {
+            let OracleCallData {
+                name,
+                args,
+                output_tys,
+                ..
+            } = &**data;
             // Seed the FNV hash oracle from the *name bytes* — the same
             // derivation `eval_biir` uses on lowered Boolar output, where no
             // oracle table is available. Keeps all three interpreters

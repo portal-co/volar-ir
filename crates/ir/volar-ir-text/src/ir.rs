@@ -27,7 +27,8 @@ use crate::WriteText;
 use core::fmt;
 use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBlocks, IRTerminator, IRVarId};
 use volar_ir_common::{
-    ActionDecl, Constant, IrType, OracleDecl, RngDecl, Stmt, StorageId, Type, TypeId, TypeTable,
+    ActionCallData, ActionDecl, Constant, IrType, OracleCallData, OracleDecl, RngDecl, Stmt,
+    StorageId, Type, TypeId, TypeTable,
 };
 
 pub(crate) const FORMAT_HEADER: &str = "volar-ir v1";
@@ -335,12 +336,13 @@ fn write_ir_stmt(result: IRVarId, stmt: &Stmt<IRVarId>, w: &mut dyn fmt::Write) 
             }
             w.write_char(']')?;
         }
-        Stmt::OracleCall {
-            name,
-            args,
-            output_tys,
-            result_ty,
-        } => {
+        Stmt::OracleCall(data) => {
+            let OracleCallData {
+                name,
+                args,
+                output_tys,
+                result_ty,
+            } = &**data;
             w.write_str("oracle_call ")?;
             write_quoted_str(name, w)?;
             w.write_str(" args=")?;
@@ -354,14 +356,15 @@ fn write_ir_stmt(result: IRVarId, stmt: &Stmt<IRVarId>, w: &mut dyn fmt::Write) 
             write_var(*call, w)?;
             write!(w, " idx={} ty={}", idx, ty.0)?;
         }
-        Stmt::ActionCall {
-            name,
-            guard,
-            args,
-            fallbacks,
-            output_tys,
-            result_ty,
-        } => {
+        Stmt::ActionCall(data) => {
+            let ActionCallData {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                result_ty,
+            } = &**data;
             w.write_str("action_call ")?;
             write_quoted_str(name, w)?;
             w.write_str(" guard=")?;

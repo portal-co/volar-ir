@@ -24,7 +24,8 @@ use vaffle::{
     ValueId,
 };
 use volar_ir_common::{
-    Constant, IrType, Node, OracleDecl, PolyCoeffs, Stmt, StorageId, TypeId, TypeTable,
+    Constant, IrType, Node, OracleCallData, OracleDecl, PolyCoeffs, Stmt, StorageId, TypeId,
+    TypeTable,
 };
 
 use crate::generators::ir::{PRIM_TYPES, RawIrStmt, RawTypeIdx};
@@ -382,12 +383,12 @@ fn build_vaffle_extended_block(
             let result_ty = type_table.intern(IrType::Tuple(output_tys.clone()));
 
             // OracleCall aggregate at vid.
-            new_values.push(Value::Op(Stmt::OracleCall {
+            new_values.push(Value::Op(Stmt::OracleCall(Box::new(OracleCallData {
                 name: decl.name.clone(),
                 args,
                 output_tys: output_tys.clone(),
                 result_ty,
-            }));
+            }))));
             stmt_vids.push(vid);
             // aggregate NOT added to var_info
 

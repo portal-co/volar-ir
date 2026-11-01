@@ -549,18 +549,12 @@ fn snapshot_call(
     sub: &IrSubstitution,
 ) -> (Vec<IRVarId>, Option<IRVarId>, Vec<IRVarId>) {
     match (sub, stmt) {
-        (IrSubstitution::Oracle { .. }, Stmt::OracleCall { args, .. }) => {
-            (args.clone(), None, vec![])
+        (IrSubstitution::Oracle { .. }, Stmt::OracleCall(data)) => {
+            (data.args.clone(), None, vec![])
         }
-        (
-            IrSubstitution::Action { .. },
-            Stmt::ActionCall {
-                guard,
-                args,
-                fallbacks,
-                ..
-            },
-        ) => (args.clone(), Some(*guard), fallbacks.clone()),
+        (IrSubstitution::Action { .. }, Stmt::ActionCall(data)) => {
+            (data.args.clone(), Some(data.guard), data.fallbacks.clone())
+        }
         (IrSubstitution::Rng { .. }, Stmt::Rng { .. }) => (vec![], None, vec![]),
         _ => (vec![], None, vec![]),
     }
@@ -569,8 +563,8 @@ fn snapshot_call(
 fn find_call_site(block: &IRBlock, name: &str, sub: &IrSubstitution) -> Option<usize> {
     for (si, stmt) in block.stmts.iter().enumerate() {
         let m = match (sub, &stmt.kind) {
-            (IrSubstitution::Oracle { .. }, Stmt::OracleCall { name: n, .. }) => n == name,
-            (IrSubstitution::Action { .. }, Stmt::ActionCall { name: n, .. }) => n == name,
+            (IrSubstitution::Oracle { .. }, Stmt::OracleCall(data)) => data.name == name,
+            (IrSubstitution::Action { .. }, Stmt::ActionCall(data)) => data.name == name,
             (IrSubstitution::Rng { .. }, Stmt::Rng { name: n, .. }) => n == name,
             _ => false,
         };
@@ -666,17 +660,12 @@ fn visit_stmt_vars<F: FnMut(IRVarId)>(stmt: &IRStmt, f: &mut F) {
         Stmt::Poly { coeffs, .. } => {
             coeffs.keys().for_each(|k| k.iter().for_each(|&v| f(v)));
         }
-        Stmt::OracleCall { args, .. } => args.iter().for_each(|&a| f(a)),
+        Stmt::OracleCall(data) => data.args.iter().for_each(|&a| f(a)),
         Stmt::OracleOutput { call, .. } => f(*call),
-        Stmt::ActionCall {
-            guard,
-            args,
-            fallbacks,
-            ..
-        } => {
-            f(*guard);
-            args.iter().for_each(|&a| f(a));
-            fallbacks.iter().for_each(|&a| f(a));
+        Stmt::ActionCall(data) => {
+            f(data.guard);
+            data.args.iter().for_each(|&a| f(a));
+            data.fallbacks.iter().for_each(|&a| f(a));
         }
         Stmt::ActionOutput { call, .. } => f(*call),
         _ => {}
@@ -881,7 +870,10 @@ mod tests {
         IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRTypes,
         IRVarId,
     };
-    use volar_ir_common::{Constant, IrType, OracleDecl, RngDecl, Stmt, StorageId, Type, TypeId};
+    use volar_ir_common::{
+        Constant, IrType, OracleCallData, OracleDecl, RngDecl, Stmt, StorageId, Type, TypeId,
+    };
+    use std::boxed::Box;
 
     fn ret() -> IRTerminator {
         IRTerminator::Jmp {
@@ -920,12 +912,12 @@ mod tests {
         let result_ty = types.intern(IrType::Tuple(vec![u64_ty]));
 
         let host_stmts = vec![
-            Stmt::OracleCall {
+            Stmt::OracleCall(Box::new(OracleCallData {
                 name: "h".to_string(),
                 args: vec![],
                 output_tys: vec![u64_ty],
                 result_ty,
-            },
+                })),
             Stmt::OracleOutput {
                 call: IRVarId(0),
                 idx: 0,
@@ -997,12 +989,12 @@ mod tests {
         let result_ty = types.intern(IrType::Tuple(vec![u64_ty]));
 
         let host_stmts = vec![
-            Stmt::OracleCall {
+            Stmt::OracleCall(Box::new(OracleCallData {
                 name: "h".to_string(),
                 args: vec![],
                 output_tys: vec![u64_ty],
                 result_ty,
-            },
+                })),
             Stmt::OracleOutput {
                 call: IRVarId(0),
                 idx: 0,
@@ -1030,7 +1022,7 @@ mod tests {
         // Pre-call block (index 0) should have no OracleCall.
         for node in &host.blocks[0].stmts {
             assert!(
-                !matches!(&node.kind, Stmt::OracleCall { name, .. } if name == "h"),
+                !matches!(&node.kind, Stmt::OracleCall(d) if d.name == "h"),
                 "OracleCall should have been removed from the pre-call block"
             );
         }
@@ -1049,12 +1041,12 @@ mod tests {
         let (mut types, u64_ty, _) = types_with_u64();
         let result_ty = types.intern(IrType::Tuple(vec![u64_ty]));
 
-        let make_call = || Stmt::OracleCall {
+        let make_call = || Stmt::OracleCall(Box::new(OracleCallData {
             name: "h".to_string(),
             args: vec![],
             output_tys: vec![u64_ty],
             result_ty,
-        };
+            }));
         let stmts = vec![make_call(), make_call()];
         let mut host = IRBlocks::new(vec![block(stmts, ret())]);
         host.oracles.push(OracleDecl {
@@ -1118,18 +1110,18 @@ mod tests {
         let result_ty = types.intern(IrType::Tuple(vec![u64_ty]));
 
         let stmts = vec![
-            Stmt::OracleCall {
+            Stmt::OracleCall(Box::new(OracleCallData {
                 name: "a".to_string(),
                 args: vec![],
                 output_tys: vec![u64_ty],
                 result_ty,
-            },
-            Stmt::OracleCall {
+                })),
+            Stmt::OracleCall(Box::new(OracleCallData {
                 name: "b".to_string(),
                 args: vec![],
                 output_tys: vec![u64_ty],
                 result_ty,
-            },
+                })),
         ];
         let mut host = IRBlocks::new(vec![block(stmts, ret())]);
         host.oracles.push(OracleDecl {

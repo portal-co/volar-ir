@@ -335,9 +335,7 @@ fn shr1(value: U256) -> U256 {
 // ============================================================================
 
 fn digit<S: FieldSink>(bits: &[S::Wire], index: usize, sink: &mut S) -> S::Wire {
-    bits.get(index)
-        .cloned()
-        .unwrap_or_else(|| sink.zero())
+    bits.get(index).cloned().unwrap_or_else(|| sink.zero())
 }
 
 fn n_digits<S: FieldSink>(spec: &PrimeSpec, sink: &mut S) -> Vec<S::Wire> {
@@ -537,9 +535,9 @@ pub fn eval_prime_poly<S: FieldSink>(
 ) -> Vec<S::Wire> {
     match types.0.get(ty.0 as usize) {
         Some(IrType::Vec(count, elem)) => {
-            let lane_w = types.value_bit_width(*elem).unwrap_or_else(|| {
-                panic!("eval_prime_poly: vector element has no bit width")
-            });
+            let lane_w = types
+                .value_bit_width(*elem)
+                .unwrap_or_else(|| panic!("eval_prime_poly: vector element has no bit width"));
             let mut out = Vec::new();
             for lane in 0..*count {
                 let start = lane * lane_w;
@@ -549,9 +547,9 @@ pub fn eval_prime_poly<S: FieldSink>(
                     let mut lane_factors = Vec::with_capacity(factors.len());
                     for (factor_ty, wires) in factors {
                         if types_equal(*factor_ty, ty, types) {
-                            lane_factors
-                                .push((*elem, slice_wires(wires, start, lane_w, sink)));
-                        } else if types_equal(*factor_ty, *elem, types) || is_bit_ty(*factor_ty, types)
+                            lane_factors.push((*elem, slice_wires(wires, start, lane_w, sink)));
+                        } else if types_equal(*factor_ty, *elem, types)
+                            || is_bit_ty(*factor_ty, types)
                         {
                             lane_factors.push((*factor_ty, wires.clone()));
                         } else {
@@ -574,9 +572,9 @@ pub fn eval_prime_poly<S: FieldSink>(
             let mut out = Vec::new();
             let mut offset = 0usize;
             for &part in parts {
-                let part_w = types.value_bit_width(part).unwrap_or_else(|| {
-                    panic!("eval_prime_poly: tuple part has no bit width")
-                });
+                let part_w = types
+                    .value_bit_width(part)
+                    .unwrap_or_else(|| panic!("eval_prime_poly: tuple part has no bit width"));
                 let part_const = slice_wires(constant, offset, part_w, sink);
                 let mut part_terms = Vec::with_capacity(terms.len());
                 for (factors, coeff) in terms {
@@ -584,7 +582,8 @@ pub fn eval_prime_poly<S: FieldSink>(
                     for (factor_ty, wires) in factors {
                         if types_equal(*factor_ty, ty, types) {
                             part_factors.push((part, slice_wires(wires, offset, part_w, sink)));
-                        } else if types_equal(*factor_ty, part, types) || is_bit_ty(*factor_ty, types)
+                        } else if types_equal(*factor_ty, part, types)
+                            || is_bit_ty(*factor_ty, types)
                         {
                             part_factors.push((*factor_ty, wires.clone()));
                         } else {
@@ -593,13 +592,7 @@ pub fn eval_prime_poly<S: FieldSink>(
                     }
                     part_terms.push((part_factors, *coeff));
                 }
-                out.extend(eval_prime_poly(
-                    part,
-                    &part_const,
-                    &part_terms,
-                    types,
-                    sink,
-                ));
+                out.extend(eval_prime_poly(part, &part_const, &part_terms, types, sink));
                 offset += part_w;
             }
             out
@@ -754,12 +747,19 @@ mod tests {
             types.prime_field(3, vec![4]),
             Err(PrimeFieldError::NotCanonical)
         );
-        assert_eq!(types.prime_field(1, vec![0]), Err(PrimeFieldError::BitLength));
+        assert_eq!(
+            types.prime_field(1, vec![0]),
+            Err(PrimeFieldError::BitLength)
+        );
     }
 
     #[test]
     fn solinas_matches_integer_arithmetic_for_small_primes() {
-        let specs = [PrimeSpec::z3(), PrimeSpec { k: 3, n: vec![3] }, PrimeSpec { k: 3, n: vec![1] }];
+        let specs = [
+            PrimeSpec::z3(),
+            PrimeSpec { k: 3, n: vec![3] },
+            PrimeSpec { k: 3, n: vec![1] },
+        ];
         let primes = [3u128, 5, 7];
         for (spec, prime) in specs.iter().zip(primes) {
             let mut ring = BoolRing;

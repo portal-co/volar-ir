@@ -53,6 +53,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use alloc::boxed::Box;
 
 use vaffle::{Block, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Terminator, Value, ValueId};
 use volar_ir::ir::{
@@ -2707,25 +2708,20 @@ fn collect_stmt_uses<S: UseSink>(stmt: &Stmt<ValueId>, out: &mut S) {
             out.add_use(src.0);
             out.add_use(addr.0);
         }
-        Stmt::OracleCall { args, .. } => {
-            for a in args {
+        Stmt::OracleCall(data) => {
+            for a in &data.args {
                 out.add_use(a.0);
             }
         }
         Stmt::OracleOutput { call, .. } => {
             out.add_use(call.0);
         }
-        Stmt::ActionCall {
-            guard,
-            args,
-            fallbacks,
-            ..
-        } => {
-            out.add_use(guard.0);
-            for a in args {
+        Stmt::ActionCall(data) => {
+            out.add_use(data.guard.0);
+            for a in &data.args {
                 out.add_use(a.0);
             }
-            for f in fallbacks {
+            for f in &data.fallbacks {
                 out.add_use(f.0);
             }
         }
@@ -3018,9 +3014,9 @@ pub(crate) fn stmt_result_vtid(stmt: &Stmt<ValueId>) -> TypeId {
         Stmt::StorageRead { ty, .. } => *ty,
         Stmt::StorageWrite { .. } => TypeId(0),
         Stmt::Rng { ty, .. } => *ty,
-        Stmt::OracleCall { result_ty, .. } => *result_ty,
+        Stmt::OracleCall(data) => data.result_ty,
         Stmt::OracleOutput { ty, .. } => *ty,
-        Stmt::ActionCall { result_ty, .. } => *result_ty,
+        Stmt::ActionCall(data) => data.result_ty,
         Stmt::ActionOutput { ty, .. } => *ty,
         _ => TypeId(0),
     }
@@ -3151,37 +3147,43 @@ fn translate_stmt(
             name: name.clone(),
             ty: t(ty),
         },
-        volar_ir_common::Stmt::OracleCall {
-            name,
-            args,
-            output_tys,
-            result_ty,
-        } => IRStmt::OracleCall {
-            name: name.clone(),
-            args: args.iter().map(s).collect(),
-            output_tys: tv(output_tys),
-            result_ty: t(result_ty),
-        },
+        volar_ir_common::Stmt::OracleCall(data) => {
+            let volar_ir_common::OracleCallData {
+                name,
+                args,
+                output_tys,
+                result_ty,
+            } = &**data;
+            IRStmt::OracleCall(Box::new(volar_ir_common::OracleCallData {
+                name: name.clone(),
+                args: args.iter().map(s).collect(),
+                output_tys: tv(output_tys),
+                result_ty: t(result_ty),
+            }))
+        }
         volar_ir_common::Stmt::OracleOutput { call, idx, ty } => IRStmt::OracleOutput {
             call: s(call),
             idx: *idx,
             ty: t(ty),
         },
-        volar_ir_common::Stmt::ActionCall {
-            name,
-            guard,
-            args,
-            fallbacks,
-            output_tys,
-            result_ty,
-        } => IRStmt::ActionCall {
-            name: name.clone(),
-            guard: s(guard),
-            args: args.iter().map(s).collect(),
-            fallbacks: fallbacks.iter().map(s).collect(),
-            output_tys: tv(output_tys),
-            result_ty: t(result_ty),
-        },
+        volar_ir_common::Stmt::ActionCall(data) => {
+            let volar_ir_common::ActionCallData {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                result_ty,
+            } = &**data;
+            IRStmt::ActionCall(Box::new(volar_ir_common::ActionCallData {
+                name: name.clone(),
+                guard: s(guard),
+                args: args.iter().map(s).collect(),
+                fallbacks: fallbacks.iter().map(s).collect(),
+                output_tys: tv(output_tys),
+                result_ty: t(result_ty),
+            }))
+        }
         volar_ir_common::Stmt::ActionOutput { call, idx, ty } => IRStmt::ActionOutput {
             call: s(call),
             idx: *idx,

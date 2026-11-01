@@ -15,7 +15,9 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 use vaffle::{FuncBody, FuncDecl, Module, Value, ValueId};
 use volar_ir::boolar::{BIrBlock, BIrBlocks, BIrStmt, BIrTarget, BIrTerminator, LaneId};
 use volar_ir::ir::{IRBlock, IRBlockTargetId, IRBlocks, IRBranchTarget, IRTerminator, IRVarId};
-use volar_ir_common::{Constant, Node, PolyCoeffs, StorageId, TypeId, TypeTable};
+use volar_ir_common::{
+    ActionCallData, ActionStoreData, Constant, Node, PolyCoeffs, StorageId, TypeId, TypeTable,
+};
 
 use crate::biir::apply_aliases_to_biir_terminator;
 use crate::common::{
@@ -700,20 +702,16 @@ pub(crate) fn shift_ir_stmt_vars(
             }
             coeffs.retain(|_, c| *c & 1 != 0);
         }
-        Stmt::OracleCall { args, .. } => {
-            for a in args.iter_mut() {
+        Stmt::OracleCall(data) => {
+            for a in data.args.iter_mut() {
                 shift_var(a, old_base, n_stmts, shift);
             }
         }
         Stmt::OracleOutput { call, .. } | Stmt::ActionOutput { call, .. } => {
             shift_var(call, old_base, n_stmts, shift);
         }
-        Stmt::ActionCall {
-            guard,
-            args,
-            fallbacks,
-            ..
-        } => {
+        Stmt::ActionCall(data) => {
+            let ActionCallData { guard, args, fallbacks, .. } = &mut **data;
             shift_var(guard, old_base, n_stmts, shift);
             for a in args.iter_mut() {
                 shift_var(a, old_base, n_stmts, shift);
@@ -722,13 +720,8 @@ pub(crate) fn shift_ir_stmt_vars(
                 shift_var(f, old_base, n_stmts, shift);
             }
         }
-        Stmt::ActionStore {
-            guard,
-            args,
-            fallbacks,
-            targets,
-            ..
-        } => {
+        Stmt::ActionStore(data) => {
+            let ActionStoreData { guard, args, fallbacks, targets, .. } = &mut **data;
             shift_var(guard, old_base, n_stmts, shift);
             for a in args.iter_mut() {
                 shift_var(a, old_base, n_stmts, shift);
@@ -2190,8 +2183,8 @@ fn apply_aliases_to_vaffle_stmt(
                 }
             }
         }
-        Stmt::OracleCall { args, .. } => {
-            for a in args.iter_mut() {
+        Stmt::OracleCall(data) => {
+            for a in data.args.iter_mut() {
                 let c = canon_alias(alias_map, *a);
                 if c != *a {
                     *a = c;
@@ -2206,12 +2199,8 @@ fn apply_aliases_to_vaffle_stmt(
                 changed = true;
             }
         }
-        Stmt::ActionCall {
-            guard,
-            args,
-            fallbacks,
-            ..
-        } => {
+        Stmt::ActionCall(data) => {
+            let ActionCallData { guard, args, fallbacks, .. } = &mut **data;
             let cg = canon_alias(alias_map, *guard);
             if cg != *guard {
                 *guard = cg;

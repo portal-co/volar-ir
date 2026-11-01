@@ -11,7 +11,9 @@ use volar_ir::{
     boolar::{BIrBlocks, BIrStmt, BIrTarget, BIrTerminator},
     ir::{IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator, IRType, IRTypes},
 };
-use volar_ir_common::{BitRing, Constant, PolyCoeffs, Type, TypeId};
+use volar_ir_common::{
+    ActionCallData, ActionStoreData, BitRing, Constant, OracleCallData, PolyCoeffs, Type, TypeId,
+};
 
 // ============================================================================
 // BIrBlocks → LirTarget
@@ -410,12 +412,13 @@ pub fn lower_ir_with_handler<P, T, H>(
             let var_idx = vals_per_block[bi].len(); // index of this stmt's result
             match &stmt.kind {
                 // ---- Oracle: emit target.oracle(), stash results ------------
-                IRStmt::OracleCall {
-                    name,
-                    args,
-                    output_tys,
-                    ..
-                } => {
+                IRStmt::OracleCall(data) => {
+                    let OracleCallData {
+                        name,
+                        args,
+                        output_tys,
+                        ..
+                    } = &**data;
                     let arg_vals: Vec<T::Value> = args
                         .iter()
                         .map(|id| vals_per_block[bi][id.0 as usize].clone())
@@ -438,14 +441,15 @@ pub fn lower_ir_with_handler<P, T, H>(
                     vals_per_block[bi].push(results[*idx].clone());
                 }
                 // ---- Action: emit target.action(), stash results -----------
-                IRStmt::ActionCall {
-                    name,
-                    guard,
-                    args,
-                    fallbacks,
-                    output_tys,
-                    ..
-                } => {
+                IRStmt::ActionCall(data) => {
+                    let ActionCallData {
+                        name,
+                        guard,
+                        args,
+                        fallbacks,
+                        output_tys,
+                        ..
+                    } = &**data;
                     let guard_val = vals_per_block[bi][guard.0 as usize].clone();
                     let arg_vals: Vec<T::Value> = args
                         .iter()
@@ -479,14 +483,15 @@ pub fn lower_ir_with_handler<P, T, H>(
                     vals_per_block[bi].push(results[*idx].clone());
                 }
                 // ---- Direct action storage --------------------------------
-                IRStmt::ActionStore {
-                    name,
-                    guard,
-                    args,
-                    fallbacks,
-                    output_tys,
-                    targets,
-                } => {
+                IRStmt::ActionStore(data) => {
+                    let ActionStoreData {
+                        name,
+                        guard,
+                        args,
+                        fallbacks,
+                        output_tys,
+                        targets,
+                    } = &**data;
                     let guard = vals_per_block[bi][guard.0 as usize].clone();
                     let args: Vec<T::Value> = args
                         .iter()
@@ -497,10 +502,7 @@ pub fn lower_ir_with_handler<P, T, H>(
                         .map(|id| vals_per_block[bi][id.0 as usize].clone())
                         .collect();
                     let arg_lir_tys = lir_types_for_vars(
-                        match &stmt.kind {
-                            IRStmt::ActionStore { args, .. } => args,
-                            _ => unreachable!(),
-                        },
+                        data.args.as_slice(),
                         &block_var_tys[bi],
                         types,
                     );
@@ -642,9 +644,8 @@ fn lir_stmt_result_type(stmt: &IRStmt) -> Option<volar_ir::ir::IRTypeId> {
         | IRStmt::Rng { ty, .. }
         | IRStmt::Poly { ty, .. } => Some(*ty),
         IRStmt::Transmute { dst_ty, .. } => Some(*dst_ty),
-        IRStmt::OracleCall { result_ty, .. } | IRStmt::ActionCall { result_ty, .. } => {
-            Some(*result_ty)
-        }
+        IRStmt::OracleCall(data) => Some(data.result_ty),
+        IRStmt::ActionCall(data) => Some(data.result_ty),
         IRStmt::StorageWrite { .. } | IRStmt::ActionStore { .. } => None,
         _ => None,
     }

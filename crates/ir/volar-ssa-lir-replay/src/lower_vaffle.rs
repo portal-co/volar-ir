@@ -4,7 +4,9 @@
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 
 use vaffle::{FuncBody, FuncDecl, FuncId, Module, Target as VTarget, Terminator, Value, ValueId};
-use volar_ir_common::{IrType, Stmt, Type as NativeType, TypeId, TypeTable};
+use volar_ir_common::{
+    ActionCallData, IrType, OracleCallData, Stmt, Type as NativeType, TypeId, TypeTable,
+};
 use volar_lir::{BranchTarget, LirTarget, LirType};
 use volar_provenance::{KeepProvenance, ProvenanceHandler};
 
@@ -258,12 +260,13 @@ fn lower_vaffle_value<P, T, Q>(
                 "Value::Param encountered in Block::stmts without a pre-seeded value"
             );
         }
-        Value::Op(Stmt::OracleCall {
-            name,
-            args,
-            output_tys,
-            ..
-        }) => {
+        Value::Op(Stmt::OracleCall(data)) => {
+            let OracleCallData {
+                name,
+                args,
+                output_tys,
+                ..
+            } = &**data;
             let arg_vals: Vec<T::Value> = args.iter().map(|a| get(vals, a)).collect();
             let arg_lir_tys: Vec<LirType> = args.iter().map(|_| LirType::U64).collect();
             let ret_tys: Vec<LirType> = output_tys
@@ -280,14 +283,15 @@ fn lower_vaffle_value<P, T, Q>(
                 .expect("OracleOutput: no stashed results for OracleCall");
             vals[vid.0] = Some(results[*idx].clone());
         }
-        Value::Op(Stmt::ActionCall {
-            name,
-            guard,
-            args,
-            fallbacks,
-            output_tys,
-            ..
-        }) => {
+        Value::Op(Stmt::ActionCall(data)) => {
+            let ActionCallData {
+                name,
+                guard,
+                args,
+                fallbacks,
+                output_tys,
+                ..
+            } = &**data;
             let guard_val = get(vals, guard);
             let arg_vals: Vec<T::Value> = args.iter().map(|a| get(vals, a)).collect();
             let fallback_vals: Vec<T::Value> = fallbacks.iter().map(|a| get(vals, a)).collect();
