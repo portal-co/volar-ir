@@ -302,6 +302,23 @@ impl<V> PolyCoeffs<V> {
         Self(Vec::new())
     }
 
+    /// Create an empty collection that will hold about `n` monomials
+    /// without reallocating. At whole-program scale the movfuscator emits
+    /// tens of millions of 1-2 monomial polynomials; the default `Vec`
+    /// growth policy (first insert reserves 4 slots of a 32-byte tuple)
+    /// more than doubles each one's heap footprint, so exact capacity is
+    /// the difference between fitting and being killed by the OS.
+    pub fn with_capacity(n: usize) -> Self {
+        Self(Vec::with_capacity(n))
+    }
+
+    /// Create a collection holding exactly one monomial (exact capacity).
+    pub fn single(key: Vec<V>, coeff: u8) -> Self {
+        let mut outer = Vec::with_capacity(1);
+        outer.push((key, coeff));
+        Self(outer)
+    }
+
     /// Number of monomial entries.
     pub fn len(&self) -> usize {
         self.0.len()

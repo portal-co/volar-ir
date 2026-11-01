@@ -2574,7 +2574,9 @@ fn revm_wasm32_import_probe() {
                         let _ = &seen;
                     }
                     let mut types = types;
-                    let mov_src = blocks.clone();
+                    // (a full pre-mov clone here used to sit resident through
+                    // the whole movfuscation for no reader -- removed: at
+                    // revm scale that is 1-2GB of peak RSS.)
                     let mut mov_b =
                         volar_ir_passes::movfuscate::movfuscate_ir_owned(blocks, &mut types);
                     let post_s: usize = mov_b.blocks.iter().map(|b| b.stmts.len()).sum();

@@ -325,3 +325,34 @@ pre-LTO 999M-value import. Symbolic memmove length is now lowered
 (byte loop, forward-copy = exact for dest <= src). The unmod import
 shrink (shared Table-on-ID dispatch at this scale, open item #2)
 remains the lever.
+
+## Movfuscator memory work (2026-11-01)
+
+Whole-program movfuscation sat at the 12GB jetsam ceiling. Measured
+budget at the CSE'd static LTO scale (12.68M stmts in, 73.4M stmts
+out; Node<IRStmt> = 88 bytes: Stmt 80 + Option<SideId> 8, P = ()):
+
+| term | before | after | fix |
+|---|---|---|---|
+| output Vec growth transient | up to old+new ~17GB virtual | 0 | upfront `Vec::with_capacity(8x input)` — virtual, lazily committed |
+| input blocks alive through movfuscation | ~1.1-2.3GB | ~0 (drained progressively) | `MovfuscCtx::discard_block_stmts` (default no-op; IrCtx clears each block after its terminator is consumed) |
+| Poly coefficient heaps | ~4.5GB (outer monomial Vec amortized to 4x32B slots) | ~2-3GB | `PolyCoeffs::with_capacity/single` exact-capacity constructors at every movfuscator emit site |
+| probe-side dead clone (`mov_src`) | 1.1-2.3GB resident through the whole stage | 0 | removed |
+| allocator high-water between stages | several GB | largely returned | `malloc_zone_pressure_relief` between heavy stages (probe, macOS) |
+
+Observed: movfuscation now starts at ~4.8GB resident (was ~11GB) and
+COMPLETES (73.4M stmts, histogram verified) when the machine has
+headroom; the pipeline still dies inside the final emission writes or
+the post-mov DCE when free memory is tight — the output's 6.5GB flat
+Vec + ~2.5GB Poly heaps + ~4.8GB start baseline is right at the line.
+
+Next levers, in measured-impact order:
+1. **Box the Oracle/Action payload structs in `Stmt`** — the 3-Vec+
+   String OracleCall/ActionCall variants set the enum's 80-byte stride
+   for every statement; boxing them drops Node to ~72B (-1.2GB at 73.4M
+   stmts). ~40 mechanical sites across volar-ir-common/-ir/-opt/
+   -passes/-vaffle-target/-virt/fuzz (construction + matches).
+2. Post-mov DCE working set at 73.4M vars (volar-ir-opt) — the stage
+   that now kills first after movfuscation completes.
+3. PolyCoeffs inline small-monomial storage (representation change) —
+   the remaining ~2.5GB of per-Poly heap.

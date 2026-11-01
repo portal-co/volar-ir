@@ -235,6 +235,18 @@ pub trait MovfuscCtx {
         return_slot_types: &[Self::SlotTy],
     ) -> TermResult;
 
+    /// Release block `block_idx`'s statement body after it has been fully
+    /// consumed (its statements emitted and its terminator resolved). At
+    /// whole-program scale the input blocks are a large fraction of peak
+    /// RSS, and nothing downstream reads a processed block's statements
+    /// again (the accumulation phase works from computed var ids; the
+    /// final assembly only moves the emitter's own buffer), so the
+    /// default implementation is a no-op and storage-backed contexts
+    /// clear the body to free it progressively while the output grows.
+    fn discard_block_stmts(blocks: &mut Self::Blocks, block_idx: usize) {
+        let _ = (blocks, block_idx);
+    }
+
     /// Consume the context and assemble the final single-block module.
     fn build_output(
         self,
@@ -730,6 +742,10 @@ pub fn movfuscate<C: MovfuscCtx>(
             next_state: term.next_state,
             ret_vals: term.ret_vals,
         });
+        // The block is fully consumed; release its statements so the
+        // input's memory is freed progressively while the (larger) output
+        // grows. See `discard_block_stmts`.
+        C::discard_block_stmts(blocks, i);
     }
 
     // Boundary metadata: each block's own stmt range plus its "exported"
@@ -1607,10 +1623,11 @@ impl<P: Clone> IrCtx<P> {
         pc_width: usize,
         ctrl_prov: P,
         slot_alloc: SlotAllocation,
+        stmt_capacity: usize,
     ) -> Self {
         let var_types = combined_param_types.clone();
         Self {
-            stmts: Vec::new(),
+            stmts: Vec::with_capacity(stmt_capacity),
             pending_prov: ctrl_prov.clone(),
             ctrl_prov,
             next_id: first_id,
@@ -1776,8 +1793,9 @@ impl<P: Clone> IrCtx<P> {
 
     /// Emit `val XOR const_k` (field addition in GF(2^n)) using `Poly`.
     fn emit_poly_xor_const(&mut self, val: u32, const_k: Constant, ty: IRTypeId) -> u32 {
-        let mut coeffs = PolyCoeffs::new();
-        coeffs.insert(vec![IRVarId(val)], 1u8);
+        // Exact-capacity outer storage: these emit_poly sites run tens of
+        // millions of times at whole-program scale (see `with_capacity`).
+        let coeffs = PolyCoeffs::single(vec![IRVarId(val)], 1u8);
         self.push_typed(
             IRStmt::Poly {
                 ty,
@@ -1951,6 +1969,10 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         blocks.blocks.len()
     }
 
+    fn discard_block_stmts(blocks: &mut IRBlocks<P>, block_idx: usize) {
+        blocks.blocks[block_idx].stmts = alloc::vec::Vec::new();
+    }
+
     fn block_param_count(blocks: &IRBlocks<P>, i: usize) -> usize {
         blocks.blocks[i].params.len()
     }
@@ -2013,8 +2035,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         }
         let mut key = vec![IRVarId(a), IRVarId(b)];
         key.sort();
-        let mut coeffs = PolyCoeffs::new();
-        coeffs.insert(key, 1u8);
+        let coeffs = PolyCoeffs::single(key, 1u8);
         self.emit_poly(coeffs, 0)
     }
 
@@ -2023,7 +2044,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         if a == b {
             return self.emit_zero_bit();
         }
-        let mut coeffs = PolyCoeffs::new();
+        let mut coeffs = PolyCoeffs::with_capacity(2);
         coeffs.insert(vec![IRVarId(a)], 1);
         coeffs.insert(vec![IRVarId(b)], 1);
         self.emit_poly(coeffs, 0)
@@ -2031,8 +2052,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
 
     /// `NOT a` = `Poly { {[a]: 1u8}, constant: 1 }` (i.e. `1 + a` in GF(2)).
     fn emit_not(&mut self, a: u32) -> u32 {
-        let mut coeffs = PolyCoeffs::new();
-        coeffs.insert(vec![IRVarId(a)], 1);
+        let coeffs = PolyCoeffs::single(vec![IRVarId(a)], 1);
         self.emit_poly(coeffs, 1)
     }
 
@@ -2056,8 +2076,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         // Canonical order for the monomial key.
         let mut key = vec![IRVarId(is_active), IRVarId(val)];
         key.sort();
-        let mut coeffs = PolyCoeffs::new();
-        coeffs.insert(key, 1u8);
+        let coeffs = PolyCoeffs::single(key, 1u8);
         let t = ty.clone();
         self.push_typed(
             IRStmt::Poly {
@@ -2076,7 +2095,7 @@ impl<P: Clone> MovfuscCtx for IrCtx<P> {
         if a == b {
             return self.emit_zero_slot(ty); // a + a = 0 in characteristic-2 fields
         }
-        let mut coeffs = PolyCoeffs::new();
+        let mut coeffs = PolyCoeffs::with_capacity(2);
         coeffs.insert(vec![IRVarId(a)], 1);
         coeffs.insert(vec![IRVarId(b)], 1);
         let t = ty.clone();
@@ -3035,14 +3054,12 @@ fn movfuscate_ir_impl<P: Clone>(
     let n = blocks.blocks.len();
     // Diagnostic sidecar (no_std-safe): the post-layout block count and the
     // total statement count, readable by std-side drivers/probes.
+    let total_input_stmts: usize = blocks.blocks.iter().map(|b| b.stmts.len()).sum();
     LAST_LAYOUT_STATS.store(
         (n as u64) << 32 | (blocks.blocks.iter().map(|b| b.stmts.len()).min().unwrap_or(0) as u64),
         core::sync::atomic::Ordering::Relaxed,
     );
-    MOV_TOTAL_STMTS.store(
-        blocks.blocks.iter().map(|b| b.stmts.len()).sum::<usize>() as u64,
-        core::sync::atomic::Ordering::Relaxed,
-    );
+    MOV_TOTAL_STMTS.store(total_input_stmts as u64, core::sync::atomic::Ordering::Relaxed);
     if n == 1 {
         let empty_init = MovfuscAccumInit {
             start: 0,
@@ -3115,6 +3132,23 @@ fn movfuscate_ir_impl<P: Clone>(
         pc_width,
         ctrl_prov,
         slot_alloc,
+        // Pre-size the output buffer: the combined block's statement Vec
+        // grows by pushes, and Vec's doubling reallocations transiently
+        // hold old+new capacity (at ~80M statements and ~90 bytes/stmt
+        // that is a ~17GB spike on top of everything else). The estimate
+        // over-reserves generously; the allocation is virtual and macOS
+        // (and Linux) commit pages lazily, so untouched tail pages never
+        // become resident. Measured expansions: static revm 3.1x, CSE'd
+        // static revm 5.8x — 8x covers both; a program exceeding 8x falls
+        // back to doubling from a large base (acceptably rare). The
+        // ceiling keeps a pathological input from reserving absurd
+        // virtual space.
+        (total_input_stmts
+            .saturating_mul(8)
+            .saturating_add(64))
+        .min(274_877_906_944 / core::mem::size_of::<
+            volar_ir_common::Node<IRStmt, P>,
+        >()),
     );
     let (mut result, block_ranges, accum_info, watch_results) =
         movfuscate(ctx, blocks, state_slot_types, return_slot_types, watch);
