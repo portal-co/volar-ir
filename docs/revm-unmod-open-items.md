@@ -274,3 +274,54 @@ import sinks (strlen/memcmp-family call sites inside neutered/leaf
 contexts). Note: the probe's own reachability REPLICA still
 under-reports if it does not expand Dyn (the movfuscation layout
 visits all on Dyn; the replica was aligned to match).
+
+
+## IR-level optimization + unmodified-LTO status (2026-10-31)
+
+The opt pipeline (`volar_ir_opt`) is wired into both revm probes behind
+env gates, with per-stage timings measured at the static LTO module's
+scale (26.5M lowered stmts / 56,734 blocks):
+
+- **DCE** (`dce_ir_blocks_with_remap`): 50s round 0, converges round 1
+  (13.8s round 1, unchanged round 2). Alone: 26.5M -> 25.0M stmts.
+- **CSE** (`cse_ir_blocks_with_remap`): 65-71s round 0, converged by
+  round 1. With DCE: 26.5M -> 12.68M stmts (2.1x).
+- **fold** (`fold_ir_blocks`): 1438s at 26.5M stmts (54us/stmt — a
+  pass-performance problem; gated behind REVM_IR_FOLD, default off).
+- **VAFFLE-level `fold_vaffle_module`**: 987s at 15.3M values with no
+  value-count reduction (gated behind REVM_VAFFLE_OPT, default off).
+- **Batch** (Poly widening): unmeasured at scale (fold-gated).
+- Correctness: the bulk differential re-evaluates the optimized lowered
+  modules — 60,081 -> 14,865 stmts (4.0x) with eval equality on all
+  vectors (DYN-OK contract re-checked pre/post opt at revm scale).
+
+Pipeline traps found and fixed in the probe wiring:
+1. `dce/cse_ir_blocks_with_remap` rewrite each block's terminator
+   INTERNALLY; the returned var remaps exist for external metadata
+   holders only. Applying them AGAIN to the terminators double-remaps
+   and corrupts Dyn targets (every Dyn target became a computed
+   Shuffle/Poly). `check_dyn_targets` (probe-side, mirrors the
+   movfuscator's per-block Block-typed Const/StorageRead/param
+   contract) now guards pre/post opt.
+2. CSE's allocator churn raises the RSS high-water mark; the
+   subsequent movfuscation then lands on top and gets killed
+   (jetsam ~12GB). `malloc_zone_pressure_relief` between stages helps
+   but does not remove the wall; REVM_NO_CSE skips CSE.
+
+Memory envelope at LTO scale: movfuscation of the static LTO module
+(26.5M stmts / 15.3M values / 54,545 blocks) completed once at ~12GB
+(the 81.7M-stmt guarded result) but sits AT the ceiling — the same
+baseline SIGKILLed on a re-run with less free system memory, and
+DCE-only/CSE'd variants (25.0M/12.68M inputs) also died after the opt
+stage's churn. Movfuscation needs either a quieter machine, a
+two-process pipeline (serialize the module between stages), or its own
+memory work before whole-program LTO-scale movfuscation is reliable.
+
+Unmodified-revm LTO import: the unmodified entry pulls revm's FULL
+state machinery (BTreeMap/quicksort/account-load paths) through the
+interpreter's indirect dispatch — the import SIGKILLed at ~12GB around
+function #587/1200+ (~900M values at that point), the same wall as the
+pre-LTO 999M-value import. Symbolic memmove length is now lowered
+(byte loop, forward-copy = exact for dest <= src). The unmod import
+shrink (shared Table-on-ID dispatch at this scale, open item #2)
+remains the lever.

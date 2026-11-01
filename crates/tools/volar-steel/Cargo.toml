@@ -14,6 +14,7 @@ volar-vaffle-target.workspace = true
 volar-ir-passes.workspace = true
 volar-ir.workspace = true
 volar-ir-common.workspace = true
+volar-ir-opt.workspace = true
 
 [dev-dependencies]
 volar-fuzz.workspace = true

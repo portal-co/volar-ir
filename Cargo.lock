@@ -2187,6 +2187,7 @@ dependencies = [
  "volar-fuzz",
  "volar-ir",
  "volar-ir-common",
+ "volar-ir-opt",
  "volar-ir-passes",
  "volar-llvm-vaffle-import",
  "volar-vaffle-target",

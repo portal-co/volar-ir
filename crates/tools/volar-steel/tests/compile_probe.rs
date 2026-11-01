@@ -13,6 +13,208 @@ fn artifacts() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("programs")
 }
 
+/// Apply one pass's per-block var remaps to every block's terminator
+/// (vars are block-scoped; terminator jump args are the only cross-block
+/// var references).
+fn apply_ir_remaps(
+    blocks: &mut volar_ir::ir::IRBlocks<()>,
+    remaps: &[std::collections::BTreeMap<u32, u32>],
+) {
+    for (bi, blk) in blocks.blocks.iter_mut().enumerate() {
+        if remaps[bi].is_empty() {
+            continue;
+        }
+        // Clone only the non-trivial per-block map so the terminator `map`
+        // can own its context without aliasing the shared `remaps` slice.
+        let mut remap = remaps[bi].clone();
+        let old = std::mem::replace(
+            &mut blk.terminator,
+            volar_ir::ir::IRTerminator::Jmp {
+                target: volar_ir::ir::IRBranchTarget::new(
+                    volar_ir::ir::IRBlockTargetId::Return,
+                    vec![],
+                ),
+            },
+        );
+        blk.terminator = old
+            .map(
+                &mut remap,
+                &mut |remap: &mut std::collections::BTreeMap<u32, u32>,
+                      v: volar_ir::ir::IRVarId|
+                 -> Result<volar_ir::ir::IRVarId, core::convert::Infallible> {
+                    Ok(remap
+                        .get(&v.0)
+                        .map(|&n| volar_ir::ir::IRVarId(n))
+                        .unwrap_or(v))
+                },
+            )
+            .expect("terminator var remap is infallible");
+    }
+}
+
+/// IR-level optimization fixpoint: constant fold -> CSE -> DCE -> Poly
+/// batch, each pass applying the var remaps to terminators. Returns the
+/// number of passes run (1..=max_passes).
+/// Dyn-target validator mirroring the movfuscator's per-block
+/// `block_var_to_bits` contract: a Dyn var must be defined in its OWN
+/// block by a Block-typed Const or a Block-typed StorageRead (the
+/// movfuscator's two tracked shapes), or be a Block-typed param.
+/// `label` distinguishes pre-/post-optimization runs.
+fn check_dyn_targets(
+    blocks: &volar_ir::ir::IRBlocks<()>,
+    types: &volar_ir::ir::IRTypes,
+    label: &str,
+) {
+    let mut dyn_bad = 0usize;
+    for (bi, blk) in blocks.blocks.iter().enumerate() {
+        let dyn_vars: Vec<u32> = match &blk.terminator {
+            volar_ir::ir::IRTerminator::Jmp { target } => match &target.dest {
+                volar_ir::ir::IRBlockTargetId::Dyn(v) => vec![v.0],
+                _ => vec![],
+            },
+            _ => vec![],
+        };
+        for dv in dyn_vars {
+            // IRBlock.params is a plain Vec<TypeId> (params are the block's
+            // first vars, in order — no per-param ValueIds).
+            let p = blk.params.len();
+            let param_ok = (dv as usize) < p
+                && matches!(
+                    &types.0[blk.params[dv as usize].0 as usize],
+                    volar_ir_common::IrType::Block { .. }
+                );
+            let stmt_idx = (dv as usize).checked_sub(p);
+            let def_kind = stmt_idx
+                .and_then(|idx| blk.stmts.get(idx))
+                .map(|st| format!("{:?}", st.kind))
+                .unwrap_or_else(|| "<no stmt>".to_string());
+            let stmt_ok = stmt_idx
+                .and_then(|idx| blk.stmts.get(idx))
+                .map(|st| {
+                    matches!(
+                        &st.kind,
+                        volar_ir::ir::IRStmt::Const(_, ty)
+                            | volar_ir::ir::IRStmt::StorageRead { ty, .. }
+                                if matches!(
+                                    &types.0[ty.0 as usize],
+                                    volar_ir_common::IrType::Block { .. }
+                                )
+                    )
+                })
+                .unwrap_or(false);
+            if !(param_ok || stmt_ok) {
+                eprintln!(
+                    "DYN-BAD[{label}] block {bi}: Dyn var {dv} def={}",
+                    &def_kind[..def_kind.len().min(200)]
+                );
+                dyn_bad += 1;
+                if dyn_bad > 4 {
+                    panic!("stopping DYN-BAD dump [{label}]");
+                }
+            }
+        }
+    }
+    eprintln!("DYN-OK[{label}]: all Dyn targets satisfy the movfuscator contract");
+}
+
+/// DCE-only fixpoint — the fast path for the giant single mov-block
+/// (CSE there builds one map over ~80M stmts; fold measured 1438s at
+/// 26.5M — see the run_ir_opt notes).
+fn run_ir_dce(
+    blocks: &mut volar_ir::ir::IRBlocks<()>,
+    types: &volar_ir::ir::IRTypes,
+    max_passes: usize,
+) -> usize {
+    let mut passes = 0usize;
+    for round in 0..max_passes {
+        passes += 1;
+        let t = std::time::Instant::now();
+        let (c, _remaps) = volar_ir_opt::ir::dce_ir_blocks_with_remap(blocks, types);
+        eprintln!("ir-dce round {round}: changed={c} {:?}", t.elapsed());
+        if !c {
+            break;
+        }
+    }
+    passes
+}
+
+/// Return freed allocator pages to the OS between heavy stages. CSE's
+/// per-block canon maps raise the RSS high-water mark; macOS only
+/// reclaims them under pressure, so movfuscation's own giant state then
+/// lands on top and gets killed (jetsam, ~12GB). No-op elsewhere.
+#[cfg(target_os = "macos")]
+fn malloc_pressure_relief() {
+    extern "C" {
+        fn malloc_zone_pressure_relief(zone: *mut core::ffi::c_void, num_pages: usize);
+    }
+    // SAFETY: zone 0 = the default malloc zone; num_pages 0 means "all".
+    unsafe {
+        malloc_zone_pressure_relief(core::ptr::null_mut(), 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn malloc_pressure_relief() {}
+
+/// IR-level optimization fixpoint. Measured costs at 26.5M stmts /
+/// 56,734 blocks: DCE 40s, CSE 435s, fold 1438s (54us/stmt — a
+/// pass-performance problem, gated behind REVM_IR_FOLD), batch
+/// unmeasured. DCE runs first: unused guard algebra is the biggest
+/// cheap win. CSE dedups repeated guard shapes. Fold+batch only
+/// under REVM_IR_FOLD.
+fn run_ir_opt(
+    blocks: &mut volar_ir::ir::IRBlocks<()>,
+    types: &mut volar_ir::ir::IRTypes,
+    max_passes: usize,
+) -> usize {
+    let do_fold = std::env::var_os("REVM_IR_FOLD").is_some();
+    // CSE's per-block canon maps leave the heap high-water-marked; at
+    // whole-program scale the subsequent movfuscation then gets killed
+    // by the OS (SIGKILL, jetsam). REVM_NO_CSE skips it.
+    let no_cse = std::env::var_os("REVM_NO_CSE").is_some();
+    let mut passes = 0usize;
+    for round in 0..max_passes {
+        passes += 1;
+        let mut changed = false;
+        let t = std::time::Instant::now();
+        let (c, _remaps) = volar_ir_opt::ir::dce_ir_blocks_with_remap(blocks, types);
+        eprintln!("ir-opt round {round} dce: changed={c} {:?}", t.elapsed());
+        changed |= c;
+        if !no_cse {
+            let t = std::time::Instant::now();
+            let (c, _remaps) = volar_ir_opt::ir::cse_ir_blocks_with_remap(blocks, types);
+            eprintln!("ir-opt round {round} cse: changed={c} {:?}", t.elapsed());
+            changed |= c;
+        }
+        if do_fold {
+            let t = std::time::Instant::now();
+            let c = volar_ir_opt::ir::fold_ir_blocks(blocks, types);
+            eprintln!(
+                "ir-opt round {round} fold: changed={c} {:?}",
+                t.elapsed()
+            );
+            changed |= c;
+            if round == 0 {
+                let t = std::time::Instant::now();
+                let (c, _remaps) = volar_ir_opt::ir::batch_ir_blocks_with_remap(blocks, types);
+                eprintln!(
+                    "ir-opt round {round} batch: changed={c} {:?}",
+                    t.elapsed()
+                );
+                changed |= c;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    passes
+}
+
+fn ir_stmt_count(blocks: &volar_ir::ir::IRBlocks<()>) -> usize {
+    blocks.blocks.iter().map(|b| b.stmts.len()).sum()
+}
+
 /// Native spec of the reference program (data-dependent loop).
 fn reference_native(key: u64, value: u64, n: u64, path: [u64; 4]) -> u64 {
     let mut acc = key ^ value;
@@ -2192,8 +2394,37 @@ fn revm_wasm32_import_probe() {
                         }
                     }
                 }
+                // VAFFLE-level constant folding before lowering. Measured
+                // 987s with no value-count reduction at 15.3M values (the
+                // pass was not built for this scale) — gated separately.
+                let mut vaffle = vaffle;
+                if std::env::var_os("REVM_VAFFLE_OPT").is_some() {
+                    let v_at = std::time::Instant::now();
+                    let pre_vals: usize = vaffle
+                        .funcs
+                        .iter()
+                        .filter_map(|f| match f {
+                            vaffle::FuncDecl::Body(b) => Some(b.values.len()),
+                            _ => None,
+                        })
+                        .sum();
+                    let changed = volar_ir_opt::vaffle::fold_vaffle_module(&mut vaffle);
+                    let post_vals: usize = vaffle
+                        .funcs
+                        .iter()
+                        .filter_map(|f| match f {
+                            vaffle::FuncDecl::Body(b) => Some(b.values.len()),
+                            _ => None,
+                        })
+                        .sum();
+                    eprintln!(
+                        "vaffle fold OK in {:?}: changed={changed} {pre_vals} -> {post_vals} values",
+                        v_at.elapsed()
+                    );
+                }
                 let lowered_at = std::time::Instant::now();
-                let (blocks, types) = volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
+                let (mut blocks, mut types) =
+                    volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
                 let n_stmts: usize = blocks.blocks.iter().map(|b| b.stmts.len()).sum();
                 eprintln!(
                     "revm wasm32 lower OK in {:?}: {} blocks, {n_stmts} stmts, {} types",
@@ -2201,6 +2432,24 @@ fn revm_wasm32_import_probe() {
                     blocks.blocks.len(),
                     types.0.len()
                 );
+                // Baseline: does the PRE-opt module satisfy the movfuscator's
+                // per-block Dyn-target contract?
+                check_dyn_targets(&blocks, &types, "pre-ir-opt");
+                // IR-level optimization (fold/CSE/DCE/batch to fixpoint),
+                // shaking out dead guard algebra before movfuscation.
+                if std::env::var_os("REVM_IR_OPT").is_some() {
+                    let o_at = std::time::Instant::now();
+                    let passes = run_ir_opt(&mut blocks, &mut types, 6);
+                    eprintln!(
+                        "revm wasm32 ir-opt OK in {:?}: {passes} passes, {} blocks, {} stmts",
+                        o_at.elapsed(),
+                        blocks.blocks.len(),
+                        ir_stmt_count(&blocks)
+                    );
+                    check_dyn_targets(&blocks, &types, "post-ir-opt");
+                    malloc_pressure_relief();
+                }
+                malloc_pressure_relief();
                 // Movfuscation stage: convert the lowered control flow into
                 // data-controlled iterations (mov-only execution). The
                 // dispatch values become loop iterations, which compress
@@ -2326,7 +2575,7 @@ fn revm_wasm32_import_probe() {
                     }
                     let mut types = types;
                     let mov_src = blocks.clone();
-                    let mov_b =
+                    let mut mov_b =
                         volar_ir_passes::movfuscate::movfuscate_ir_owned(blocks, &mut types);
                     let post_s: usize = mov_b.blocks.iter().map(|b| b.stmts.len()).sum();
                     let post_hist = hist(&mov_b);
@@ -2340,6 +2589,20 @@ fn revm_wasm32_import_probe() {
                         (stats >> 32) as usize,
                         (stats & 0xffff_ffff) as usize
                     );
+                    // Post-movfuscation optimization: the single mov-block's
+                    // guard algebra repeats shapes across iterations — CSE
+                    // and DCE shake out the bookkeeping.
+                    if std::env::var_os("REVM_MOV_OPT").is_some() {
+                        let mo_at = std::time::Instant::now();
+                        let passes = run_ir_dce(&mut mov_b, &types, 3);
+                        eprintln!(
+                            "revm wasm32 mov-opt OK in {:?}: {passes} passes, {} stmts",
+                            mo_at.elapsed(),
+                            ir_stmt_count(&mov_b)
+                        );
+                        let post_opt_hist = hist(&mov_b);
+                        eprintln!("mov-opt post-hist: {post_opt_hist:?}");
+                    }
                     eprintln!(
                         "revm wasm32 movfuscate OK in {:?}: {} blocks/{pre_s} stmts -> {} blocks/{post_s} stmts, {} types",
                         m_at.elapsed(),
@@ -2369,8 +2632,9 @@ fn revm_unmodified_import_probe() {
     if std::env::var("REVM_UNMODIFIED").is_err() {
         return;
     }
-    let ll = std::fs::read_to_string(artifacts().join("revm_driver_unmodified_wasm32_o0.ll"))
-        .expect("ll");
+    // The unmodified entry lives in the SAME fat-LTO module as the static
+    // driver (one bin, two `#[no_mangle]` entries) — shared sanitized file.
+    let ll = std::fs::read_to_string(artifacts().join("revm_driver_wasm32_o0.ll")).expect("ll");
     let context = Context::create();
     let module = context
         .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
@@ -2412,8 +2676,16 @@ fn revm_unmodified_import_probe() {
             // Next pipeline stage: VAFFLE -> volar IR, consuming the
             // module (transferring ~1B values by clone would double RSS).
             if std::env::var_os("REVM_UNMOD_LOWER").is_some() {
+                // VAFFLE-level constant folding before lowering.
+                let mut vaffle = vaffle;
+                if std::env::var_os("REVM_VAFFLE_OPT").is_some() {
+                    let v_at = std::time::Instant::now();
+                    let changed = volar_ir_opt::vaffle::fold_vaffle_module(&mut vaffle);
+                    eprintln!("revm unmodified vaffle fold OK: changed={changed}");
+                }
                 let lowered_at = std::time::Instant::now();
-                let (blocks, types) = volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
+                let (mut blocks, mut types) =
+                    volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
                 let n_stmts: usize = blocks.blocks.iter().map(|b| b.stmts.len()).sum();
                 eprintln!(
                     "revm unmodified lower OK in {:?}: {} blocks, {n_stmts} stmts, {} types",
@@ -2421,6 +2693,64 @@ fn revm_unmodified_import_probe() {
                     blocks.blocks.len(),
                     types.0.len()
                 );
+                // IR-level optimization (fold/CSE/DCE/batch to fixpoint).
+                if std::env::var_os("REVM_IR_OPT").is_some() {
+                    let o_at = std::time::Instant::now();
+                    let passes = run_ir_opt(&mut blocks, &mut types, 6);
+                    eprintln!(
+                        "revm unmodified ir-opt OK in {:?}: {passes} passes, {} blocks, {} stmts",
+                        o_at.elapsed(),
+                        blocks.blocks.len(),
+                        ir_stmt_count(&blocks)
+                    );
+                    malloc_pressure_relief();
+                }
+                malloc_pressure_relief();
+                // Movfuscation + post-mov optimization: values become
+                // iterations of the single mov-block.
+                if std::env::var_os("REVM_MOVFUSCATE").is_some() {
+                    let m_at = std::time::Instant::now();
+                    let pre_s = n_stmts;
+                    let hist = |b: &volar_ir::ir::IRBlocks<()>| -> std::collections::BTreeMap<String, usize> {
+                        let mut h: std::collections::BTreeMap<String, usize> = Default::default();
+                        for blk in b.blocks.iter() {
+                            for st in blk.stmts.iter() {
+                                let key = match &st.kind {
+                                    volar_ir::ir::IRStmt::Const(..) => "Const",
+                                    volar_ir::ir::IRStmt::Poly { .. } => "Poly",
+                                    volar_ir::ir::IRStmt::StorageRead { .. } => "StorageRead",
+                                    volar_ir::ir::IRStmt::StorageWrite { .. } => "StorageWrite",
+                                    _ => "other",
+                                };
+                                *h.entry(key.to_string()).or_insert(0) += 1;
+                            }
+                        }
+                        h
+                    };
+                    let pre_hist = hist(&blocks);
+                    eprintln!("revm unmodified movfuscate pre-hist: {pre_hist:?}");
+                    let mut mov_b =
+                        volar_ir_passes::movfuscate::movfuscate_ir_owned(blocks, &mut types);
+                    let post_s: usize = mov_b.blocks.iter().map(|b| b.stmts.len()).sum();
+                    let post_hist = hist(&mov_b);
+                    eprintln!("revm unmodified movfuscate post-hist: {post_hist:?}");
+                    if std::env::var_os("REVM_MOV_OPT").is_some() {
+                        let mo_at = std::time::Instant::now();
+                        let passes = run_ir_opt(&mut mov_b, &mut types, 4);
+                        eprintln!(
+                            "revm unmodified mov-opt OK in {:?}: {passes} passes, {} stmts",
+                            mo_at.elapsed(),
+                            ir_stmt_count(&mov_b)
+                        );
+                        let post_opt_hist = hist(&mov_b);
+                        eprintln!("revm unmodified mov-opt post-hist: {post_opt_hist:?}");
+                    }
+                    eprintln!(
+                        "revm unmodified movfuscate OK in {:?}: {pre_s} stmts -> {} stmts",
+                        m_at.elapsed(),
+                        post_s
+                    );
+                }
             }
         }
         Err(e) => {
@@ -2836,6 +3166,36 @@ fn bulk_memory_loop_matches_unroll() {
             "lowered unroll sel={sel}"
         );
         assert_eq!(decode_bits(&lowered_loop), want, "lowered loop sel={sel}");
+
+        // The OPT pipeline (DCE+CSE fixpoint) must preserve IR semantics:
+        // optimize both lowered modules, then evaluate again.
+        {
+            let (mut opt_ir, mut opt_types) = (unroll_ir.clone(), unroll_types.clone());
+            run_ir_opt(&mut opt_ir, &mut opt_types, 4);
+            let opt_out = volar_fuzz::interpreter::ir::eval_ir_with_storage(
+                &opt_ir,
+                &opt_types,
+                &lowered_inputs,
+            )
+            .0
+            .expect("optimized unroll eval");
+            assert_eq!(decode_bits(&opt_out), want, "opt unroll sel={sel}");
+            let pre = ir_stmt_count(&unroll_ir);
+            let post = ir_stmt_count(&opt_ir);
+            eprintln!("bulk opt unroll: {pre} -> {post} stmts");
+        }
+        {
+            let (mut opt_ir, mut opt_types) = (loop_ir.clone(), loop_types.clone());
+            run_ir_opt(&mut opt_ir, &mut opt_types, 4);
+            let opt_out = volar_fuzz::interpreter::ir::eval_ir_with_storage(
+                &opt_ir,
+                &opt_types,
+                &lowered_inputs,
+            )
+            .0
+            .expect("optimized loop eval");
+            assert_eq!(decode_bits(&opt_out), want, "opt loop sel={sel}");
+        }
     }
 
     // The INCREMENTAL lowering agrees as well (block ids are rebased per

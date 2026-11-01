@@ -252,6 +252,7 @@ struct BlockEmitter<P: Clone = ()> {
 }
 
 impl<P: Clone> BlockEmitter<P> {
+    #[allow(dead_code)]
     fn new(params: Vec<IRTypeId>) -> Self {
         let next_var = params.len() as u32;
         BlockEmitter {

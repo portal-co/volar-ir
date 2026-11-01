@@ -4681,7 +4681,14 @@ impl<'ctx> Importer<'ctx> {
                     ))
                 });
         }
-        if !matches!(intrinsic, MemoryIntrinsic::Memcpy | MemoryIntrinsic::Memset) {
+        // Symbolic memmove rides the same byte loop as memcpy. The loop
+        // copies forward, which is exact memmove semantics for dest <= src
+        // (drain/compaction shapes); a dest > src overlap would need the
+        // backward variant and is not provided.
+        if !matches!(
+            intrinsic,
+            MemoryIntrinsic::Memcpy | MemoryIntrinsic::Memset | MemoryIntrinsic::Memmove
+        ) {
             return Err(ImportError::Unsupported(format!(
                 "symbolic llvm.{} length is not supported",
                 intrinsic.name()
