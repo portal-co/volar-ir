@@ -137,8 +137,9 @@ pub fn dce_ir_blocks<P: Clone>(blocks: &mut IRBlocks<P>, _types: &IRTypes) -> bo
 }
 
 /// Like [`dce_ir_blocks`], but also returns each block's own cumulative
-/// var-id remap (old `IRVarId.0` -> new `IRVarId.0`; identity for a block
-/// DCE left untouched) — lets a caller holding external var-id-based
+/// var-id remap as a dense `Vec<u32>` indexed by the pre-DCE `IRVarId.0`
+/// (value = post-DCE id; identity for a block DCE left untouched; dead
+/// pre-DCE ids that no longer exist hold `u32::MAX`) — lets a caller holding external var-id-based
 /// metadata computed against the *pre*-DCE block (e.g. movfuscation's own
 /// [`MovfuscBlockBoundary`]/[`MovfuscAccumInfo`], neither of which live in
 /// this crate) translate that metadata to stay valid post-DCE, instead of
@@ -151,7 +152,7 @@ pub fn dce_ir_blocks<P: Clone>(blocks: &mut IRBlocks<P>, _types: &IRTypes) -> bo
 pub fn dce_ir_blocks_with_remap<P: Clone>(
     blocks: &mut IRBlocks<P>,
     _types: &IRTypes,
-) -> (bool, Vec<BTreeMap<u32, u32>>) {
+) -> (bool, Vec<Vec<u32>>) {
     let mut any_changed = false;
     let mut remaps = Vec::with_capacity(blocks.blocks.len());
     for block in blocks.blocks.iter_mut() {
@@ -648,7 +649,7 @@ pub fn dce_ir_blocks_with_remap_and_roots<P: Clone>(
     blocks: &mut IRBlocks<P>,
     _types: &IRTypes,
     extra_live: &[u32],
-) -> (bool, Vec<BTreeMap<u32, u32>>) {
+) -> (bool, Vec<Vec<u32>>) {
     let mut any_changed = false;
     let mut remaps = Vec::with_capacity(blocks.blocks.len());
     for block in blocks.blocks.iter_mut() {
@@ -693,7 +694,7 @@ fn collect_stmt_vars(stmt: &volar_ir::ir::IRStmt) -> Vec<IRVarId> {
 fn dce_ir_block_once<P: Clone>(
     block: &mut IRBlock<P>,
     extra_live: &[u32],
-) -> (bool, BTreeMap<u32, u32>) {
+) -> (bool, Vec<u32>) {
     let n_params = block.params.len();
     let n_stmts = block.stmts.len();
     let mut must_keep = vec![false; n_stmts];
@@ -747,51 +748,71 @@ fn dce_ir_block_once<P: Clone>(
     }
 
     if live.iter().all(|&l| l) {
-        let identity: BTreeMap<u32, u32> =
-            (0..(n_params + n_stmts) as u32).map(|v| (v, v)).collect();
-        return (false, identity);
+        // Dense identity: remap[v] = v for every var id.
+        return (false, (0..(n_params + n_stmts) as u32).collect());
     }
 
-    let mut remap: BTreeMap<u32, u32> = BTreeMap::new();
-    for p in 0..n_params {
-        remap.insert(p as u32, p as u32);
+    // Dense remap over the block's whole var range (params ++ stmts). At
+    // whole-program scale a single movfuscated block can hold ~73M vars; a
+    // BTreeMap<u32, u32> of that population costs GBs of node overhead
+    // while this dense Vec costs 4 bytes per var.
+    let mut remap = vec![u32::MAX; n_params + n_stmts];
+    for (p, slot) in remap.iter_mut().enumerate().take(n_params) {
+        *slot = p as u32;
     }
     let mut new_idx = n_params as u32;
     for i in 0..n_stmts {
         if live[i] {
-            remap.insert((n_params + i) as u32, new_idx);
+            remap[n_params + i] = new_idx;
             new_idx += 1;
         }
     }
-    let remap_var = |v: IRVarId| -> IRVarId {
-        IRVarId(*remap.get(&v.0).unwrap_or_else(|| panic!(
-            "dce_ir_block_once: var {} referenced by a live statement/terminator but not itself live -- \
-             violates the invariant that operands are always defined earlier in the same block", v.0,
-        )))
-    };
 
-    let mut new_stmts = Vec::with_capacity(new_idx as usize - n_params);
-    for i in 0..n_stmts {
-        if live[i] {
-            let node = block.stmts[i].clone();
-            let new_kind = node
-                .kind
-                .clone()
-                .map_var(
-                    &mut (),
-                    &mut |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
-                        Ok(remap_var(v))
-                    },
-                    &mut |_, ty| Ok(ty),
-                    &mut |_, s| Ok(s),
-                )
-                .unwrap();
-            new_stmts.push(Node {
-                kind: new_kind,
-                ..node
-            });
+    // Compact IN PLACE with a write cursor instead of building a second
+    // full block copy: at the mov-block scale the clone-then-swap held both
+    // copies live simultaneously (~2x the block). Every live stmt is taken
+    // out via `mem::replace` (dummy placeholder), remapped, and written
+    // back at cursor position `w` <= `r`, so the source slot is already
+    // consumed when it is overwritten.
+    let remap_var = |v: IRVarId| -> IRVarId {
+        let nv = remap[v.0 as usize];
+        assert!(
+            nv != u32::MAX,
+            "dce_ir_block_once: var {} referenced by a live statement/terminator but not itself live -- \
+             violates the invariant that operands are always defined earlier in the same block",
+            v.0,
+        );
+        IRVarId(nv)
+    };
+    let first_prov = block.stmts.first().map(|n| n.prov.clone());
+    let mut write = 0usize;
+    for r in 0..n_stmts {
+        if !live[r] {
+            continue;
         }
+        let dummy_prov = first_prov.clone().expect("live[r] implies stmts non-empty");
+        let dummy = Node {
+            kind: Stmt::Const(Constant { hi: 0, lo: 0 }, volar_ir::ir::IRTypeId(0)),
+            prov: dummy_prov,
+            side: None,
+        };
+        let node = core::mem::replace(&mut block.stmts[r], dummy);
+        let Node { kind, prov, side } = node;
+        let kind = kind
+            .map_var(
+                &mut (),
+                &mut |_: &mut (), v: IRVarId| -> Result<IRVarId, core::convert::Infallible> {
+                    Ok(remap_var(v))
+                },
+                &mut |_, ty| Ok(ty),
+                &mut |_, s| Ok(s),
+            )
+            .unwrap();
+        block.stmts[write] = Node { kind, prov, side };
+        write += 1;
     }
+    block.stmts.truncate(write);
+
     let new_term = block
         .terminator
         .clone()
@@ -802,8 +823,6 @@ fn dce_ir_block_once<P: Clone>(
             },
         )
         .unwrap();
-
-    block.stmts = new_stmts;
     block.terminator = new_term;
     (true, remap)
 }
