@@ -311,10 +311,10 @@ mod cutover_repro_tests {
         }
     }
 
-    fn monomial_key(m: &Vec<IRVarId>) -> &Vec<IRVarId> {
+    fn monomial_key(m: &[IRVarId]) -> &[IRVarId] {
         m
     }
-    fn monomial_iter(m: &Vec<IRVarId>) -> impl Iterator<Item = IRVarId> + '_ {
+    fn monomial_iter(m: &[IRVarId]) -> impl Iterator<Item = IRVarId> + '_ {
         m.iter().copied()
     }
 }

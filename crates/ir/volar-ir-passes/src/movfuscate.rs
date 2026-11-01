@@ -1452,7 +1452,7 @@ fn subst_ir_owned(stmt: IRStmt, var_map: &[u32], preserves_poly_key_order: bool)
             constant,
         } => {
             let mut coeffs = coeffs;
-            let remap = |vars: &mut Vec<IRVarId>| remap_poly_vars(vars, var_map);
+            let remap = |vars: &mut [IRVarId]| remap_poly_vars(vars, var_map);
             if preserves_poly_key_order {
                 coeffs.remap_monomials_in_place_preserving_key_order(remap);
             } else {
@@ -1471,7 +1471,7 @@ fn subst_ir_owned(stmt: IRStmt, var_map: &[u32], preserves_poly_key_order: bool)
 /// Substitute a single polynomial monomial. Degree-one monomials are the
 /// overwhelmingly common gate form, and are already canonical after every
 /// variable remap, so avoid even entering the sort implementation for them.
-fn remap_poly_vars(vars: &mut Vec<IRVarId>, var_map: &[u32]) {
+fn remap_poly_vars(vars: &mut [IRVarId], var_map: &[u32]) {
     for var in vars.iter_mut() {
         *var = IRVarId(var_map[var.0 as usize]);
     }

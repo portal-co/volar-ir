@@ -346,13 +346,20 @@ headroom; the pipeline still dies inside the final emission writes or
 the post-mov DCE when free memory is tight — the output's 6.5GB flat
 Vec + ~2.5GB Poly heaps + ~4.8GB start baseline is right at the line.
 
-Next levers, in measured-impact order:
-1. **Box the Oracle/Action payload structs in `Stmt`** — the 3-Vec+
-   String OracleCall/ActionCall variants set the enum's 80-byte stride
-   for every statement; boxing them drops Node to ~72B (-1.2GB at 73.4M
-   stmts). ~40 mechanical sites across volar-ir-common/-ir/-opt/
-   -passes/-vaffle-target/-virt/fuzz (construction + matches).
-2. Post-mov DCE working set at 73.4M vars (volar-ir-opt) — the stage
-   that now kills first after movfuscation completes.
-3. PolyCoeffs inline small-monomial storage (representation change) —
-   the remaining ~2.5GB of per-Poly heap.
+Next levers — ALL THREE DONE (2026-11-01):
+1. **DONE — Box the Oracle/Action payload structs in `Stmt`**: the
+   enum's stride was measured at 128 bytes (align 16), not 80 —
+   Node was 136B. After boxing, Stmt = 64 bytes (Poly sets the stride),
+   Node = 72B; the mov-block's flat stmt Vec alone drops ~10GB -> ~5.3GB
+   at 73.4M stmts. Guard test pins the 64-byte stride.
+2. **DONE — post-mov DCE working set**: the returned remap BTreeMap
+   (~73M entries, ~3.5-5.6GB of node overhead) is now a dense Vec<u32>
+   (~294MB), and the rewrite compacts in place with a write cursor
+   instead of clone-then-swap (was ~2x the block at the peak).
+3. **DONE — PolyCoeffs single-variable monomial keys inline**: new
+   `PolyKey<V>` (One(V) inline / Many(Vec<V>)) replaces the monomial
+   `Vec<V>` key; ordering matches the old lexicographic Vec order so
+   binary search is unchanged, and every API surface keeps its shape
+   (iter/keys yield &[V], insert/entry/from_iter take Vec<V>). At the
+   movfuscator's ~50M single-variable monomials this removes ~50M heap
+   allocations (~1.5GB) and halves the per-Poly malloc count.

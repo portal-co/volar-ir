@@ -441,7 +441,7 @@ pub fn merge_poly_into<V: Clone + Ord>(
         if src_coeff & 1 == 0 {
             continue;
         }
-        *dst_coeffs.entry(src_key.clone()).or_insert(0) ^= coeff;
+        *dst_coeffs.entry(src_key.to_vec()).or_insert(0) ^= coeff;
     }
 
     // Remove zero-coefficient entries (XOR cancellations).

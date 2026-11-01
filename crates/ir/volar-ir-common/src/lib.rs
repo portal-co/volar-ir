@@ -277,6 +277,64 @@ mod storage_access_tests {
     }
 }
 
+/// One monomial key of a [`Stmt::Poly`].
+///
+/// The overwhelmingly common shape at whole-program scale is a
+/// single-variable monomial (the movfuscator's AND/XOR/gate polynomials),
+/// so `One` inlines that variable with no per-key heap allocation; `Many`
+/// holds the general case. Ordering is exactly the old `Vec<V>`
+/// lexicographic order (a length-1 key `[a]` compares like that slice), so
+/// binary search over the canonical key order is unchanged.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum PolyKey<V> {
+    /// A single-variable monomial, stored inline.
+    One(V),
+    /// A multi-variable monomial, stored as a sorted variable list.
+    Many(Vec<V>),
+}
+
+impl<V> PolyKey<V> {
+    /// Normalize a key list: a length-1 list becomes the inline form.
+    pub fn from_vec(vars: Vec<V>) -> Self {
+        match vars.len() {
+            1 => {
+                let mut it = vars.into_iter();
+                Self::One(it.next().expect("len 1"))
+            }
+            _ => Self::Many(vars),
+        }
+    }
+
+    /// The key's variables as a slice.
+    pub fn as_slice(&self) -> &[V] {
+        match self {
+            Self::One(v) => core::slice::from_ref(v),
+            Self::Many(vars) => vars,
+        }
+    }
+
+    /// The key's variables as a mutable slice (length-preserving).
+    pub fn as_mut_slice(&mut self) -> &mut [V] {
+        match self {
+            Self::One(v) => core::slice::from_mut(v),
+            Self::Many(vars) => vars,
+        }
+    }
+
+    /// Lexicographic comparison against a raw key slice; matches the
+    /// derived `Ord` between two `PolyKey`s exactly.
+    fn cmp_slice(&self, key: &[V]) -> core::cmp::Ordering
+    where
+        V: Ord,
+    {
+        self.as_slice().cmp(key)
+    }
+}
+
 /// Canonical sparse coefficient collection for [`Stmt::Poly`].
 ///
 /// Monomials are held in lexicographic key order with at most one entry per
@@ -289,7 +347,7 @@ mod storage_access_tests {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct PolyCoeffs<V>(Vec<(Vec<V>, u8)>);
+pub struct PolyCoeffs<V>(Vec<(PolyKey<V>, u8)>);
 
 impl<V> Default for PolyCoeffs<V> {
     fn default() -> Self {
@@ -316,7 +374,7 @@ impl<V> PolyCoeffs<V> {
     /// Create a collection holding exactly one monomial (exact capacity).
     pub fn single(key: Vec<V>, coeff: u8) -> Self {
         let mut outer = Vec::with_capacity(1);
-        outer.push((key, coeff));
+        outer.push((PolyKey::from_vec(key), coeff));
         Self(outer)
     }
 
@@ -336,13 +394,15 @@ impl<V> PolyCoeffs<V> {
     }
 
     /// Iterate over `(monomial, coefficient)` pairs in canonical key order.
-    pub fn iter(&self) -> impl Iterator<Item = (&Vec<V>, &u8)> {
-        self.0.iter().map(|(monomial, coeff)| (monomial, coeff))
+    pub fn iter(&self) -> impl Iterator<Item = (&[V], &u8)> {
+        self.0
+            .iter()
+            .map(|(monomial, coeff)| (monomial.as_slice(), coeff))
     }
 
     /// Iterate over monomial keys in canonical order.
-    pub fn keys(&self) -> impl Iterator<Item = &Vec<V>> {
-        self.0.iter().map(|(monomial, _)| monomial)
+    pub fn keys(&self) -> impl Iterator<Item = &[V]> {
+        self.0.iter().map(|(monomial, _)| monomial.as_slice())
     }
 
     /// Iterate over coefficients in canonical key order.
@@ -351,15 +411,16 @@ impl<V> PolyCoeffs<V> {
     }
 
     /// Retain monomials for which `f` returns `true`.
-    pub fn retain(&mut self, mut f: impl FnMut(&Vec<V>, &mut u8) -> bool) {
-        self.0.retain_mut(|(monomial, coeff)| f(monomial, coeff));
+    pub fn retain(&mut self, mut f: impl FnMut(&[V], &mut u8) -> bool) {
+        self.0
+            .retain_mut(|(monomial, coeff)| f(monomial.as_slice(), coeff));
     }
 }
 
 impl<V: Ord> PolyCoeffs<V> {
     fn key_index(&self, key: &[V]) -> Result<usize, usize> {
         self.0
-            .binary_search_by(|(monomial, _)| monomial.as_slice().cmp(key))
+            .binary_search_by(|(monomial, _)| monomial.cmp_slice(key))
     }
 
     /// Return the coefficient for `key`, if present.
@@ -372,7 +433,7 @@ impl<V: Ord> PolyCoeffs<V> {
         match self.key_index(&key) {
             Ok(index) => Some(core::mem::replace(&mut self.0[index].1, coeff)),
             Err(index) => {
-                self.0.insert(index, (key, coeff));
+                self.0.insert(index, (PolyKey::from_vec(key), coeff));
                 None
             }
         }
@@ -402,9 +463,9 @@ impl<V: Ord> PolyCoeffs<V> {
     /// collide, the later entry replaces the earlier one, matching the
     /// map-style behavior of this type; callers needing algebraic combination
     /// must apply the `Poly` type's coefficient semantics themselves.
-    pub fn remap_monomials_in_place(&mut self, mut f: impl FnMut(&mut Vec<V>)) {
+    pub fn remap_monomials_in_place(&mut self, mut f: impl FnMut(&mut [V])) {
         for (monomial, _) in &mut self.0 {
-            f(monomial);
+            f(monomial.as_mut_slice());
         }
         if self
             .0
@@ -436,10 +497,10 @@ impl<V: Ord> PolyCoeffs<V> {
     /// properties.
     pub fn remap_monomials_in_place_preserving_key_order(
         &mut self,
-        mut f: impl FnMut(&mut Vec<V>),
+        mut f: impl FnMut(&mut [V]),
     ) {
         for (monomial, _) in &mut self.0 {
-            f(monomial);
+            f(monomial.as_mut_slice());
         }
     }
 }
@@ -450,7 +511,7 @@ pub enum PolyCoeffsEntry<'a, V> {
     Occupied(&'a mut u8),
     /// A key position that has not been allocated yet.
     Vacant {
-        entries: &'a mut Vec<(Vec<V>, u8)>,
+        entries: &'a mut Vec<(PolyKey<V>, u8)>,
         index: usize,
         key: Vec<V>,
     },
@@ -467,7 +528,7 @@ impl<'a, V> PolyCoeffsEntry<'a, V> {
                 index,
                 key,
             } => {
-                entries.insert(index, (key, default));
+                entries.insert(index, (PolyKey::from_vec(key), default));
                 &mut entries[index].1
             }
         }
@@ -479,26 +540,43 @@ impl<V> IntoIterator for PolyCoeffs<V> {
     type IntoIter = alloc::vec::IntoIter<(Vec<V>, u8)>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        // Keys flatten back to their raw variable lists; single-variable
+        // keys re-materialize a one-element Vec (cold path -- owned
+        // iteration is only used by rewrite passes).
+        self.0
+            .into_iter()
+            .map(|(key, coeff)| {
+                let vars = match key {
+                    PolyKey::One(v) => {
+                        let mut out = Vec::new();
+                        out.push(v);
+                        out
+                    }
+                    PolyKey::Many(vars) => vars,
+                };
+                (vars, coeff)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 
 impl<'a, V> IntoIterator for &'a PolyCoeffs<V> {
-    type Item = (&'a Vec<V>, &'a u8);
+    type Item = (&'a [V], &'a u8);
     type IntoIter =
-        core::iter::Map<core::slice::Iter<'a, (Vec<V>, u8)>, fn(&(Vec<V>, u8)) -> (&Vec<V>, &u8)>;
+        core::iter::Map<core::slice::Iter<'a, (PolyKey<V>, u8)>, for<'b> fn(&'b (PolyKey<V>, u8)) -> (&'b [V], &'b u8)>;
 
     fn into_iter(self) -> Self::IntoIter {
-        fn as_pair<V>(entry: &(Vec<V>, u8)) -> (&Vec<V>, &u8) {
-            (&entry.0, &entry.1)
-        }
-        self.0.iter().map(as_pair)
+        self.0
+            .iter()
+            .map(|entry: &(PolyKey<V>, u8)| (entry.0.as_slice(), &entry.1))
     }
 }
 
 impl<V: Ord> core::iter::FromIterator<(Vec<V>, u8)> for PolyCoeffs<V> {
     fn from_iter<T: IntoIterator<Item = (Vec<V>, u8)>>(iter: T) -> Self {
-        let mut entries: Vec<(Vec<V>, u8)> = iter.into_iter().collect();
+        let mut entries: Vec<(PolyKey<V>, u8)> =
+            iter.into_iter().map(|(key, c)| (PolyKey::from_vec(key), c)).collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         let mut write = 0;
         for read in 0..entries.len() {
@@ -544,7 +622,7 @@ mod poly_coeffs_tests {
         assert_eq!(
             coeffs
                 .iter()
-                .map(|(key, value)| (key.clone(), *value))
+                .map(|(key, value)| (key.to_vec(), *value))
                 .collect::<Vec<_>>(),
             vec![(vec![2], 3), (vec![3], 7)]
         );

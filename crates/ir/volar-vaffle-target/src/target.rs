@@ -3587,7 +3587,7 @@ mod tests {
             .keys()
             .find(|m| m.len() == 2)
             .expect("OR must have exactly one degree-2 monomial")
-            .clone();
+            .to_vec();
         assert_eq!(or_ab.len(), 2);
         let (or_a, or_b) = (or_ab[0], or_ab[1]);
         assert_eq!(or_coeffs.get(&vec![or_a]), Some(&1u8));
