@@ -1972,9 +1972,7 @@ fn revm_wasm32_import_probe() {
                             continue;
                         }
                         for (bi, blk) in b.blocks.iter().enumerate() {
-                            if let vaffle::Terminator::Return { values } =
-                                &blk.terminator
-                            {
+                            if let vaffle::Terminator::Return { values } = &blk.terminator {
                                 if values.is_empty() {
                                     eprintln!(
                                         "EMPTY RET PROBE f{fi} b{bi}: sig_results={sig_results} stmts={}",
@@ -2005,9 +2003,10 @@ fn revm_wasm32_import_probe() {
                                 if shown >= 3 {
                                     break 'outer;
                                 }
-                                if let vaffle::Value::Op(
-                                    volar_ir_common::Stmt::Merge { parts, .. },
-                                ) = &b.values[sid.0].kind
+                                if let vaffle::Value::Op(volar_ir_common::Stmt::Merge {
+                                    parts,
+                                    ..
+                                }) = &b.values[sid.0].kind
                                 {
                                     let foreign: Vec<usize> = parts
                                         .iter()
@@ -2061,7 +2060,10 @@ fn revm_wasm32_import_probe() {
                             if cross.is_empty() {
                                 continue;
                             }
-                            eprintln!("SSA SHAPE: func {fi} has {} cross-block values", cross.len());
+                            eprintln!(
+                                "SSA SHAPE: func {fi} has {} cross-block values",
+                                cross.len()
+                            );
                             for &v in cross.iter().take(4) {
                                 let def = format!("{:?}", b.values[v].kind);
                                 let owner = b
@@ -2121,10 +2123,8 @@ fn revm_wasm32_import_probe() {
                         if reported >= 2 {
                             break;
                         }
-                        if let (
-                            vaffle::FuncDecl::Body(pre_b),
-                            vaffle::FuncDecl::Body(post_b),
-                        ) = (pre_f, post_f)
+                        if let (vaffle::FuncDecl::Body(pre_b), vaffle::FuncDecl::Body(post_b)) =
+                            (pre_f, post_f)
                         {
                             let pre_v = dom_violations(pre_b);
                             if pre_v.is_empty() {
@@ -2138,9 +2138,7 @@ fn revm_wasm32_import_probe() {
                                 post_v.len()
                             );
                             for (vid, owner, use_b, pre_preds) in pre_v.iter().take(2) {
-                                let post_entry = post_v
-                                    .iter()
-                                    .find(|(v2, _, _, _)| v2 == vid);
+                                let post_entry = post_v.iter().find(|(v2, _, _, _)| v2 == vid);
                                 let post_preds: Option<&Vec<usize>> =
                                     post_entry.map(|(_, _, _, ps)| ps);
                                 eprintln!(
@@ -2160,10 +2158,10 @@ fn revm_wasm32_import_probe() {
                     for f in vaffle.funcs.iter() {
                         match f {
                             vaffle::FuncDecl::Body(_) => body_count += 1,
-                            vaffle::FuncDecl::Import { module: m, name, .. } => {
-                                *import_names
-                                    .entry(format!("{m}::{name}"))
-                                    .or_insert(0usize) += 1;
+                            vaffle::FuncDecl::Import {
+                                module: m, name, ..
+                            } => {
+                                *import_names.entry(format!("{m}::{name}")).or_insert(0usize) += 1;
                             }
                             _ => {}
                         }
@@ -2195,10 +2193,8 @@ fn revm_wasm32_import_probe() {
                     }
                 }
                 let lowered_at = std::time::Instant::now();
-                let (blocks, types) =
-                    volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
-                let n_stmts: usize =
-                    blocks.blocks.iter().map(|b| b.stmts.len()).sum();
+                let (blocks, types) = volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
+                let n_stmts: usize = blocks.blocks.iter().map(|b| b.stmts.len()).sum();
                 eprintln!(
                     "revm wasm32 lower OK in {:?}: {} blocks, {n_stmts} stmts, {} types",
                     lowered_at.elapsed(),
@@ -2254,12 +2250,24 @@ fn revm_wasm32_import_probe() {
                                 volar_ir::ir::IRBlockTargetId::Block(id) => {
                                     succ.push(id.0 as usize);
                                 }
-                                volar_ir::ir::IRBlockTargetId::Dyn(_) => dyn_seen = true,
+                                // Mirror the movfuscation layout: a Dyn
+                                // target visits ALL blocks (the continuation
+                                // identity is a runtime value).
+                                volar_ir::ir::IRBlockTargetId::Dyn(_) => {
+                                    dyn_seen = true;
+                                    for i in 0..n {
+                                        succ.push(i);
+                                    }
+                                }
                                 _ => {}
                             };
                             match term {
                                 volar_ir::ir::IRTerminator::Jmp { target } => push_target(target),
-                                volar_ir::ir::IRTerminator::JumpCond { then_target, else_target, .. } => {
+                                volar_ir::ir::IRTerminator::JumpCond {
+                                    then_target,
+                                    else_target,
+                                    ..
+                                } => {
                                     push_target(then_target);
                                     push_target(else_target);
                                 }
@@ -2305,17 +2313,22 @@ fn revm_wasm32_import_probe() {
                             })
                             .count();
                         eprintln!("FACT sinks={sinks} dyn_terms={dyn_terms}");
+                        {
+                            let t2 = format!("{:?}", blocks.blocks[2].terminator);
+                            eprintln!(
+                                "FACT block2: stmts={} term={}",
+                                blocks.blocks[2].stmts.len(),
+                                &t2[..t2.len().min(300)]
+                            );
+                        }
 
                         let _ = &seen;
                     }
                     let mut types = types;
                     let mov_src = blocks.clone();
-                    let mov_b = volar_ir_passes::movfuscate::movfuscate_ir_owned(
-                        blocks,
-                        &mut types,
-                    );
-                    let post_s: usize =
-                        mov_b.blocks.iter().map(|b| b.stmts.len()).sum();
+                    let mov_b =
+                        volar_ir_passes::movfuscate::movfuscate_ir_owned(blocks, &mut types);
+                    let post_s: usize = mov_b.blocks.iter().map(|b| b.stmts.len()).sum();
                     let post_hist = hist(&mov_b);
                     eprintln!("movfuscate post-hist: {post_hist:?}");
                     let stats = volar_ir_passes::movfuscate::LAST_LAYOUT_STATS
@@ -2400,10 +2413,8 @@ fn revm_unmodified_import_probe() {
             // module (transferring ~1B values by clone would double RSS).
             if std::env::var_os("REVM_UNMOD_LOWER").is_some() {
                 let lowered_at = std::time::Instant::now();
-                let (blocks, types) =
-                    volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
-                let n_stmts: usize =
-                    blocks.blocks.iter().map(|b| b.stmts.len()).sum();
+                let (blocks, types) = volar_vaffle_target::lower_vaffle_to_ir_incremental(vaffle);
+                let n_stmts: usize = blocks.blocks.iter().map(|b| b.stmts.len()).sum();
                 eprintln!(
                     "revm unmodified lower OK in {:?}: {} blocks, {n_stmts} stmts, {} types",
                     lowered_at.elapsed(),
@@ -2493,9 +2504,7 @@ fn native_bulk_sum(sel: u32) -> u32 {
 /// Dominance-violation scanner for one VAFFLE body: cross-block uses
 /// whose def block does not dominate the using block. Returns
 /// (value, owner, use_block, use_block_preds) triples.
-fn dom_violations(
-    b: &vaffle::FuncBody,
-) -> Vec<(usize, usize, usize, Vec<usize>)> {
+fn dom_violations(b: &vaffle::FuncBody) -> Vec<(usize, usize, usize, Vec<usize>)> {
     let n = b.blocks.len();
     let mut def_block = vec![usize::MAX; b.values.len()];
     let mut preds: Vec<std::collections::BTreeSet<usize>> =
@@ -2521,8 +2530,7 @@ fn dom_violations(
                 default_target,
                 ..
             } => {
-                let mut v: Vec<usize> =
-                    targets.iter().map(|t| t.block.0).collect();
+                let mut v: Vec<usize> = targets.iter().map(|t| t.block.0).collect();
                 v.push(default_target.block.0);
                 v
             }
@@ -2645,8 +2653,8 @@ fn dispatch_table_read_write_reuse() {
     // and loads (direct and through a GEP off the param) route through the
     // shared Table-on-ID dispatch: write path (incl. the value-param
     // threading), read path, and check-once reuse for the derived pointer.
-    let ll = std::fs::read_to_string(artifacts().join("dispatch_probe.ll"))
-        .expect("dispatch_probe.ll");
+    let ll =
+        std::fs::read_to_string(artifacts().join("dispatch_probe.ll")).expect("dispatch_probe.ll");
     let context = Context::create();
     let llvm_mod = context
         .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
@@ -2659,12 +2667,9 @@ fn dispatch_table_read_write_reuse() {
     } else {
         volar_llvm_vaffle_import::LlvmImportConfig::default().with_table_dispatch()
     };
-    let module = volar_llvm_vaffle_import::import_module_with_config(
-        &llvm_mod,
-        &["dispatch_probe"],
-        config,
-    )
-    .expect("LLVM import");
+    let module =
+        volar_llvm_vaffle_import::import_module_with_config(&llvm_mod, &["dispatch_probe"], config)
+            .expect("LLVM import");
     let fid = module
         .exports
         .get("dispatch_probe")
@@ -2728,12 +2733,11 @@ fn bulk_memory_loop_matches_unroll() {
             entry,
             volar_llvm_vaffle_import::LlvmImportConfig::default(),
         );
-    let (loop_mod, loop_fid, loop_values, loop_ir, loop_types) =
-        import_vaffle_with_config(
-            file,
-            entry,
-            volar_llvm_vaffle_import::LlvmImportConfig::default().with_bulk_memory_loop(),
-        );
+    let (loop_mod, loop_fid, loop_values, loop_ir, loop_types) = import_vaffle_with_config(
+        file,
+        entry,
+        volar_llvm_vaffle_import::LlvmImportConfig::default().with_bulk_memory_loop(),
+    );
 
     // The importer's own metric: the entry body's values shrink several
     // times (the 300-byte fills/copy collapse to loop scaffolding).
@@ -2745,10 +2749,8 @@ fn bulk_memory_loop_matches_unroll() {
     for sel in [0u32, 1] {
         // VAFFLE flattens the u32 param to 32 one-bit entry params; the
         // lowered IR keeps one 32-bit value.
-        let vaffle_inputs: Vec<Vec<bool>> =
-            (0..32).map(|b| vec![(sel >> b) & 1 == 1]).collect();
-        let lowered_inputs: Vec<Vec<bool>> =
-            vec![(0..32).map(|b| (sel >> b) & 1 == 1).collect()];
+        let vaffle_inputs: Vec<Vec<bool>> = (0..32).map(|b| vec![(sel >> b) & 1 == 1]).collect();
+        let lowered_inputs: Vec<Vec<bool>> = vec![(0..32).map(|b| (sel >> b) & 1 == 1).collect()];
         if std::env::var_os("VLVI_THREAD_DEBUG").is_some() {
             for f2 in &unroll_mod.funcs {
                 if let vaffle::FuncDecl::Body(b) = f2 {
@@ -2759,11 +2761,8 @@ fn bulk_memory_loop_matches_unroll() {
                             def.chars().take(100).collect::<String>()
                         );
                         for (bi, blk) in b.blocks.iter().enumerate() {
-                            if let Some(pos303) =
-                                blk.stmts.iter().position(|&sid| sid.0 == 303)
-                            {
-                                let pos313 =
-                                    blk.stmts.iter().position(|&sid| sid.0 == 313);
+                            if let Some(pos303) = blk.stmts.iter().position(|&sid| sid.0 == 303) {
+                                let pos313 = blk.stmts.iter().position(|&sid| sid.0 == 313);
                                 eprintln!(
                                     "THREAD DBG: v303 in b{bi} stmts at pos {pos303}; v313 at {pos313:?}; block stmts {}",
                                     blk.stmts.len()
@@ -2778,7 +2777,10 @@ fn bulk_memory_loop_matches_unroll() {
                                 }
                             }
                             if blk.params.iter().any(|&(vid, _)| vid.0 == 303) {
-                                eprintln!("THREAD DBG: v303 is a PARAM of b{bi} ({} params)", blk.params.len());
+                                eprintln!(
+                                    "THREAD DBG: v303 is a PARAM of b{bi} ({} params)",
+                                    blk.params.len()
+                                );
                             }
                             let t = format!("{:?}", blk.terminator);
                             if t.contains("ValueId(303)") {
@@ -2828,18 +2830,20 @@ fn bulk_memory_loop_matches_unroll() {
         )
         .0
         .expect("lowered loop eval");
-        assert_eq!(decode_bits(&lowered_unroll), want, "lowered unroll sel={sel}");
+        assert_eq!(
+            decode_bits(&lowered_unroll),
+            want,
+            "lowered unroll sel={sel}"
+        );
         assert_eq!(decode_bits(&lowered_loop), want, "lowered loop sel={sel}");
     }
 
     // The INCREMENTAL lowering agrees as well (block ids are rebased per
     // function; vars are block-scoped so no var rebase is needed). It
     // consumes the module, so it runs after the borrow-heavy gates.
-    let (inc_blocks, inc_types) =
-        volar_vaffle_target::lower_vaffle_to_ir_incremental(unroll_mod);
+    let (inc_blocks, inc_types) = volar_vaffle_target::lower_vaffle_to_ir_incremental(unroll_mod);
     for sel in [0u32, 1] {
-        let lowered_inputs: Vec<Vec<bool>> =
-            vec![(0..32).map(|b| (sel >> b) & 1 == 1).collect()];
+        let lowered_inputs: Vec<Vec<bool>> = vec![(0..32).map(|b| (sel >> b) & 1 == 1).collect()];
         let inc_out = volar_fuzz::interpreter::ir::eval_ir_with_storage(
             &inc_blocks,
             &inc_types,
@@ -2878,18 +2882,31 @@ fn bits_to_u64(v: &[std::vec::Vec<bool>]) -> u64 {
 
 #[test]
 fn incremental_multifunction_call_eval_matches_whole() {
-    use vaffle::{Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target as VTarget, Terminator, Value, ValueId};
+    use vaffle::{
+        Block, BlockId, FuncBody, FuncDecl, FuncId, Module, SigDecl, SigId, Target as VTarget,
+        Terminator, Value, ValueId,
+    };
     use volar_ir_common::{IrType, Node, Stmt, TypeTable};
 
     let mut types = TypeTable::new();
     let bit = types.bit();
     let u8_ty = types.intern(IrType::Vec(8, bit));
     let sigs = vec![
-        SigDecl { params: vec![u8_ty, u8_ty], results: vec![u8_ty] }, // 0: main
-        SigDecl { params: vec![u8_ty], results: vec![u8_ty] },        // 1: helper
+        SigDecl {
+            params: vec![u8_ty, u8_ty],
+            results: vec![u8_ty],
+        }, // 0: main
+        SigDecl {
+            params: vec![u8_ty],
+            results: vec![u8_ty],
+        }, // 1: helper
     ];
     let n = |kind: Value| Node::new(kind, (), None);
-    let tgt = |block: BlockId, args: Vec<ValueId>| VTarget { block, args, reentry: None };
+    let tgt = |block: BlockId, args: Vec<ValueId>| VTarget {
+        block,
+        args,
+        reentry: None,
+    };
 
     // helper(x) = rol8(x, 3)
     let helper = FuncBody {
@@ -2898,11 +2915,21 @@ fn incremental_multifunction_call_eval_matches_whole() {
         blocks: vec![Block {
             params: vec![(ValueId(0), u8_ty)],
             stmts: vec![ValueId(1)],
-            terminator: Terminator::Return { values: vec![ValueId(1)] },
+            terminator: Terminator::Return {
+                values: vec![ValueId(1)],
+            },
         }],
         values: vec![
-            n(Value::Param { block: BlockId(0), ty: u8_ty, idx: 0 }),
-            n(Value::Op(Stmt::Rol { src: ValueId(0), ty: u8_ty, n: 3 })),
+            n(Value::Param {
+                block: BlockId(0),
+                ty: u8_ty,
+                idx: 0,
+            }),
+            n(Value::Op(Stmt::Rol {
+                src: ValueId(0),
+                ty: u8_ty,
+                n: 3,
+            })),
         ],
     };
 
@@ -2933,22 +2960,48 @@ fn incremental_multifunction_call_eval_matches_whole() {
     let (c3, t3) = (ValueId(35), ValueId(44));
     let m = ValueId(51);
     let mut main_values: Vec<Node<Value, ()>> = vec![
-        n(Value::Param { block: BlockId(0), ty: u8_ty, idx: 0 }),
-        n(Value::Param { block: BlockId(0), ty: u8_ty, idx: 1 }),
-        n(Value::Call { func: FuncId(1), args: vec![ValueId(0)] }),
+        n(Value::Param {
+            block: BlockId(0),
+            ty: u8_ty,
+            idx: 0,
+        }),
+        n(Value::Param {
+            block: BlockId(0),
+            ty: u8_ty,
+            idx: 1,
+        }),
+        n(Value::Call {
+            func: FuncId(1),
+            args: vec![ValueId(0)],
+        }),
     ];
     for j in 0..8u8 {
-        main_values.push(n(Value::Output { value: c0, idx: j as usize }));
+        main_values.push(n(Value::Output {
+            value: c0,
+            idx: j as usize,
+        }));
     }
     main_values.push(n(u8v(t0)));
-    main_values.push(n(Value::Call { func: FuncId(1), args: vec![t0] }));
+    main_values.push(n(Value::Call {
+        func: FuncId(1),
+        args: vec![t0],
+    }));
     for j in 0..8u8 {
-        main_values.push(n(Value::Output { value: c1, idx: j as usize }));
+        main_values.push(n(Value::Output {
+            value: c1,
+            idx: j as usize,
+        }));
     }
     main_values.push(n(u8v(t1)));
-    main_values.push(n(Value::Call { func: FuncId(1), args: vec![t0] }));
+    main_values.push(n(Value::Call {
+        func: FuncId(1),
+        args: vec![t0],
+    }));
     for j in 0..8u8 {
-        main_values.push(n(Value::Output { value: c2, idx: j as usize }));
+        main_values.push(n(Value::Output {
+            value: c2,
+            idx: j as usize,
+        }));
     }
     main_values.push(n(u8v(t2)));
     // b1's param values (32..34), then its call/outputs/merge (35..44),
@@ -2960,9 +3013,15 @@ fn incremental_multifunction_call_eval_matches_whole() {
             idx: (vid - 32) as usize,
         }));
     }
-    main_values.push(n(Value::Call { func: FuncId(1), args: vec![ValueId(34)] }));
+    main_values.push(n(Value::Call {
+        func: FuncId(1),
+        args: vec![ValueId(34)],
+    }));
     for j in 0..8u8 {
-        main_values.push(n(Value::Output { value: c3, idx: j as usize }));
+        main_values.push(n(Value::Output {
+            value: c3,
+            idx: j as usize,
+        }));
     }
     main_values.push(n(u8v(t3)));
     for vid in 45..51u32 {
@@ -2977,7 +3036,10 @@ fn incremental_multifunction_call_eval_matches_whole() {
         rb.push((i, ValueId(48))); // even result bits <- r0
         rb.push((i, ValueId(50))); // odd result bits <- r2
     }
-    main_values.push(n(Value::Op(Stmt::Shuffle { result_bits: rb, ty: u8_ty })));
+    main_values.push(n(Value::Op(Stmt::Shuffle {
+        result_bits: rb,
+        ty: u8_ty,
+    })));
 
     let mut b0_stmts = vec![c0];
     for j in 0..8u8 {
@@ -3014,15 +3076,20 @@ fn incremental_multifunction_call_eval_matches_whole() {
                 },
             },
             Block {
-                params: vec![(ValueId(32), u8_ty), (ValueId(33), u8_ty), (ValueId(34), u8_ty)],
+                params: vec![
+                    (ValueId(32), u8_ty),
+                    (ValueId(33), u8_ty),
+                    (ValueId(34), u8_ty),
+                ],
                 stmts: b1_stmts,
-                terminator: Terminator::Jump(tgt(
-                    BlockId(3),
-                    vec![ValueId(32), ValueId(33), t3],
-                )),
+                terminator: Terminator::Jump(tgt(BlockId(3), vec![ValueId(32), ValueId(33), t3])),
             },
             Block {
-                params: vec![(ValueId(45), u8_ty), (ValueId(46), u8_ty), (ValueId(47), u8_ty)],
+                params: vec![
+                    (ValueId(45), u8_ty),
+                    (ValueId(46), u8_ty),
+                    (ValueId(47), u8_ty),
+                ],
                 stmts: vec![],
                 terminator: Terminator::Jump(tgt(
                     BlockId(3),
@@ -3030,7 +3097,11 @@ fn incremental_multifunction_call_eval_matches_whole() {
                 )),
             },
             Block {
-                params: vec![(ValueId(48), u8_ty), (ValueId(49), u8_ty), (ValueId(50), u8_ty)],
+                params: vec![
+                    (ValueId(48), u8_ty),
+                    (ValueId(49), u8_ty),
+                    (ValueId(50), u8_ty),
+                ],
                 stmts: vec![m],
                 terminator: Terminator::Return { values: vec![m] },
             },
@@ -3066,8 +3137,14 @@ fn incremental_multifunction_call_eval_matches_whole() {
         let bit = types.bit();
         let u8_ty = types.intern(volar_ir_common::IrType::Vec(8, bit));
         vec![
-            SigDecl { params: vec![u8_ty, u8_ty], results: vec![u8_ty] },
-            SigDecl { params: vec![u8_ty], results: vec![u8_ty] },
+            SigDecl {
+                params: vec![u8_ty, u8_ty],
+                results: vec![u8_ty],
+            },
+            SigDecl {
+                params: vec![u8_ty],
+                results: vec![u8_ty],
+            },
         ]
     }
 
@@ -3086,13 +3163,12 @@ fn incremental_multifunction_call_eval_matches_whole() {
             let want = bits_to_u64(&vaffle_out);
 
             // Whole-module lowering: connected + correct.
-            let (whole, whole_types) =
-                volar_vaffle_target::lower_vaffle_to_ir(&build(
-                    build_types(),
-                    main.clone(),
-                    helper.clone(),
-                    build_sigs(),
-                ));
+            let (whole, whole_types) = volar_vaffle_target::lower_vaffle_to_ir(&build(
+                build_types(),
+                main.clone(),
+                helper.clone(),
+                build_sigs(),
+            ));
             if a == 0x01 && b == 0x00 {
                 for (bi, blk) in whole.blocks.iter().enumerate() {
                     eprintln!(
@@ -3104,7 +3180,11 @@ fn incremental_multifunction_call_eval_matches_whole() {
                 }
             }
             let reachable = count_reachable_from_entry(&whole);
-            assert_eq!(reachable, whole.blocks.len(), "whole module not fully reachable");
+            assert_eq!(
+                reachable,
+                whole.blocks.len(),
+                "whole module not fully reachable"
+            );
             let whole_out = volar_fuzz::interpreter::ir::eval_ir_with_storage(
                 &whole,
                 &whole_types,
@@ -3124,9 +3204,17 @@ fn incremental_multifunction_call_eval_matches_whole() {
                 helper.clone(),
                 build_sigs(),
             ));
-            assert_eq!(inc.blocks.len(), whole.blocks.len(), "block count divergence");
+            assert_eq!(
+                inc.blocks.len(),
+                whole.blocks.len(),
+                "block count divergence"
+            );
             let reachable = count_reachable_from_entry(&inc);
-            assert_eq!(reachable, inc.blocks.len(), "incremental module not fully reachable");
+            assert_eq!(
+                reachable,
+                inc.blocks.len(),
+                "incremental module not fully reachable"
+            );
             let inc_out = volar_fuzz::interpreter::ir::eval_ir_with_storage(
                 &inc,
                 &inc_types,
@@ -3138,7 +3226,11 @@ fn incremental_multifunction_call_eval_matches_whole() {
             )
             .0
             .expect("incremental IR eval");
-            assert_eq!(bits_to_u64(&inc_out), want, "incremental IR a={a:#x} b={b:#x}");
+            assert_eq!(
+                bits_to_u64(&inc_out),
+                want,
+                "incremental IR a={a:#x} b={b:#x}"
+            );
         }
     }
 }
@@ -3167,7 +3259,11 @@ fn count_reachable_from_entry(blocks: &volar_ir::ir::IRBlocks) -> usize {
                 IRBlockTargetId::Dyn(_) => push_all(&mut stack),
                 _ => {}
             },
-            IRTerminator::JumpCond { then_target, else_target, .. } => {
+            IRTerminator::JumpCond {
+                then_target,
+                else_target,
+                ..
+            } => {
                 for t in [then_target, else_target] {
                     match t.dest {
                         IRBlockTargetId::Block(id) => stack.push(id.0 as usize),

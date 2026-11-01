@@ -49,8 +49,16 @@ Driven by `volar-steel/tests/frontend_probe.rs`:
 `revm_driver_wasm32_o0.ll` is the same revm driver compiled for
 `wasm32-unknown-unknown`, stopping at LLVM IR:
 
-    cd revm-driver && cargo rustc --target wasm32-unknown-unknown -- \
-      --emit=llvm-ir -C opt-level=0
+    cd revm-driver && CARGO_PROFILE_DEV_LTO=fat CARGO_PROFILE_DEV_CODEGEN_UNITS=1 \
+      cargo rustc --target wasm32-unknown-unknown -- \
+      --emit=llvm-ir -C opt-level=0 -C panic=abort
+
+  The fat-LTO build merges every dependency CGU into one module, so
+  cross-CGU calls (previously 73 `declare`d import callees that orphaned
+  everything downstream of the first call) arrive WITH bodies. Then
+  sanitize for the importer's LLVM build:
+
+      python3 sanitize_wasm_ll.py <emitted>.ll revm_driver_wasm32_o0.ll
 
 copy the emitted
 `target/wasm32-unknown-unknown/debug/deps/revm_steel_driver-*.ll` here as

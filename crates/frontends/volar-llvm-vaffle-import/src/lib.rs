@@ -1046,6 +1046,15 @@ struct Importer<'ctx> {
     /// globals). A runtime-dispatched pointer still names each pool by its
     /// own storage ID, so coherence is preserved.
     pools: Vec<(StorageId, u64)>,
+    /// Dedicated GLOBAL spillover pools: each holds ONLY globals (byte
+    /// addressing, `2^global_addr_bits` bytes per pool). Kept separate from
+    /// `pools` (which pool[0] shares between the global head and alloca
+    /// carving) because global BYTE addresses and alloca BIT addresses
+    /// share the storage's numeric address space — a global at byte `g`
+    /// would collide with an alloca carved at bit `g`. Whole-program LTO
+    /// modules reference megabytes of rodata, so globals spill here when
+    /// pool[0]'s byte head fills.
+    global_pools: Vec<(StorageId, u64)>,
     global_pool_offset: HashMap<PointerValue<'ctx>, u64>,
     /// The one SigId per LLVM function. Signature shape is
     /// provenance-independent (param/result types don't change across
@@ -1250,6 +1259,7 @@ impl<'ctx> Importer<'ctx> {
             storage_for_global: HashMap::new(),
             global_pool_offset: HashMap::new(),
             pools: Vec::new(),
+            global_pools: Vec::new(),
             sig_of: HashMap::new(),
             storage_alloc: StorageAllocator::new(GLOBAL_STORAGE_BASE),
             alloca_data: Vec::new(),
@@ -1660,10 +1670,28 @@ impl<'ctx> Importer<'ctx> {
     /// caller may pass any global's address regardless of which function
     /// directly references it syntactically.
     fn register_all_globals(&mut self, llvm_module: &LlvmModule<'ctx>) -> IResult<()> {
+        use inkwell::llvm_sys::core::LLVMGetFirstUse;
+        use inkwell::values::AsValueRef as _;
         let mut count = 0usize;
+        let mut skipped_unused = 0usize;
         for global in llvm_module.get_globals() {
             let key = global.as_pointer_value();
             if self.storage_for_global.contains_key(&key) {
+                continue;
+            }
+            // A global whose address is NEVER taken (no use anywhere in
+            // the module — not in an instruction, not in another global's
+            // initializer) cannot have its location referenced by any
+            // lowered body, so it needs no pool slot. Whole-program LTO
+            // modules carry tens of thousands of data globals for
+            // functions that are never imported; registering all of them
+            // exhausts the pointer-value address field for symbols the
+            // program cannot reach. Skipping unused globals is a SAFE
+            // over-approximation: any use in lowered code implies a use
+            // exists, so every resolvable symbol is still registered.
+            // SAFETY: `global` is a live module global's value ref.
+            if unsafe { LLVMGetFirstUse(global.as_value_ref()) }.is_null() {
+                skipped_unused += 1;
                 continue;
             }
             let ty: BasicTypeEnum = global
@@ -1676,12 +1704,24 @@ impl<'ctx> Importer<'ctx> {
             self.global_pool_offset.insert(key, base);
             count += 1;
         }
-        if count > self.max_dispatch_candidates {
+        // The runtime dispatch candidate set is per-STORAGE (each global
+        // resolves to its pool storage; the byte address disambiguates
+        // within it), so the global COUNT does not widen any site's
+        // candidate mux. The pools themselves are the candidate-bearing
+        // storages — bound those instead.
+        let pool_storages = self.pools.len() + self.global_pools.len();
+        if pool_storages > self.max_dispatch_candidates {
             return Err(ImportError::Unsupported(format!(
-                "module has {count} globals, exceeding the {}-candidate \
-                 limit for runtime pointer dispatch",
+                "module has {pool_storages} pool storages (for {count} \
+                 used globals), exceeding the {}-candidate limit for \
+                 runtime pointer dispatch",
                 self.max_dispatch_candidates
             )));
+        }
+        if std::env::var_os("VLVI_IMPORT_STATS").is_some() && (skipped_unused > 0 || count > 0) {
+            eprintln!(
+                "import stats: registered {count} used globals across {pool_storages} pool storages; skipped {skipped_unused} never-referenced globals"
+            );
         }
         Ok(())
     }
@@ -1703,30 +1743,61 @@ impl<'ctx> Importer<'ctx> {
     /// pointers get no trimmed-address bound).
     fn is_pool_storage(&self, sid: StorageId) -> bool {
         self.pools.iter().any(|&(p, _)| p == sid)
+            || self.global_pools.iter().any(|&(p, _)| p == sid)
     }
 
-    /// Carve `n_bytes` for a GLOBAL from pool[0]'s tail at 16-byte
-    /// alignment, returning `(pool, byte offset)`. Globals live only in
-    /// pool[0] so their dispatch-candidate byte addressing stays uniform.
-    /// Fails closed when pool[0] outgrows the pointer-value encoding's
-    /// address field (a module whose GLOBALS alone exceed it has no
-    /// multi-pool remedy — the encoding itself is the limit).
+    /// Carve `n_bytes` for a GLOBAL at 16-byte alignment, returning
+    /// `(pool, byte offset)`. Globals fill pool[0]'s byte head first
+    /// (keeping the historical single-pool layout when they fit), then
+    /// spill into dedicated global pools: each global pool carries ONLY
+    /// globals, byte-addressed across the full `2^global_addr_bits`
+    /// address space, so whole-program LTO modules with megabytes of
+    /// referenced rodata import without exhausting the pointer-value
+    /// address field. Allocas never carve from global pools (see
+    /// `pool_carve_alloca`), so the two address domains cannot collide.
     fn pool_carve_global(&mut self, n_bytes: u64) -> IResult<(StorageId, u64)> {
-        let base = self.pools.first().map(|&(_, b)| b).unwrap_or(0);
-        let base = base.next_multiple_of(16);
-        let end = base
-            .checked_add(n_bytes)
-            .ok_or_else(|| ImportError::Unsupported("static pool size overflow".into()))?;
-        if end >= (1u64 << self.global_addr_bits()) {
-            return Err(ImportError::Unsupported(
-                "static pool exhausted: module globals exceed the \
-                 pointer-value address field"
-                    .into(),
-            ));
+        let capacity = 1u64 << self.global_addr_bits();
+        // Pool[0]'s byte head first, bounded so global byte addresses can
+        // never reach the allocas' bit-address domain above them.
+        let head_room = (1u64 << (self.global_addr_bits() - 3))
+            .saturating_sub(self.pools.first().map(|&(_, b)| b).unwrap_or(0));
+        let aligned_head = self
+            .pools
+            .first()
+            .map(|&(_, b)| b)
+            .unwrap_or(0)
+            .next_multiple_of(16);
+        if n_bytes
+            .checked_add(aligned_head)
+            .is_some_and(|end| end <= aligned_head.saturating_add(head_room))
+            && aligned_head
+                .checked_add(n_bytes)
+                .is_some_and(|end| end <= 1u64 << self.global_addr_bits())
+        {
+            if let Some(first) = self.pools.first_mut() {
+                first.1 = aligned_head + n_bytes;
+                return Ok((first.0, aligned_head));
+            }
         }
-        let pool = self.pool_ensure();
-        self.pools[0].1 = end;
-        Ok((pool, base))
+        // Dedicated global pools: byte-addressed, exclusive to globals.
+        let mut base = None;
+        for pool in self.global_pools.iter_mut() {
+            let aligned = pool.1.next_multiple_of(16);
+            if aligned
+                .checked_add(n_bytes)
+                .is_some_and(|end| end <= capacity)
+            {
+                base = Some((pool.0, aligned));
+                pool.1 = aligned + n_bytes;
+                break;
+            }
+        }
+        if base.is_none() {
+            let p = self.storage_alloc.alloc();
+            self.global_pools.push((p, n_bytes));
+            base = Some((p, 0));
+        }
+        Ok(base.expect("carve resolved"))
     }
 
     /// Carve `n_bytes` for a NON-ESCAPING ALLOCA, returning
@@ -2214,10 +2285,52 @@ impl<'ctx> Importer<'ctx> {
                 let block = fctx.current;
                 self.ptr_value_bits(fctx, block, p)?
             }
+            BasicValueEnum::StructValue(st) => {
+                // A constant aggregate (rustc's niche-encoded enum
+                // constants — e.g. the `{ ptr, i32 } { ptr inttoptr
+                // (i32 1), i32 0 }` shape of an initialized OnceLock
+                // slot): flatten field-wise in declaration order,
+                // matching the aggregate-return convention the call
+                // sites use. Field recursion bottoms out at ints,
+                // pointers, and (nested) aggregates.
+                let mut bits = Vec::new();
+                for i in 0..st.count_fields() {
+                    let f = st.get_field_at_index(i).ok_or_else(|| {
+                        ImportError::Unsupported(
+                            "non-constant aggregate operand is unsupported".into(),
+                        )
+                    })?;
+                    bits.extend(self.value_bits(fctx, f)?);
+                }
+                bits
+            }
+            BasicValueEnum::ArrayValue(arr) => {
+                // Constant array operands: element-wise flatten via
+                // LLVMGetElementAsConstant (inkwell 0.10 exposes no
+                // per-element accessor on ArrayValue).
+                use inkwell::llvm_sys::core::LLVMGetElementAsConstant;
+                let len = arr.get_type().len();
+                let mut bits = Vec::new();
+                for i in 0..len {
+                    // SAFETY: `i` is within the array constant's length.
+                    let raw = unsafe { LLVMGetElementAsConstant(arr.as_value_ref(), i) };
+                    if raw.is_null() {
+                        return Err(ImportError::Unsupported(
+                            "non-constant array operand is unsupported".into(),
+                        ));
+                    }
+                    // SAFETY: `raw` is a live constant value ref.
+                    let f = unsafe { BasicValueEnum::new(raw) };
+                    bits.extend(self.value_bits(fctx, f)?);
+                }
+                bits
+            }
             _ => {
-                return Err(ImportError::Unsupported(
-                    "unsupported value kind (only integers and pointers-into-globals are supported)".into(),
-                ));
+                let ty = format!("{:?}", v.get_type());
+                return Err(ImportError::Unsupported(format!(
+                    "unsupported value kind (only integers and pointers-into-globals are supported): type={ty} value={}",
+                    v.print_to_string().to_string_lossy().chars().take(220).collect::<String>()
+                )));
             }
         };
         self.cache_put(fctx, v.as_any_value_enum(), bits.clone());
@@ -2760,6 +2873,262 @@ impl<'ctx> Importer<'ctx> {
                     }
                 }
                 None
+            }
+            InstructionOpcode::Fence => {
+                // Single-threaded wasm32: a memory fence orders no other
+                // circuit accesses — a no-op. (Seen next to `bytes`'
+                // refcount atomics.)
+                None
+            }
+            InstructionOpcode::AtomicCmpXchg => {
+                // Single-threaded wasm32: cmpxchg is
+                // old = *ptr; success = (old == cmp);
+                // *ptr = success ? new : old; -> returns { old, success }.
+                // The aggregate result flattens to [old bits..., success]
+                // (fields in declaration order — the convention the
+                // extractvalue handling and aggregate call results use).
+                // Seen at -O0 from `bytes`' refcount compare_exchange.
+                let ptr = load_store_pointer(instr, 0)?;
+                self.ensure_default_address_space(ptr)?;
+                let cmp = op!(1);
+                let val = op!(2);
+                // The instruction's own type is the aggregate { T, i1 };
+                // the accessed width is the cmp value's width.
+                let val_ty = instr
+                    .get_operand(1)
+                    .and_then(|o| o.value())
+                    .map(|v| v.get_type())
+                    .ok_or_else(|| ImportError::Unsupported("malformed cmpxchg".into()))?;
+                let n_bits = self.llvm_bit_width(val_ty)?;
+                let old_bits =
+                    if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned()
+                    {
+                        let ptr_bits0 = self
+                            .cache_get_dominant(fctx, &ptr.as_any_value_enum())
+                            .and_then(|b| b.first().copied())
+                            .ok_or_else(|| {
+                                ImportError::Unsupported(
+                                    "stack pointer bits missing (internal)".into(),
+                                )
+                            })?;
+                        let pointee_tid = self.llvm_type_id(val_ty)?;
+                        let addr_bound = self.stack_addr_bound(&stack_ptr);
+                        self.stack_load_dynamic(
+                            fctx,
+                            stack_ptr.storage,
+                            ptr_bits0,
+                            &stack_ptr.addr_bits,
+                            pointee_tid,
+                            n_bits,
+                            addr_bound,
+                        )
+                    } else {
+                        match self.resolve_global_ptr(fctx, ptr) {
+                            Ok(GlobalPtr::Const(g)) => self.mem_load(
+                                fctx,
+                                g.storage,
+                                g.byte_offset,
+                                n_bits.div_ceil(8),
+                            ),
+                            Ok(GlobalPtr::Symbolic {
+                                storage,
+                                offset_bits,
+                            }) => self.mem_load_dynamic(
+                                fctx,
+                                storage,
+                                &offset_bits,
+                                n_bits.div_ceil(8),
+                            ),
+                            Err(_) => {
+                                let pointee_tid = self.llvm_type_id(val_ty)?;
+                                let ptr_bits =
+                                    self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
+                                self.dispatch_read(fctx, &ptr_bits, pointee_tid, n_bits)?
+                            }
+                        }
+                    };
+                // success = (old == cmp) as one bit; store = sel(success,
+                // val, old) via AND/NOT/OR (no Select helper exists).
+                let success = self.alu(fctx, cur, HelperOp::Eq, &[old_bits.clone(), cmp.clone()]);
+                let not_success = self.alu(fctx, cur, HelperOp::Not, &[success.clone()]);
+                let val_keep = self.alu(fctx, cur, HelperOp::And, &[val.clone(), success.clone()]);
+                let old_keep = self.alu(fctx, cur, HelperOp::And, &[old_bits.clone(), not_success]);
+                let stored = self.alu(fctx, cur, HelperOp::Or, &[val_keep, old_keep]);
+                if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned()
+                {
+                    let ptr_bits0 = self
+                        .cache_get_dominant(fctx, &ptr.as_any_value_enum())
+                        .and_then(|b| b.first().copied())
+                        .ok_or_else(|| {
+                            ImportError::Unsupported("stack pointer bits missing (internal)".into())
+                        })?;
+                    let addr_bound = self.stack_addr_bound(&stack_ptr);
+                    self.stack_store_dynamic(
+                        fctx,
+                        stack_ptr.storage,
+                        ptr_bits0,
+                        &stack_ptr.addr_bits,
+                        &stored,
+                        addr_bound,
+                    );
+                } else {
+                    match self.resolve_global_ptr(fctx, ptr) {
+                        Ok(GlobalPtr::Const(g)) => self.mem_store(
+                            fctx,
+                            g.storage,
+                            g.byte_offset,
+                            &stored,
+                            n_bits.div_ceil(8),
+                        ),
+                        Ok(GlobalPtr::Symbolic {
+                            storage,
+                            offset_bits,
+                        }) => self.mem_store_dynamic(
+                            fctx,
+                            storage,
+                            &offset_bits,
+                            &stored,
+                            n_bits.div_ceil(8),
+                        ),
+                        Err(_) => {
+                            let ptr_bits =
+                                self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
+                            self.dispatch_write(fctx, &ptr_bits, &stored)?;
+                        }
+                    }
+                }
+                // `alu` returns a single-bit wire for Eq (width-1 result).
+                let mut result = old_bits;
+                let success_bit = success[0];
+                result.push(success_bit);
+                // Track the aggregate's field layout so the following
+                // `extractvalue`s resolve (fields in declaration order:
+                // [old value, success flag]).
+                fctx.aggregate_fields.insert(
+                    instr.as_any_value_enum(),
+                    vec![
+                        Some(result[..n_bits].to_vec()),
+                        Some(vec![success_bit]),
+                    ],
+                );
+                Some(result)
+            }
+            InstructionOpcode::AtomicRMW => {
+                use inkwell::AtomicRMWBinOp;
+                use inkwell::values::InstructionValue as _;
+                let ptr = load_store_pointer(instr, 0)?;
+                self.ensure_default_address_space(ptr)?;
+                let val = op!(1);
+                let n_bits = self.llvm_bit_width(instr.get_type())?;
+                let n_bytes = n_bits.div_ceil(8);
+                // Single-threaded wasm32: an atomic RMW is exactly
+                // load -> op -> store returning the OLD value; the ordering
+                // (monotonic/acquire/release/acq_rel/seq_cst) carries no
+                // circuit semantics. Seen at -O0 from `bytes`' refcount
+                // fetch_add/fetch_sub helpers.
+                let bin = instr
+                    .get_atomic_rmw_bin_op()
+                    .ok_or_else(|| ImportError::Unsupported("malformed atomicrmw".into()))?;
+                // OLD bits: the same resolution order as the Load arm.
+                let old_bits =
+                    if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned()
+                    {
+                        let ptr_bits0 = self
+                            .cache_get_dominant(fctx, &ptr.as_any_value_enum())
+                            .and_then(|b| b.first().copied())
+                            .ok_or_else(|| {
+                                ImportError::Unsupported(
+                                    "stack pointer bits missing (internal)".into(),
+                                )
+                            })?;
+                        let pointee_tid = self.llvm_type_id(instr.get_type())?;
+                        let addr_bound = self.stack_addr_bound(&stack_ptr);
+                        self.stack_load_dynamic(
+                            fctx,
+                            stack_ptr.storage,
+                            ptr_bits0,
+                            &stack_ptr.addr_bits,
+                            pointee_tid,
+                            n_bits,
+                            addr_bound,
+                        )
+                    } else {
+                        match self.resolve_global_ptr(fctx, ptr) {
+                            Ok(GlobalPtr::Const(g)) => {
+                                self.mem_load(fctx, g.storage, g.byte_offset, n_bytes)
+                            }
+                            Ok(GlobalPtr::Symbolic {
+                                storage,
+                                offset_bits,
+                            }) => self.mem_load_dynamic(fctx, storage, &offset_bits, n_bytes),
+                            // Runtime-dispatch fallback (pointer params,
+                            // phi/select-merged values): mirrors the Load
+                            // arm's fail-open path.
+                            Err(_) => {
+                                let pointee_tid = self.llvm_type_id(instr.get_type())?;
+                                let ptr_bits =
+                                    self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
+                                self.dispatch_read(fctx, &ptr_bits, pointee_tid, n_bytes)?
+                            }
+                        }
+                    };
+                let new_bits = match bin {
+                    AtomicRMWBinOp::Add => {
+                        self.alu(fctx, cur, HelperOp::Add, &[old_bits.clone(), val.clone()])
+                    }
+                    AtomicRMWBinOp::Sub => {
+                        self.alu(fctx, cur, HelperOp::Sub, &[old_bits.clone(), val.clone()])
+                    }
+                    AtomicRMWBinOp::And => {
+                        self.alu(fctx, cur, HelperOp::And, &[old_bits.clone(), val.clone()])
+                    }
+                    AtomicRMWBinOp::Or => {
+                        self.alu(fctx, cur, HelperOp::Or, &[old_bits.clone(), val.clone()])
+                    }
+                    AtomicRMWBinOp::Xor => {
+                        self.alu(fctx, cur, HelperOp::Xor, &[old_bits.clone(), val.clone()])
+                    }
+                    AtomicRMWBinOp::Xchg => val.clone(),
+                    op => {
+                        return Err(ImportError::Unsupported(format!(
+                            "atomicrmw op {op:?}"
+                        )));
+                    }
+                };
+                // NEW bits: the same resolution order as the Store arm.
+                if let Some(stack_ptr) = fctx.stack_slot_of.get(&ptr.as_any_value_enum()).cloned()
+                {
+                    let ptr_bits0 = self
+                        .cache_get_dominant(fctx, &ptr.as_any_value_enum())
+                        .and_then(|b| b.first().copied())
+                        .ok_or_else(|| {
+                            ImportError::Unsupported("stack pointer bits missing (internal)".into())
+                        })?;
+                    let addr_bound = self.stack_addr_bound(&stack_ptr);
+                    self.stack_store_dynamic(
+                        fctx,
+                        stack_ptr.storage,
+                        ptr_bits0,
+                        &stack_ptr.addr_bits,
+                        &new_bits,
+                        addr_bound,
+                    );
+                } else {
+                    match self.resolve_global_ptr(fctx, ptr) {
+                        Ok(GlobalPtr::Const(g)) => self
+                            .mem_store(fctx, g.storage, g.byte_offset, &new_bits, n_bytes),
+                        Ok(GlobalPtr::Symbolic {
+                            storage,
+                            offset_bits,
+                        }) => self.mem_store_dynamic(fctx, storage, &offset_bits, &new_bits, n_bytes),
+                        Err(_) => {
+                            let ptr_bits =
+                                self.value_bits(fctx, BasicValueEnum::PointerValue(ptr))?;
+                            self.dispatch_write(fctx, &ptr_bits, &new_bits)?;
+                        }
+                    }
+                }
+                Some(old_bits)
             }
             InstructionOpcode::GetElementPtr => {
                 let base = load_store_pointer(instr, 0)?;

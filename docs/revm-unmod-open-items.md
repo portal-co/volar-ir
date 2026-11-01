@@ -233,20 +233,44 @@ reference == whole-module IR == incremental IR on all vectors.
 Suites: vaffle-target 75/75, fuzz 91/91, lir 7/7, replay 4/4,
 ir-passes 177/177.
 
-Layer 2 (OPEN — the remaining revm elision): the import pipeline's
-`inline_vaffle_everything` leaves NO Body-to-Body calls, and the revm
-wasm32 module retains **73 `llvm::`-mangled Import declarations that
-are real internal Rust functions** (`ruint overflowing_add`,
-`slice starts_with/chunks_exact`, `from_raw_parts`, `drop_glue`
-variants, `OnceLock get_or_init`, `Into::into`, ...). Classic
-declare/define aliasing: call sites reference the `declare`d symbol
-while the worklist walked the `define`d one, so those callees became
-unresolved imports. The entry function's FIRST call targets one of
-them, and import calls lower as terminal abort sinks, orphaning
-everything downstream (probe facts: reachable=3/5092, 232 proper Dyn
-returns, 89 sink call sites, bodies=219 imports=73). Fix shape: in
-`volar-llvm-vaffle-import`, resolve declare/define aliasing when
-interning call targets (reuse the define's FuncId, or lower the
-define's body under the declare's id). Until then movfuscation of the
-revm module legitimately compresses only the reachable prefix
-(3.47M -> 8.5k stmts), NOT a lowering bug.
+Layer 2 (RESOLVED 2026-10-31): the 73 unresolved callees were NOT
+declare/define aliasing inside one module — the pre-link `.ll` carries
+cross-CGU calls as `declare`s whose DEFINES live in other CGUs (only
+177 defines / 90 declares; `overflowing_add` etc. are declare-only).
+Fix: build the driver whole-program —
+`CARGO_PROFILE_DEV_LTO=fat CARGO_PROFILE_DEV_CODEGEN_UNITS=1 cargo
+rustc --target wasm32-unknown-unknown -- --emit=llvm-ir -C opt-level=0
+-C panic=abort` — merging every dependency CGU into one module
+(12,025 defines; only `strlen`/`memcmp` remain external). The emitted
+module needs `programs/sanitize_wasm_ll.py` (newest float spellings ->
+accepted hex forms, `target_mem:` attribute tokens stripped, float
+parse/format machinery neutered `unreachable` — revm is integer-only).
+
+Importer extensions for the LTO module (all fail-closed -> lowered):
+AtomicRMW (load->op->store, old value returned; single-threaded wasm
+ordering ignored), AtomicCmpXchg (load, Eq, select-store, aggregate
+{old, success} result registered for extractvalue), Fence (no-op),
+constant-aggregate flattening in `value_bits` (StructValue fields /
+ArrayValue elements, including niche-encoded `inttoptr` enum
+constants), unused-global pool skip (`get_first_use` — safe
+over-approximation), dedicated GLOBAL spillover pools (globals were
+pool[0]-only; LTO rodata overflows the ADDR field — global pools are
+byte-addressed and never alloca-carved so the two address domains
+cannot collide), and the stale global-count dispatch gate replaced by
+a pool-storage-count gate (per-site candidates are per-STORAGE since
+pool packing; the global count does not widen any mux).
+
+RESULT (static wasm32 probe, REVM_UNMOD_LOWER VLVI_TABLE_DISPATCH
+VLVI_DISABLE_WORD_CELLS VLVI_BULK_LOOP REVM_MOVFUSCATE): import OK
+1,121 funcs / 54,545 blocks / 15.3M values in 3.2s (was 308 funcs /
+1.68M values with 73 unresolved imports); lower OK 56,734 blocks /
+26.5M stmts in 160s; **movfuscation 26.5M stmts -> 1 block / 81.7M
+stmts of guarded mov-iterations in 67s** — StorageRead 270,917 ->
+564,763 (guarded, PRESERVED), StorageWrite 293,846 -> 293,846
+(exact), Poly 8.8M -> 54.3M (guard algebra). The former 99.7% elision
+is gone: operations are carried as iterations as intended. Probe
+facts: 1,186 real call sites with proper Dyn returns, 8 remaining
+import sinks (strlen/memcmp-family call sites inside neutered/leaf
+contexts). Note: the probe's own reachability REPLICA still
+under-reports if it does not expand Dyn (the movfuscation layout
+visits all on Dyn; the replica was aligned to match).
