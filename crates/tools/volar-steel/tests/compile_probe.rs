@@ -9,6 +9,24 @@ use std::path::PathBuf;
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 
+// Phase-shaped pool allocator serving this whole test binary: IR data is
+// bump-allocated in 64MiB chunks that die wholesale when their last
+// allocation drops, so stage transitions reclaim entire regions instead of
+// leaving GBs of freed-but-never-returned pages resident. See the module
+// doc for the design and its invariants.
+mod pool_alloc;
+#[global_allocator]
+static POOL: pool_alloc::Pool = pool_alloc::Pool::new();
+
+fn pool_stats(label: &str) {
+    eprintln!(
+        "pool[{label}]: chunks={} live={}MB allocated_total={}MB",
+        POOL.chunks_live.load(std::sync::atomic::Ordering::Relaxed),
+        POOL.bytes_live.load(std::sync::atomic::Ordering::Relaxed) / (1024 * 1024),
+        POOL.bytes_allocated.load(std::sync::atomic::Ordering::Relaxed) / (1024 * 1024),
+    );
+}
+
 fn artifacts() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("programs")
 }
@@ -2432,6 +2450,7 @@ fn revm_wasm32_import_probe() {
                     blocks.blocks.len(),
                     types.0.len()
                 );
+                    pool_stats("after-lower");
                 // Baseline: does the PRE-opt module satisfy the movfuscator's
                 // per-block Dyn-target contract?
                 check_dyn_targets(&blocks, &types, "pre-ir-opt");
@@ -2446,6 +2465,7 @@ fn revm_wasm32_import_probe() {
                         blocks.blocks.len(),
                         ir_stmt_count(&blocks)
                     );
+                        pool_stats("after-ir-opt");
                     check_dyn_targets(&blocks, &types, "post-ir-opt");
                     malloc_pressure_relief();
                 }
@@ -2591,6 +2611,7 @@ fn revm_wasm32_import_probe() {
                         (stats >> 32) as usize,
                         (stats & 0xffff_ffff) as usize
                     );
+                        pool_stats("after-movfuscate");
                     // Post-movfuscation optimization: the single mov-block's
                     // guard algebra repeats shapes across iterations — CSE
                     // and DCE shake out the bookkeeping.
