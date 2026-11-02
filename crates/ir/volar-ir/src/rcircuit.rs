@@ -16,6 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use volar_ir_common::StorageId;
 
+pub mod ancilla;
 mod generated;
 pub use generated::{RCircuit, RExternalKind};
 

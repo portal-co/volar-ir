@@ -58,8 +58,9 @@ pub use storage_to_mux_ir::{
     StorageToMuxConfig, StorageToMuxError, storage_to_mux_ir, storage_to_mux_ir_with_access,
 };
 pub use to_reversible::{
-    ReversibleMode, ToReversibleError, UnknownVar, ValueWatchlist, VarWireMap, WireWatchEntry,
-    WireWatchlist, to_reversible, to_reversible_with_mode, translate_watchlist,
+    ReversibleMode, ReversibleOptions, ToReversibleError, UnknownVar, ValueWatchlist, VarWireMap,
+    WireWatchEntry, WireWatchlist, to_reversible, to_reversible_with_mode,
+    to_reversible_with_options, translate_watchlist,
 };
 pub use unroll_ir::{
     CfgSegmentUnroll, PrefixUnroll, PrefixUnrollOutcome, UnrollError, UnrollLimits,

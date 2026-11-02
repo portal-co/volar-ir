@@ -61,6 +61,7 @@ use volar_ir::circuit::BCircuit;
 use volar_ir::ir::IRVarId;
 #[cfg(test)]
 use volar_ir::rcircuit::StorageState;
+use volar_ir::rcircuit::ancilla::AncillaPool;
 use volar_ir::rcircuit::{RCircuit, RExternalKind, RGate};
 #[cfg(test)]
 use volar_ir_common::StorageId;
@@ -276,16 +277,30 @@ pub fn to_reversible(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToRevers
     to_reversible_with_mode(circ, ReversibleMode::Naive)
 }
 
-/// Convert a circuit-fused Boolar program with an explicit embedding policy.
+/// Reversible embedding policy plus generation-time resource options.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ReversibleOptions {
+    /// Embedding policy (naive or hardened).
+    pub mode: ReversibleMode,
+    /// Recycle statement-local scratch wires under the borrow/restore
+    /// contract ([`AncillaPool`]): `Or` synthesis uncomputes its two scratch
+    /// copies (+4 gates per `Or`) and `StorageRead` releases its swap scratch
+    /// (free — it is already restored). Off: scratch wires are never reused.
+    ///
+    /// Semantics are unchanged in either mode, for every initial wire
+    /// assignment — the pooled restore holds for arbitrary initial values, so
+    /// the hardened-mode identity-on-nonzero-workspace invariant is preserved.
+    pub share_scratch: bool,
+}
+
+/// Convert a circuit-fused Boolar program with explicit generation options.
 ///
-/// [`ReversibleMode::Naive`] is exactly [`to_reversible`].
-/// [`ReversibleMode::Hardened`] accepts pure Boolean statements and guarantees
-/// that all workspace and borrowed wires are restored: zero workspace selects
-/// the `(x, y ⊕ f(x))` embedding, while nonzero workspace selects identity.
-pub fn to_reversible_with_mode(
+/// [`to_reversible_with_mode`] is this with scratch sharing disabled.
+pub fn to_reversible_with_options(
     circ: &BCircuit,
-    mode: ReversibleMode,
+    options: ReversibleOptions,
 ) -> Result<(RCircuit, VarWireMap), ToReversibleError> {
+    let mode = options.mode;
     if mode == ReversibleMode::Hardened {
         for (i, node) in circ.stmts.iter().enumerate() {
             if matches!(
@@ -301,16 +316,40 @@ pub fn to_reversible_with_mode(
         }
     }
 
-    let (circuit, map) = synthesize_naive(circ)?;
+    let (circuit, map) = synthesize_naive(circ, options.share_scratch)?;
     match mode {
         ReversibleMode::Naive => Ok((circuit, map)),
         ReversibleMode::Hardened => Ok(harden(circ, circuit, map)),
     }
 }
 
+/// Convert a circuit-fused Boolar program with an explicit embedding policy.
+///
+/// [`ReversibleMode::Naive`] is exactly [`to_reversible`].
+/// [`ReversibleMode::Hardened`] accepts pure Boolean statements and guarantees
+/// that all workspace and borrowed wires are restored: zero workspace selects
+/// the `(x, y ⊕ f(x))` embedding, while nonzero workspace selects identity.
+pub fn to_reversible_with_mode(
+    circ: &BCircuit,
+    mode: ReversibleMode,
+) -> Result<(RCircuit, VarWireMap), ToReversibleError> {
+    to_reversible_with_options(
+        circ,
+        ReversibleOptions {
+            mode,
+            share_scratch: false,
+        },
+    )
+}
+
 /// Shared Boolar synthesis used directly by naive mode and as the compute
-/// phase of hardened mode.
-fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversibleError> {
+/// phase of hardened mode. When `share_scratch` is set, statement-local
+/// scratch wires come from an [`AncillaPool`] and are restored + released at
+/// statement end; otherwise every scratch wire is fresh.
+fn synthesize_naive(
+    circ: &BCircuit,
+    share_scratch: bool,
+) -> Result<(RCircuit, VarWireMap), ToReversibleError> {
     // ---- Use-count analysis -------------------------------------------------
     // Counts of each var in every *reader* position: stmt operands, storage
     // addr/src lists, and outputs. A var with count == 1 that is not an input
@@ -381,8 +420,10 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
 
     let mut gates: Vec<RGate> = Vec::new();
 
-    // Scratch allocator (appended after the provisional y register).
-    let mut next_scratch = y_base_prov + circ.outputs.len();
+    // Scratch allocator (appended after the provisional y register). All
+    // scratch wires come from this pool; whether restored wires are recycled
+    // is controlled by `share_scratch` at each release site.
+    let mut scratch = AncillaPool::new(y_base_prov + circ.outputs.len());
 
     // On-demand stmt-result ancilla allocator.
     let mut next_anc = params as usize;
@@ -501,10 +542,8 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                 let wr = next_anc;
                 next_anc += 1;
                 // De Morgan on copied-not operands: res := ¬(¬a ∧ ¬b).
-                let na = next_scratch;
-                next_scratch += 1;
-                let nb = next_scratch;
-                next_scratch += 1;
+                let na = scratch.acquire();
+                let nb = scratch.acquire();
                 gates.push(RGate::Cnot {
                     ctrl: map_vec[a.0 as usize],
                     target: na,
@@ -521,6 +560,24 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                     target: wr,
                 });
                 gates.push(RGate::X(wr));
+                if share_scratch {
+                    // Uncompute the copied-not operands (reverse of their
+                    // synthesis, in reverse order), restoring na/nb to their
+                    // borrow-time values for *any* initial assignment, then
+                    // release them for reuse by later statements.
+                    gates.push(RGate::X(nb));
+                    gates.push(RGate::Cnot {
+                        ctrl: map_vec[b.0 as usize],
+                        target: nb,
+                    });
+                    gates.push(RGate::X(na));
+                    gates.push(RGate::Cnot {
+                        ctrl: map_vec[a.0 as usize],
+                        target: na,
+                    });
+                    scratch.release(na);
+                    scratch.release(nb);
+                }
                 map_vec.push(wr);
             }
             BIrStmt::StorageRead {
@@ -532,9 +589,8 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                 // Bennett-style non-destructive read:
                 //   swap cell ↔ scratch (cell value now in scratch, cell = 0)
                 //   CNOT scratch → result wire (copy the bit out)
-                //   swap again (restore the cell, clear the scratch)
-                let s = next_scratch;
-                next_scratch += 1;
+                //   swap again (restore the cell, restore the scratch)
+                let s = scratch.acquire();
                 let addr_wires: Vec<usize> = addr.iter().map(|v| map_vec[v.0 as usize]).collect();
                 let swap = |target| RGate::StorageSwap {
                     storage: *storage,
@@ -550,6 +606,12 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                     target: wr,
                 });
                 gates.push(swap(s));
+                if share_scratch {
+                    // The second swap already restores the scratch wire to
+                    // its borrow-time value for any initial assignment, so
+                    // releasing it costs nothing.
+                    scratch.release(s);
+                }
                 map_vec.push(wr);
             }
             BIrStmt::StorageWrite {
@@ -564,9 +626,10 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
                 // into the cell. The old cell value is left in the scratch as
                 // expected Bennett garbage (documented, not uncomputed). The
                 // stmt's own result var is void — it gets a fresh ancilla
-                // that stays 0 and is never read.
-                let t = next_scratch;
-                next_scratch += 1;
+                // that stays 0 and is never read. The scratch wire keeps the
+                // old cell value as documented Bennett garbage, so it is
+                // never released back to the pool.
+                let t = scratch.acquire();
                 gates.push(RGate::Cnot {
                     ctrl: map_vec[src.0 as usize],
                     target: t,
@@ -737,7 +800,7 @@ fn synthesize_naive(circ: &BCircuit) -> Result<(RCircuit, VarWireMap), ToReversi
         });
     }
 
-    let num_wires_total = next_scratch - delta;
+    let num_wires_total = y_base_prov + circ.outputs.len() + scratch.peak_allocated() - delta;
     let circuit = RCircuit::new(num_wires_total, gates)
         .expect("to_reversible synthesis produces validated gates by construction");
     let y_end = y_base + circ.outputs.len();
@@ -779,7 +842,11 @@ fn harden(circ: &BCircuit, circuit: RCircuit, mut map: VarWireMap) -> (RCircuit,
     }
 
     let borrowed_base = circuit.num_wires;
-    let borrowed: Vec<usize> = (borrowed_base..borrowed_base + map.workspace.len()).collect();
+    // One selector plus the dirty wires the zero-test ladder actually uses
+    // (workspace.len() - 2 for n >= 3, none below) — not one per workspace
+    // wire.
+    let borrowed_count = (map.workspace.len().saturating_sub(2) + 1).max(1);
+    let borrowed: Vec<usize> = (borrowed_base..borrowed_base + borrowed_count).collect();
     let selector = *borrowed.last().expect("nonempty workspace has a selector");
 
     let mut controlled_clean_copy = Vec::with_capacity(compute.len() * 2 + output_count);
@@ -941,7 +1008,11 @@ mod tests {
     /// (x, y, zeros…) yields (x, y ⊕ f(x), garbage…), for every input pair
     /// over the given bit width.
     fn check_semantics(circ: &BCircuit) {
-        let (rc, map) = to_reversible(circ).expect("converts");
+        check_semantics_with(circ, ReversibleOptions::default());
+    }
+
+    fn check_semantics_with(circ: &BCircuit, options: ReversibleOptions) {
+        let (rc, map) = to_reversible_with_options(circ, options).expect("converts");
         let n_params = circ.params as usize;
         let n_out = circ.outputs.len();
         assert_eq!(map.var_space(), circ.var_space());
@@ -991,10 +1062,26 @@ mod tests {
     /// initialized-ancilla path: x/z/u are restored for every assignment and
     /// y changes exactly when z was all zero.
     fn check_hardened_semantics(circ: &BCircuit) {
-        let (rc, map) = to_reversible_with_mode(circ, ReversibleMode::Hardened).expect("converts");
+        check_hardened_semantics_with(
+            circ,
+            ReversibleOptions {
+                mode: ReversibleMode::Hardened,
+                share_scratch: false,
+            },
+        );
+    }
+
+    fn check_hardened_semantics_with(circ: &BCircuit, options: ReversibleOptions) {
+        let (rc, map) = to_reversible_with_options(circ, options).expect("converts");
         assert_eq!(map.mode(), ReversibleMode::Hardened);
         assert_eq!(map.num_wires(), rc.num_wires);
-        assert_eq!(map.borrowed_wires().len(), map.workspace_wires().len());
+        // Borrowed wires: one selector plus the ladder's dirty wires.
+        let expected_borrowed = if map.workspace_wires().is_empty() {
+            0
+        } else {
+            (map.workspace_wires().len().saturating_sub(2) + 1).max(1)
+        };
+        assert_eq!(map.borrowed_wires().len(), expected_borrowed);
 
         let n_params = circ.params as usize;
         let n_out = circ.outputs.len();
@@ -1491,6 +1578,125 @@ mod tests {
                 "cell[0] must hold written bit"
             );
         }
+    }
+
+    #[test]
+    fn shared_scratch_reduces_wires_and_preserves_naive_semantics() {
+        // Two Or statements: unshared synthesis uses two scratch wires each;
+        // shared synthesis restores and reuses one pair.
+        let mut circ = BCircuit::new(3);
+        let o1 = build(&mut circ, BIrStmt::Or(IRVarId(0), IRVarId(1)));
+        let o2 = build(&mut circ, BIrStmt::Or(o1, IRVarId(2)));
+        let x = build(&mut circ, BIrStmt::Xor(o2, IRVarId(0)));
+        circ.outputs = vec![x];
+
+        let (_plain_rc, plain_map) = to_reversible(&circ).expect("converts");
+        let shared = ReversibleOptions {
+            mode: ReversibleMode::Naive,
+            share_scratch: true,
+        };
+        let (_shared_rc, shared_map) =
+            to_reversible_with_options(&circ, shared).expect("converts");
+        assert_eq!(
+            shared_map.num_wires() + 2,
+            plain_map.num_wires(),
+            "the second Or must reuse the first Or's restored scratch wires"
+        );
+        check_semantics_with(&circ, shared);
+    }
+
+    #[test]
+    fn shared_scratch_recycles_storage_read_scratch() {
+        // Two reads: the swap-back already restores the scratch wire, so the
+        // second read must reuse the first's scratch at zero gate cost.
+        let sid = StorageId::DEFAULT;
+        let lane = LaneId(0);
+        let mut circ = BCircuit::new(2);
+        let r1 = circ.push_stmt(
+            BIrStmt::StorageRead {
+                storage: sid,
+                lane,
+                addr: vec![IRVarId(0)],
+            },
+            (),
+        );
+        let r2 = circ.push_stmt(
+            BIrStmt::StorageRead {
+                storage: sid,
+                lane,
+                addr: vec![IRVarId(1)],
+            },
+            (),
+        );
+        let x = build(&mut circ, BIrStmt::Xor(r2, IRVarId(0)));
+        circ.outputs = vec![x];
+
+        let (_plain_rc, plain_map) = to_reversible(&circ).expect("converts");
+        let shared = ReversibleOptions {
+            mode: ReversibleMode::Naive,
+            share_scratch: true,
+        };
+        let (shared_rc, shared_map) =
+            to_reversible_with_options(&circ, shared).expect("converts");
+        assert_eq!(shared_map.num_wires() + 1, plain_map.num_wires());
+
+        // Spot-check behavior through the storage model: r1 reads cell[x0],
+        // r2 reads cell[x1], and the output is y = r2 ^ x0.
+        for addr0 in [false, true] {
+            for addr1 in [false, true] {
+                for stored in [false, true] {
+                    let mut storage = StorageState::new();
+                    if stored {
+                        storage.insert(((sid, lane), vec![addr1]), true);
+                    }
+                    let mut wires = vec![false; shared_rc.num_wires];
+                    wires[0] = addr0;
+                    wires[1] = addr1;
+                    let y_base = shared_map.y_base();
+                    shared_rc.apply(&mut wires, &mut storage);
+                    assert_eq!(wires[y_base], stored ^ addr0, "y = r2 ^ x0");
+                    let cell = storage
+                        .get(&((sid, lane), vec![addr1]))
+                        .copied()
+                        .unwrap_or(false);
+                    assert_eq!(cell, stored, "cell must hold its original value");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_scratch_preserves_hardened_totality() {
+        // Or-heavy circuit so the hardened zero test covers a workspace with
+        // pooled scratch wires; checked over the complete state space,
+        // including nonzero (illegitimate) workspace assignments.
+        let mut circ = BCircuit::new(2);
+        let o1 = build(&mut circ, BIrStmt::Or(IRVarId(0), IRVarId(1)));
+        let a = build(&mut circ, BIrStmt::And(o1, IRVarId(1)));
+        let o2 = build(&mut circ, BIrStmt::Or(a, IRVarId(0)));
+        circ.outputs = vec![o2];
+        check_hardened_semantics_with(
+            &circ,
+            ReversibleOptions {
+                mode: ReversibleMode::Hardened,
+                share_scratch: true,
+            },
+        );
+    }
+
+    #[test]
+    fn hardened_borrowed_region_excludes_unused_dirty_wire() {
+        // Regression guard for the borrowed-region sizing: selector plus
+        // exactly the dirty wires the ladder uses.
+        let mut circ = BCircuit::new(2);
+        let o = build(&mut circ, BIrStmt::Or(IRVarId(0), IRVarId(1)));
+        let a = build(&mut circ, BIrStmt::And(o, IRVarId(1)));
+        circ.outputs = vec![a];
+        let (_rc, map) =
+            to_reversible_with_mode(&circ, ReversibleMode::Hardened).expect("converts");
+        let workspace = map.workspace_wires().len();
+        assert!(workspace >= 3, "test circuit must exercise the ladder");
+        assert_eq!(map.borrowed_wires().len(), workspace - 2 + 1);
     }
 
     #[test]

@@ -381,14 +381,23 @@ impl PipelinePass<BoolarStage> for FuseBoolar {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ToReversible {
     pub mode: volar_ir_passes::ReversibleMode,
+    /// Recycle statement-local scratch wires (borrow/restore ancilla
+    /// sharing). See [`volar_ir_passes::ReversibleOptions::share_scratch`].
+    pub share_scratch: bool,
 }
 
 impl PipelinePass<BoolarCircuitStage> for ToReversible {
     type Output = RCircuitStage;
 
     fn apply(self, circ: BCircuit) -> Result<RCircuit, BoxError> {
-        let (rcircuit, _map) =
-            volar_ir_passes::to_reversible_with_mode(&circ, self.mode).map_err(box_err)?;
+        let (rcircuit, _map) = volar_ir_passes::to_reversible_with_options(
+            &circ,
+            volar_ir_passes::ReversibleOptions {
+                mode: self.mode,
+                share_scratch: self.share_scratch,
+            },
+        )
+        .map_err(box_err)?;
         Ok(rcircuit)
     }
 }
@@ -588,7 +597,22 @@ impl Pipeline<BoolarCircuitStage> {
         self,
         mode: volar_ir_passes::ReversibleMode,
     ) -> Result<Pipeline<RCircuitStage>, BoxError> {
-        self.apply(ToReversible { mode })
+        self.apply(ToReversible {
+            mode,
+            share_scratch: false,
+        })
+    }
+
+    /// Convert to a reversible gate circuit with explicit generation options
+    /// (embedding mode plus borrow/restore scratch sharing).
+    pub fn to_reversible_with_options(
+        self,
+        options: volar_ir_passes::ReversibleOptions,
+    ) -> Result<Pipeline<RCircuitStage>, BoxError> {
+        self.apply(ToReversible {
+            mode: options.mode,
+            share_scratch: options.share_scratch,
+        })
     }
 
     /// Terminal: the circuit-fused Boolar IR.
