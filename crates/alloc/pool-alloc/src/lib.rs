@@ -104,6 +104,10 @@ fn bucket_of(size: usize) -> usize {
 
 /// `chunk` value marking a system-routed (pooling-gated-off) allocation.
 const SYSTEM_SENTINEL: usize = 1;
+/// Header magic for system-routed allocations: the hdr+8 field holds the
+/// System base pointer (the payload may sit at a variable offset to keep
+/// alignment; base+HEADER alone breaks align > 16).
+const SENTINEL_MAGIC: u32 = 0x53454E54; // 'SENT'
 
 /// `madvise` advice: drop the pages; they re-fault as zeros. Same value
 /// (4) on macOS and Linux.
@@ -695,18 +699,24 @@ unsafe impl GlobalAlloc for Pool {
             let align = layout.align().max(16);
             if !self.pooling.load(Ordering::Relaxed) {
                 // System-routed with a tagged header (see the module doc).
-                let sys = Layout::from_size_align(size + HEADER, align).expect("gated layout");
+                // Over-allocate so the payload can be rounded up to `align`:
+                // base+HEADER alone misaligns align>16 requests (payload ≡
+                // 16 mod align). hdr = payload-16 stays inside the block.
+                let sys = Layout::from_size_align(size + HEADER + align, align)
+                    .expect("gated layout");
                 let base = System.alloc(sys);
                 if base.is_null() {
                     return ptr::null_mut();
                 }
-                let b = base as usize;
-                ptr::write(b as *mut u32, size as u32);
-                #[cfg(debug_assertions)]
-                ptr::write((b + 4) as *mut u32, HEADER_MAGIC);
-                ptr::write((b + 8) as *mut usize, SYSTEM_SENTINEL);
+                let payload =
+                    ((base as usize + HEADER + (align - 1)) & !(align - 1))
+                        .max(base as usize + HEADER);
+                let hdr = payload - HEADER;
+                ptr::write(hdr as *mut u32, size as u32);
+                ptr::write((hdr + 4) as *mut u32, SENTINEL_MAGIC);
+                ptr::write((hdr + 8) as *mut usize, base as usize);
                 self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
-                return (b + HEADER) as *mut u8;
+                return payload as *mut u8;
             }
             self.lock();
             let mut chunk = *self.head.get();
@@ -861,7 +871,7 @@ unsafe impl GlobalAlloc for Pool {
                 // and the re-entrant alloc would self-deadlock on this very
                 // spin lock.
                 let magic = ptr::read((hdr + 4) as *const u32);
-                if magic != HEADER_MAGIC {
+                if magic != HEADER_MAGIC && magic != SENTINEL_MAGIC {
                     self.unlock();
                     panic!(
                         "pool free of a non-pool/corrupt pointer {ptr:?} (magic {magic:#x}); pool state: chunks={} live={}MB",
@@ -870,20 +880,23 @@ unsafe impl GlobalAlloc for Pool {
                     );
                 }
             }
-            let chunk_tag = ptr::read((hdr + 8) as *const usize);
+            let magic = ptr::read((hdr + 4) as *const u32);
             POOL_DEALLOCS.fetch_add(1, Ordering::Relaxed);
-            if chunk_tag == SYSTEM_SENTINEL {
+            if magic == SENTINEL_MAGIC {
                 POOL_SENTINEL_FREES.fetch_add(1, Ordering::Relaxed);
-                // System-routed (pooling was off at alloc): free via System
-                // with the reconstructed layout.
+                // System-routed (pooling was off at alloc): the hdr+8 field
+                // holds the true System base (the payload sits at a rounded
+                // offset — see the gated alloc). libc free only needs the
+                // base pointer; the layout argument is bookkeeping.
+                let base = ptr::read((hdr + 8) as *const usize) as *mut u8;
                 let cap = ptr::read(hdr as *const u32) as usize;
                 let sys = Layout::from_size_align(cap + HEADER, layout.align().max(16))
                     .expect("gated free");
                 self.unlock();
-                System.dealloc(hdr as *mut u8, sys);
+                System.dealloc(base, sys);
                 return;
             }
-        let chunk = chunk_tag as *mut Chunk;
+        let chunk = ptr::read((hdr + 8) as *const usize) as *mut Chunk;
         let fill_base = (*chunk).fill_base;
         let cap = ptr::read(hdr as *const u32) as usize;
         // The freed slot must live inside its chunk's data region; a
@@ -917,7 +930,15 @@ unsafe impl GlobalAlloc for Pool {
         (*chunk).outstanding -= 1;
         self.bytes_live.fetch_sub(layout.size(), Ordering::Relaxed);
         let span_end = hdr + HEADER + cap;
+        // Oversized slots (cap + HEADER >= page_size) straddle pages; the
+        // payload-magic write at node+cap-8 would land in the NEXT page's
+        // bookkeeping and a same-page page_nodes increment would double
+        // count. Route them through the Release path: their pages are
+        // reclaimable instead, and the scan (max request <= page) never
+        // wanted them anyway.
+        let oversized = cap + HEADER >= page_size();
         if self.free_mode_reuse.load(Ordering::Relaxed)
+            && !oversized
             && cap >= MIN_BUCKET_SIZE
             && layout.align().max(16) <= MIN_BUCKET_SIZE
             && (*chunk).outstanding > 0
@@ -996,7 +1017,12 @@ unsafe impl GlobalAlloc for Pool {
                     layout.size(),
                 );
             }
-            ptr::write((node as usize + cap - 8) as *mut u64, NODE_MAGIC);
+            // Only mark when the magic slot stays within the node's page:
+            // a cross-page write would poison the next page's counters.
+            let magic_at = node as usize + cap - 8;
+            if magic_at / page_size() == (node as usize) / page_size() {
+                ptr::write(magic_at as *mut u64, NODE_MAGIC);
+            }
         } else {
             // Release mode (or oversized/gated slot): forget the slot —
             // its pages can now go fully dead.
