@@ -120,6 +120,19 @@ static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
 /// Test-side trace switch (set via [`Pool::set_trace`]).
 static TRACE: AtomicBool = AtomicBool::new(false);
 
+/// Diagnostic push/pop counters for the freelist node accounting.
+static POOL_NODE_PUSHES: AtomicUsize = AtomicUsize::new(0);
+static POOL_NODE_POPS: AtomicUsize = AtomicUsize::new(0);
+static POOL_DEALLOCS: AtomicUsize = AtomicUsize::new(0);
+static POOL_PUSHLOG: AtomicUsize = AtomicUsize::new(0);
+static POOL_SENTINEL_FREES: AtomicUsize = AtomicUsize::new(0);
+
+/// Written into a dead slot's last 8 payload bytes while the slot is on
+/// a freelist; the pop clears it. A push that finds it already present is
+/// a DOUBLE PUSH (the same slot freed twice while unreused) — the direct
+/// cause of duplicate list nodes and slot double-serving.
+const NODE_MAGIC: u64 = 0x4E4F4445_1B00C0DE;
+
 fn page_size() -> usize {
     let cached = PAGE_SIZE.load(Ordering::Relaxed);
     if cached != 0 {
@@ -186,6 +199,17 @@ impl Chunk {
             let ps = page_size();
             let first = (start - base) / ps;
             let last = (end - 1 - base) / ps;
+            if first >= self.n_pages || last >= self.n_pages {
+                // A span beyond the chunk means a corrupt header (cap) or
+                // bump: the write below would land INSIDE the metadata
+                // table (page_alloc[p>=n_pages] aliases page_nodes) and
+                // silently poison counters. Loud abort instead.
+                eprintln!(
+                    "POOL-FATAL span-beyond-chunk: start={start:#x} end={end:#x} \\\n                     base={base:#x} first={first} last={last} n_pages={} fill={:#x}",
+                    self.n_pages, self.fill,
+                );
+                std::process::abort();
+            }
             for p in first..=last {
                 let lo = (start - base).max(p * ps);
                 let hi = (end - base).min((p + 1) * ps);
@@ -200,6 +224,18 @@ impl Chunk {
             let ps = page_size();
             let first = (start - base) / ps;
             let last = (end - 1 - base) / ps;
+            if first >= self.n_pages || last >= self.n_pages {
+                // Corrupt header (cap beyond the chunk): the OOB write
+                // below would land INSIDE the metadata table
+                // (page_freed[p>=n_pages] aliases page_nodes) and
+                // silently poison counters — the 0xFFFF we chased. Loud
+                // abort instead (stash the values for the abort handler).
+                eprintln!(
+                    "POOL-FATAL span-beyond-chunk: start={start:#x} end={end:#x} \\\n                     base={base:#x} first={first} last={last} n_pages={} fill={:#x}",
+                    self.n_pages, self.fill,
+                );
+                std::process::abort();
+            }
             let mut newly_dead = 0usize;
             for p in first..=last {
                 let lo = (start - base).max(p * ps);
@@ -274,6 +310,10 @@ pub struct Pool {
     /// stays pool-routed by size class; pointers allocated while pooling
     /// was off carry a sentinel-tagged header — see the module doc.
     pooling: AtomicBool,
+    /// Pure System pass-through (POOL_PASSTHROUGH=1): identical to plain
+    /// malloc — no sentinel headers, no bookkeeping. Control experiment
+    /// for app-level wild writes.
+    pass_through: AtomicBool,
     /// true = frees push slots to the freelist for reuse (churn phases);
     /// false = frees forget slots so their pages can be released
     /// (drain phases). See [`Pool::set_free_mode`].
@@ -296,6 +336,7 @@ impl Pool {
             head: UnsafeCell::new(ptr::null_mut()),
             free_chunks: UnsafeCell::new(ptr::null_mut()),
             pooling: AtomicBool::new(true),
+            pass_through: AtomicBool::new(false),
             free_mode_reuse: AtomicBool::new(true),
             chunks_live: AtomicUsize::new(0),
             bytes_live: AtomicUsize::new(0),
@@ -321,6 +362,15 @@ impl Pool {
     /// fully dead and be madvise'd — for producer/consumer phases (the
     /// movfuscator draining its input while the output grows) this makes
     /// RSS track peak-concurrent usage.
+    /// Route every allocation straight to System, byte-identical to
+    /// plain malloc (control experiment).
+    pub fn set_pass_through(&self, on: bool) {
+        self.pass_through.store(on, Ordering::Relaxed);
+        if on {
+            self.pooling.store(false, Ordering::Relaxed);
+        }
+    }
+
     pub fn set_free_mode(&self, reuse: bool) {
         self.free_mode_reuse.store(reuse, Ordering::Relaxed);
     }
@@ -331,6 +381,111 @@ impl Pool {
     }
 
     #[inline]
+    /// Loud, allocation-free-after-unlock fatal path for any invariant
+    /// violation detected under the spin lock. Panicking here would
+    /// deadlock the process silently (the panic machinery allocates
+    /// through this very allocator while we hold the lock — the message
+    /// never finishes formatting), so we unlock, print the values, and
+    /// abort. This turns "process vanishes mid-movfuscation" into a
+    /// one-line diagnosis.
+    #[cold]
+    fn pool_fatal(
+        &self,
+        msg: &str,
+        ptr: usize,
+        chunk: usize,
+        fill_base: usize,
+        cap: usize,
+        size: usize,
+    ) -> ! {
+        self.unlock();
+        eprintln!(
+            "  deallocs={} sentinel_frees={} node pushes={} pops={} drift={}",
+            POOL_DEALLOCS.load(Ordering::Relaxed),
+            POOL_SENTINEL_FREES.load(Ordering::Relaxed),
+            POOL_NODE_PUSHES.load(Ordering::Relaxed),
+            POOL_NODE_POPS.load(Ordering::Relaxed),
+            POOL_NODE_PUSHES.load(Ordering::Relaxed) as isize
+                - POOL_NODE_POPS.load(Ordering::Relaxed) as isize,
+        );
+        eprintln!(
+            "POOL-FATAL {msg}: ptr={ptr:#x} chunk={chunk:#x} fill_base={fill_base:#x} cap={cap} size={size} \
+             chunks={} live={} mode_reuse={} pooling={} pages_released={}",
+            self.chunks_live.load(Ordering::Relaxed),
+            self.bytes_live.load(Ordering::Relaxed),
+            self.free_mode_reuse.load(Ordering::Relaxed),
+            self.pooling.load(Ordering::Relaxed),
+            self.pages_released.load(Ordering::Relaxed),
+        );
+        // Dump every bucket head — if the walk found our node already on
+        // the list, this shows WHICH head holds it and the chain shape.
+        if chunk != 0 {
+            let c = chunk as *const Chunk;
+            unsafe {
+                for (i, h) in (*c).free_heads.iter().enumerate() {
+                    if !h.is_null() {
+                        let n0 = ptr::read(*h as *const *mut u8);
+                        eprintln!(
+                            "  head[{i}] = {:#x} -> {:#x}",
+                            *h as usize, n0 as usize
+                        );
+                    }
+                }
+                eprintln!(
+                    "  freed ptr={:#x} hdr={:#x} fill={:#x} fill_base={:#x}",
+                    ptr,
+                    ptr as usize - 16,
+                    (*c).fill,
+                    (*c).fill_base,
+                );
+            }
+        }
+        // Dump the failing page's neighbors so a wild write into the
+        // metadata table is visible (u16 counters + the u64 dead word).
+        if chunk != 0 && fill_base != 0 {
+            let chunk = chunk as *const Chunk;
+            let ps = page_size();
+            unsafe {
+            let pn = (ptr.wrapping_sub((*chunk).fill_base)) / ps;
+            if pn < (*chunk).n_pages {
+                eprintln!(
+                    "  page {pn}: alloc={} freed={} nodes={} \
+                     neighbors(nodes)={:?} {:?} {:?}",
+                    *(*chunk).page_alloc.add(pn),
+                    *(*chunk).page_freed.add(pn),
+                    *(*chunk).page_nodes.add(pn),
+                    (pn > 0).then(|| *(*chunk).page_nodes.add(pn - 1)),
+                    *(*chunk).page_nodes.add(pn),
+                    (pn + 1 < (*chunk).n_pages)
+                        .then(|| *(*chunk).page_nodes.add(pn + 1)),
+                );
+            } else {
+                eprintln!("  page {pn} OUT OF RANGE (n_pages={})", (*chunk).n_pages);
+            }
+            eprintln!(
+                "  chunk fields: fill={:#x} outstanding={} n_pages={} \
+                 page_alloc={:?} page_nodes={:?}",
+                (*chunk).fill,
+                (*chunk).outstanding,
+                (*chunk).n_pages,
+                (*chunk).page_alloc,
+                (*chunk).page_nodes,
+            );
+            }
+        }
+        std::process::abort();
+    }
+
+    /// Debug invariant: a served slot must never overlap the chunk
+    /// struct's own System block (a user write through such a slot lands
+    /// in free_heads/page_nodes bookkeeping — the corruption engine).
+    #[inline]
+    fn slot_overlaps_chunk(&self, chunk: *mut Chunk, ret: *mut u8, size: usize) -> bool {
+        let c = chunk as usize;
+        let r = ret as usize;
+        r < c + size_of::<Chunk>() && c < r + size
+    }
+
     fn tracing() -> bool {
         TRACE.load(Ordering::Relaxed)
     }
@@ -358,6 +513,22 @@ impl Pool {
             // zeros. No new system allocation, no RSS growth.
             let recycled = *self.free_chunks.get();
             if !recycled.is_null() {
+                // Aliasing guard: the recycled chunk must NOT still be in
+                // the live list (a double-drop would put it in both).
+                let mut lc = *self.head.get();
+                while !lc.is_null() {
+                    if lc == recycled {
+                        self.pool_fatal(
+                            "new_chunk: recycled chunk still linked live",
+                            recycled as usize,
+                            recycled as usize,
+                            (*recycled).fill_base,
+                            0,
+                            (*recycled).outstanding,
+                        );
+                    }
+                    lc = (*lc).next;
+                }
                 *self.free_chunks.get() = (*recycled).next;
                 let c = &mut *recycled;
                 c.next = *self.head.get();
@@ -451,6 +622,24 @@ impl Pool {
             // is the recorded fill_base — madvise from the struct's own
             // address would sweep a 64MiB window across unrelated mappings.
             madvise_pages((*chunk).fill_base, 0, CHUNK_SIZE / page_size());
+            // Double-drop guard: pushing the same chunk onto the recycle
+            // stack twice aliases two lifetimes of one data region (stale
+            // freelists served as fresh, double-served slots) — the root
+            // of the whole corruption chain.
+            let mut fc = *self.free_chunks.get();
+            while !fc.is_null() {
+                if fc == chunk {
+                    self.pool_fatal(
+                        "drop_chunk: chunk already on recycle stack",
+                        chunk as usize,
+                        chunk as usize,
+                        (*chunk).fill_base,
+                        0,
+                        (*chunk).outstanding,
+                    );
+                }
+                fc = (*fc).next;
+            }
             (*chunk).next = *self.free_chunks.get();
             *self.free_chunks.get() = chunk;
             self.chunks_live.fetch_sub(1, Ordering::Relaxed);
@@ -493,6 +682,9 @@ unsafe impl Sync for Pool {}
 unsafe impl GlobalAlloc for Pool {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         unsafe {
+            if self.pass_through.load(Ordering::Relaxed) {
+                return System.alloc(layout);
+            }
             if layout.size() >= DIRECT_THRESHOLD {
                 return System.alloc(layout);
             }
@@ -560,7 +752,36 @@ unsafe impl GlobalAlloc for Pool {
                             // bytes that madvise zeroes, truncating the list
                             // without ever aliasing live data).
                             let cnt = *(*chunk).page_nodes.add(pn);
-                            *(*chunk).page_nodes.add(pn) = cnt.saturating_sub(1);
+                            if cnt == 0 {
+                                // The node was on the list but its page
+                                // counter is 0 — the list or the counters
+                                // are corrupt (double-serve phantom).
+                                POOL_NODE_POPS.fetch_add(1, Ordering::Relaxed);
+                                self.pool_fatal(
+                                    "alloc: phantom freelist node (counter already 0)",
+                                    node as usize,
+                                    chunk as usize,
+                                    (*chunk).fill_base,
+                                    cap,
+                                    size,
+                                );
+                            }
+                            *(*chunk).page_nodes.add(pn) = cnt - 1;
+                            POOL_NODE_POPS.fetch_add(1, Ordering::Relaxed);
+                            ptr::write(
+                                (node as usize + cap - 8) as *mut u64,
+                                0,
+                            );
+                            if self.slot_overlaps_chunk(chunk, node, cap) {
+                                self.pool_fatal(
+                                    "alloc: reused slot overlaps the chunk struct",
+                                    node as usize,
+                                    chunk as usize,
+                                    (*chunk).fill_base,
+                                    cap,
+                                    size,
+                                );
+                            }
                             self.unlock();
                             return node as *mut u8;
                         }
@@ -585,6 +806,16 @@ unsafe impl GlobalAlloc for Pool {
                     self.bytes_live.fetch_add(size, Ordering::Relaxed);
                     self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
                     (*chunk).on_alloc_pages(base, hdr, hdr + HEADER + size);
+                    if self.slot_overlaps_chunk(chunk, data as *mut u8, size) {
+                        self.pool_fatal(
+                            "alloc: served slot overlaps the chunk struct",
+                            data as usize,
+                            chunk as usize,
+                            base,
+                            size,
+                            size,
+                        );
+                    }
                     self.unlock();
                     return data as *mut u8;
                 }
@@ -615,7 +846,10 @@ unsafe impl GlobalAlloc for Pool {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe {
-            if layout.size() >= DIRECT_THRESHOLD || layout.size() == 0 {
+            if self.pass_through.load(Ordering::Relaxed)
+                || layout.size() >= DIRECT_THRESHOLD
+                || layout.size() == 0
+            {
                 System.dealloc(ptr, layout);
                 return;
             }
@@ -637,7 +871,9 @@ unsafe impl GlobalAlloc for Pool {
                 }
             }
             let chunk_tag = ptr::read((hdr + 8) as *const usize);
+            POOL_DEALLOCS.fetch_add(1, Ordering::Relaxed);
             if chunk_tag == SYSTEM_SENTINEL {
+                POOL_SENTINEL_FREES.fetch_add(1, Ordering::Relaxed);
                 // System-routed (pooling was off at alloc): free via System
                 // with the reconstructed layout.
                 let cap = ptr::read(hdr as *const u32) as usize;
@@ -647,41 +883,125 @@ unsafe impl GlobalAlloc for Pool {
                 System.dealloc(hdr as *mut u8, sys);
                 return;
             }
-            let chunk = chunk_tag as *mut Chunk;
-            if Self::tracing() {
-                eprintln!(
-                    "  free ptr={ptr:?} cap={} chunk={chunk:?} outstanding={}",
-                    ptr::read(hdr as *const u32),
-                    (*chunk).outstanding
+        let chunk = chunk_tag as *mut Chunk;
+        let fill_base = (*chunk).fill_base;
+        let cap = ptr::read(hdr as *const u32) as usize;
+        // The freed slot must live inside its chunk's data region; a
+        // pointer outside it means the header's chunk tag is stale or the
+        // slot was misrouted — continuing would compute wild page indices.
+        if hdr < fill_base || hdr + HEADER + cap > fill_base + CHUNK_SIZE {
+            self.pool_fatal(
+                "dealloc: freed slot outside its chunk's data region",
+                ptr as usize,
+                chunk as usize,
+                fill_base,
+                cap,
+                layout.size(),
+            );
+        }
+        // Diagnostic aborts (not panics!) for every invariant: panicking
+        // under the lock self-deadlocks the process silently (the panic
+        // machinery's own allocations re-enter the pool while we hold the
+        // spin lock). Unlock + print + abort instead — the abort makes the
+        // corruption loud and immediate instead of a silent hang.
+        if (*chunk).outstanding == 0 {
+            self.pool_fatal(
+                "dealloc: outstanding underflow (double free?)",
+                ptr as usize,
+                chunk as usize,
+                fill_base,
+                cap,
+                layout.size(),
+            );
+        }
+        (*chunk).outstanding -= 1;
+        self.bytes_live.fetch_sub(layout.size(), Ordering::Relaxed);
+        let span_end = hdr + HEADER + cap;
+        if self.free_mode_reuse.load(Ordering::Relaxed)
+            && cap >= MIN_BUCKET_SIZE
+            && layout.align().max(16) <= MIN_BUCKET_SIZE
+            && (*chunk).outstanding > 0
+        {
+            // Reuse mode: return the slot to its chunk's bucket list. The
+            // NODE address is the PAYLOAD address; the next-pointer lives
+            // in the payload's first 8 bytes (dead data — the caller just
+            // gave them up), NEVER in the header (the header's cap/magic
+            // must survive for the slot's eventual re-free). The slot's
+            // pages are NOT releasable while a node exists (page_nodes).
+            let b = bucket_of(cap);
+            let node = (hdr + HEADER) as *mut u8;
+            if (node as usize) < fill_base
+                || (node as usize) >= fill_base + CHUNK_SIZE
+            {
+                self.pool_fatal(
+                    "dealloc: freelist node outside its chunk",
+                    ptr as usize,
+                    chunk as usize,
+                    fill_base,
+                    cap,
+                    layout.size(),
                 );
             }
-            (*chunk).outstanding -= 1;
-            self.bytes_live.fetch_sub(layout.size(), Ordering::Relaxed);
-            let cap = ptr::read(hdr as *const u32) as usize;
-            let span_end = hdr + HEADER + cap;
-            if self.free_mode_reuse.load(Ordering::Relaxed)
-                && cap >= MIN_BUCKET_SIZE
-                && layout.align().max(16) <= MIN_BUCKET_SIZE
-                && (*chunk).outstanding > 0
-            {
-                // Reuse mode: return the slot to its chunk's bucket list. The
-                // NODE address is the PAYLOAD address; the next-pointer lives
-                // in the payload's first 8 bytes (dead data — the caller just
-                // gave them up), NEVER in the header (the header's cap/magic
-                // must survive for the slot's eventual re-free). The slot's
-                // pages are NOT releasable while a node exists (page_nodes).
-                let b = bucket_of(cap);
-                let node = (hdr + HEADER) as *mut u8;
-                ptr::write(node as *mut *mut u8, (*chunk).free_heads[b]);
-                (*chunk).free_heads[b] = node;
-                *(*chunk)
-                    .page_nodes
-                    .add((node as usize - (*chunk).fill_base) / page_size()) += 1;
-            } else {
-                // Release mode (or oversized/gated slot): forget the slot —
-                // its pages can now go fully dead.
-                (*chunk).on_free_pages((*chunk).fill_base, hdr, span_end);
+            let pn = (node as usize - fill_base) / page_size();
+            if pn >= (*chunk).n_pages {
+                self.pool_fatal(
+                    "dealloc: freelist node page index out of range",
+                    ptr as usize,
+                    chunk as usize,
+                    fill_base,
+                    cap,
+                    layout.size(),
+                );
             }
+            ptr::write(node as *mut *mut u8, (*chunk).free_heads[b]);
+            (*chunk).free_heads[b] = node;
+            let cnt = *(*chunk).page_nodes.add(pn);
+            if cnt >= 512 {
+                // A 16KB page cannot hold more than 512 min-size slots —
+                // a larger count means the counter itself was corrupted
+                // or the pushes drifted.
+                self.pool_fatal(
+                    "dealloc: page_nodes exceeds slots-per-page",
+                    ptr as usize,
+                    chunk as usize,
+                    fill_base,
+                    cap,
+                    layout.size(),
+                );
+            }
+            *(*chunk).page_nodes.add(pn) = cnt + 1;
+            POOL_NODE_PUSHES.fetch_add(1, Ordering::Relaxed);
+            if cnt + 1 > 200
+                && POOL_PUSHLOG
+                    .fetch_add(1, Ordering::Relaxed)
+                    < 40
+            {
+                eprintln!(
+                    "PUSHLOG page={pn} node={:#x} cap={cap} cnt={}",
+                    node as usize,
+                    *(*chunk).page_nodes.add(pn)
+                );
+            }
+            // Cheap duplicate check: a served-twice slot carries the node
+            // magic (its second owner's data usually overwrites it, so a
+            // miss is not proof — the airtight full-list walk was used to
+            // root-cause the double-push chain and removed for cost).
+            if ptr::read((node as usize + cap - 8) as *const u64) == NODE_MAGIC {
+                self.pool_fatal(
+                    "dealloc: DOUBLE PUSH (slot already on freelist)",
+                    ptr as usize,
+                    chunk as usize,
+                    fill_base,
+                    cap,
+                    layout.size(),
+                );
+            }
+            ptr::write((node as usize + cap - 8) as *mut u64, NODE_MAGIC);
+        } else {
+            // Release mode (or oversized/gated slot): forget the slot —
+            // its pages can now go fully dead.
+            (*chunk).on_free_pages(fill_base, hdr, span_end);
+        }
             // Dead pages are swept lazily; a chunk whose last allocation died
             // recycles wholesale (its whole region madvise'd anyway).
             if (*chunk).outstanding == 0 {

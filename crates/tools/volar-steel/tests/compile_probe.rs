@@ -17,6 +17,17 @@ use inkwell::memory_buffer::MemoryBuffer;
 #[global_allocator]
 static POOL: pool_alloc::Pool = pool_alloc::Pool::new();
 
+fn disable_pool_if_env() {
+    // Debugging gates: POOL_OFF=1 routes every allocation to System (the
+    // pool's phase gate); POOL_PASSTHROUGH=1 is pure malloc (no sentinel
+    // headers) — bisects pool-internal vs app-level corruption.
+    if std::env::var_os("POOL_PASSTHROUGH").is_some() {
+        POOL.set_pass_through(true);
+    } else if std::env::var_os("POOL_OFF").is_some() {
+        POOL.set_pooling(false);
+    }
+}
+
 fn pool_stats(label: &str) {
     eprintln!(
         "pool[{label}]: chunks={} live={}MB allocated_total={}MB",
@@ -662,6 +673,7 @@ fn simple_loop_carried_scalar_works() {
 /// work through the pipeline?
 #[test]
 fn loop_array_push_pop_works() {
+    disable_pool_if_env();
     let (blocks, mut types) = import_program_to_ir("loop_array.ll", "push_pop");
     let movfuscated = volar_ir_passes::movfuscate::movfuscate_ir(&blocks, &mut types);
     let bit_ty = types
@@ -2482,6 +2494,13 @@ fn revm_wasm32_import_probe() {
                     pool_stats("pre-scrub");
                     blocks = blocks.clone();
                     pool_stats("post-scrub");
+                    // The movfuscator's drain runs in Release mode: freed
+                    // input slots are FORGOTTEN so their pages go fully
+                    // dead and are madvise'd mid-walk while the output
+                    // grows (the double-buffering). (Reuse mode here made
+                    // every drain-free push a freelist node — millions of
+                    // them — and fed the page_nodes overflow corruption.)
+                    POOL.set_free_mode(false);
                 }
                 malloc_pressure_relief();
                 // Movfuscation stage: convert the lowered control flow into
