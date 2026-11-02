@@ -442,3 +442,44 @@ Remaining levers, in order:
    progressively during the movfuscation walk.
 3. The movfuscator's own working set (beyond the output Vec) —
    BlockResult/boundary metadata across 56,734 blocks.
+
+
+## Pool allocator v5 + crate split + layout mem::take (2026-11-02)
+
+The allocator moved to its own crate, `crates/alloc/pool-alloc`
+(workspace member; volar-steel dev-dep). v5 synthesizes the session's
+findings into a dual-mode design:
+
+- **Freelists restored** (v3-proven: the lowering's interleaved per-
+  function SSA transients strand capacity without them — the v4
+  no-freelist experiment ballooned lowering to 13.6GB in 40s).
+- **Page release for node-free pages only**: per-page freelist-node
+  counters gate the madvise sweep (a page holding nodes keeps them).
+- **Dual free mode** (`set_free_mode`): Reuse (churn phases) vs Release
+  (drain phases — freed slots are FORGOTTEN so their pages die).
+- **Layout pass dummy-swap instead of clone** (movfuscator usage
+  lever): `layout_cfg_for_movfuscation_typed` mem::replaces each block
+  out of the input array instead of cloning — removes a ~900MB
+  full-module copy at movfuscation start.
+- Bugs fixed en route: freelist nodes must live in the PAYLOAD (header
+  nodes clobber cap/magic — the v2 lesson, re-learned); saturating
+  page-node counts (a lost count is a safe degradation).
+
+Validated: pool crate 7/7 (incl. 200k-op stress under
+POOL_STRESS_RUN=1 --nocapture); ir-passes 177; volar-steel suite in
+progress at turn end.
+
+Pipeline (guarded): through ir-opt + scrub identical to the best runs
+(after-lower 90 chunks/3.05GB live; ir-opt gated to 20MB live; scrub
+1.35GB), movfuscation peak **10.9GB** (was 13.6GB pre-v5), and **RSS
+then DROPPED to 5.5GB mid-walk** — the double-buffering demonstrably
+working: the drained input's pages return to the OS while the output
+grows. The run then vanished silently (no panic output, no guard kill)
+late in movfuscation — a crash to chase next session, likely in the
+Release-mode drain path or the layout-reordered drain order.
+
+Remaining follow-ups: (a) chase the late-movfuscation silent crash
+(RUST_BACKTRACE + pool trace in Release mode); (b) the layout pass's
+DFS reordering still scatters chunk deaths (allocation-order drain
+would sharpen the release); (c) run the full volar-steel suite to
+completion on a quieter machine.

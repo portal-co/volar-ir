@@ -9,12 +9,11 @@ use std::path::PathBuf;
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 
-// Phase-shaped pool allocator serving this whole test binary: IR data is
-// bump-allocated in 64MiB chunks that die wholesale when their last
-// allocation drops, so stage transitions reclaim entire regions instead of
-// leaving GBs of freed-but-never-returned pages resident. See the module
-// doc for the design and its invariants.
-mod pool_alloc;
+// Phase-shaped pool allocator (crate `pool-alloc`) serving this whole test
+// binary: IR data is bump-allocated in 64MiB chunks with per-4KB-page
+// release (dead pages madvise'd), so the movfuscator's input drain lowers
+// RSS mid-walk while the output grows — peak-concurrent, not cumulative.
+// See the crate doc for the design and its invariants.
 #[global_allocator]
 static POOL: pool_alloc::Pool = pool_alloc::Pool::new();
 
@@ -2627,6 +2626,7 @@ fn revm_wasm32_import_probe() {
                         (stats & 0xffff_ffff) as usize
                     );
                     pool_stats("after-movfuscate");
+                    POOL.set_free_mode(true);
                     // Post-movfuscation optimization: the single mov-block's
                     // guard algebra repeats shapes across iterations — CSE
                     // and DCE shake out the bookkeeping.

@@ -1089,6 +1089,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a69ee997a6282f8462abf1e0d8c38c965e968799e912b3bed8c9e8a28c2f9f"
 
 [[package]]
+name = "pool-alloc"
+version = "0.1.0"
+
+[[package]]
 name = "portal-lazy-transform"
 version = "0.1.0"
 source = "git+https://github.com/portal-co/portal-lazy-transform.git#f81b87c66a266db54c2b080e1d177358e140effa"
@@ -2183,6 +2187,7 @@ name = "volar-steel"
 version = "0.1.0"
 dependencies = [
  "inkwell",
+ "pool-alloc",
  "vaffle",
  "volar-fuzz",
  "volar-ir",

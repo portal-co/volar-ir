@@ -11,7 +11,9 @@
 
 use alloc::{collections::BTreeSet, vec, vec::Vec};
 
-use volar_ir::ir::{IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator};
+use volar_ir::ir::{
+    IRBlock, IRBlockId, IRBlockTargetId, IRBlocks, IRBranchTarget, IRStmt, IRTerminator,
+};
 use volar_ir_common::IrType as IRType;
 
 /// Measurements returned by [`layout_cfg_for_movfuscation`].
@@ -101,7 +103,21 @@ pub fn layout_cfg_for_movfuscation_typed<P: Clone>(
 
     let mut laid_out = Vec::with_capacity(order.len());
     for old in order {
-        let mut block = blocks.blocks[old].clone();
+        // Move the old block out (dummy-swap) instead of cloning: at
+        // whole-program scale the stmts payload is ~900MB and cloning it
+        // doubled movfuscation's peak. The dummy placeholder is only seen
+        // by callers holding `blocks` mid-loop — `blocks.blocks` is
+        // replaced with `laid_out` below before this fn returns.
+        let mut block = core::mem::replace(
+            &mut blocks.blocks[old],
+            IRBlock {
+                params: Vec::new(),
+                stmts: Vec::new(),
+                terminator: IRTerminator::Jmp {
+                    target: IRBranchTarget::new(IRBlockTargetId::Return, Vec::new()),
+                },
+            },
+        );
         block.terminator = remap_terminator(block.terminator, &old_to_new);
         // Remap Block-typed Const block-index values alongside the
         // terminators.

@@ -18,3 +18,4 @@ volar-ir-opt.workspace = true
 
 [dev-dependencies]
 volar-fuzz.workspace = true
+pool-alloc = { path = "../../alloc/pool-alloc" }

@@ -1,0 +1,8 @@
+[package]
+name = "pool-alloc"
+version = "0.1.0"
+edition = "2024"
+description = "Phase-shaped chunked pool allocator for whole-program IR pipelines (probe infrastructure)"
+license.workspace = true
+
+[dependencies]
