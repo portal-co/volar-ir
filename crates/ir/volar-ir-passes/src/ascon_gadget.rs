@@ -578,8 +578,8 @@ mod tests {
     #[test]
     fn encrypt_gadget_matches_native_ascon128a() {
         let key = [0x42u8; 16];
-        let nonce = [0x24u8; 16];
-        for bits in [1usize, 7, 8, 9, 63, 64, 65, 127, 128, 129, 200] {
+        for nonce in [[0x24u8; 16], [0xab; 16]] {
+        for bits in [1usize, 7, 8, 9, 63, 64, 65, 127, 128, 129, 200, 256, 264, 617] {
             let pt: Vec<bool> = (0..bits).map(|j| (j * 37 + 11) % 5 < 2).collect();
             let (ct_bits, tag_bits) = encrypt_in_circuit(&key, &nonce, &pt);
             let (ct_native, tag_native) =
@@ -597,6 +597,7 @@ mod tests {
                 tag_native.as_slice(),
                 "tag mismatch at {bits} bits"
             );
+        }
         }
     }
 
@@ -796,24 +797,60 @@ fn probe_init_state_matches() {
     #[test]
     fn wire_nonce_matches_const_nonce() {
         let key = [0x42u8; 16];
-        let nonce = [0x24u8; 16];
-        let pt: Vec<bool> = (0..37).map(|j| j % 3 == 1).collect();
-        let (ct_c, tag_c) = encrypt_in_circuit(&key, &nonce, &pt);
+        for nonce in [[0x24u8; 16], [0xab; 16]] {
+        for bits in [37usize, 129, 617] {
+            let pt: Vec<bool> = (0..bits).map(|j| (j * 31 + 7) % 5 < 2).collect();
+            let (ct_c, tag_c) = encrypt_in_circuit(&key, &nonce, &pt);
+            let mut circ = BCircuit::new((pt.len() + 128) as u32);
+            let pt_wires: Vec<IRVarId> = (0..pt.len() as u32).map(IRVarId).collect();
+            let nonce_wires: [IRVarId; 128] =
+                core::array::from_fn(|i| IRVarId(pt.len() as u32 + i as u32));
+            let (ct_w, tag_w) =
+                ascon128a_encrypt_wires_with_nonce(&mut circ, &key, &nonce_wires, &pt_wires);
+            let mut input = pt.clone();
+            input.extend(unpack_bytes(&nonce, 128));
+            let vals = eval(&circ, &input);
+            let ct_bits: Vec<bool> = ct_w.iter().map(|v| vals[v.0 as usize]).collect();
+            let tag_bits: Vec<bool> = tag_w.iter().map(|v| vals[v.0 as usize]).collect();
+            assert_eq!(ct_bits, ct_c, "ct divergence at {bits} bits");
+            assert_eq!(pack_bytes(&tag_bits), pack_bytes(&tag_c), "tag divergence at {bits}");
+        }
+        }
+    }
 
-        // Same, but with the nonce as 128 input wires (byte order).
-        let mut circ = BCircuit::new((pt.len() + 128) as u32);
-        let pt_wires: Vec<IRVarId> = (0..pt.len() as u32).map(IRVarId).collect();
-        let nonce_wires: [IRVarId; 128] =
-            core::array::from_fn(|i| IRVarId(pt.len() as u32 + i as u32));
-        let (ct_w, tag_w) =
-            ascon128a_encrypt_wires_with_nonce(&mut circ, &key, &nonce_wires, &pt_wires);
-        let mut input = pt.clone();
-        input.extend(unpack_bytes(&nonce, 128));
-        let vals = eval(&circ, &input);
-        let ct_bits: Vec<bool> = ct_w.iter().map(|v| vals[v.0 as usize]).collect();
-        let tag_bits: Vec<bool> = tag_w.iter().map(|v| vals[v.0 as usize]).collect();
-        assert_eq!(ct_bits, ct_c);
-        assert_eq!(pack_bytes(&tag_bits), pack_bytes(&tag_c));
+    #[test]
+    fn wire_nonce_encrypt_opens_natively() {
+        let key = [0x42u8; 16];
+        let nonce = [0xabu8; 16];
+        // Byte-aligned lengths only: native decrypt reconstructs padding
+            // positions from the ct bytes, so bit-level (non-byte) blobs are
+            // for in-circuit consumers only.
+            for bits in [40usize, 128, 136, 256, 616] {
+            let pt: Vec<bool> = (0..bits).map(|j| (j * 31 + 7) % 5 < 2).collect();
+            let mut circ = BCircuit::new((pt.len() + 128) as u32);
+            let pt_wires: Vec<IRVarId> = (0..pt.len() as u32).map(IRVarId).collect();
+            let nonce_wires: [IRVarId; 128] =
+                core::array::from_fn(|i| IRVarId(pt.len() as u32 + i as u32));
+            let (ct_w, tag_w) =
+                ascon128a_encrypt_wires_with_nonce(&mut circ, &key, &nonce_wires, &pt_wires);
+            let mut input = pt.clone();
+            input.extend(unpack_bytes(&nonce, 128));
+            let vals = eval(&circ, &input);
+            let ct_bits: Vec<bool> = ct_w.iter().map(|v| vals[v.0 as usize]).collect();
+            let tag_bits: Vec<bool> = tag_w.iter().map(|v| vals[v.0 as usize]).collect();
+            let opened = volar_spec::ascon::ascon128a_decrypt(
+                &key,
+                &nonce,
+                &[],
+                &pack_bytes(&ct_bits),
+                &pack_bytes(&tag_bits).try_into().expect("16 bytes"),
+            );
+            assert_eq!(
+                opened.as_deref().map(|v| unpack_bytes(v, bits)),
+                Some(pt.clone()),
+                "wire-nonce ciphertext must open natively at {bits} bits"
+            );
+        }
     }
 
     #[test]
