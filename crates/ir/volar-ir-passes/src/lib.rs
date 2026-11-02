@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod apply_gadgets;
+pub mod ascon_gadget;
 pub mod cfg_layout;
 pub mod dispatch_accumulator;
 pub mod from_reversible;

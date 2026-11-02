@@ -17,3 +17,4 @@ volar-side.workspace = true
 
 [dev-dependencies]
 volar-fuzz.workspace = true
+volar-spec = { git = "https://github.com/portal-co/volar.git", rev = "61b06ab" }
