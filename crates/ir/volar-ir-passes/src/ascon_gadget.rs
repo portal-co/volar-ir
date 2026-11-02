@@ -238,10 +238,48 @@ fn aead_pad_bit(n: usize) -> usize {
 /// `plaintext` are the blob plaintext wires; returns the ciphertext wires
 /// (same count as `plaintext`, zero-padded to whole bytes) and the 128 tag
 /// wires, in the blob wire format documented at the top of this module.
+/// Nonce bytes (byte order, as in the AEAD) as state words.
+fn nonce_words(b: &WireBuilder, nonce: &[u8; 16]) -> [Word; 2] {
+    [
+        const_word(b, u64::from_be_bytes(nonce[..8].try_into().expect("nonce half"))),
+        const_word(b, u64::from_be_bytes(nonce[8..].try_into().expect("nonce half"))),
+    ]
+}
+
+/// Wire-carried nonce (byte order, like the tag format) as state words:
+/// word bit `i` = nonce byte `7 - i/8`, bit `i % 8`.
+fn nonce_wires_to_words(nonce: &[IRVarId; 128]) -> [Word; 2] {
+    core::array::from_fn(|w| {
+        core::array::from_fn(|i| nonce[64 * w + 8 * (7 - i / 8) + (i % 8)])
+    })
+}
+
 pub fn ascon128a_encrypt_wires(
     circ: &mut BCircuit,
     key: &[u8; 16],
     nonce: &[u8; 16],
+    plaintext: &[IRVarId],
+) -> (Vec<IRVarId>, [IRVarId; 128]) {
+    let b = &mut WireBuilder::new(circ);
+    let nw = nonce_words(b, nonce);
+    ascon128a_encrypt_inner(circ, key, nw, plaintext)
+}
+
+/// [`ascon128a_encrypt_wires`] with the nonce carried on wires (public but
+/// runtime-dynamic values, e.g. ORAM slot nonces read from the tree).
+pub fn ascon128a_encrypt_wires_with_nonce(
+    circ: &mut BCircuit,
+    key: &[u8; 16],
+    nonce: &[IRVarId; 128],
+    plaintext: &[IRVarId],
+) -> (Vec<IRVarId>, [IRVarId; 128]) {
+    ascon128a_encrypt_inner(circ, key, nonce_wires_to_words(nonce), plaintext)
+}
+
+fn ascon128a_encrypt_inner(
+    circ: &mut BCircuit,
+    key: &[u8; 16],
+    nonce_words: [Word; 2],
     plaintext: &[IRVarId],
 ) -> (Vec<IRVarId>, [IRVarId; 128]) {
     let b = &mut WireBuilder::new(circ);
@@ -251,8 +289,8 @@ pub fn ascon128a_encrypt_wires(
         const_word(b, ASCON_128A_IV),
         const_word(b, k1),
         const_word(b, k2),
-        const_word(b, u64::from_be_bytes(nonce[..8].try_into().expect("nonce half"))),
-        const_word(b, u64::from_be_bytes(nonce[8..].try_into().expect("nonce half"))),
+        nonce_words[0],
+        nonce_words[1],
     ];
     ascon_p12_wires(b, &mut state);
     xor_const_word(b, &mut state[3], k1);
@@ -351,14 +389,45 @@ pub fn ascon128a_decrypt_wires(
         "ciphertext and plaintext bit counts agree (blob format)"
     );
     let b = &mut WireBuilder::new(circ);
+    let nw = nonce_words(b, nonce);
+    ascon128a_decrypt_inner(circ, key, nw, plaintext_bits, ciphertext, tag)
+}
+
+/// [`ascon128a_decrypt_wires`] with the nonce carried on wires.
+pub fn ascon128a_decrypt_wires_with_nonce(
+    circ: &mut BCircuit,
+    key: &[u8; 16],
+    nonce: &[IRVarId; 128],
+    plaintext_bits: usize,
+    ciphertext: &[IRVarId],
+    tag: &[IRVarId; 128],
+) -> (Vec<IRVarId>, IRVarId) {
+    ascon128a_decrypt_inner(circ, key, nonce_wires_to_words(nonce), plaintext_bits, ciphertext, tag)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ascon128a_decrypt_inner(
+    circ: &mut BCircuit,
+    key: &[u8; 16],
+    nonce_words: [Word; 2],
+    plaintext_bits: usize,
+    ciphertext: &[IRVarId],
+    tag: &[IRVarId; 128],
+) -> (Vec<IRVarId>, IRVarId) {
+    assert_eq!(
+        ciphertext.len(),
+        plaintext_bits,
+        "ciphertext and plaintext bit counts agree (blob format)"
+    );
+    let b = &mut WireBuilder::new(circ);
     let k1 = u64::from_be_bytes(key[..8].try_into().expect("key half"));
     let k2 = u64::from_be_bytes(key[8..].try_into().expect("key half"));
     let mut state: State = [
         const_word(b, ASCON_128A_IV),
         const_word(b, k1),
         const_word(b, k2),
-        const_word(b, u64::from_be_bytes(nonce[..8].try_into().expect("nonce half"))),
-        const_word(b, u64::from_be_bytes(nonce[8..].try_into().expect("nonce half"))),
+        nonce_words[0],
+        nonce_words[1],
     ];
     ascon_p12_wires(b, &mut state);
     xor_const_word(b, &mut state[3], k1);
@@ -722,6 +791,29 @@ fn probe_init_state_matches() {
         // keystream ^ 0). The first L bits must agree.
         assert_eq!(unpack_bytes(&ct_n, 1), ct_bits, "ct");
         assert_eq!(pack_bytes(&tag_bits), tag_n.as_slice(), "tag");
+    }
+
+    #[test]
+    fn wire_nonce_matches_const_nonce() {
+        let key = [0x42u8; 16];
+        let nonce = [0x24u8; 16];
+        let pt: Vec<bool> = (0..37).map(|j| j % 3 == 1).collect();
+        let (ct_c, tag_c) = encrypt_in_circuit(&key, &nonce, &pt);
+
+        // Same, but with the nonce as 128 input wires (byte order).
+        let mut circ = BCircuit::new((pt.len() + 128) as u32);
+        let pt_wires: Vec<IRVarId> = (0..pt.len() as u32).map(IRVarId).collect();
+        let nonce_wires: [IRVarId; 128] =
+            core::array::from_fn(|i| IRVarId(pt.len() as u32 + i as u32));
+        let (ct_w, tag_w) =
+            ascon128a_encrypt_wires_with_nonce(&mut circ, &key, &nonce_wires, &pt_wires);
+        let mut input = pt.clone();
+        input.extend(unpack_bytes(&nonce, 128));
+        let vals = eval(&circ, &input);
+        let ct_bits: Vec<bool> = ct_w.iter().map(|v| vals[v.0 as usize]).collect();
+        let tag_bits: Vec<bool> = tag_w.iter().map(|v| vals[v.0 as usize]).collect();
+        assert_eq!(ct_bits, ct_c);
+        assert_eq!(pack_bytes(&tag_bits), pack_bytes(&tag_c));
     }
 
     #[test]
