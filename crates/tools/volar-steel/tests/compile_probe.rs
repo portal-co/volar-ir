@@ -202,11 +202,13 @@ fn run_ir_opt(
         let t = std::time::Instant::now();
         let (c, _remaps) = volar_ir_opt::ir::dce_ir_blocks_with_remap(blocks, types);
         eprintln!("ir-opt round {round} dce: changed={c} {:?}", t.elapsed());
+        pool_stats("ir-opt-round-dce");
         changed |= c;
         if !no_cse {
             let t = std::time::Instant::now();
             let (c, _remaps) = volar_ir_opt::ir::cse_ir_blocks_with_remap(blocks, types);
             eprintln!("ir-opt round {round} cse: changed={c} {:?}", t.elapsed());
+            pool_stats("ir-opt-round-cse");
             changed |= c;
         }
         if do_fold {
@@ -2456,6 +2458,11 @@ fn revm_wasm32_import_probe() {
                 // IR-level optimization (fold/CSE/DCE/batch to fixpoint),
                 // shaking out dead guard algebra before movfuscation.
                 if std::env::var_os("REVM_IR_OPT").is_some() {
+                    // Gate the pool off for the reuse-heavy churn phases
+                    // (DCE/CSE canon maps): they interleave with the
+                    // module's persistent data and pin chunks; System
+                    // malloc serves this pattern and frees eagerly.
+                    POOL.set_pooling(false);
                     let o_at = std::time::Instant::now();
                     let passes = run_ir_opt(&mut blocks, &mut types, 6);
                     eprintln!(
@@ -2467,6 +2474,15 @@ fn revm_wasm32_import_probe() {
                     pool_stats("after-ir-opt");
                     check_dyn_targets(&blocks, &types, "post-ir-opt");
                     malloc_pressure_relief();
+                    // Re-enable the pool and SCRUB: clone the (post-opt)
+                    // module into fresh pool chunks and drop the original,
+                    // whose chunks then die wholesale — carrying the
+                    // lowering-era strand with them. The movfuscator starts
+                    // from a clean arena whose freed capacity recycles.
+                    POOL.set_pooling(true);
+                    pool_stats("pre-scrub");
+                    blocks = blocks.clone();
+                    pool_stats("post-scrub");
                 }
                 malloc_pressure_relief();
                 // Movfuscation stage: convert the lowered control flow into

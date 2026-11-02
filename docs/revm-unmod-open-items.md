@@ -399,3 +399,46 @@ Remaining reducible terms, in impact order:
 3. **Start baseline (~4.2GB)**: the ir-opt high-water survives
    `malloc_pressure_relief` (fragmentation). A two-process pipeline
    (serialize the module between stages) would reset it to ~1GB.
+
+## Pool allocator for the probes (2026-11-01, chunked arena)
+
+`crates/tools/volar-steel/tests/pool_alloc.rs` — a GlobalAlloc pool
+serving the compile_probe binary: <1MiB allocations bump into 64MiB
+system-obtained chunks; each chunk tracks outstanding count and is
+fully reclaimed (madvise(MADV_DONTNEED) + free-chunk-stack recycle)
+when its last allocation drops. Per-allocation header: 16B
+{cap: u32, magic: u32, chunk: *mut Chunk}. Size-class routing by
+layout (GlobalAlloc contract) — no pointer probing.
+
+Measured wins:
+- ir-opt churn (the 15GB of DCE/CSE canon-map allocations that
+  previously stranded GBs in chunk space): gated OFF to System
+  (`set_pooling(false)`) — the pool collapsed to 20MB live during
+  ir-opt and the chunk set shrank 80 -> 66. This is the pool's
+  biggest demonstrated win: churn phases no longer strand arena
+  capacity.
+- Pool scrub before movfuscation (clone the post-opt module into a
+  fresh arena, drop the original wholesale): arena = 1.35GB live.
+
+Measured limit — movfuscation's resident floor under the pool is
+HIGHER than malloc's: freed slots keep their pages resident until
+whole-chunk death (no sub-chunk release), while macOS malloc reclaims
+under pressure. The pipeline died inside movfuscation at 14.8GB
+(guard-capped); malloc-era kills were at ~12.6GB. The user-requested
+double-buffering (drain input chunks while the output grows) is
+implemented and correct (freed slots DO serve the Poly heaps —
+same-size reuse verified by test), but reused slots don't lower RSS:
+their pages were already resident and stay that way.
+
+Remaining levers, in order:
+1. Sub-chunk release: track per-4KB-page deadness in each chunk and
+   madvise(MADV_DONTNEED) fully-dead pages on free (page-granular
+   freelist occupancy bitmap). This is the classic arena trick the
+   design was missing — it would let the drain actually LOWER RSS
+   mid-walk.
+2. Drain-order vs allocation-order alignment: the layout pass
+   reorders blocks, so chunk deaths scatter late; processing (or
+   laying out) blocks in allocation order would let whole chunks die
+   progressively during the movfuscation walk.
+3. The movfuscator's own working set (beyond the output Vec) —
+   BlockResult/boundary metadata across 56,734 blocks.

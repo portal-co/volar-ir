@@ -22,6 +22,20 @@
 //!   blocks die chunk-by-chunk during the walk, and the ~50M `Poly`
 //!   monomial heaps die in one sweep when the output drops — instead of
 //!   millions of native frees scattering across memory.
+//! - **Phase gating**: reuse-heavy churn phases (ir-opt's per-block canon
+//!   maps) interleave with the module's persistent data and pin chunks;
+//!   routing their allocations to the system allocator during those phases
+//!   (`set_pooling(false)`) keeps the pool for the phase-shaped data
+//!   (import/lowering, movfuscation) where wholesale reclamation wins.
+//!   Pooling is always re-enabled for the drain/output phases.
+//! - **Dead chunks are recycled, not unmapped**: a fully-freed chunk is
+//!   unlinked, `madvise(MADV_DONTNEED)`d (physical pages released; they
+//!   re-fault as zeros), and pushed onto a free-chunk stack. `new_chunk`
+//!   pops that stack first, so freed capacity is REUSED and the process's
+//!   footprint tracks peak concurrent usage instead of cumulative churn
+//!   (measured: CSE alone grew the chunk set 80 -> 134 because freed
+//!   strand slots never matched later allocation shapes; with recycling
+//!   the freed regions serve whatever comes next).
 //! - **Freelist reuse inside live chunks**: lowering interleaves per-function
 //!   SSA transients (freed every function) with the module's persistent data
 //!   in the same chunks. With a pure never-rewind bump, every freed transient
@@ -71,10 +85,19 @@ const CHUNK_SIZE: usize = 64 * 1024 * 1024;
 /// the bump-rounded slot size), `magic: u32` (debug builds), `chunk: *mut
 /// Chunk`. The data pointer returned to callers points `HEADER` bytes past
 /// the header. Freelist scans read `cap` to enforce capacity >= request.
+///
+/// Phase gating: when pooling is off, a pool-eligible allocation is served
+/// by the system allocator as `cap + HEADER` bytes (align max(16, align)),
+/// with `chunk` set to [`SYSTEM_SENTINEL`]; `dealloc` reconstructs the
+/// system layout from the stored `cap`. The header is what makes the two
+/// routings distinguishable at free time.
 const HEADER: usize = 16;
 
 /// Debug-only magic stored in every pool header; a mismatch on free means
 /// a size-class routing contract violation.
+
+/// `chunk` value marking a system-routed (pooling-gated-off) allocation.
+const SYSTEM_SENTINEL: usize = 1;
 const HEADER_MAGIC: u32 = 0x1B00_C0DE; // sentinel: "b00-code" with an l-shaped 1
 
 const N_BUCKETS: usize = 17; // ceil_log2 of sizes 16B..1MiB -> buckets 4..=20
@@ -107,6 +130,15 @@ pub struct Pool {
     locked: AtomicBool,
     /// Singly-linked list of live chunks.
     head: UnsafeCell<*mut Chunk>,
+    /// Stack of fully-freed chunks awaiting reuse (VA retained; pages
+    /// madvise'd away). Recycled by `new_chunk` before hitting System.
+    free_chunks: UnsafeCell<*mut Chunk>,
+    /// When false, pool-eligible allocations route to the system
+    /// allocator (phase gating for reuse-heavy churn phases). Dealloc
+    /// stays pool-routed by size class; pointers allocated while pooling
+    /// was off have NO pool header — see the routing note in `dealloc`.
+    pooling: AtomicBool,
+    pub chunks_recycled: AtomicUsize,
     /// Live diagnostics for the probes.
     pub chunks_live: AtomicUsize,
     pub bytes_live: AtomicUsize,
@@ -119,10 +151,21 @@ impl Pool {
         Self {
             locked: AtomicBool::new(false),
             head: UnsafeCell::new(ptr::null_mut()),
+            free_chunks: UnsafeCell::new(ptr::null_mut()),
+            pooling: AtomicBool::new(true),
+            chunks_recycled: AtomicUsize::new(0),
             chunks_live: AtomicUsize::new(0),
             bytes_live: AtomicUsize::new(0),
             bytes_allocated: AtomicUsize::new(0),
         }
+    }
+
+    /// Gate pool service for pool-eligible allocations. Must not be
+    /// toggled while phase data is live unless the caller accepts that
+    /// phase allocations bypass the pool (they are freed eagerly by the
+    /// system allocator's own routing — see `dealloc`'s note).
+    pub fn set_pooling(&self, on: bool) {
+        self.pooling.store(on, Ordering::Relaxed);
     }
 
     fn lock(&self) {
@@ -140,7 +183,28 @@ impl Pool {
     }
 
     unsafe fn new_chunk(&self) -> *mut Chunk {
-        let layout = Layout::from_size_align(CHUNK_SIZE, 16).expect("chunk layout");
+        // Recycle a fully-freed chunk first: the VA is retained, the
+        // physical pages were madvise'd away at death and re-fault as
+        // zeros. No new system allocation, no RSS growth.
+        let recycled = *self.free_chunks.get();
+        if !recycled.is_null() {
+            *self.free_chunks.get() = (*recycled).next;
+            ptr::write(
+                recycled,
+                Chunk {
+                    next: *self.head.get(),
+                    outstanding: 0,
+                    fill: core::mem::size_of::<Chunk>(),
+                    free_heads: [ptr::null_mut(); N_BUCKETS],
+                },
+            );
+            *self.head.get() = recycled;
+            self.chunks_recycled.fetch_add(1, Ordering::Relaxed);
+            self.chunks_live.fetch_add(1, Ordering::Relaxed);
+            return recycled;
+        }
+        // Page-aligned so the whole-region madvise on death is exact.
+        let layout = Layout::from_size_align(CHUNK_SIZE, 16384).expect("chunk layout");
         let base = System.alloc(layout);
         if base.is_null() {
             return ptr::null_mut();
@@ -199,8 +263,15 @@ impl Pool {
             }
             link = &mut (*(*link)).next;
         }
-        let layout = Layout::from_size_align(CHUNK_SIZE, 16).expect("chunk layout");
-        System.dealloc(chunk as *mut u8, layout);
+        // Release the physical pages (re-fault as zeros) and keep the VA
+        // on the recycle stack. Region is page-aligned by construction.
+        const MADV_DONTNEED: i32 = 4;
+        unsafe extern "C" {
+            fn madvise(addr: *mut core::ffi::c_void, length: usize, advice: i32) -> i32;
+        }
+        let _ = madvise(chunk as *mut core::ffi::c_void, CHUNK_SIZE, MADV_DONTNEED);
+        (*chunk).next = *self.free_chunks.get();
+        *self.free_chunks.get() = chunk;
         self.chunks_live.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -219,6 +290,21 @@ unsafe impl GlobalAlloc for Pool {
             return System.alloc(layout);
         }
         let align = layout.align().max(16);
+        if !self.pooling.load(Ordering::Relaxed) {
+            // System-routed with a tagged header (see the header doc).
+            let sys = Layout::from_size_align(size + HEADER, align).expect("gated layout");
+            let base = System.alloc(sys);
+            if base.is_null() {
+                return ptr::null_mut();
+            }
+            let b = base as usize;
+            ptr::write(b as *mut u32, size as u32);
+            #[cfg(debug_assertions)]
+            ptr::write((b + 4) as *mut u32, HEADER_MAGIC);
+            ptr::write((b + 8) as *mut usize, SYSTEM_SENTINEL);
+            self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
+            return (b + HEADER) as *mut u8;
+        }
         self.lock();
         let mut chunk = *self.head.get();
         loop {
@@ -327,7 +413,18 @@ unsafe impl GlobalAlloc for Pool {
                 );
             }
         }
-        let chunk = ptr::read((hdr + 8) as *const *mut Chunk) as *mut Chunk;
+        let chunk_tag = ptr::read((hdr + 8) as *const usize);
+        if chunk_tag == SYSTEM_SENTINEL {
+            // System-routed (pooling was off at alloc): free via System
+            // with the reconstructed layout.
+            let cap = ptr::read(hdr as *const u32) as usize;
+            let sys = Layout::from_size_align(cap + HEADER, layout.align().max(16))
+                .expect("gated free");
+            self.unlock();
+            System.dealloc(hdr as *mut u8, sys);
+            return;
+        }
+        let chunk = chunk_tag as *mut Chunk;
         (*chunk).outstanding -= 1;
         self.bytes_live.fetch_sub(layout.size(), Ordering::Relaxed);
         if (*chunk).outstanding == 0 {
@@ -616,4 +713,18 @@ fn pool_repro_trace() {
         eprintln!("round {round}: pick={pick:#x} {op}");
         crate::POOL.check_invariants();
     }
+}
+
+#[test]
+fn pool_same_size_reuse_hits_freelist() {
+    // A freed slot must serve a same-size request (same payload address
+    // if it is the head of its bucket list).
+    let a = unsafe { std::alloc::alloc(Layout::from_size_align(16000, 16).unwrap()) };
+    let b = unsafe { std::alloc::alloc(Layout::from_size_align(16000, 16).unwrap()) };
+    unsafe { std::alloc::dealloc(a, Layout::from_size_align(16000, 16).unwrap()) };
+    let c = unsafe { std::alloc::alloc(Layout::from_size_align(16000, 16).unwrap()) };
+    eprintln!("a={a:?} b={b:?} c={c:?}");
+    assert_eq!(c, a, "same-size realloc must reuse the freed slot");
+    unsafe { std::alloc::dealloc(b, Layout::from_size_align(16000, 16).unwrap()) };
+    unsafe { std::alloc::dealloc(c, Layout::from_size_align(16000, 16).unwrap()) };
 }
