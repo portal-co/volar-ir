@@ -385,6 +385,28 @@ fn aes_block_wires(b: &mut WireBuilder, input: &Block, rks: &[[u8; 16]; 11]) -> 
     s
 }
 
+/// Append raw AES-128 block encryption on wires with a build-time constant
+/// key: one ECB-mode application per input block (callers compose CTR or
+/// other modes themselves, e.g. by feeding counter blocks and XORing the
+/// keystream with plaintext wires).
+///
+/// The whole key schedule is constant-folded natively — the key never
+/// occupies wires; only state S-boxes run in-circuit. Block bit layout is
+/// the blob convention: 16 bytes in stream order, LSB-first within each
+/// byte.
+pub fn aes128_ecb_encrypt_wires(
+    circ: &mut BCircuit,
+    key: &[u8; 16],
+    blocks: &[[IRVarId; 128]],
+) -> Vec<[IRVarId; 128]> {
+    let rks = native_key_expansion(key);
+    let b = &mut WireBuilder::new(circ);
+    blocks
+        .iter()
+        .map(|wires| block_wires(&aes_block_wires(b, &wires_block(wires), &rks)))
+        .collect()
+}
+
 /// `nonce + i` as a 128-bit big-endian ripple adder over nonce wires
 /// (wrapping, like the native `wrapping_add`). Wire for value bit `j`
 /// (LSB-first) is byte `15 - j/8`, bit `j % 8`.
@@ -681,6 +703,30 @@ mod tests {
         circ.outputs = ct.iter().chain(tag.iter()).copied().collect();
         let result = eval(&circ, pt);
         (result[..ct.len()].to_vec(), result[ct.len()..].to_vec())
+    }
+
+    #[test]
+    fn ecb_gadget_matches_fips197_kat() {
+        // FIPS-197 Appendix B / C.1 AES-128 known-answer vector.
+        let key: [u8; 16] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ];
+        let pt: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let expected: [u8; 16] = [
+            0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4,
+            0xc5, 0x5a,
+        ];
+        let mut circ = BCircuit::new(128);
+        let input: [IRVarId; 128] = core::array::from_fn(|i| IRVarId(i as u32));
+        let out = aes128_ecb_encrypt_wires(&mut circ, &key, &[input]);
+        circ.outputs = out[0].to_vec();
+        let pt_bits = unpack_bytes(&pt, 128);
+        let result = eval(&circ, &pt_bits);
+        assert_eq!(result, unpack_bytes(&expected, 128));
     }
 
     #[test]
