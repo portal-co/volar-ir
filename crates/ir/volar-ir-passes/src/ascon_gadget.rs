@@ -37,30 +37,31 @@ const ASCON_RC: [u64; 12] = [
 ];
 const ASCON_128A_IV: u64 = 0x80800c0800000000;
 
-/// Cipher profile for blob/tree encryption. AES-128 is reserved for
-/// conformance with the `oram_2pc` baseline and intentionally fails closed
-/// until ported.
+/// Cipher profile for blob/tree encryption.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CipherProfile {
-    /// Ascon-128a (default): cheap in-circuit sponge AEAD.
+    /// Ascon-128a (default): cheap in-circuit sponge AEAD, bit-granular.
     Ascon128a,
-    /// AES-128 per-node pads (reserved; not yet implemented).
+    /// AES-128 EtM (CTR + CMAC over the FAEST AES, see
+    /// [`crate::aes_gadget`]): conformance with the `oram_2pc` baseline.
+    /// Byte-granular only.
     Aes128,
 }
 
 /// Gadget construction errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GadgetError {
-    /// The AES-128 profile is reserved but not yet implemented.
-    AesProfileUnimplemented,
+    /// The AES profile operates on whole bytes; bit-granular blobs are the
+    /// Ascon profile's domain.
+    NotByteAligned,
 }
 
 impl core::fmt::Display for GadgetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::AesProfileUnimplemented => write!(
+            Self::NotByteAligned => write!(
                 f,
-                "AES-128 cipher profile is reserved but not yet implemented (use Ascon128a)"
+                "AES-128 cipher profile requires byte-aligned blobs (use Ascon128a for bit-granular)"
             ),
         }
     }
