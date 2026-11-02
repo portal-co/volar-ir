@@ -22,9 +22,17 @@
 //!   blocks die chunk-by-chunk during the walk, and the ~50M `Poly`
 //!   monomial heaps die in one sweep when the output drops — instead of
 //!   millions of native frees scattering across memory.
-//! - **No reuse, no zeroing**: freed space inside a live chunk is never
-//!   reallocated (the bump never rewinds), so untouched chunk memory is
-//!   still zeroed from its mmap origin and `alloc_zeroed` needs no memset.
+//! - **Freelist reuse inside live chunks**: lowering interleaves per-function
+//!   SSA transients (freed every function) with the module's persistent data
+//!   in the same chunks. With a pure never-rewind bump, every freed transient
+//!   permanently strands its bump space and the phase's peak balloons
+//!   (measured: lowering peaked at ~10.5GB in 15s under malloc's ~4GB). So
+//!   freed slots go onto per-chunk ceil-pow2 size-bucketed free lists and
+//!   allocations reuse the first slot with capacity >= size (steady per-phase
+//!   shapes hit exact matches immediately). Per-chunk freelists die with
+//!   their chunk, so wholesale chunk death stays sound. Reused slots carry
+//!   garbage, so `alloc_zeroed` goes through the trait's default (alloc +
+//!   zero) — correctness over the mmap-zero shortcut.
 //! - **Direct routing**: allocations of [`DIRECT_THRESHOLD`] or larger go
 //!   straight to the system allocator (they are mmap-backed natively and
 //!   freed eagerly), so no chunk is ever pinned by one huge allocation.
@@ -47,9 +55,9 @@
 //! IR type signatures.
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::cell::UnsafeCell;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::alloc::System;
 
 /// Allocations at or above this size bypass the pool and go directly to
@@ -59,13 +67,27 @@ const DIRECT_THRESHOLD: usize = 1024 * 1024;
 /// Pool chunk size.
 const CHUNK_SIZE: usize = 64 * 1024 * 1024;
 
-/// Per-allocation header: chunk back-pointer (+ debug magic). The data
-/// pointer returned to callers points `HEADER` bytes past the header.
+/// Per-allocation header layout (16 bytes): `cap: u32` (payload capacity,
+/// the bump-rounded slot size), `magic: u32` (debug builds), `chunk: *mut
+/// Chunk`. The data pointer returned to callers points `HEADER` bytes past
+/// the header. Freelist scans read `cap` to enforce capacity >= request.
 const HEADER: usize = 16;
 
 /// Debug-only magic stored in every pool header; a mismatch on free means
 /// a size-class routing contract violation.
 const HEADER_MAGIC: u32 = 0x1B00_C0DE; // sentinel: "b00-code" with an l-shaped 1
+
+const N_BUCKETS: usize = 17; // ceil_log2 of sizes 16B..1MiB -> buckets 4..=20
+
+/// Smallest payload size kept in a bucket (below this, round up to 16).
+const MIN_BUCKET_SIZE: usize = 16;
+
+/// ceil_log2 for bucket selection, clamped to [4, 20].
+fn bucket_of(size: usize) -> usize {
+    let s = size.max(MIN_BUCKET_SIZE);
+    let lg = usize::BITS - (s - 1).leading_zeros(); // ceil(log2(s))
+    (lg as usize).min(N_BUCKETS - 1 + 4).saturating_sub(4)
+}
 
 struct Chunk {
     next: *mut Chunk,
@@ -73,6 +95,11 @@ struct Chunk {
     outstanding: usize,
     /// Bump offset (bytes from the chunk base) of the next free byte.
     fill: usize,
+    /// Per-bucket free lists (null = empty). Each node is a freed slot;
+    /// the slot's first 8 bytes hold the next-node pointer (payload area,
+    /// so no extra space). Nodes live only in their own chunk's lists, so
+    /// a chunk's whole-region free is dangling-free by construction.
+    free_heads: [*mut u8; N_BUCKETS],
 }
 
 pub struct Pool {
@@ -125,6 +152,7 @@ impl Pool {
                 next: *self.head.get(),
                 outstanding: 0,
                 fill: core::mem::size_of::<Chunk>(),
+                free_heads: [ptr::null_mut(); N_BUCKETS],
             },
         );
         *self.head.get() = chunk;
@@ -132,7 +160,7 @@ impl Pool {
         chunk
     }
 
-        /// Walk the chunk list and assert structural sanity: no duplicate
+    /// Walk the chunk list and assert structural sanity: no duplicate
     /// chunk addresses, every chunk non-degenerate. Test aid.
     pub fn check_invariants(&self) {
         self.lock();
@@ -145,10 +173,16 @@ impl Pool {
             while !(*link).is_null() {
                 let c = *link as usize;
                 assert!(n < seen.len(), "chunk list longer than the checker bound");
-                assert!(!seen[..n].contains(&c), "duplicate chunk {c:#x} in live list");
+                assert!(
+                    !seen[..n].contains(&c),
+                    "duplicate chunk {c:#x} in live list"
+                );
                 seen[n] = c;
                 n += 1;
-                assert!((*(*link)).outstanding > 0, "live chunk {c:#x} has outstanding=0");
+                assert!(
+                    (*(*link)).outstanding > 0,
+                    "live chunk {c:#x} has outstanding=0"
+                );
                 link = &mut (*(*link)).next;
             }
         }
@@ -195,6 +229,43 @@ unsafe impl GlobalAlloc for Pool {
                     return ptr::null_mut();
                 }
             }
+            // Freelist first: a bucket slot with capacity >= size (the
+            // payload fits because bucket capacity is a strict pow2 ceiling
+            // and align <= 16 <= MIN_BUCKET_SIZE).
+            let b = bucket_of(size);
+            if align <= MIN_BUCKET_SIZE && !(*chunk).free_heads[b].is_null() {
+                // Bounded scan: take the first node whose stored capacity
+                // >= the request (bucket membership alone does not imply
+                // it — a slot with cap just over 2^(b-1) shares bucket b
+                // with a request of size 2^b). Nodes that don't fit stay
+                // on the list; falling through to the bump is safe.
+                // `node` is a PAYLOAD address (== the returned data
+                // pointer); its header lives at node-HEADER: cap at +0,
+                // magic at +4 (debug), chunk at +8. The freelist next
+                // pointer lives in the payload's first 8 bytes.
+                let mut prev: *mut *mut u8 = &mut (*chunk).free_heads[b];
+                let mut node = (*chunk).free_heads[b];
+                let mut hops = 0usize;
+                while !node.is_null() && hops < 32 {
+                    let cap =
+                        ptr::read((node as usize - HEADER) as *const u32) as usize;
+                    if cap >= size {
+                        // Unlink: prev's next (head field or node payload).
+                        let next = ptr::read(node as *const *mut u8);
+                        ptr::write(prev, next);
+                        let hdr = node as usize - HEADER;
+                        ptr::write((hdr + 8) as *mut *mut Chunk, chunk);
+                        (*chunk).outstanding += 1;
+                        self.bytes_live.fetch_add(size, Ordering::Relaxed);
+                        self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
+                        self.unlock();
+                        return node;
+                    }
+                    prev = node as *mut *mut u8;
+                    node = ptr::read(node as *const *mut u8);
+                    hops += 1;
+                }
+            }
             // Data goes at `data`, header 16 bytes before it, so that both
             // the header (needs 8 for the pointer) and the data (needs
             // `align`) are satisfied.
@@ -202,11 +273,9 @@ unsafe impl GlobalAlloc for Pool {
             let data = (base + (*chunk).fill + HEADER + (align - 1)) & !(align - 1);
             let hdr = data - HEADER;
             if hdr + HEADER + size <= base + CHUNK_SIZE {
+                ptr::write(hdr as *mut u32, size as u32);
                 #[cfg(debug_assertions)]
-                ptr::write(hdr as *mut u32, HEADER_MAGIC);
-                #[cfg(not(debug_assertions))]
-                ptr::write((hdr + 4) as *mut *mut Chunk, chunk);
-                #[cfg(debug_assertions)]
+                ptr::write((hdr + 4) as *mut u32, HEADER_MAGIC);
                 ptr::write((hdr + 8) as *mut *mut Chunk, chunk);
                 (*chunk).fill = hdr + HEADER + size - base;
                 (*chunk).outstanding += 1;
@@ -242,17 +311,41 @@ unsafe impl GlobalAlloc for Pool {
             return;
         }
         self.lock();
-        let hdr = (ptr as usize - HEADER) as usize;
+        let hdr = ptr as usize - HEADER;
         #[cfg(debug_assertions)]
         {
-            let magic = ptr::read(hdr as *const u32);
-            debug_assert_eq!(magic, HEADER_MAGIC, "pool free of a non-pool pointer");
+            // NEVER panic under the lock: the panic machinery allocates,
+            // and the re-entrant alloc would self-deadlock on this very
+            // spin lock (that hang once masked the real bug here).
+            let magic = ptr::read((hdr + 4) as *const u32);
+            if magic != HEADER_MAGIC {
+                self.unlock();
+                panic!(
+                    "pool free of a non-pool/corrupt pointer {ptr:?} (magic {magic:#x}); pool state: chunks={} live={}MB",
+                    self.chunks_live.load(Ordering::Relaxed),
+                    self.bytes_live.load(Ordering::Relaxed) / (1024 * 1024),
+                );
+            }
         }
         let chunk = ptr::read((hdr + 8) as *const *mut Chunk) as *mut Chunk;
         (*chunk).outstanding -= 1;
         self.bytes_live.fetch_sub(layout.size(), Ordering::Relaxed);
         if (*chunk).outstanding == 0 {
             self.drop_chunk(chunk);
+        } else {
+            // Return the slot to its chunk's bucket list (the next-pointer
+            // lives in the payload area, which the caller just gave up).
+            // Bucket by the STORED capacity: realloc'd-down slots keep
+            // their bigger bucket, so capacity >= request always holds for
+            // exact-shape reuse and the scan only skips genuine misfits.
+            let cap = ptr::read(hdr as *const u32) as usize;
+            let b = bucket_of(cap);
+            // The freelist node is the PAYLOAD address; the next-pointer
+            // goes into the payload's first 8 bytes (the caller just gave
+            // them up), never into the header.
+            let slot = (hdr + HEADER) as *mut u8;
+            ptr::write(slot as *mut *mut u8, (*chunk).free_heads[b]);
+            (*chunk).free_heads[b] = slot;
         }
         self.unlock();
     }
@@ -261,8 +354,7 @@ unsafe impl GlobalAlloc for Pool {
         // Always allocate-copy-free: pool memory never extends in place,
         // and a size-class change (pool -> direct system) is handled by the
         // same path. The copy preserves contents across the move.
-        let new_layout = Layout::from_size_align(new_size, layout.align())
-            .expect("realloc layout");
+        let new_layout = Layout::from_size_align(new_size, layout.align()).expect("realloc layout");
         let new_ptr = self.alloc(new_layout);
         if new_ptr.is_null() {
             return ptr::null_mut();
@@ -305,7 +397,9 @@ fn pool_random_alloc_free_stress() {
     // Seeded LCG so failures reproduce.
     let mut state: u64 = 0x1234_5678_9ABC_DEF0;
     let mut next = move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         state >> 33
     };
     struct Slot {
@@ -333,9 +427,9 @@ fn pool_random_alloc_free_stress() {
             let idx = pick % slots.len();
             let slot = slots.swap_remove(idx);
             // Verify the fill byte survived (no aliasing corruption).
-            let ok = (0..slot.layout.size()).step_by(97).all(|i| unsafe {
-                *slot.ptr.add(i) == slot.fill
-            });
+            let ok = (0..slot.layout.size())
+                .step_by(97)
+                .all(|i| unsafe { *slot.ptr.add(i) == slot.fill });
             assert!(ok, "corruption at round {round}");
             unsafe { std::alloc::dealloc(slot.ptr, slot.layout) };
         }
@@ -344,21 +438,18 @@ fn pool_random_alloc_free_stress() {
             let idx = pick % slots.len();
             let new_size = 1 + (next() as usize) % (128 * 1024);
             let slot = &mut slots[idx];
-            let ptr = unsafe {
-                std::alloc::realloc(slot.ptr, slot.layout, new_size)
-            };
+            let ptr = unsafe { std::alloc::realloc(slot.ptr, slot.layout, new_size) };
             assert!(!ptr.is_null(), "realloc failed");
             let keep = slot.layout.size().min(new_size);
-            let ok = (0..keep).step_by(101).all(|i| unsafe {
-                *ptr.add(i) == slot.fill
-            });
+            let ok = (0..keep)
+                .step_by(101)
+                .all(|i| unsafe { *ptr.add(i) == slot.fill });
             assert!(ok, "realloc corruption at round {round}");
             // The grown tail [keep..new_size) is uninitialized by realloc's
             // contract -- define it so later whole-buffer checks are sound.
             unsafe { ptr::write_bytes(ptr.add(keep), slot.fill, new_size - keep) };
             slot.ptr = ptr;
-            slot.layout = Layout::from_size_align(new_size, slot.layout.align())
-                .expect("layout");
+            slot.layout = Layout::from_size_align(new_size, slot.layout.align()).expect("layout");
         }
         let _ = DefaultHasher::new(); // keep the import used without noise
     }
@@ -373,8 +464,12 @@ fn pool_random_alloc_free_stress() {
     // by whatever those tests hold live. The content checks above are
     // concurrency-safe and always run.
     let strict = std::env::var_os("POOL_STRICT_STRESS").is_some();
-    let live_before = crate::POOL.bytes_live.load(std::sync::atomic::Ordering::Relaxed);
-    let chunks_before = crate::POOL.chunks_live.load(std::sync::atomic::Ordering::Relaxed);
+    let live_before = crate::POOL
+        .bytes_live
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let chunks_before = crate::POOL
+        .chunks_live
+        .load(std::sync::atomic::Ordering::Relaxed);
     let mut bursts: Vec<Vec<u8>> = Vec::new();
     for i in 0..16 {
         let mut v = vec![7u8; 8 * 1024 * 1024 + i * 4096];
@@ -387,12 +482,16 @@ fn pool_random_alloc_free_stress() {
     drops(&mut bursts);
     if strict {
         assert_eq!(
-            crate::POOL.bytes_live.load(std::sync::atomic::Ordering::Relaxed),
+            crate::POOL
+                .bytes_live
+                .load(std::sync::atomic::Ordering::Relaxed),
             live_before,
             "burst bytes must reclaim exactly"
         );
         assert_eq!(
-            crate::POOL.chunks_live.load(std::sync::atomic::Ordering::Relaxed),
+            crate::POOL
+                .chunks_live
+                .load(std::sync::atomic::Ordering::Relaxed),
             chunks_before,
             "burst chunks must die wholesale"
         );
@@ -419,7 +518,9 @@ fn pool_alignment_is_honored() {
 fn pool_repro_trace() {
     let mut state: u64 = 0x1234_5678_9ABC_DEF0;
     let mut next = move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         state >> 33
     };
     let mut slots: Vec<(usize, Layout, u8)> = Vec::new(); // (raw ptr, layout, fill)
@@ -438,8 +539,14 @@ fn pool_repro_trace() {
         } else if !slots.is_empty() {
             let idx = pick % slots.len();
             let (ptr, layout, fill) = slots.swap_remove(idx);
-            let ok = (0..layout.size()).step_by(97).all(|i| unsafe { *((ptr + i) as *const u8) == fill });
-            op = format!("free idx={idx} size={} align={} ptr={ptr:#x} ok={ok}", layout.size(), layout.align());
+            let ok = (0..layout.size())
+                .step_by(97)
+                .all(|i| unsafe { *((ptr + i) as *const u8) == fill });
+            op = format!(
+                "free idx={idx} size={} align={} ptr={ptr:#x} ok={ok}",
+                layout.size(),
+                layout.align()
+            );
             assert!(ok, "corruption: {op}");
             unsafe { std::alloc::dealloc(ptr as *mut u8, layout) };
         } else {
@@ -450,26 +557,37 @@ fn pool_repro_trace() {
             let idx = pick % slots.len();
             let new_size = 1 + (next() as usize) % (128 * 1024);
             let (old_ptr, old_layout, fill) = slots[idx];
-            let new_ptr = unsafe { std::alloc::realloc(old_ptr as *mut u8, old_layout, new_size) } as usize;
+            let new_ptr =
+                unsafe { std::alloc::realloc(old_ptr as *mut u8, old_layout, new_size) } as usize;
             let keep = old_layout.size().min(new_size);
-            let ok = (0..keep).step_by(101).all(|i| unsafe { *((new_ptr + i) as *const u8) == fill });
+            let ok = (0..keep)
+                .step_by(101)
+                .all(|i| unsafe { *((new_ptr + i) as *const u8) == fill });
             assert!(ok, "realloc corruption round {round}: old={old_ptr:#x} new={new_ptr:#x} old_size={} new={new_size}", old_layout.size());
             // Define the grown tail so whole-buffer checks stay sound.
             unsafe { std::ptr::write_bytes((new_ptr + keep) as *mut u8, fill, new_size - keep) };
-            slots[idx] = (new_ptr, Layout::from_size_align(new_size, old_layout.align()).expect("l"), fill);
+            slots[idx] = (
+                new_ptr,
+                Layout::from_size_align(new_size, old_layout.align()).expect("l"),
+                fill,
+            );
             eprintln!("round {round}: realloc idx={idx} old={old_ptr:#x} new={new_ptr:#x} oldsz={} newsz={new_size}", old_layout.size());
         }
         // Per-op verification of every live buffer's fill bytes: pinpoints
         // the exact op that corrupts.
         for (k, (p, l, f)) in slots.iter().enumerate() {
-            let ok = (0..l.size()).step_by(97).all(|i| unsafe { *((p + i) as *const u8) == *f });
+            let ok = (0..l.size())
+                .step_by(97)
+                .all(|i| unsafe { *((p + i) as *const u8) == *f });
             if !ok {
-                // Read the pool header: magic at ptr-16, chunk ptr at ptr-8.
-                let magic = unsafe { std::ptr::read((p - 16) as *const u32) };
+                // Read the pool header: cap at ptr-16, magic at ptr-12,
+                // chunk ptr at ptr-8.
+                let cap = unsafe { std::ptr::read((p - 16) as *const u32) };
+                let magic = unsafe { std::ptr::read((p - 12) as *const u32) };
                 let chunk = unsafe { std::ptr::read((p - 8) as *const usize) };
                 let first_bad = (0..l.size()).find(|&i| unsafe { *((p + i) as *const u8) != *f });
                 panic!(
-                    "fill corrupt after round {round} slot {k} ptr={p:#x} size={} fill={f} magic={magic:#x} chunk={chunk:#x} first_bad={first_bad:?}",
+                    "fill corrupt after round {round} slot {k} ptr={p:#x} size={} fill={f} cap={cap} magic={magic:#x} chunk={chunk:#x} first_bad={first_bad:?}",
                     l.size()
                 );
             }
@@ -480,7 +598,11 @@ fn pool_repro_trace() {
                 let (pi, li, _) = slots[i];
                 let (pj, lj, _) = slots[j];
                 let (a, asz) = (pi.min(pj), if pi <= pj { li.size() } else { lj.size() });
-                let (b, _) = if pi <= pj { (pj, lj.size()) } else { (pi, li.size()) };
+                let (b, _) = if pi <= pj {
+                    (pj, lj.size())
+                } else {
+                    (pi, li.size())
+                };
                 assert!(
                     a + asz <= b,
                     "OVERLAP round {round}: [{a:#x}..{:#x}] vs [{b:#x}..{:#x}]\n  i={i}: {pi:#x} sz={}\n  j={j}: {pj:#x} sz={}",
