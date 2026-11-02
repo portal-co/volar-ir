@@ -127,8 +127,7 @@ fn pool_random_alloc_free_stress() {
             // contract -- define it so later whole-buffer checks are sound.
             unsafe { ptr::write_bytes(ptr.add(keep), slot.fill, new_size - keep) };
             slot.ptr = ptr;
-            slot.layout = Layout::from_size_align(new_size, slot.layout.align())
-                .expect("layout");
+            slot.layout = Layout::from_size_align(new_size, slot.layout.align()).expect("layout");
         }
     }
     for slot in slots {
@@ -168,7 +167,9 @@ fn pool_random_alloc_free_stress() {
         // Page-granular release: the burst's freed pages must have been
         // swept (the pool releases dead pages in batches of >= 64).
         assert!(
-            POOL.pages_released.load(std::sync::atomic::Ordering::Relaxed) > 0
+            POOL.pages_released
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
                 || chunks_before == 0,
             "burst dead pages must be swept"
         );
@@ -219,7 +220,9 @@ fn pool_page_release_happens() {
     // v5: pages only die when freelist nodes are absent — run in Release
     // mode so the freed slots are forgotten.
     POOL.set_free_mode(false);
-    let before = POOL.pages_released.load(std::sync::atomic::Ordering::Relaxed);
+    let before = POOL
+        .pages_released
+        .load(std::sync::atomic::Ordering::Relaxed);
     let mut bufs = Vec::new();
     for i in 0..256 {
         let layout = Layout::from_size_align(96 * 1024, 16).expect("layout");
@@ -231,7 +234,9 @@ fn pool_page_release_happens() {
     for (p, l) in bufs.drain(..) {
         unsafe { std::alloc::dealloc(p, l) };
     }
-    let after = POOL.pages_released.load(std::sync::atomic::Ordering::Relaxed);
+    let after = POOL
+        .pages_released
+        .load(std::sync::atomic::Ordering::Relaxed);
     POOL.set_free_mode(true);
     assert!(
         after > before,

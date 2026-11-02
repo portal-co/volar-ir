@@ -127,7 +127,11 @@ fn page_size() -> usize {
     }
     // SAFETY: getpagesize is thread-safe and infallible in practice.
     let ps = unsafe { getpagesize() } as usize;
-    let ps = if ps >= 4096 && ps.is_power_of_two() { ps } else { 4096 };
+    let ps = if ps >= 4096 && ps.is_power_of_two() {
+        ps
+    } else {
+        4096
+    };
     PAGE_SIZE.store(ps, Ordering::Relaxed);
     ps
 }
@@ -176,82 +180,85 @@ struct Chunk {
 impl Chunk {
     /// `#[inline]`-small helpers for the page accounting. `span` is the
     /// slot's full byte extent (header + payload).
-        /// Account a freshly-allocated slot's byte span into its pages.
-    unsafe fn on_alloc_pages(&mut self, base: usize, start: usize, end: usize) { unsafe {
-        let ps = page_size();
-        let first = (start - base) / ps;
-        let last = (end - 1 - base) / ps;
-        for p in first..=last {
-            let lo = (start - base).max(p * ps);
-            let hi = (end - base).min((p + 1) * ps);
-            let old = *self.page_alloc.add(p) as usize;
-            *self.page_alloc.add(p) = (old + (hi - lo)) as u16;
+    /// Account a freshly-allocated slot's byte span into its pages.
+    unsafe fn on_alloc_pages(&mut self, base: usize, start: usize, end: usize) {
+        unsafe {
+            let ps = page_size();
+            let first = (start - base) / ps;
+            let last = (end - 1 - base) / ps;
+            for p in first..=last {
+                let lo = (start - base).max(p * ps);
+                let hi = (end - base).min((p + 1) * ps);
+                let old = *self.page_alloc.add(p) as usize;
+                *self.page_alloc.add(p) = (old + (hi - lo)) as u16;
+            }
         }
-    }}
+    }
 
     unsafe fn on_free_pages(&mut self, base: usize, start: usize, end: usize) -> usize {
         unsafe {
-
-        let ps = page_size();
-        let first = (start - base) / ps;
-        let last = (end - 1 - base) / ps;
-        let mut newly_dead = 0usize;
-        for p in first..=last {
-            let lo = (start - base).max(p * ps);
-            let hi = (end - base).min((p + 1) * ps);
-            let alloced = *self.page_alloc.add(p) as usize;
-            let mut freed = *self.page_freed.add(p) as usize + (hi - lo);
-            // Clamp: over-accounting (if any) must not block the dead
-            // transition — the counters are a release heuristic, not a
-            // correctness invariant, and a panic here would deadlock the
-            // allocator (see the module doc).
-            if freed > alloced {
-                freed = alloced;
-            }
-            *self.page_freed.add(p) = freed as u16;
-            let nodes = *self.page_nodes.add(p) as usize;
-            if freed == alloced && alloced > 0 && nodes == 0 {
-                let word = self.dead_words.add(p / 64);
-                let bit = 1u64 << (p % 64);
-                if (*word & bit) == 0 {
-                    *word |= bit;
-                    self.dead_count += 1;
-                    newly_dead += 1;
+            let ps = page_size();
+            let first = (start - base) / ps;
+            let last = (end - 1 - base) / ps;
+            let mut newly_dead = 0usize;
+            for p in first..=last {
+                let lo = (start - base).max(p * ps);
+                let hi = (end - base).min((p + 1) * ps);
+                let alloced = *self.page_alloc.add(p) as usize;
+                let mut freed = *self.page_freed.add(p) as usize + (hi - lo);
+                // Clamp: over-accounting (if any) must not block the dead
+                // transition — the counters are a release heuristic, not a
+                // correctness invariant, and a panic here would deadlock the
+                // allocator (see the module doc).
+                if freed > alloced {
+                    freed = alloced;
+                }
+                *self.page_freed.add(p) = freed as u16;
+                let nodes = *self.page_nodes.add(p) as usize;
+                if freed == alloced && alloced > 0 && nodes == 0 {
+                    let word = self.dead_words.add(p / 64);
+                    let bit = 1u64 << (p % 64);
+                    if (*word & bit) == 0 {
+                        *word |= bit;
+                        self.dead_count += 1;
+                        newly_dead += 1;
+                    }
                 }
             }
-        }
-        newly_dead
+            newly_dead
         }
     }
 
     /// Release the currently-dead pages in batched contiguous runs.
     /// Returns the number of pages whose physical memory was dropped.
-    unsafe fn sweep_dead_pages(&mut self, base: usize) -> usize { unsafe {
-        if self.dead_count == 0 {
-            return 0;
-        }
-        let mut released = 0usize;
-        let mut run_start: Option<usize> = None;
-        for p in 0..self.n_pages {
-            let dead = ((*self.dead_words.add(p / 64) >> (p % 64)) & 1) == 1;
-            if dead {
-                if run_start.is_none() {
-                    run_start = Some(p);
-                }
-            } else if let Some(s) = run_start.take() {
-                madvise_pages(base, s, p - s);
-                released += p - s;
+    unsafe fn sweep_dead_pages(&mut self, base: usize) -> usize {
+        unsafe {
+            if self.dead_count == 0 {
+                return 0;
             }
+            let mut released = 0usize;
+            let mut run_start: Option<usize> = None;
+            for p in 0..self.n_pages {
+                let dead = ((*self.dead_words.add(p / 64) >> (p % 64)) & 1) == 1;
+                if dead {
+                    if run_start.is_none() {
+                        run_start = Some(p);
+                    }
+                } else if let Some(s) = run_start.take() {
+                    madvise_pages(base, s, p - s);
+                    released += p - s;
+                }
+            }
+            if let Some(s) = run_start.take() {
+                madvise_pages(base, s, self.n_pages - s);
+                released += self.n_pages - s;
+            }
+            // All dead bits consumed.
+            ptr::write_bytes(self.dead_words, 0, self.n_pages.div_ceil(64) * 8 / 8);
+            self.dead_count = 0;
+            released
         }
-        if let Some(s) = run_start.take() {
-            madvise_pages(base, s, self.n_pages - s);
-            released += self.n_pages - s;
-        }
-        // All dead bits consumed.
-        ptr::write_bytes(self.dead_words, 0, self.n_pages.div_ceil(64) * 8 / 8);
-        self.dead_count = 0;
-        released
-    }}
+    }
 }
 
 pub struct Pool {
@@ -342,128 +349,134 @@ impl Pool {
         self.locked.store(false, Ordering::Release);
     }
 
-    unsafe fn new_chunk(&self) -> *mut Chunk { unsafe {
-        let ps = page_size();
-        let n_pages = CHUNK_SIZE / ps;
-        // Recycle a fully-freed chunk first: the VA is retained, the
-        // physical pages were madvise'd away at death and re-fault as
-        // zeros. No new system allocation, no RSS growth.
-        let recycled = *self.free_chunks.get();
-        if !recycled.is_null() {
-            *self.free_chunks.get() = (*recycled).next;
-            let c = &mut *recycled;
-            c.next = *self.head.get();
-            c.outstanding = 0;
-            c.fill = 0;
-            // fill_base is already correct: the struct carries its own
-            // data region through the recycle stack. (Overwriting it with
-            // the struct's address here is what once madvise'd a 64MiB
-            // window across unrelated heap mappings.)
-            debug_assert_ne!(c.fill_base, 0);
-            ptr::write_bytes(c.page_alloc, 0, n_pages);
-            ptr::write_bytes(c.page_freed, 0, n_pages);
-            ptr::write_bytes(c.page_nodes, 0, n_pages);
-            ptr::write_bytes(c.dead_words, 0, n_pages.div_ceil(64));
-            c.dead_count = 0;
-            for h in &mut c.free_heads {
-                *h = ptr::null_mut();
+    unsafe fn new_chunk(&self) -> *mut Chunk {
+        unsafe {
+            let ps = page_size();
+            let n_pages = CHUNK_SIZE / ps;
+            // Recycle a fully-freed chunk first: the VA is retained, the
+            // physical pages were madvise'd away at death and re-fault as
+            // zeros. No new system allocation, no RSS growth.
+            let recycled = *self.free_chunks.get();
+            if !recycled.is_null() {
+                *self.free_chunks.get() = (*recycled).next;
+                let c = &mut *recycled;
+                c.next = *self.head.get();
+                c.outstanding = 0;
+                c.fill = 0;
+                // fill_base is already correct: the struct carries its own
+                // data region through the recycle stack. (Overwriting it with
+                // the struct's address here is what once madvise'd a 64MiB
+                // window across unrelated heap mappings.)
+                debug_assert_ne!(c.fill_base, 0);
+                ptr::write_bytes(c.page_alloc, 0, n_pages);
+                ptr::write_bytes(c.page_freed, 0, n_pages);
+                ptr::write_bytes(c.page_nodes, 0, n_pages);
+                ptr::write_bytes(c.dead_words, 0, n_pages.div_ceil(64));
+                c.dead_count = 0;
+                &mut c.free_heads.fill(ptr::null_mut());
+                *self.head.get() = recycled;
+                self.chunks_recycled.fetch_add(1, Ordering::Relaxed);
+                self.chunks_live.fetch_add(1, Ordering::Relaxed);
+                return recycled;
             }
-            *self.head.get() = recycled;
-            self.chunks_recycled.fetch_add(1, Ordering::Relaxed);
+            // Page-aligned so whole-region madvise on death is exact.
+            let layout = Layout::from_size_align(CHUNK_SIZE, ps).expect("chunk layout");
+            let base = System.alloc(layout);
+            if base.is_null() {
+                return ptr::null_mut();
+            }
+            // 8-byte aligned: the dead-words table is dereferenced as *mut u64
+            // (a misaligned deref panics in debug builds — and its formatting
+            // would re-enter this allocator under the lock).
+            let meta_layout = Layout::from_size_align(
+                n_pages * 3 * size_of::<u16>() + n_pages.div_ceil(64) * size_of::<u64>(),
+                8,
+            )
+            .expect("page metadata layout");
+            let meta = System.alloc(meta_layout);
+            if meta.is_null() {
+                System.dealloc(base, layout);
+                return ptr::null_mut();
+            }
+            // Chunk metadata must NOT allocate through the global allocator
+            // (that is this Pool — allocating here would self-deadlock on the
+            // spin lock; the sample-verified hang). System.alloc directly.
+            let chunk_layout = Layout::from_size_align(size_of::<Chunk>(), 16).expect("chunk meta");
+            let chunk_mem = System.alloc(chunk_layout);
+            if chunk_mem.is_null() {
+                System.dealloc(base, layout);
+                System.dealloc(meta, meta_layout);
+                return ptr::null_mut();
+            }
+            let chunk = chunk_mem as *mut Chunk;
+            ptr::write(
+                chunk,
+                Chunk {
+                    next: *self.head.get(),
+                    outstanding: 0,
+                    fill: 0,
+                    fill_base: base as usize,
+                    n_pages,
+                    page_alloc: meta as *mut u16,
+                    page_freed: meta.add(n_pages) as *mut u16,
+                    page_nodes: meta.add(n_pages * 2) as *mut u16,
+                    dead_words: meta.add(n_pages * 3) as *mut u64,
+                    dead_count: 0,
+                    free_heads: [ptr::null_mut(); N_BUCKETS],
+                },
+            );
+            ptr::write_bytes((*chunk).page_alloc, 0, n_pages);
+            ptr::write_bytes((*chunk).page_freed, 0, n_pages);
+            ptr::write_bytes((*chunk).page_nodes, 0, n_pages);
+            ptr::write_bytes((*chunk).dead_words, 0, n_pages.div_ceil(64));
+            *self.head.get() = chunk;
             self.chunks_live.fetch_add(1, Ordering::Relaxed);
-            return recycled;
+            chunk
         }
-        // Page-aligned so whole-region madvise on death is exact.
-        let layout = Layout::from_size_align(CHUNK_SIZE, ps).expect("chunk layout");
-        let base = System.alloc(layout);
-        if base.is_null() {
-            return ptr::null_mut();
-        }
-        // 8-byte aligned: the dead-words table is dereferenced as *mut u64
-        // (a misaligned deref panics in debug builds — and its formatting
-        // would re-enter this allocator under the lock).
-        let meta_layout = Layout::from_size_align(
-            n_pages * 3 * size_of::<u16>() + n_pages.div_ceil(64) * size_of::<u64>(),
-            8,
-        )
-        .expect("page metadata layout");
-        let meta = System.alloc(meta_layout);
-        if meta.is_null() {
-            System.dealloc(base, layout);
-            return ptr::null_mut();
-        }
-        // Chunk metadata must NOT allocate through the global allocator
-        // (that is this Pool — allocating here would self-deadlock on the
-        // spin lock; the sample-verified hang). System.alloc directly.
-        let chunk_layout = Layout::from_size_align(size_of::<Chunk>(), 16).expect("chunk meta");
-        let chunk_mem = System.alloc(chunk_layout);
-        if chunk_mem.is_null() {
-            System.dealloc(base, layout);
-            System.dealloc(meta, meta_layout);
-            return ptr::null_mut();
-        }
-        let chunk = chunk_mem as *mut Chunk;
-        ptr::write(
-            chunk,
-            Chunk {
-                next: *self.head.get(),
-                outstanding: 0,
-                fill: 0,
-                fill_base: base as usize,
-                n_pages,
-                page_alloc: meta as *mut u16,
-                page_freed: meta.add(n_pages) as *mut u16,
-                page_nodes: meta.add(n_pages * 2) as *mut u16,
-                dead_words: meta.add(n_pages * 3) as *mut u64,
-                dead_count: 0,
-                free_heads: [ptr::null_mut(); N_BUCKETS],
-            },
-        );
-        ptr::write_bytes((*chunk).page_alloc, 0, n_pages);
-        ptr::write_bytes((*chunk).page_freed, 0, n_pages);
-        ptr::write_bytes((*chunk).page_nodes, 0, n_pages);
-        ptr::write_bytes((*chunk).dead_words, 0, n_pages.div_ceil(64));
-        *self.head.get() = chunk;
-        self.chunks_live.fetch_add(1, Ordering::Relaxed);
-        chunk
-    }}
+    }
 
-    unsafe fn drop_chunk(&self, chunk: *mut Chunk) { unsafe {
-        // Unlink (the list is short: tens of chunks at whole-program scale).
-        let mut link = self.head.get();
-        while !(*link).is_null() {
-            if *link == chunk {
-                *link = (*chunk).next;
-                break;
+    unsafe fn drop_chunk(&self, chunk: *mut Chunk) {
+        unsafe {
+            // Unlink (the list is short: tens of chunks at whole-program scale).
+            let mut link = self.head.get();
+            while !(*link).is_null() {
+                if *link == chunk {
+                    *link = (*chunk).next;
+                    break;
+                }
+                link = &mut (*(*link)).next;
             }
-            link = &mut (*(*link)).next;
+            // Release the DATA region's physical pages (they re-fault as
+            // zeros) and keep the struct + VA on the recycle stack. The base
+            // is the recorded fill_base — madvise from the struct's own
+            // address would sweep a 64MiB window across unrelated mappings.
+            madvise_pages((*chunk).fill_base, 0, CHUNK_SIZE / page_size());
+            (*chunk).next = *self.free_chunks.get();
+            *self.free_chunks.get() = chunk;
+            self.chunks_live.fetch_sub(1, Ordering::Relaxed);
         }
-        // Release the DATA region's physical pages (they re-fault as
-        // zeros) and keep the struct + VA on the recycle stack. The base
-        // is the recorded fill_base — madvise from the struct's own
-        // address would sweep a 64MiB window across unrelated mappings.
-        madvise_pages((*chunk).fill_base, 0, CHUNK_SIZE / page_size());
-        (*chunk).next = *self.free_chunks.get();
-        *self.free_chunks.get() = chunk;
-        self.chunks_live.fetch_sub(1, Ordering::Relaxed);
-    }}
+    }
 
     /// Sweep a chunk's dead pages if enough have accumulated (batched
     /// contiguous runs keep the syscall count low). Returns pages dropped.
-    unsafe fn maybe_sweep(&self, chunk: *mut Chunk) -> usize { unsafe {
-        if (*chunk).dead_count < 64 {
-            return 0;
+    unsafe fn maybe_sweep(&self, chunk: *mut Chunk) -> usize {
+        unsafe {
+            if (*chunk).dead_count < 64 {
+                return 0;
+            }
+            if Self::tracing() {
+                eprintln!(
+                    "    sweep chunk {chunk:?} dead_count={}",
+                    (*chunk).dead_count
+                );
+            }
+            let released = (*chunk).sweep_dead_pages((*chunk).fill_base);
+            if released > 0 {
+                self.pages_released.fetch_add(released, Ordering::Relaxed);
+            }
+            released
         }
-        if Self::tracing() {
-            eprintln!("    sweep chunk {chunk:?} dead_count={}", (*chunk).dead_count);
-        }
-        let released = (*chunk).sweep_dead_pages((*chunk).fill_base);
-        if released > 0 {
-            self.pages_released.fetch_add(released, Ordering::Relaxed);
-        }
-        released
-    }}
-
+    }
 }
 
 impl Default for Pool {
@@ -478,221 +491,225 @@ unsafe impl Sync for Pool {}
 // counters and page tables) is guarded by the spin lock; `Sync` marks the
 // shared `&Pool` sound across threads.
 unsafe impl GlobalAlloc for Pool {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 { unsafe {
-        if layout.size() >= DIRECT_THRESHOLD {
-            return System.alloc(layout);
-        }
-        let size = layout.size();
-        if size == 0 {
-            return System.alloc(layout);
-        }
-        let align = layout.align().max(16);
-        if !self.pooling.load(Ordering::Relaxed) {
-            // System-routed with a tagged header (see the module doc).
-            let sys = Layout::from_size_align(size + HEADER, align).expect("gated layout");
-            let base = System.alloc(sys);
-            if base.is_null() {
-                return ptr::null_mut();
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        unsafe {
+            if layout.size() >= DIRECT_THRESHOLD {
+                return System.alloc(layout);
             }
-            let b = base as usize;
-            ptr::write(b as *mut u32, size as u32);
-            #[cfg(debug_assertions)]
-            ptr::write((b + 4) as *mut u32, HEADER_MAGIC);
-            ptr::write((b + 8) as *mut usize, SYSTEM_SENTINEL);
-            self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
-            return (b + HEADER) as *mut u8;
-        }
-        self.lock();
-        let mut chunk = *self.head.get();
-        let _ps = page_size();
-        if Self::tracing() {
-            eprintln!(
-                "  alloc size={size} align={align} chunks={}",
-                self.chunks_live.load(Ordering::Relaxed)
-            );
-        }
-        loop {
-            if chunk.is_null() {
-                chunk = self.new_chunk();
-                if chunk.is_null() {
-                    self.unlock();
+            let size = layout.size();
+            if size == 0 {
+                return System.alloc(layout);
+            }
+            let align = layout.align().max(16);
+            if !self.pooling.load(Ordering::Relaxed) {
+                // System-routed with a tagged header (see the module doc).
+                let sys = Layout::from_size_align(size + HEADER, align).expect("gated layout");
+                let base = System.alloc(sys);
+                if base.is_null() {
                     return ptr::null_mut();
                 }
-            }
-            // Freelist reuse (Reuse mode): the bucket list holds NODE
-            // addresses (the slot headers); the payload is node + HEADER.
-            // Bucket membership does NOT imply capacity — the node's cap
-            // (stored in its header) is checked. Nodes that don't fit stay
-            // on the list; falling through to the bump is safe.
-            let b = bucket_of(size);
-            if align <= MIN_BUCKET_SIZE && !(*chunk).free_heads[b].is_null() {
-                let mut prev: *mut *mut u8 = &mut (*chunk).free_heads[b];
-                let mut node = (*chunk).free_heads[b];
-                let mut hops = 0usize;
-                while !node.is_null() && hops < 32 {
-                    let cap = ptr::read(
-                        (node as usize - HEADER) as *const u32,
-                    ) as usize;
-                    if cap >= size {
-                        let next = ptr::read(node as *const *mut u8);
-                        ptr::write(prev, next);
-                        let hdr = node as usize - HEADER;
-                        ptr::write((hdr + 8) as *mut *mut Chunk, chunk);
-                        (*chunk).outstanding += 1;
-                        self.bytes_live.fetch_add(size, Ordering::Relaxed);
-                        self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
-                        let pn = (node as usize - (*chunk).fill_base) / page_size();
-                        // Saturating: a lost count is a SAFE degradation —
-                        // the page just never becomes releasable (its
-                        // freelist nodes' next-pointers live in payload
-                        // bytes that madvise zeroes, truncating the list
-                        // without ever aliasing live data).
-                        let cnt = *(*chunk).page_nodes.add(pn);
-                        *(*chunk).page_nodes.add(pn) = cnt.saturating_sub(1);
-                        self.unlock();
-                        return node as *mut u8;
-                    }
-                    prev = node as *mut *mut u8;
-                    node = ptr::read(node as *const *mut u8);
-                    hops += 1;
-                }
-            }
-            // Data goes at `data`, header 16 bytes before it, so that both
-            // the header (needs 8 for the pointer) and the data (needs
-            // `align`) are satisfied.
-            let base = (*chunk).fill_base;
-            let data = (base + (*chunk).fill + HEADER + (align - 1)) & !(align - 1);
-            let hdr = data - HEADER;
-            if hdr + HEADER + size <= base + CHUNK_SIZE {
-                ptr::write(hdr as *mut u32, size as u32);
+                let b = base as usize;
+                ptr::write(b as *mut u32, size as u32);
                 #[cfg(debug_assertions)]
-                ptr::write((hdr + 4) as *mut u32, HEADER_MAGIC);
-                ptr::write((hdr + 8) as *mut *mut Chunk, chunk);
-                (*chunk).fill = hdr + HEADER + size - base;
-                (*chunk).outstanding += 1;
-                self.bytes_live.fetch_add(size, Ordering::Relaxed);
+                ptr::write((b + 4) as *mut u32, HEADER_MAGIC);
+                ptr::write((b + 8) as *mut usize, SYSTEM_SENTINEL);
                 self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
-                (*chunk).on_alloc_pages(base, hdr, hdr + HEADER + size);
-                self.unlock();
-                return data as *mut u8;
+                return (b + HEADER) as *mut u8;
             }
-            // Full: try the next chunk, else a fresh one. If even a fresh
-            // chunk cannot hold it (size close to CHUNK_SIZE), fall back to
-            // the system allocator for this allocation.
-            let next = (*chunk).next;
+            self.lock();
+            let mut chunk = *self.head.get();
+            let _ps = page_size();
             if Self::tracing() {
-                eprintln!("    walk chunk {chunk:?} full; next={next:?}");
-            }
-            if next.is_null() {
-                if HEADER + size + align > CHUNK_SIZE {
-                    self.unlock();
-                    return System.alloc(layout);
-                }
-                let fresh = self.new_chunk();
-                if fresh.is_null() {
-                    self.unlock();
-                    return ptr::null_mut();
-                }
-                chunk = fresh;
-            } else {
-                chunk = next;
-            }
-        }
-    }}
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) { unsafe {
-        if layout.size() >= DIRECT_THRESHOLD || layout.size() == 0 {
-            System.dealloc(ptr, layout);
-            return;
-        }
-        self.lock();
-        let hdr = ptr as usize - HEADER;
-        #[cfg(debug_assertions)]
-        {
-            // NEVER panic under the lock: the panic machinery allocates,
-            // and the re-entrant alloc would self-deadlock on this very
-            // spin lock.
-            let magic = ptr::read((hdr + 4) as *const u32);
-            if magic != HEADER_MAGIC {
-                self.unlock();
-                panic!(
-                    "pool free of a non-pool/corrupt pointer {ptr:?} (magic {magic:#x}); pool state: chunks={} live={}MB",
-                    self.chunks_live.load(Ordering::Relaxed),
-                    self.bytes_live.load(Ordering::Relaxed) / (1024 * 1024),
+                eprintln!(
+                    "  alloc size={size} align={align} chunks={}",
+                    self.chunks_live.load(Ordering::Relaxed)
                 );
             }
+            loop {
+                if chunk.is_null() {
+                    chunk = self.new_chunk();
+                    if chunk.is_null() {
+                        self.unlock();
+                        return ptr::null_mut();
+                    }
+                }
+                // Freelist reuse (Reuse mode): the bucket list holds NODE
+                // addresses (the slot headers); the payload is node + HEADER.
+                // Bucket membership does NOT imply capacity — the node's cap
+                // (stored in its header) is checked. Nodes that don't fit stay
+                // on the list; falling through to the bump is safe.
+                let b = bucket_of(size);
+                if align <= MIN_BUCKET_SIZE && !(*chunk).free_heads[b].is_null() {
+                    let mut prev: *mut *mut u8 = &mut (*chunk).free_heads[b];
+                    let mut node = (*chunk).free_heads[b];
+                    let mut hops = 0usize;
+                    while !node.is_null() && hops < 32 {
+                        let cap = ptr::read((node as usize - HEADER) as *const u32) as usize;
+                        if cap >= size {
+                            let next = ptr::read(node as *const *mut u8);
+                            ptr::write(prev, next);
+                            let hdr = node as usize - HEADER;
+                            ptr::write((hdr + 8) as *mut *mut Chunk, chunk);
+                            (*chunk).outstanding += 1;
+                            self.bytes_live.fetch_add(size, Ordering::Relaxed);
+                            self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
+                            let pn = (node as usize - (*chunk).fill_base) / page_size();
+                            // Saturating: a lost count is a SAFE degradation —
+                            // the page just never becomes releasable (its
+                            // freelist nodes' next-pointers live in payload
+                            // bytes that madvise zeroes, truncating the list
+                            // without ever aliasing live data).
+                            let cnt = *(*chunk).page_nodes.add(pn);
+                            *(*chunk).page_nodes.add(pn) = cnt.saturating_sub(1);
+                            self.unlock();
+                            return node as *mut u8;
+                        }
+                        prev = node as *mut *mut u8;
+                        node = ptr::read(node as *const *mut u8);
+                        hops += 1;
+                    }
+                }
+                // Data goes at `data`, header 16 bytes before it, so that both
+                // the header (needs 8 for the pointer) and the data (needs
+                // `align`) are satisfied.
+                let base = (*chunk).fill_base;
+                let data = (base + (*chunk).fill + HEADER + (align - 1)) & !(align - 1);
+                let hdr = data - HEADER;
+                if hdr + HEADER + size <= base + CHUNK_SIZE {
+                    ptr::write(hdr as *mut u32, size as u32);
+                    #[cfg(debug_assertions)]
+                    ptr::write((hdr + 4) as *mut u32, HEADER_MAGIC);
+                    ptr::write((hdr + 8) as *mut *mut Chunk, chunk);
+                    (*chunk).fill = hdr + HEADER + size - base;
+                    (*chunk).outstanding += 1;
+                    self.bytes_live.fetch_add(size, Ordering::Relaxed);
+                    self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
+                    (*chunk).on_alloc_pages(base, hdr, hdr + HEADER + size);
+                    self.unlock();
+                    return data as *mut u8;
+                }
+                // Full: try the next chunk, else a fresh one. If even a fresh
+                // chunk cannot hold it (size close to CHUNK_SIZE), fall back to
+                // the system allocator for this allocation.
+                let next = (*chunk).next;
+                if Self::tracing() {
+                    eprintln!("    walk chunk {chunk:?} full; next={next:?}");
+                }
+                if next.is_null() {
+                    if HEADER + size + align > CHUNK_SIZE {
+                        self.unlock();
+                        return System.alloc(layout);
+                    }
+                    let fresh = self.new_chunk();
+                    if fresh.is_null() {
+                        self.unlock();
+                        return ptr::null_mut();
+                    }
+                    chunk = fresh;
+                } else {
+                    chunk = next;
+                }
+            }
         }
-        let chunk_tag = ptr::read((hdr + 8) as *const usize);
-        if chunk_tag == SYSTEM_SENTINEL {
-            // System-routed (pooling was off at alloc): free via System
-            // with the reconstructed layout.
-            let cap = ptr::read(hdr as *const u32) as usize;
-            let sys = Layout::from_size_align(cap + HEADER, layout.align().max(16))
-                .expect("gated free");
-            self.unlock();
-            System.dealloc(hdr as *mut u8, sys);
-            return;
-        }
-        let chunk = chunk_tag as *mut Chunk;
-        if Self::tracing() {
-            eprintln!(
-                "  free ptr={ptr:?} cap={} chunk={chunk:?} outstanding={}",
-                ptr::read(hdr as *const u32),
-                (*chunk).outstanding
-            );
-        }
-        (*chunk).outstanding -= 1;
-        self.bytes_live.fetch_sub(layout.size(), Ordering::Relaxed);
-        let cap = ptr::read(hdr as *const u32) as usize;
-        let span_end = hdr + HEADER + cap;
-        if self.free_mode_reuse.load(Ordering::Relaxed)
-            && cap >= MIN_BUCKET_SIZE
-            && layout.align().max(16) <= MIN_BUCKET_SIZE
-            && (*chunk).outstanding > 0
-        {
-            // Reuse mode: return the slot to its chunk's bucket list. The
-            // NODE address is the PAYLOAD address; the next-pointer lives
-            // in the payload's first 8 bytes (dead data — the caller just
-            // gave them up), NEVER in the header (the header's cap/magic
-            // must survive for the slot's eventual re-free). The slot's
-            // pages are NOT releasable while a node exists (page_nodes).
-            let b = bucket_of(cap);
-            let node = (hdr + HEADER) as *mut u8;
-            ptr::write(node as *mut *mut u8, (*chunk).free_heads[b]);
-            (*chunk).free_heads[b] = node;
-            *(*chunk)
-                .page_nodes
-                .add((node as usize - (*chunk).fill_base) / page_size()) += 1;
-        } else {
-            // Release mode (or oversized/gated slot): forget the slot —
-            // its pages can now go fully dead.
-            (*chunk).on_free_pages((*chunk).fill_base, hdr, span_end);
-        }
-        // Dead pages are swept lazily; a chunk whose last allocation died
-        // recycles wholesale (its whole region madvise'd anyway).
-        if (*chunk).outstanding == 0 {
-            self.drop_chunk(chunk);
-        } else {
-            self.maybe_sweep(chunk);
-        }
-        self.unlock();
-    }}
+    }
 
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 { unsafe {
-        // Always allocate-copy-free: pool memory never extends in place,
-        // and a size-class change (pool -> direct system) is handled by
-        // the same path. The copy preserves contents across the move.
-        let new_layout = Layout::from_size_align(new_size, layout.align())
-            .expect("realloc layout");
-        let new_ptr = self.alloc(new_layout);
-        if new_ptr.is_null() {
-            return ptr::null_mut();
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe {
+            if layout.size() >= DIRECT_THRESHOLD || layout.size() == 0 {
+                System.dealloc(ptr, layout);
+                return;
+            }
+            self.lock();
+            let hdr = ptr as usize - HEADER;
+            #[cfg(debug_assertions)]
+            {
+                // NEVER panic under the lock: the panic machinery allocates,
+                // and the re-entrant alloc would self-deadlock on this very
+                // spin lock.
+                let magic = ptr::read((hdr + 4) as *const u32);
+                if magic != HEADER_MAGIC {
+                    self.unlock();
+                    panic!(
+                        "pool free of a non-pool/corrupt pointer {ptr:?} (magic {magic:#x}); pool state: chunks={} live={}MB",
+                        self.chunks_live.load(Ordering::Relaxed),
+                        self.bytes_live.load(Ordering::Relaxed) / (1024 * 1024),
+                    );
+                }
+            }
+            let chunk_tag = ptr::read((hdr + 8) as *const usize);
+            if chunk_tag == SYSTEM_SENTINEL {
+                // System-routed (pooling was off at alloc): free via System
+                // with the reconstructed layout.
+                let cap = ptr::read(hdr as *const u32) as usize;
+                let sys = Layout::from_size_align(cap + HEADER, layout.align().max(16))
+                    .expect("gated free");
+                self.unlock();
+                System.dealloc(hdr as *mut u8, sys);
+                return;
+            }
+            let chunk = chunk_tag as *mut Chunk;
+            if Self::tracing() {
+                eprintln!(
+                    "  free ptr={ptr:?} cap={} chunk={chunk:?} outstanding={}",
+                    ptr::read(hdr as *const u32),
+                    (*chunk).outstanding
+                );
+            }
+            (*chunk).outstanding -= 1;
+            self.bytes_live.fetch_sub(layout.size(), Ordering::Relaxed);
+            let cap = ptr::read(hdr as *const u32) as usize;
+            let span_end = hdr + HEADER + cap;
+            if self.free_mode_reuse.load(Ordering::Relaxed)
+                && cap >= MIN_BUCKET_SIZE
+                && layout.align().max(16) <= MIN_BUCKET_SIZE
+                && (*chunk).outstanding > 0
+            {
+                // Reuse mode: return the slot to its chunk's bucket list. The
+                // NODE address is the PAYLOAD address; the next-pointer lives
+                // in the payload's first 8 bytes (dead data — the caller just
+                // gave them up), NEVER in the header (the header's cap/magic
+                // must survive for the slot's eventual re-free). The slot's
+                // pages are NOT releasable while a node exists (page_nodes).
+                let b = bucket_of(cap);
+                let node = (hdr + HEADER) as *mut u8;
+                ptr::write(node as *mut *mut u8, (*chunk).free_heads[b]);
+                (*chunk).free_heads[b] = node;
+                *(*chunk)
+                    .page_nodes
+                    .add((node as usize - (*chunk).fill_base) / page_size()) += 1;
+            } else {
+                // Release mode (or oversized/gated slot): forget the slot —
+                // its pages can now go fully dead.
+                (*chunk).on_free_pages((*chunk).fill_base, hdr, span_end);
+            }
+            // Dead pages are swept lazily; a chunk whose last allocation died
+            // recycles wholesale (its whole region madvise'd anyway).
+            if (*chunk).outstanding == 0 {
+                self.drop_chunk(chunk);
+            } else {
+                self.maybe_sweep(chunk);
+            }
+            self.unlock();
         }
-        let copy = layout.size().min(new_size);
-        if copy > 0 {
-            ptr::copy_nonoverlapping(ptr, new_ptr, copy);
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        unsafe {
+            // Always allocate-copy-free: pool memory never extends in place,
+            // and a size-class change (pool -> direct system) is handled by
+            // the same path. The copy preserves contents across the move.
+            let new_layout =
+                Layout::from_size_align(new_size, layout.align()).expect("realloc layout");
+            let new_ptr = self.alloc(new_layout);
+            if new_ptr.is_null() {
+                return ptr::null_mut();
+            }
+            let copy = layout.size().min(new_size);
+            if copy > 0 {
+                ptr::copy_nonoverlapping(ptr, new_ptr, copy);
+            }
+            self.dealloc(ptr, layout);
+            new_ptr
         }
-        self.dealloc(ptr, layout);
-        new_ptr
-    }}
+    }
 }
