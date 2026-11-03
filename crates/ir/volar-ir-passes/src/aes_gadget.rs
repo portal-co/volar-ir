@@ -13,9 +13,10 @@
 //!   constant-folded: `K_e`/`K_m` and their round keys, and the CMAC
 //!   subkeys `K1`/`K2`, are computed natively (the inline AES below) and
 //!   embedded as constants. Only state S-boxes run in-circuit.
-//! - The S-box is algebraic: inversion in GF(2^8) (mod `0x11B`) via the
-//!   `x^254` addition chain (Frobenius squares are linear, six generic
-//!   multiplications) followed by the FIPS affine map.
+//! - The S-box is the Boyar–Peralta circuit (32+2 ANDs, ~120 gates total;
+//!   see `sbox_wires_bp`), replacing the algebraic `x^254` addition chain
+//!   (~1.5k gates), which is retained as `sbox_wires_algebraic` for the
+//!   exhaustive differential test.
 //! - Byte-granular only: `GadgetError::NotByteAligned` when the plaintext
 //!   bit count is not a multiple of 8 (bit-granular blobs are the Ascon
 //!   profile's domain; the padding-positions lesson of
@@ -281,9 +282,167 @@ fn reduce(b: &mut WireBuilder, prod: &mut [Option<IRVarId>; 15]) {
     }
 }
 
+/// The AES S-box: the Boyar–Peralta forward circuit. Transcribed from
+/// `bp_aes_sbox_fwd.v` in ben-marshall/aes-sboxes (itself a transcription of
+/// Boyar & Peralta's circuit from "A Small Depth-16 Circuit for the AES
+/// S-Box"); the algebraic `x^254` construction below is retained for the
+/// exhaustive differential test. Bit order: the source is indexed MSB-first
+/// over a bit-reversed byte (`U[i] = s_in[7-i]`, `d = s_in[0]`), and the
+/// output is reversed back (`s_out[j] = S[7-j]`) — with our LSB-first
+/// `Byte`, both reversals are pure relabelings.
+fn sbox_wires(b: &mut WireBuilder, x: &Byte) -> Byte {
+    sbox_wires_bp(b, x)
+}
+
+/// The Boyar–Peralta forward S-box on wires (see `sbox_wires` for
+/// provenance). 1-indexed arrays mirror the source's `t_`/`m_` numbering.
+#[allow(clippy::needless_range_loop)]
+fn sbox_wires_bp(b: &mut WireBuilder, x: &Byte) -> Byte {
+    let u: Byte = core::array::from_fn(|i| x[7 - i]);
+    let d = x[0];
+    let mut t = [IRVarId(0); 28];
+    t[1] = b.xor(u[0], u[3]);
+    t[2] = b.xor(u[0], u[5]);
+    t[3] = b.xor(u[0], u[6]);
+    t[4] = b.xor(u[3], u[5]);
+    t[5] = b.xor(u[4], u[6]);
+    t[6] = b.xor(t[1], t[5]);
+    t[7] = b.xor(u[1], u[2]);
+    t[8] = b.xor(u[7], t[6]);
+    t[9] = b.xor(u[7], t[7]);
+    t[10] = b.xor(t[6], t[7]);
+    t[11] = b.xor(u[1], u[5]);
+    t[12] = b.xor(u[2], u[5]);
+    t[13] = b.xor(t[3], t[4]);
+    t[14] = b.xor(t[6], t[11]);
+    t[15] = b.xor(t[5], t[11]);
+    t[16] = b.xor(t[5], t[12]);
+    t[17] = b.xor(t[9], t[16]);
+    t[18] = b.xor(u[3], u[7]);
+    t[19] = b.xor(t[7], t[18]);
+    t[20] = b.xor(t[1], t[19]);
+    t[21] = b.xor(u[6], u[7]);
+    t[22] = b.xor(t[7], t[21]);
+    t[23] = b.xor(t[2], t[22]);
+    t[24] = b.xor(t[2], t[10]);
+    t[25] = b.xor(t[20], t[17]);
+    t[26] = b.xor(t[3], t[16]);
+    t[27] = b.xor(t[1], t[12]);
+
+    let mut m = [IRVarId(0); 64];
+    m[1] = b.and(t[13], t[6]);
+    m[2] = b.and(t[23], t[8]);
+    m[3] = b.xor(t[14], m[1]);
+    m[4] = b.and(t[19], d);
+    m[5] = b.xor(m[4], m[1]);
+    m[6] = b.and(t[3], t[16]);
+    m[7] = b.and(t[22], t[9]);
+    m[8] = b.xor(t[26], m[6]);
+    m[9] = b.and(t[20], t[17]);
+    m[10] = b.xor(m[9], m[6]);
+    m[11] = b.and(t[1], t[15]);
+    m[12] = b.and(t[4], t[27]);
+    m[13] = b.xor(m[12], m[11]);
+    m[14] = b.and(t[2], t[10]);
+    m[15] = b.xor(m[14], m[11]);
+    m[16] = b.xor(m[3], m[2]);
+    m[17] = b.xor(m[5], t[24]);
+    m[18] = b.xor(m[8], m[7]);
+    m[19] = b.xor(m[10], m[15]);
+    m[20] = b.xor(m[16], m[13]);
+    m[21] = b.xor(m[17], m[15]);
+    m[22] = b.xor(m[18], m[13]);
+    m[23] = b.xor(m[19], t[25]);
+    m[24] = b.xor(m[22], m[23]);
+    m[25] = b.and(m[22], m[20]);
+    m[26] = b.xor(m[21], m[25]);
+    m[27] = b.xor(m[20], m[21]);
+    m[28] = b.xor(m[23], m[25]);
+    m[29] = b.and(m[28], m[27]);
+    m[30] = b.and(m[26], m[24]);
+    m[31] = b.and(m[20], m[23]);
+    m[32] = b.and(m[27], m[31]);
+    m[33] = b.xor(m[27], m[25]);
+    m[34] = b.and(m[21], m[22]);
+    m[35] = b.and(m[24], m[34]);
+    m[36] = b.xor(m[24], m[25]);
+    m[37] = b.xor(m[21], m[29]);
+    m[38] = b.xor(m[32], m[33]);
+    m[39] = b.xor(m[23], m[30]);
+    m[40] = b.xor(m[35], m[36]);
+    m[41] = b.xor(m[38], m[40]);
+    m[42] = b.xor(m[37], m[39]);
+    m[43] = b.xor(m[37], m[38]);
+    m[44] = b.xor(m[39], m[40]);
+    m[45] = b.xor(m[42], m[41]);
+    m[46] = b.and(m[44], t[6]);
+    m[47] = b.and(m[40], t[8]);
+    m[48] = b.and(m[39], d);
+    m[49] = b.and(m[43], t[16]);
+    m[50] = b.and(m[38], t[9]);
+    m[51] = b.and(m[37], t[17]);
+    m[52] = b.and(m[42], t[15]);
+    m[53] = b.and(m[45], t[27]);
+    m[54] = b.and(m[41], t[10]);
+    m[55] = b.and(m[44], t[13]);
+    m[56] = b.and(m[40], t[23]);
+    m[57] = b.and(m[39], t[19]);
+    m[58] = b.and(m[43], t[3]);
+    m[59] = b.and(m[38], t[22]);
+    m[60] = b.and(m[37], t[20]);
+    m[61] = b.and(m[42], t[1]);
+    m[62] = b.and(m[45], t[4]);
+    m[63] = b.and(m[41], t[2]);
+
+    let mut l = [IRVarId(0); 30];
+    l[0] = b.xor(m[61], m[62]);
+    l[1] = b.xor(m[50], m[56]);
+    l[2] = b.xor(m[46], m[48]);
+    l[3] = b.xor(m[47], m[55]);
+    l[4] = b.xor(m[54], m[58]);
+    l[5] = b.xor(m[49], m[61]);
+    l[6] = b.xor(m[62], l[5]);
+    l[7] = b.xor(m[46], l[3]);
+    l[8] = b.xor(m[51], m[59]);
+    l[9] = b.xor(m[52], m[53]);
+    l[10] = b.xor(m[53], l[4]);
+    l[11] = b.xor(m[60], l[2]);
+    l[12] = b.xor(m[48], m[51]);
+    l[13] = b.xor(m[50], l[0]);
+    l[14] = b.xor(m[52], m[61]);
+    l[15] = b.xor(m[55], l[1]);
+    l[16] = b.xor(m[56], l[0]);
+    l[17] = b.xor(m[57], l[1]);
+    l[18] = b.xor(m[58], l[8]);
+    l[19] = b.xor(m[63], l[4]);
+    l[20] = b.xor(l[0], l[1]);
+    l[21] = b.xor(l[1], l[7]);
+    l[22] = b.xor(l[3], l[12]);
+    l[23] = b.xor(l[18], l[2]);
+    l[24] = b.xor(l[15], l[9]);
+    l[25] = b.xor(l[6], l[10]);
+    l[26] = b.xor(l[7], l[9]);
+    l[27] = b.xor(l[8], l[10]);
+    l[28] = b.xor(l[11], l[14]);
+    l[29] = b.xor(l[11], l[17]);
+
+    // s0 = l6^l24; s1 = ~(l16^l26); s2 = ~(l19^l28); s3 = l6^l21;
+    // s4 = l20^l22; s5 = l25^l29; s6 = ~(l13^l27); s7 = ~(l6^l23).
+    let mut s = [IRVarId(0); 8];
+    s[0] = b.xor(l[6], l[24]);
+    s[1] = { let x = b.xor(l[16], l[26]); b.not(x) };
+    s[2] = { let x = b.xor(l[19], l[28]); b.not(x) };
+    s[3] = b.xor(l[6], l[21]);
+    s[4] = b.xor(l[20], l[22]);
+    s[5] = b.xor(l[25], l[29]);
+    s[6] = { let x = b.xor(l[13], l[27]); b.not(x) };
+    s[7] = { let x = b.xor(l[6], l[23]); b.not(x) };
+    core::array::from_fn(|j| s[7 - j])
+}
+
 /// The AES S-box: inversion in GF(2^8) (`x^254` addition chain), then the
 /// FIPS affine map. `0^254 = 0`, so the zero byte needs no special case.
-fn sbox_wires(b: &mut WireBuilder, x: &Byte) -> Byte {
+fn sbox_wires_algebraic(b: &mut WireBuilder, x: &Byte) -> Byte {
     let p2 = gf_square(b, x);
     let p4 = gf_square(b, &p2);
     let p8 = gf_square(b, &p4);
@@ -703,6 +862,27 @@ mod tests {
         circ.outputs = ct.iter().chain(tag.iter()).copied().collect();
         let result = eval(&circ, pt);
         (result[..ct.len()].to_vec(), result[ct.len()..].to_vec())
+    }
+
+    #[test]
+    fn sbox_bp_exhaustive_match() {
+        // All 256 inputs: Boyar–Peralta == algebraic == the FIPS table.
+        let mut bp_circ = BCircuit::new(8);
+        let mut alg_circ = BCircuit::new(8);
+        let input: Byte = core::array::from_fn(|i| IRVarId(i as u32));
+        bp_circ.outputs = sbox_wires_bp(&mut WireBuilder::new(&mut bp_circ), &input).to_vec();
+        alg_circ.outputs =
+            sbox_wires_algebraic(&mut WireBuilder::new(&mut alg_circ), &input).to_vec();
+        for value in 0..=255u8 {
+            let bits = unpack_bytes(&[value], 8);
+            let expected = unpack_bytes(&[SBOX[value as usize]], 8);
+            assert_eq!(eval(&bp_circ, &bits), expected, "BP sbox at {value:#04x}");
+            assert_eq!(
+                eval(&alg_circ, &bits),
+                expected,
+                "algebraic sbox at {value:#x}"
+            );
+        }
     }
 
     #[test]
