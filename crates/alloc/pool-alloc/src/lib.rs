@@ -1050,12 +1050,33 @@ unsafe impl GlobalAlloc for Pool {
                 let base = (*chunk).fill_base;
                 let data = (base + (*chunk).fill + HEADER + (align - 1)) & !(align - 1);
                 let hdr = data - HEADER;
-                if hdr + HEADER + size <= base + CHUNK_SIZE {
-                    ptr::write(hdr as *mut u32, size as u32);
+                // Slot extent uses the bucket cap (>= size): the declared
+                // span covers the magic tail so packed neighbors never share
+                // bytes and the free path's span_end matches exactly.
+                let cap = size.max(MIN_BUCKET_SIZE);
+                if hdr + HEADER + cap <= base + CHUNK_SIZE {
+                    // Bucket cap, not raw size: sizes below MIN_BUCKET_SIZE
+                    // have no 8-byte tail (the magic write would land in the
+                    // header), so they route through Release mode via the
+                    // cap >= MIN_BUCKET_SIZE guard in dealloc.
+                    ptr::write(hdr as *mut u32, cap as u32);
                     #[cfg(debug_assertions)]
                     ptr::write((hdr + 4) as *mut u32, HEADER_MAGIC);
                     ptr::write((hdr + 8) as *mut *mut Chunk, chunk);
-                    (*chunk).fill = hdr + HEADER + size - base;
+                    // A recycled chunk's pages keep their macOS MADV_DONTNEED
+                    // contents until the pages are actually reclaimed, so a
+                    // fresh bump serve can inherit the slot's previous
+                    // lifetime's NODE_MAGIC in the payload tail — a false
+                    // DOUBLE PUSH on its first free. Clear the tail on serve
+                    // (same-page guard mirrors the push side). Slots smaller
+                    // than 8 bytes have no 8-byte tail (nothing to clear).
+                    if size >= 8 {
+                        let tail_at = data as usize + size - 8;
+                        if tail_at / page_size() == (data as usize) / page_size() {
+                            ptr::write(tail_at as *mut u64, 0);
+                        }
+                    }
+                    (*chunk).fill = hdr + HEADER + cap - base;
                     (*chunk).outstanding += 1;
                     self.bytes_live.fetch_add(size, Ordering::Relaxed);
                     self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
@@ -1226,6 +1247,26 @@ unsafe impl GlobalAlloc for Pool {
                 if magic_at / page_size() == (node as usize) / page_size()
                     && ptr::read(magic_at as *const u64) == NODE_MAGIC
                 {
+                    // Diagnose before aborting: count occurrences of this
+                    // node on its bucket list. Two+ = insertion bug; one =
+                    // a serve never cleared the magic. Bounded, allocation-
+                    // free walk (integers only in the eprintln).
+                    let mut occ = 0usize;
+                    let mut n2 = (*chunk).free_heads[b];
+                    let mut hops = 0usize;
+                    while !n2.is_null() && hops < 8192 {
+                        if n2 as usize == node as usize {
+                            occ += 1;
+                        }
+                        n2 = ptr::read(n2 as *const *mut u8);
+                        hops += 1;
+                    }
+                    eprintln!(
+                        "  DP-DIAG: occ={occ} hops={hops} list_head={:#x} \\\n                         node={:#x} node_next={:#x}",
+                        (*chunk).free_heads[b] as usize,
+                        node as usize,
+                        ptr::read(node as *const *mut u8) as usize,
+                    );
                     self.pool_fatal(
                         "dealloc: DOUBLE PUSH (slot already on freelist)",
                         ptr as usize,
@@ -1300,6 +1341,10 @@ unsafe impl GlobalAlloc for Pool {
                         layout.size(),
                     );
                 }
+                // Bucket cap, not raw layout size: the header carries the
+                // cap the slot was bumped with (>= MIN_BUCKET_SIZE) and the
+                // magic arithmetic needs an 8-byte tail.
+                let cap = cap.max(MIN_BUCKET_SIZE);
                 // Mark the slot (only within its own page: a cross-page
                 // write would poison the next page's counters).
                 let magic_at = node as usize + cap - 8;
