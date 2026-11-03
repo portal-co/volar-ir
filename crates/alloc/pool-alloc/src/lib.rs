@@ -261,7 +261,7 @@ impl Chunk {
                 return;
             }
             let n = self.n_pages;
-            let names = [b'A', b'F', b'N'];
+            let names = *b"AFN";
             let bases = [self.page_alloc, self.page_freed, self.page_nodes];
             for a in 0..3 {
                 let base = bases[a];
@@ -1068,13 +1068,13 @@ unsafe impl GlobalAlloc for Pool {
                     // fresh bump serve can inherit the slot's previous
                     // lifetime's NODE_MAGIC in the payload tail — a false
                     // DOUBLE PUSH on its first free. Clear the tail on serve
-                    // (same-page guard mirrors the push side). Slots smaller
-                    // than 8 bytes have no 8-byte tail (nothing to clear).
-                    if size >= 8 {
-                        let tail_at = data as usize + size - 8;
-                        if tail_at / page_size() == (data as usize) / page_size() {
-                            ptr::write(tail_at as *mut u64, 0);
-                        }
+                    // (same-page guard mirrors the push side). Use the
+                    // bucket cap: the magic lives at data+cap-8 on free, so
+                    // the clear must hit the same bytes (for size < 16 the
+                    // raw-size offset would miss it).
+                    let tail_at = data as usize + cap - 8;
+                    if tail_at / page_size() == (data as usize) / page_size() {
+                        ptr::write(tail_at as *mut u64, 0);
                     }
                     (*chunk).fill = hdr + HEADER + cap - base;
                     (*chunk).outstanding += 1;
