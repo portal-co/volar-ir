@@ -430,7 +430,7 @@ impl Chunk {
             self.dead_count = 0;
             // POOL_SHADOW: the sweep is pool-internal, mirror its (null)
             // effect on the counters so verify_meta stays consistent.
-            if shadow_enabled() != 0 {
+            if shadow_enabled() == 2 {
                 let n3 = self.n_pages * 3;
                 ptr::copy_nonoverlapping(self.page_alloc, self.shadow, n3);
             }
@@ -474,7 +474,7 @@ pub struct Pool {
 impl Pool {
     pub const fn new() -> Self {
         // POOL_REENTRANT starts false and is flipped by the first fatal;
-        // const fn can't store, so the initial true comes from the static.
+        // the static initializes it false directly.
         Self {
             locked: AtomicBool::new(false),
             head: UnsafeCell::new(ptr::null_mut()),
@@ -528,7 +528,7 @@ impl Pool {
     /// POOL_SHADOW: verify every live chunk's arrays against its mirror.
     unsafe fn shadow_verify_all(&self, op: u8) {
         unsafe {
-            if shadow_enabled() == 0 {
+            if shadow_enabled() != 2 {
                 return;
             }
             let mut c = *self.head.get();
@@ -542,7 +542,7 @@ impl Pool {
     /// POOL_SHADOW: mirror the arrays after our own legal writes.
     unsafe fn shadow_sync_all(&self) {
         unsafe {
-            if shadow_enabled() == 0 {
+            if shadow_enabled() != 2 {
                 return;
             }
             let mut c = *self.head.get();
@@ -749,8 +749,17 @@ impl Pool {
             // 8-byte aligned: the dead-words table is dereferenced as *mut u64
             // (a misaligned deref panics in debug builds — and its formatting
             // would re-enter this allocator under the lock).
+            // Region offsets are in BYTES (meta is *mut u8): each u16
+            // region spans n_pages * 2 bytes. The pre-fix offsets used
+            // n_pages-byte strides, so page_freed aliased page_alloc's
+            // second half, page_nodes aliased page_freed's second half,
+            // and dead_words overlapped page_nodes — byte-accounting
+            // writes (slot spans) landed in the nodes counters, which is
+            // the page_nodes poison (16371/16563 "byte counters",
+            // freed > alloc, 0xFFFF wraps, the += overflow panic) chased
+            // across the whole 2026-11-02 investigation.
             let meta_layout = Layout::from_size_align(
-                n_pages * 3 * size_of::<u16>() + n_pages.div_ceil(64) * size_of::<u64>(),
+                n_pages * 6 * size_of::<u16>() + n_pages.div_ceil(64) * size_of::<u64>(),
                 8,
             )
             .expect("page metadata layout");
@@ -821,9 +830,9 @@ impl Pool {
                     fill_base: base as usize,
                     n_pages,
                     page_alloc: meta as *mut u16,
-                    page_freed: meta.add(n_pages) as *mut u16,
-                    page_nodes: meta.add(n_pages * 2) as *mut u16,
-                    dead_words: meta.add(n_pages * 3) as *mut u64,
+                    page_freed: meta.add(n_pages * 2) as *mut u16,
+                    page_nodes: meta.add(n_pages * 4) as *mut u16,
+                    dead_words: meta.add(n_pages * 6) as *mut u64,
                     dead_count: 0,
                     free_heads: [ptr::null_mut(); N_BUCKETS],
                     shadow: shadow as *mut u16,
@@ -898,7 +907,7 @@ impl Pool {
                 self.pages_released.fetch_add(released, Ordering::Relaxed);
             }
             // POOL_SHADOW: the sweep cleared dead_words (pool-internal).
-            if shadow_enabled() != 0 {
+            if shadow_enabled() == 2 {
                 (*chunk).sync_meta();
             }
             released
