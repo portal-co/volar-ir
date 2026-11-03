@@ -116,7 +116,29 @@ const MADV_DONTNEED: i32 = 4;
 unsafe extern "C" {
     fn madvise(addr: *mut core::ffi::c_void, length: usize, advice: i32) -> i32;
     fn getpagesize() -> i32;
+    fn mmap(
+        addr: *mut core::ffi::c_void,
+        len: usize,
+        prot: i32,
+        flags: i32,
+        fd: i32,
+        off: i64,
+    ) -> *mut core::ffi::c_void;
+    fn munmap(addr: *mut core::ffi::c_void, len: usize) -> i32;
+    fn mprotect(addr: *mut core::ffi::c_void, len: usize, prot: i32) -> i32;
 }
+
+// Detector (POOL_SHADOW=1) meta tables get PROT_NONE guard pages on
+// BOTH sides: any stray write into the table (or past its neighbors)
+// faults immediately at the exact offending address, and lldb catches
+// the writer with a full backtrace. This pins the OOB writer no matter
+// which pool structure it aliases.
+const MMAP_PROT_RW: i32 = 0x3;
+const MMAP_PROT_NONE: i32 = 0x0;
+// macOS: MAP_PRIVATE=0x02, MAP_ANON=0x1000, MAP_FIXED=0x10.
+const MMAP_FLAGS_ANON_FIXED: i32 = 0x1012;
+/// Guard-page stride: [GUARD | table | GUARD].
+const SHADOW_GUARD_SIZE: usize = 4096;
 
 /// Runtime page size, cached (4 KiB on x86_64, 16 KiB on Apple Silicon).
 static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
@@ -129,7 +151,34 @@ static POOL_NODE_PUSHES: AtomicUsize = AtomicUsize::new(0);
 static POOL_NODE_POPS: AtomicUsize = AtomicUsize::new(0);
 static POOL_DEALLOCS: AtomicUsize = AtomicUsize::new(0);
 static POOL_PUSHLOG: AtomicUsize = AtomicUsize::new(0);
+
+/// Lazy POOL_SHADOW check: 0 = initializing (re-entrant call), 1 = off,
+/// 2 = on. The env read allocates (getenv), so this function re-enters
+/// the allocator: a CAS in-progress guard returns "off" for the nested
+/// calls and the outermost call finishes the init.
+fn shadow_enabled() -> usize {
+    let v = SHADOW_STATE.load(Ordering::Acquire);
+    if v != 0 {
+        return v;
+    }
+    if SHADOW_STATE
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return 0; // a nested call during the env read: treat as off
+    }
+    let on = if std::env::var_os("POOL_SHADOW").is_some() {
+        2
+    } else {
+        1
+    };
+    SHADOW_STATE.store(on, Ordering::Release);
+    on
+}
+
+static SHADOW_STATE: AtomicUsize = AtomicUsize::new(0);
 static POOL_SENTINEL_FREES: AtomicUsize = AtomicUsize::new(0);
+static POOL_REENTRANT: AtomicBool = AtomicBool::new(false);
 
 /// Written into a dead slot's last 8 payload bytes while the slot is on
 /// a freelist; the pop clears it. A push that finds it already present is
@@ -189,12 +238,93 @@ struct Chunk {
     page_nodes: *mut u16,
     /// Per-chunk size-bucketed free lists (Reuse mode). null = empty.
     free_heads: [*mut u8; N_BUCKETS],
+    /// POOL_SHADOW detector: a mirror of the page counters
+    /// (alloc|freed|nodes), verified against the live arrays after every
+    /// pool operation. Any write to the arrays that did not come from
+    /// this allocator shows up as a mismatch with page index + value.
+    shadow: *mut u16,
     /// Dead-page bitset (one bit per page) + count of set bits.
     dead_words: *mut u64,
     dead_count: usize,
 }
 
 impl Chunk {
+    /// POOL_SHADOW detector: verify the live u16 arrays against the
+    /// mirror. Any cell that changed without this allocator writing it
+    /// (all legal writes update the mirror immediately after) aborts
+    /// with the page index and both values — the external writer caught
+    /// having written between two pool operations. POOL_SHADOW=1 enables.
+    #[inline]
+    unsafe fn verify_meta(&self, op: u8) {
+        unsafe {
+            if shadow_enabled() == 0 {
+                return;
+            }
+            let n = self.n_pages;
+            let names = [b'A', b'F', b'N'];
+            let bases = [self.page_alloc, self.page_freed, self.page_nodes];
+            for a in 0..3 {
+                let base = bases[a];
+                let sh = self.shadow.add(a * n);
+                for p in 0..n {
+                    let live = *base.add(p);
+                    let mirror = *sh.add(p);
+                    if live != mirror {
+                        // Never panic/allocate under the lock: eprintln is
+                        // fine (stderr), then abort. DUMP THE NEIGHBORHOOD:
+                        // the live array's +/-4 cells around the mismatch
+                        // plus the mirror's same window — the pattern
+                        // (byte counters? pointer halves? indices?) names
+                        // the writer.
+                        eprintln!(
+                            "SHADOW-MISMATCH op={} region={} page={} live={} mirror={} fill={:#x} outstanding={} dead_count={}",
+                            op, names[a] as char, p, live, mirror,
+                            self.fill, self.outstanding, self.dead_count
+                        );
+                        eprintln!(
+                            "  live window p-4..p+4: {} {} {} {} [{p}] {} {} {} {}",
+                            *base.add(p.saturating_sub(4)),
+                            *base.add(p.saturating_sub(3)),
+                            *base.add(p.saturating_sub(2)),
+                            *base.add(p.saturating_sub(1)),
+                            *base.add((p + 1).min(n - 1)),
+                            *base.add((p + 2).min(n - 1)),
+                            *base.add((p + 3).min(n - 1)),
+                            *base.add((p + 4).min(n - 1)),
+                        );
+                        eprintln!(
+                            "  mirror same window: {} {} {} {} {} {} {} {}",
+                            *sh.add(p.saturating_sub(4)),
+                            *sh.add(p.saturating_sub(3)),
+                            *sh.add(p.saturating_sub(2)),
+                            *sh.add(p.saturating_sub(1)),
+                            *sh.add((p + 1).min(n - 1)),
+                            *sh.add((p + 2).min(n - 1)),
+                            *sh.add((p + 3).min(n - 1)),
+                            *sh.add((p + 4).min(n - 1)),
+                        );
+                        std::process::abort();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sync the mirror to the live arrays after a legal write.
+    #[inline]
+    unsafe fn sync_meta(&mut self) {
+        unsafe {
+            if shadow_enabled() == 0 {
+                return;
+            }
+            let n = self.n_pages;
+            let bases = [self.page_alloc, self.page_freed, self.page_nodes];
+            for a in 0..3 {
+                ptr::copy_nonoverlapping(bases[a], self.shadow.add(a * n), n);
+            }
+        }
+    }
+
     /// `#[inline]`-small helpers for the page accounting. `span` is the
     /// slot's full byte extent (header + payload).
     /// Account a freshly-allocated slot's byte span into its pages.
@@ -265,6 +395,8 @@ impl Chunk {
                     }
                 }
             }
+            let n3 = self.n_pages * 3;
+            ptr::copy_nonoverlapping(self.page_alloc, self.shadow, n3);
             newly_dead
         }
     }
@@ -296,6 +428,12 @@ impl Chunk {
             // All dead bits consumed.
             ptr::write_bytes(self.dead_words, 0, self.n_pages.div_ceil(64) * 8 / 8);
             self.dead_count = 0;
+            // POOL_SHADOW: the sweep is pool-internal, mirror its (null)
+            // effect on the counters so verify_meta stays consistent.
+            if shadow_enabled() != 0 {
+                let n3 = self.n_pages * 3;
+                ptr::copy_nonoverlapping(self.page_alloc, self.shadow, n3);
+            }
             released
         }
     }
@@ -335,6 +473,8 @@ pub struct Pool {
 
 impl Pool {
     pub const fn new() -> Self {
+        // POOL_REENTRANT starts false and is flipped by the first fatal;
+        // const fn can't store, so the initial true comes from the static.
         Self {
             locked: AtomicBool::new(false),
             head: UnsafeCell::new(ptr::null_mut()),
@@ -385,6 +525,34 @@ impl Pool {
     }
 
     #[inline]
+    /// POOL_SHADOW: verify every live chunk's arrays against its mirror.
+    unsafe fn shadow_verify_all(&self, op: u8) {
+        unsafe {
+            if shadow_enabled() == 0 {
+                return;
+            }
+            let mut c = *self.head.get();
+            while !c.is_null() {
+                (*c).verify_meta(op);
+                c = (*c).next;
+            }
+        }
+    }
+
+    /// POOL_SHADOW: mirror the arrays after our own legal writes.
+    unsafe fn shadow_sync_all(&self) {
+        unsafe {
+            if shadow_enabled() == 0 {
+                return;
+            }
+            let mut c = *self.head.get();
+            while !c.is_null() {
+                (*c).sync_meta();
+                c = (*c).next;
+            }
+        }
+    }
+
     /// Loud, allocation-free-after-unlock fatal path for any invariant
     /// violation detected under the spin lock. Panicking here would
     /// deadlock the process silently (the panic machinery allocates
@@ -402,7 +570,9 @@ impl Pool {
         cap: usize,
         size: usize,
     ) -> ! {
-        self.unlock();
+        if !POOL_REENTRANT.swap(true, Ordering::Relaxed) {
+            self.unlock();
+        }
         eprintln!(
             "  deallocs={} sentinel_frees={} node pushes={} pops={} drift={}",
             POOL_DEALLOCS.load(Ordering::Relaxed),
@@ -429,16 +599,13 @@ impl Pool {
                 for (i, h) in (*c).free_heads.iter().enumerate() {
                     if !h.is_null() {
                         let n0 = ptr::read(*h as *const *mut u8);
-                        eprintln!(
-                            "  head[{i}] = {:#x} -> {:#x}",
-                            *h as usize, n0 as usize
-                        );
+                        eprintln!("  head[{i}] = {:#x} -> {:#x}", *h as usize, n0 as usize);
                     }
                 }
                 eprintln!(
                     "  freed ptr={:#x} hdr={:#x} fill={:#x} fill_base={:#x}",
                     ptr,
-                    ptr as usize - 16,
+                    ptr - 16,
                     (*c).fill,
                     (*c).fill_base,
                 );
@@ -450,31 +617,49 @@ impl Pool {
             let chunk = chunk as *const Chunk;
             let ps = page_size();
             unsafe {
-            let pn = (ptr.wrapping_sub((*chunk).fill_base)) / ps;
-            if pn < (*chunk).n_pages {
-                eprintln!(
-                    "  page {pn}: alloc={} freed={} nodes={} \
+                let pn = (ptr.wrapping_sub((*chunk).fill_base)) / ps;
+                if pn < (*chunk).n_pages {
+                    eprintln!(
+                        "  page {pn}: alloc={} freed={} nodes={} \
                      neighbors(nodes)={:?} {:?} {:?}",
-                    *(*chunk).page_alloc.add(pn),
-                    *(*chunk).page_freed.add(pn),
-                    *(*chunk).page_nodes.add(pn),
-                    (pn > 0).then(|| *(*chunk).page_nodes.add(pn - 1)),
-                    *(*chunk).page_nodes.add(pn),
-                    (pn + 1 < (*chunk).n_pages)
-                        .then(|| *(*chunk).page_nodes.add(pn + 1)),
-                );
-            } else {
-                eprintln!("  page {pn} OUT OF RANGE (n_pages={})", (*chunk).n_pages);
-            }
-            eprintln!(
-                "  chunk fields: fill={:#x} outstanding={} n_pages={} \
+                        *(*chunk).page_alloc.add(pn),
+                        *(*chunk).page_freed.add(pn),
+                        *(*chunk).page_nodes.add(pn),
+                        (pn > 0).then(|| *(*chunk).page_nodes.add(pn - 1)),
+                        *(*chunk).page_nodes.add(pn),
+                        (pn + 1 < (*chunk).n_pages).then(|| *(*chunk).page_nodes.add(pn + 1)),
+                    );
+                    // POOL_SHADOW: mirror-vs-live for this page. Equal
+                    // means the POOL wrote the poisoned values through
+                    // its own (bounded) paths; differing means an
+                    // external writer hit the array between ops.
+                    if shadow_enabled() == 2 {
+                        let n = (*chunk).n_pages;
+                        eprintln!(
+                            "  mirror: alloc={} freed={} nodes={}",
+                            *(*chunk).shadow.add(pn),
+                            *(*chunk).shadow.add(n + pn),
+                            *(*chunk).shadow.add(2 * n + pn),
+                        );
+                    }
+                } else {
+                    eprintln!("  page {pn} OUT OF RANGE (n_pages={})", (*chunk).n_pages);
+                }
+                eprintln!(
+                    "  chunk fields: fill={:#x} outstanding={} n_pages={} \
                  page_alloc={:?} page_nodes={:?}",
-                (*chunk).fill,
-                (*chunk).outstanding,
-                (*chunk).n_pages,
-                (*chunk).page_alloc,
-                (*chunk).page_nodes,
-            );
+                    (*chunk).fill,
+                    (*chunk).outstanding,
+                    (*chunk).n_pages,
+                    (*chunk).page_alloc,
+                    (*chunk).page_nodes,
+                );
+                eprintln!(
+                    "  OUTSTANDING-TRUTH: outstanding=646? vs printed {}; \
+                     chunk struct = {:#x}",
+                    (*chunk).outstanding,
+                    chunk as usize,
+                );
             }
         }
         std::process::abort();
@@ -548,7 +733,8 @@ impl Pool {
                 ptr::write_bytes(c.page_nodes, 0, n_pages);
                 ptr::write_bytes(c.dead_words, 0, n_pages.div_ceil(64));
                 c.dead_count = 0;
-                &mut c.free_heads.fill(ptr::null_mut());
+                c.free_heads.fill(ptr::null_mut());
+                c.sync_meta();
                 *self.head.get() = recycled;
                 self.chunks_recycled.fetch_add(1, Ordering::Relaxed);
                 self.chunks_live.fetch_add(1, Ordering::Relaxed);
@@ -570,6 +756,48 @@ impl Pool {
             .expect("page metadata layout");
             let meta = System.alloc(meta_layout);
             if meta.is_null() {
+                System.dealloc(base, layout);
+                return ptr::null_mut();
+            }
+            // POOL_SHADOW detector mirror (same size as the u16 arrays).
+            // With the detector on, the mirror lives inside a guard-paged
+            // block: [PROT_NONE | mirror RW | PROT_NONE] — a stray write
+            // past either edge faults at the exact address (lldb-catchable),
+            // and the verify/sync mirror catches in-table writes.
+            let shadow_layout =
+                Layout::from_size_align(n_pages * 3 * size_of::<u16>(), 8).expect("shadow layout");
+            let mut shadow = System.alloc(shadow_layout);
+            if shadow_enabled() == 2 {
+                let total = SHADOW_GUARD_SIZE + shadow_layout.size() + SHADOW_GUARD_SIZE;
+                let blk = mmap(
+                    ptr::null_mut(),
+                    total,
+                    MMAP_PROT_RW,
+                    MMAP_FLAGS_ANON_FIXED,
+                    -1,
+                    0,
+                );
+                if blk as usize != usize::MAX {
+                    // Leave the first and last pages PROT_NONE.
+                    let _ = mprotect(blk, SHADOW_GUARD_SIZE, MMAP_PROT_NONE);
+                    let _ = mprotect(
+                        (blk as usize + total - SHADOW_GUARD_SIZE) as *mut core::ffi::c_void,
+                        SHADOW_GUARD_SIZE,
+                        MMAP_PROT_NONE,
+                    );
+                    System.dealloc(shadow, shadow_layout);
+                    shadow = (blk as usize + SHADOW_GUARD_SIZE) as *mut u8;
+                } else {
+                    eprintln!(
+                        "POOL-SHADOW mmap failed: fixed-VA block unavailable \
+                         (ret={:#x}) — falling back to System; watchpoint trap \
+                         disabled this run",
+                        blk as usize
+                    );
+                }
+            }
+            if shadow.is_null() {
+                System.dealloc(meta, meta_layout);
                 System.dealloc(base, layout);
                 return ptr::null_mut();
             }
@@ -598,12 +826,14 @@ impl Pool {
                     dead_words: meta.add(n_pages * 3) as *mut u64,
                     dead_count: 0,
                     free_heads: [ptr::null_mut(); N_BUCKETS],
+                    shadow: shadow as *mut u16,
                 },
             );
             ptr::write_bytes((*chunk).page_alloc, 0, n_pages);
             ptr::write_bytes((*chunk).page_freed, 0, n_pages);
             ptr::write_bytes((*chunk).page_nodes, 0, n_pages);
             ptr::write_bytes((*chunk).dead_words, 0, n_pages.div_ceil(64));
+            (*chunk).sync_meta();
             *self.head.get() = chunk;
             self.chunks_live.fetch_add(1, Ordering::Relaxed);
             chunk
@@ -667,6 +897,10 @@ impl Pool {
             if released > 0 {
                 self.pages_released.fetch_add(released, Ordering::Relaxed);
             }
+            // POOL_SHADOW: the sweep cleared dead_words (pool-internal).
+            if shadow_enabled() != 0 {
+                (*chunk).sync_meta();
+            }
             released
         }
     }
@@ -702,15 +936,14 @@ unsafe impl GlobalAlloc for Pool {
                 // Over-allocate so the payload can be rounded up to `align`:
                 // base+HEADER alone misaligns align>16 requests (payload ≡
                 // 16 mod align). hdr = payload-16 stays inside the block.
-                let sys = Layout::from_size_align(size + HEADER + align, align)
-                    .expect("gated layout");
+                let sys =
+                    Layout::from_size_align(size + HEADER + align, align).expect("gated layout");
                 let base = System.alloc(sys);
                 if base.is_null() {
                     return ptr::null_mut();
                 }
-                let payload =
-                    ((base as usize + HEADER + (align - 1)) & !(align - 1))
-                        .max(base as usize + HEADER);
+                let payload = ((base as usize + HEADER + (align - 1)) & !(align - 1))
+                    .max(base as usize + HEADER);
                 let hdr = payload - HEADER;
                 ptr::write(hdr as *mut u32, size as u32);
                 ptr::write((hdr + 4) as *mut u32, SENTINEL_MAGIC);
@@ -718,7 +951,11 @@ unsafe impl GlobalAlloc for Pool {
                 self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
                 return payload as *mut u8;
             }
+            // Resolve the shadow flag OUTSIDE the lock: the lazy env read
+            // allocates (var_os through getenv) and would self-deadlock.
+            let _shadow = shadow_enabled();
             self.lock();
+            self.shadow_verify_all(1);
             let mut chunk = *self.head.get();
             let _ps = page_size();
             if Self::tracing() {
@@ -778,10 +1015,7 @@ unsafe impl GlobalAlloc for Pool {
                             }
                             *(*chunk).page_nodes.add(pn) = cnt - 1;
                             POOL_NODE_POPS.fetch_add(1, Ordering::Relaxed);
-                            ptr::write(
-                                (node as usize + cap - 8) as *mut u64,
-                                0,
-                            );
+                            ptr::write((node as usize + cap - 8) as *mut u64, 0);
                             if self.slot_overlaps_chunk(chunk, node, cap) {
                                 self.pool_fatal(
                                     "alloc: reused slot overlaps the chunk struct",
@@ -792,6 +1026,7 @@ unsafe impl GlobalAlloc for Pool {
                                     size,
                                 );
                             }
+                            self.shadow_sync_all();
                             self.unlock();
                             return node as *mut u8;
                         }
@@ -819,13 +1054,14 @@ unsafe impl GlobalAlloc for Pool {
                     if self.slot_overlaps_chunk(chunk, data as *mut u8, size) {
                         self.pool_fatal(
                             "alloc: served slot overlaps the chunk struct",
-                            data as usize,
+                            data,
                             chunk as usize,
                             base,
                             size,
                             size,
                         );
                     }
+                    self.shadow_sync_all();
                     self.unlock();
                     return data as *mut u8;
                 }
@@ -863,7 +1099,10 @@ unsafe impl GlobalAlloc for Pool {
                 System.dealloc(ptr, layout);
                 return;
             }
+            // Resolve the shadow flag OUTSIDE the lock (see alloc).
+            let _shadow = shadow_enabled();
             self.lock();
+            self.shadow_verify_all(2);
             let hdr = ptr as usize - HEADER;
             #[cfg(debug_assertions)]
             {
@@ -896,138 +1135,173 @@ unsafe impl GlobalAlloc for Pool {
                 System.dealloc(base, sys);
                 return;
             }
-        let chunk = ptr::read((hdr + 8) as *const usize) as *mut Chunk;
-        let fill_base = (*chunk).fill_base;
-        let cap = ptr::read(hdr as *const u32) as usize;
-        // The freed slot must live inside its chunk's data region; a
-        // pointer outside it means the header's chunk tag is stale or the
-        // slot was misrouted — continuing would compute wild page indices.
-        if hdr < fill_base || hdr + HEADER + cap > fill_base + CHUNK_SIZE {
-            self.pool_fatal(
-                "dealloc: freed slot outside its chunk's data region",
-                ptr as usize,
-                chunk as usize,
-                fill_base,
-                cap,
-                layout.size(),
-            );
-        }
-        // Diagnostic aborts (not panics!) for every invariant: panicking
-        // under the lock self-deadlocks the process silently (the panic
-        // machinery's own allocations re-enter the pool while we hold the
-        // spin lock). Unlock + print + abort instead — the abort makes the
-        // corruption loud and immediate instead of a silent hang.
-        if (*chunk).outstanding == 0 {
-            self.pool_fatal(
-                "dealloc: outstanding underflow (double free?)",
-                ptr as usize,
-                chunk as usize,
-                fill_base,
-                cap,
-                layout.size(),
-            );
-        }
-        (*chunk).outstanding -= 1;
-        self.bytes_live.fetch_sub(layout.size(), Ordering::Relaxed);
-        let span_end = hdr + HEADER + cap;
-        // Oversized slots (cap + HEADER >= page_size) straddle pages; the
-        // payload-magic write at node+cap-8 would land in the NEXT page's
-        // bookkeeping and a same-page page_nodes increment would double
-        // count. Route them through the Release path: their pages are
-        // reclaimable instead, and the scan (max request <= page) never
-        // wanted them anyway.
-        let oversized = cap + HEADER >= page_size();
-        if self.free_mode_reuse.load(Ordering::Relaxed)
-            && !oversized
-            && cap >= MIN_BUCKET_SIZE
-            && layout.align().max(16) <= MIN_BUCKET_SIZE
-            && (*chunk).outstanding > 0
-        {
-            // Reuse mode: return the slot to its chunk's bucket list. The
-            // NODE address is the PAYLOAD address; the next-pointer lives
-            // in the payload's first 8 bytes (dead data — the caller just
-            // gave them up), NEVER in the header (the header's cap/magic
-            // must survive for the slot's eventual re-free). The slot's
-            // pages are NOT releasable while a node exists (page_nodes).
-            let b = bucket_of(cap);
-            let node = (hdr + HEADER) as *mut u8;
-            if (node as usize) < fill_base
-                || (node as usize) >= fill_base + CHUNK_SIZE
+            let chunk = ptr::read((hdr + 8) as *const usize) as *mut Chunk;
+            let fill_base = (*chunk).fill_base;
+            let cap = ptr::read(hdr as *const u32) as usize;
+            // The freed slot must live inside its chunk's data region; a
+            // pointer outside it means the header's chunk tag is stale or the
+            // slot was misrouted — continuing would compute wild page indices.
+            if hdr < fill_base || hdr + HEADER + cap > fill_base + CHUNK_SIZE {
+                self.pool_fatal(
+                    "dealloc: freed slot outside its chunk's data region",
+                    ptr as usize,
+                    chunk as usize,
+                    fill_base,
+                    cap,
+                    layout.size(),
+                );
+            }
+            // Diagnostic aborts (not panics!) for every invariant: panicking
+            // under the lock self-deadlocks the process silently (the panic
+            // machinery's own allocations re-enter the pool while we hold the
+            // spin lock). Unlock + print + abort instead — the abort makes the
+            // corruption loud and immediate instead of a silent hang.
+            if (*chunk).outstanding == 0 {
+                self.pool_fatal(
+                    "dealloc: outstanding underflow (double free?)",
+                    ptr as usize,
+                    chunk as usize,
+                    fill_base,
+                    cap,
+                    layout.size(),
+                );
+            }
+            (*chunk).outstanding -= 1;
+            self.bytes_live.fetch_sub(layout.size(), Ordering::Relaxed);
+            let span_end = hdr + HEADER + cap;
+            // Oversized slots (cap + HEADER >= page_size) straddle pages; the
+            // payload-magic write at node+cap-8 would land in the NEXT page's
+            // bookkeeping and a same-page page_nodes increment would double
+            // count. Route them through the Release path: their pages are
+            // reclaimable instead, and the scan (max request <= page) never
+            // wanted them anyway.
+            let oversized = cap + HEADER >= page_size();
+            if self.free_mode_reuse.load(Ordering::Relaxed)
+                && !oversized
+                && cap >= MIN_BUCKET_SIZE
+                && layout.align().max(16) <= MIN_BUCKET_SIZE
+                && (*chunk).outstanding > 0
             {
-                self.pool_fatal(
-                    "dealloc: freelist node outside its chunk",
-                    ptr as usize,
-                    chunk as usize,
-                    fill_base,
-                    cap,
-                    layout.size(),
-                );
+                // Reuse mode: return the slot to its chunk's bucket list. The
+                // NODE address is the PAYLOAD address; the next-pointer lives
+                // in the payload's first 8 bytes (dead data — the caller just
+                // gave them up), NEVER in the header (the header's cap/magic
+                // must survive for the slot's eventual re-free). The slot's
+                // pages are NOT releasable while a node exists (page_nodes).
+                let b = bucket_of(cap);
+                let node = (hdr + HEADER) as *mut u8;
+                if (node as usize) < fill_base || (node as usize) >= fill_base + CHUNK_SIZE {
+                    self.pool_fatal(
+                        "dealloc: freelist node outside its chunk",
+                        ptr as usize,
+                        chunk as usize,
+                        fill_base,
+                        cap,
+                        layout.size(),
+                    );
+                }
+                let pn = (node as usize - fill_base) / page_size();
+                if pn >= (*chunk).n_pages {
+                    self.pool_fatal(
+                        "dealloc: freelist node page index out of range",
+                        ptr as usize,
+                        chunk as usize,
+                        fill_base,
+                        cap,
+                        layout.size(),
+                    );
+                }
+                // Duplicate check BEFORE the counter fatal (a real double
+                // push must be identified here, not preempted by it).
+                let magic_at = node as usize + cap - 8;
+                if magic_at / page_size() == (node as usize) / page_size()
+                    && ptr::read(magic_at as *const u64) == NODE_MAGIC
+                {
+                    self.pool_fatal(
+                        "dealloc: DOUBLE PUSH (slot already on freelist)",
+                        ptr as usize,
+                        chunk as usize,
+                        fill_base,
+                        cap,
+                        layout.size(),
+                    );
+                }
+                ptr::write(node as *mut *mut u8, (*chunk).free_heads[b]);
+                (*chunk).free_heads[b] = node;
+                let cnt = *(*chunk).page_nodes.add(pn);
+                // POOL_SHADOW: read the cell's mirror BEFORE flagging —
+                // the mirror equals the last value the pool itself wrote.
+                let mirror_cnt = if shadow_enabled() == 2 {
+                    *(*chunk).shadow.add(2 * (*chunk).n_pages + pn)
+                } else {
+                    cnt
+                };
+                if cnt >= 512 {
+                    eprintln!("  cnt={} mirror_cnt={} (page {pn})", cnt, mirror_cnt);
+                    if mirror_cnt < 512 {
+                        eprintln!(
+                            "  => EXTERNAL WRITE: the pool's own last value \
+                             for this cell was {mirror_cnt} but the live cell \
+                             is {cnt}"
+                        );
+                    } else {
+                        eprintln!(
+                            "  => POOL-SIDE DRIFT: bounded pushes accumulated \
+                             past the bound (double-push missed by magic)"
+                        );
+                    }
+                }
+                if cnt >= 512 {
+                    // A 16KB page cannot hold more than 512 min-size slots —
+                    // a larger count means the counter itself was corrupted
+                    // or the pushes drifted.
+                    self.pool_fatal(
+                        "dealloc: page_nodes exceeds slots-per-page",
+                        ptr as usize,
+                        chunk as usize,
+                        fill_base,
+                        cap,
+                        layout.size(),
+                    );
+                }
+                *(*chunk).page_nodes.add(pn) = cnt + 1;
+                POOL_NODE_PUSHES.fetch_add(1, Ordering::Relaxed);
+                // POOL_SHADOW: a push crossing the slots-per-page bound is
+                // impossible via bounded pushes (the fatal above fires
+                // first) — so if we get here with cnt+1 > 512, the cell
+                // was poisoned BEFORE this push. Dump it with the mirror.
+                if cnt + 1 > 512 {
+                    eprintln!(
+                        "PUSHLOG page={pn} node={:#x} cap={cap} cnt={}",
+                        node as usize,
+                        *(*chunk).page_nodes.add(pn)
+                    );
+                    if shadow_enabled() == 2 {
+                        eprintln!(
+                            "PUSHLOG mirror: nodes={}",
+                            *(*chunk).shadow.add(2 * (*chunk).n_pages + pn)
+                        );
+                    }
+                    self.pool_fatal(
+                        "dealloc: push wrote past slots-per-page",
+                        ptr as usize,
+                        chunk as usize,
+                        fill_base,
+                        cap,
+                        layout.size(),
+                    );
+                }
+                // Mark the slot (only within its own page: a cross-page
+                // write would poison the next page's counters).
+                let magic_at = node as usize + cap - 8;
+                if magic_at / page_size() == (node as usize) / page_size() {
+                    ptr::write(magic_at as *mut u64, NODE_MAGIC);
+                }
+            } else {
+                // Release mode (or oversized/gated slot): forget the slot —
+                // its pages can now go fully dead.
+                (*chunk).on_free_pages(fill_base, hdr, span_end);
             }
-            let pn = (node as usize - fill_base) / page_size();
-            if pn >= (*chunk).n_pages {
-                self.pool_fatal(
-                    "dealloc: freelist node page index out of range",
-                    ptr as usize,
-                    chunk as usize,
-                    fill_base,
-                    cap,
-                    layout.size(),
-                );
-            }
-            ptr::write(node as *mut *mut u8, (*chunk).free_heads[b]);
-            (*chunk).free_heads[b] = node;
-            let cnt = *(*chunk).page_nodes.add(pn);
-            if cnt >= 512 {
-                // A 16KB page cannot hold more than 512 min-size slots —
-                // a larger count means the counter itself was corrupted
-                // or the pushes drifted.
-                self.pool_fatal(
-                    "dealloc: page_nodes exceeds slots-per-page",
-                    ptr as usize,
-                    chunk as usize,
-                    fill_base,
-                    cap,
-                    layout.size(),
-                );
-            }
-            *(*chunk).page_nodes.add(pn) = cnt + 1;
-            POOL_NODE_PUSHES.fetch_add(1, Ordering::Relaxed);
-            if cnt + 1 > 200
-                && POOL_PUSHLOG
-                    .fetch_add(1, Ordering::Relaxed)
-                    < 40
-            {
-                eprintln!(
-                    "PUSHLOG page={pn} node={:#x} cap={cap} cnt={}",
-                    node as usize,
-                    *(*chunk).page_nodes.add(pn)
-                );
-            }
-            // Cheap duplicate check: a served-twice slot carries the node
-            // magic (its second owner's data usually overwrites it, so a
-            // miss is not proof — the airtight full-list walk was used to
-            // root-cause the double-push chain and removed for cost).
-            if ptr::read((node as usize + cap - 8) as *const u64) == NODE_MAGIC {
-                self.pool_fatal(
-                    "dealloc: DOUBLE PUSH (slot already on freelist)",
-                    ptr as usize,
-                    chunk as usize,
-                    fill_base,
-                    cap,
-                    layout.size(),
-                );
-            }
-            // Only mark when the magic slot stays within the node's page:
-            // a cross-page write would poison the next page's counters.
-            let magic_at = node as usize + cap - 8;
-            if magic_at / page_size() == (node as usize) / page_size() {
-                ptr::write(magic_at as *mut u64, NODE_MAGIC);
-            }
-        } else {
-            // Release mode (or oversized/gated slot): forget the slot —
-            // its pages can now go fully dead.
-            (*chunk).on_free_pages(fill_base, hdr, span_end);
-        }
             // Dead pages are swept lazily; a chunk whose last allocation died
             // recycles wholesale (its whole region madvise'd anyway).
             if (*chunk).outstanding == 0 {
@@ -1035,6 +1309,7 @@ unsafe impl GlobalAlloc for Pool {
             } else {
                 self.maybe_sweep(chunk);
             }
+            self.shadow_sync_all();
             self.unlock();
         }
     }
